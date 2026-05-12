@@ -1,0 +1,20 @@
+{
+  "name": "@oversee/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "Oversee Agent Management — automatic telemetry for OpenClaw agents",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.52.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
+    "@opentelemetry/resources": "^1.25.0",
+    "@opentelemetry/semantic-conventions": "^1.25.0"
+  },
+  "license": "MIT"
+}

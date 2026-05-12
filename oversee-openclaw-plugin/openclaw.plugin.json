@@ -1,0 +1,8 @@
+{
+  "id": "oversee",
+  "name": "Oversee Agent Management",
+  "description": "Automatic agent telemetry for Oversee — the Agent Management System. Captures all agent activity including messages, tool calls, LLM requests, and responses, and forwards them as OpenTelemetry traces to your Oversee instance.",
+  "version": "0.1.0",
+  "author": "Oversee",
+  "homepage": "https://oversee.dev"
+}
