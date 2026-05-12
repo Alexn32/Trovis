@@ -178,10 +178,43 @@ CREATE TABLE IF NOT EXISTS descriptions (
 )
 """
 
+_REG_DDL_PG = """
+CREATE TABLE IF NOT EXISTS agent_registrations (
+    id               SERIAL PRIMARY KEY,
+    service_name     TEXT      NOT NULL,
+    agent_id         TEXT      DEFAULT 'main',
+    soul             TEXT      DEFAULT '',
+    identity         TEXT      DEFAULT '',
+    operating_manual TEXT      DEFAULT '',
+    user_context     TEXT      DEFAULT '',
+    memory           TEXT      DEFAULT '',
+    workspace_path   TEXT      DEFAULT '',
+    model            TEXT      DEFAULT '',
+    created_at       TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_REG_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS agent_registrations (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_name     TEXT    NOT NULL,
+    agent_id         TEXT    DEFAULT 'main',
+    soul             TEXT    DEFAULT '',
+    identity         TEXT    DEFAULT '',
+    operating_manual TEXT    DEFAULT '',
+    user_context     TEXT    DEFAULT '',
+    memory           TEXT    DEFAULT '',
+    workspace_path   TEXT    DEFAULT '',
+    model            TEXT    DEFAULT '',
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_spans_service_name ON spans(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time_unix)",
     "CREATE INDEX IF NOT EXISTS idx_descriptions_service_name ON descriptions(service_name)",
+    "CREATE INDEX IF NOT EXISTS idx_registrations_service_name ON agent_registrations(service_name)",
 ]
 
 
@@ -192,13 +225,13 @@ def init_db() -> None:
         _pool = ThreadedConnectionPool(
             minconn=2, maxconn=10, dsn=_DATABASE_URL,
         )
-        spans_ddl, desc_ddl = _SPANS_DDL_PG, _DESC_DDL_PG
+        ddls = [_SPANS_DDL_PG, _DESC_DDL_PG, _REG_DDL_PG]
     else:
-        spans_ddl, desc_ddl = _SPANS_DDL_SQLITE, _DESC_DDL_SQLITE
+        ddls = [_SPANS_DDL_SQLITE, _DESC_DDL_SQLITE, _REG_DDL_SQLITE]
 
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(spans_ddl)
-        cur.execute(desc_ddl)
+        for ddl in ddls:
+            cur.execute(ddl)
         for idx in _INDEXES:
             cur.execute(idx)
 
@@ -299,7 +332,12 @@ def get_agents() -> list[dict[str, Any]]:
                 WHERE d.service_name = spans.service_name
                 ORDER BY d.generated_at DESC, d.id DESC
                 LIMIT 1
-            )                                              AS description
+            )                                              AS description,
+            EXISTS (
+                SELECT 1
+                FROM agent_registrations r
+                WHERE r.service_name = spans.service_name
+            )                                              AS has_registration
         FROM spans
         GROUP BY service_name
         ORDER BY last_seen_ns DESC
@@ -331,6 +369,8 @@ def get_agents() -> list[dict[str, Any]]:
                     "last_seen": _ns_to_iso(row["last_seen_ns"]),
                     "top_operations": [r["span_name"] for r in top_ops_rows],
                     "description": row["description"],
+                    # Postgres returns bool, SQLite returns 0/1 — coerce.
+                    "has_registration": bool(row["has_registration"]),
                 }
             )
     return agents
@@ -446,4 +486,75 @@ def get_latest_description(service_name: str) -> dict[str, Any] | None:
         "description": row["description"],
         "span_count_analyzed": row["span_count_analyzed"],
         "generated_at": _ts_to_str(row["generated_at"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Registrations  (append-only — see save_description for the same pattern)
+# ---------------------------------------------------------------------------
+
+
+def save_registration(
+    service_name: str,
+    agent_id: str,
+    soul: str,
+    identity: str,
+    operating_manual: str,
+    user_context: str,
+    memory: str,
+    workspace_path: str,
+    model: str,
+) -> None:
+    """Persist an agent registration. Append-only so we keep history of how
+    an agent's identity changed over time."""
+    sql = f"""
+        INSERT INTO agent_registrations (
+            service_name, agent_id, soul, identity, operating_manual,
+            user_context, memory, workspace_path, model
+        ) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            sql,
+            (
+                service_name,
+                agent_id or "main",
+                soul or "",
+                identity or "",
+                operating_manual or "",
+                user_context or "",
+                memory or "",
+                workspace_path or "",
+                model or "",
+            ),
+        )
+
+
+def get_latest_registration(service_name: str) -> dict[str, Any] | None:
+    """Return the most recent registration for an agent, or None."""
+    sql = f"""
+        SELECT service_name, agent_id, soul, identity, operating_manual,
+               user_context, memory, workspace_path, model, created_at
+        FROM agent_registrations
+        WHERE service_name = {PH}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (service_name,))
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+    return {
+        "service_name": row["service_name"],
+        "agent_id": row["agent_id"] or "main",
+        "soul": row["soul"] or "",
+        "identity": row["identity"] or "",
+        "operating_manual": row["operating_manual"] or "",
+        "user_context": row["user_context"] or "",
+        "memory": row["memory"] or "",
+        "workspace_path": row["workspace_path"] or "",
+        "model": row["model"] or "",
+        "created_at": _ts_to_str(row["created_at"]),
     }

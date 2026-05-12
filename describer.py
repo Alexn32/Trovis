@@ -29,6 +29,16 @@ SYSTEM_PROMPT = (
     "appears to' — be direct and confident."
 )
 
+REGISTRATION_SYSTEM_PROMPT = (
+    "You are an AI analyst for Oversee, an agent management system. You have "
+    "been given the agent's own configuration files that define its purpose, "
+    "personality, and operating rules. Use these as the primary source of "
+    "truth for describing what this agent does. Supplement with telemetry "
+    "data for operational details like frequency, performance, and error "
+    "rates. Write a clear, confident description for a non-technical "
+    "operations manager. One paragraph, 3-5 sentences."
+)
+
 
 class APIKeyMissingError(RuntimeError):
     """ANTHROPIC_API_KEY is not set in the environment."""
@@ -106,13 +116,54 @@ def _build_prompt(summary: dict[str, Any], spans: list[dict[str, Any]]) -> str:
     )
 
 
+def _build_registration_prompt(
+    summary: dict[str, Any], registration: dict[str, Any]
+) -> str:
+    """Format the agent's own identity files plus telemetry into a prompt.
+
+    The identity files are the primary source of truth; telemetry only
+    contributes operational stats (cadence, errors, latency). USER.md and
+    MEMORY.md are stored in the registration but deliberately not surfaced
+    here — they're user-private context the operator doesn't need.
+    """
+    top_ops = ", ".join(summary.get("top_operations") or []) or "(none)"
+    return (
+        f"Agent: {summary['service_name']}\n"
+        f"Agent ID: {registration.get('agent_id') or 'main'}\n"
+        f"Model: {registration.get('model') or 'unknown'}\n"
+        f"\n"
+        f"SOUL.md (personality and purpose):\n"
+        f"{registration.get('soul') or '(empty)'}\n"
+        f"\n"
+        f"IDENTITY.md (role definition):\n"
+        f"{registration.get('identity') or '(empty)'}\n"
+        f"\n"
+        f"AGENTS.md (operating manual):\n"
+        f"{registration.get('operating_manual') or '(empty)'}\n"
+        f"\n"
+        f"Telemetry summary:\n"
+        f"- Total spans observed: {summary['span_count']}\n"
+        f"- Errors observed: {summary['error_count']}\n"
+        f"- Average span duration: {summary['avg_duration_ms']:.1f} ms\n"
+        f"- Top operations: {top_ops}\n"
+        f"\n"
+        f"Based on the configuration files above and the telemetry data, "
+        f"describe what this agent does."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
 
 
 def describe_agent(service_name: str) -> dict[str, Any]:
-    """Generate a plain-English description of an agent from its telemetry.
+    """Generate a plain-English description of an agent.
+
+    If the agent has sent its identity files via an agent_registration span,
+    those are used as the primary source — far more accurate than inferring
+    from telemetry alone. Otherwise we fall back to inferring purely from
+    observed span behavior.
 
     Raises:
         AgentNotFoundError: no spans exist for service_name.
@@ -129,17 +180,37 @@ def describe_agent(service_name: str) -> dict[str, Any]:
         )
 
     spans = database.get_agent_spans(service_name, limit=100)
-    prompt = _build_prompt(summary, spans)
+    registration = database.get_latest_registration(service_name)
+
+    # The registration must carry meaningful identity content — an empty
+    # row would be worse than telemetry-only because Claude would invent
+    # filler instead of describing real behavior.
+    has_registration_content = bool(
+        registration
+        and (
+            registration.get("soul")
+            or registration.get("identity")
+            or registration.get("operating_manual")
+        )
+    )
+
+    if has_registration_content:
+        system_prompt = REGISTRATION_SYSTEM_PROMPT
+        user_prompt = _build_registration_prompt(summary, registration)
+        source = "registration"
+    else:
+        system_prompt = SYSTEM_PROMPT
+        user_prompt = _build_prompt(summary, spans)
+        source = "telemetry_only"
 
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
     )
 
-    # Concatenate all text blocks in the response (usually just one).
     description = "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
@@ -149,4 +220,5 @@ def describe_agent(service_name: str) -> dict[str, Any]:
         "description": description,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "span_count_analyzed": len(spans),
+        "source": source,
     }

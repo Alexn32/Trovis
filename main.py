@@ -23,7 +23,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import database
 import describer
-from models import AgentDescription, AgentSummary, HealthResponse, IngestResponse, SpanRecord
+from models import (
+    AgentDescription,
+    AgentRegistration,
+    AgentSummary,
+    HealthResponse,
+    IngestResponse,
+    SpanRecord,
+)
 
 VERSION = "0.1.0"
 
@@ -146,6 +153,28 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=VERSION)
 
 
+def _extract_registrations(spans: list[dict[str, Any]]) -> None:
+    """Pull out any agent_registration spans and persist them as registration
+    rows. The spans themselves still get inserted into the spans table —
+    this is an *additional* extraction so the registration data is queryable
+    as structured rows."""
+    for span in spans:
+        attrs = span.get("attributes") or {}
+        if attrs.get("oversee.event.type") != "agent_registration":
+            continue
+        database.save_registration(
+            service_name=span["service_name"],
+            agent_id=attrs.get("oversee.agent.id") or "main",
+            soul=attrs.get("oversee.agent.soul") or "",
+            identity=attrs.get("oversee.agent.identity") or "",
+            operating_manual=attrs.get("oversee.agent.operating_manual") or "",
+            user_context=attrs.get("oversee.agent.user_context") or "",
+            memory=attrs.get("oversee.agent.memory") or "",
+            workspace_path=attrs.get("oversee.agent.workspace_path") or "",
+            model=attrs.get("oversee.agent.model") or "",
+        )
+
+
 @app.post("/v1/traces", response_model=IngestResponse)
 async def ingest_traces(request: Request) -> IngestResponse:
     # We accept the raw JSON body rather than a Pydantic-modeled one — see
@@ -160,6 +189,7 @@ async def ingest_traces(request: Request) -> IngestResponse:
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
 
     spans = _parse_otlp_json(payload)
+    _extract_registrations(spans)
     inserted = database.insert_spans(spans)
     return IngestResponse(status="ok", spans_received=inserted)
 
@@ -213,3 +243,15 @@ async def latest_description(service_name: str) -> AgentDescription:
             detail=f"no description has been generated for agent '{service_name}' yet",
         )
     return AgentDescription(**desc)
+
+
+@app.get("/agents/{service_name}/registration", response_model=AgentRegistration)
+async def latest_registration(service_name: str) -> AgentRegistration:
+    """Return the most recent registration payload (SOUL, IDENTITY, etc.) for this agent."""
+    reg = database.get_latest_registration(service_name)
+    if reg is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no registration found for agent '{service_name}'",
+        )
+    return AgentRegistration(**reg)

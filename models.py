@@ -22,7 +22,10 @@ class AgentSummary(BaseModel):
     """Aggregate view of one agent, derived from its observed spans.
 
     `description` is the most recent Claude-generated description of this
-    agent, or None if one has not been requested yet.
+    agent, or None if one has not been requested yet. `has_registration`
+    indicates whether the agent has sent its identity files (SOUL, IDENTITY,
+    etc.) via an agent_registration span — when true, descriptions are far
+    more accurate.
     """
 
     service_name: str
@@ -33,15 +36,39 @@ class AgentSummary(BaseModel):
     last_seen: str | None = None
     top_operations: list[str] = Field(default_factory=list)
     description: str | None = None
+    has_registration: bool = False
 
 
 class AgentDescription(BaseModel):
-    """A single Claude-generated description of an agent."""
+    """A single Claude-generated description of an agent.
+
+    `source` is set on the POST /describe response to indicate which prompt
+    path generated the text — "registration" when the agent's identity
+    files were used, "telemetry_only" when we had to infer from spans
+    alone. Not persisted, so the field is None when read back from the
+    descriptions table via GET /description.
+    """
 
     service_name: str
     description: str
     span_count_analyzed: int | None = None
     generated_at: str
+    source: str | None = None
+
+
+class AgentRegistration(BaseModel):
+    """An agent's identity payload sent via an agent_registration span."""
+
+    service_name: str
+    agent_id: str = "main"
+    soul: str = ""
+    identity: str = ""
+    operating_manual: str = ""
+    user_context: str = ""
+    memory: str = ""
+    workspace_path: str = ""
+    model: str = ""
+    created_at: str
 
 
 class SpanRecord(BaseModel):
