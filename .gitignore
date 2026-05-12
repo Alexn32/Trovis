@@ -43,6 +43,11 @@ oversee.db-journal
 oversee.db-shm
 oversee.db-wal
 
+# The OpenClaw plugin ships pre-compiled, so its dist/ is tracked even
+# though the generic `dist/` rule above would otherwise hide it.
+!oversee-openclaw-plugin/dist/
+!oversee-openclaw-plugin/dist/**
+
 # Local environment
 .env
 .env.local

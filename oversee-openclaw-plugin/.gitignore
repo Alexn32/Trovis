@@ -1,7 +1,8 @@
 node_modules/
-dist/
 build/
 *.tsbuildinfo
+# dist/ is intentionally tracked — the plugin ships pre-compiled so the
+# gateway can load it directly without a build step at install time.
 .DS_Store
 *.log
 npm-debug.log*

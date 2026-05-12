@@ -1,8 +1,28 @@
 {
   "id": "oversee",
   "name": "Oversee Agent Management",
-  "description": "Automatic agent telemetry for Oversee — the Agent Management System. Captures all agent activity including messages, tool calls, LLM requests, and responses, and forwards them as OpenTelemetry traces to your Oversee instance.",
+  "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Oversee dashboard.",
   "version": "0.1.0",
   "author": "Oversee",
-  "homepage": "https://oversee.dev"
+  "homepage": "https://oversee.dev",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "description": "Oversee endpoint URL (default: hardcoded SaaS URL)"
+      },
+      "agentName": {
+        "type": "string",
+        "description": "Agent name shown in Oversee dashboard"
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "Your Oversee API key from oversee.dev"
+      }
+    }
+  }
 }
