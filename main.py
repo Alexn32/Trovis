@@ -8,6 +8,13 @@ coupled to the HTTP request shape and isn't useful anywhere else.
 
 from __future__ import annotations
 
+# Load .env *before* anything else imports — database.py reads DATABASE_URL
+# at module load time, so the file has to be in process env by then. A no-op
+# in production (Railway) since no .env exists there; the platform injects
+# variables directly.
+from dotenv import load_dotenv
+load_dotenv()
+
 from contextlib import asynccontextmanager
 from typing import Any
 
