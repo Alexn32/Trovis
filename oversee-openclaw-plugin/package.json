@@ -4,7 +4,10 @@
   "description": "Oversee Agent Management — automatic telemetry for OpenClaw agents",
   "type": "module",
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./dist/index.mjs"]
+  },
+  "scripts": {
+    "build": "esbuild index.ts --outfile=dist/index.mjs --platform=node --format=esm --bundle --external:openclaw --external:openclaw/* --external:@sinclair/typebox"
   },
   "peerDependencies": {
     "openclaw": "*"
@@ -15,6 +18,9 @@
     "@opentelemetry/exporter-trace-otlp-http": "^0.52.0",
     "@opentelemetry/resources": "^1.25.0",
     "@opentelemetry/semantic-conventions": "^1.25.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
   },
   "license": "MIT"
 }
