@@ -102,6 +102,10 @@ export const api = {
       throw e
     }
   },
+  // Captured outputs (only populated when the plugin had captureOutputs
+  // enabled at emit time). Returns [] when nothing's been captured.
+  getAgentOutputs: (name, limit = 20) =>
+    request(`/agents/${encodeURIComponent(name)}/outputs?limit=${limit}`),
 
   // --- ask ---
   // messages is the full chat thread; backend is stateless. Returns

@@ -33,6 +33,7 @@ import database
 import describer
 from models import (
     AgentDescription,
+    AgentOutput,
     AgentRegistration,
     AgentSummary,
     AskRequest,
@@ -422,6 +423,24 @@ async def latest_registration(
             detail=f"no registration found for agent '{service_name}'",
         )
     return AgentRegistration(**reg)
+
+
+@app.get("/agents/{service_name}/outputs", response_model=list[AgentOutput])
+async def agent_outputs(
+    service_name: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[AgentOutput]:
+    """Return recent captured outputs (message bodies, responses, tool
+    results) for this agent. Empty list when nothing's been captured —
+    typically because the plugin's captureOutputs flag is off."""
+    account_id = getattr(request.state, "account_id", None)
+    return [
+        AgentOutput(**o)
+        for o in database.get_agent_outputs(
+            service_name, account_id=account_id, limit=limit
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

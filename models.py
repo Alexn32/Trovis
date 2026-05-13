@@ -130,6 +130,23 @@ class AskResponse(BaseModel):
     answer: str
 
 
+# ---------------------------------------------------------------------------
+# Captured outputs
+# ---------------------------------------------------------------------------
+
+
+class AgentOutput(BaseModel):
+    """One captured message/response/tool-result, extracted from a span
+    when the plugin had captureOutputs=true at the time it was emitted."""
+
+    operation: str
+    timestamp: str
+    # 'message' | 'response' | 'tool_result'
+    content_type: str
+    content: str
+    duration_ms: float
+
+
 class SpanRecord(BaseModel):
     """One row from the spans table, with JSON columns parsed back into dicts."""
 

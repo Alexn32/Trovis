@@ -78,7 +78,30 @@ def _mine_signals(spans: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     return sorted(tools), sorted(models)
 
 
-def _build_prompt(summary: dict[str, Any], spans: list[dict[str, Any]]) -> str:
+def _format_outputs_block(outputs: list[dict[str, Any]]) -> str:
+    """Render captured outputs (when the operator opted in via the plugin's
+    captureOutputs flag) as a prompt section. Returns "" when empty so
+    callers can drop the section entirely. Each content snippet is
+    truncated to 500 chars so a chatty agent can't blow up the prompt."""
+    if not outputs:
+        return ""
+    lines = ["Recent outputs from this agent (most recent first):"]
+    for o in outputs:
+        snippet = (o.get("content") or "").strip().replace("\n", " ")
+        if len(snippet) > 500:
+            snippet = snippet[:500] + "[...]"
+        lines.append(
+            f"- [{o.get('content_type')}] {o.get('operation')} "
+            f"@ {o.get('timestamp')}: {snippet}"
+        )
+    return "\n".join(lines) + "\n\n"
+
+
+def _build_prompt(
+    summary: dict[str, Any],
+    spans: list[dict[str, Any]],
+    outputs: list[dict[str, Any]] | None = None,
+) -> str:
     """Format the telemetry snapshot into a prompt Claude can reason over."""
     import json
 
@@ -109,6 +132,7 @@ def _build_prompt(summary: dict[str, Any], spans: list[dict[str, Any]]) -> str:
         f"Detected tools: {', '.join(tools) if tools else '(none detected)'}\n"
         f"Detected models: {', '.join(models) if models else '(none detected)'}\n"
         f"\n"
+        f"{_format_outputs_block(outputs or [])}"
         f"Recent span sample (up to 20 most recent):\n"
         f"{json.dumps(recent_sample, indent=2, default=str)}\n"
         f"\n"
@@ -117,7 +141,9 @@ def _build_prompt(summary: dict[str, Any], spans: list[dict[str, Any]]) -> str:
 
 
 def _build_registration_prompt(
-    summary: dict[str, Any], registration: dict[str, Any]
+    summary: dict[str, Any],
+    registration: dict[str, Any],
+    outputs: list[dict[str, Any]] | None = None,
 ) -> str:
     """Format the agent's own identity files plus telemetry into a prompt.
 
@@ -147,6 +173,7 @@ def _build_registration_prompt(
         f"- Average span duration: {summary['avg_duration_ms']:.1f} ms\n"
         f"- Top operations: {top_ops}\n"
         f"\n"
+        f"{_format_outputs_block(outputs or [])}"
         f"Based on the configuration files above and the telemetry data, "
         f"describe what this agent does."
     )
@@ -190,6 +217,14 @@ def describe_agent(
     registration = database.get_latest_registration(
         service_name, account_id=account_id
     )
+    # Captured outputs (gated by the plugin's captureOutputs flag at
+    # emit time). Empty list when nothing's been captured. Concrete
+    # examples of what the agent says/returns are by far the most
+    # useful signal for Claude — when present they should dominate
+    # telemetry-only descriptions.
+    outputs = database.get_agent_outputs(
+        service_name, account_id=account_id, limit=5
+    )
 
     # The registration must carry meaningful identity content — an empty
     # row would be worse than telemetry-only because Claude would invent
@@ -205,11 +240,11 @@ def describe_agent(
 
     if has_registration_content:
         system_prompt = REGISTRATION_SYSTEM_PROMPT
-        user_prompt = _build_registration_prompt(summary, registration)
+        user_prompt = _build_registration_prompt(summary, registration, outputs)
         source = "registration"
     else:
         system_prompt = SYSTEM_PROMPT
-        user_prompt = _build_prompt(summary, spans)
+        user_prompt = _build_prompt(summary, spans, outputs)
         source = "telemetry_only"
 
     client = anthropic.Anthropic(api_key=api_key)
