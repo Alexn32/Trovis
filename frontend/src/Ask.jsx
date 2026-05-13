@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import { api } from './api.js'
 import { SendIcon, SparkleIcon } from './Icons.jsx'
 
-// Conversational interface. The backend doesn't have an /ask endpoint
-// yet, so this is wired to a local placeholder that just acknowledges the
-// question. The UI is in place to swap in a real backend call later.
+// Conversational interface, wired to POST /ask. Stateless on the backend:
+// the full thread ships with every request, which is how we get multi-turn
+// follow-ups ("how many spans does it have?") to work without server-side
+// session state.
 
 const SUGGESTIONS = [
   'Which agents had the most errors today?',
@@ -14,20 +16,11 @@ const SUGGESTIONS = [
   'Show me agents that have stopped reporting.',
 ]
 
-export default function Ask({ seedQuestion, clearSeed }) {
+export default function Ask() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [pending, setPending] = useState(false)
   const threadRef = useRef(null)
-
-  // A question piped in from AgentDetail → autosubmit once.
-  useEffect(() => {
-    if (seedQuestion) {
-      submit(seedQuestion)
-      clearSeed?.()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seedQuestion])
 
   useEffect(() => {
     if (threadRef.current) {
@@ -35,29 +28,32 @@ export default function Ask({ seedQuestion, clearSeed }) {
     }
   }, [messages, pending])
 
-  function submit(text) {
+  async function submit(text) {
     const q = (text ?? input).trim()
     if (!q) return
-    setMessages((m) => [...m, { role: 'user', text: q }])
+    // Build the next thread (user turn appended). We submit this exact
+    // thread to the backend so it has the full conversational context.
+    const nextThread = [...messages, { role: 'user', content: q }]
+    setMessages(nextThread)
     setInput('')
     setPending(true)
-    // Placeholder response — wired-up answer comes when the backend
-    // grows an /ask endpoint. Keep this distinguishable so demos don't
-    // mistake it for real output.
-    setTimeout(() => {
+    try {
+      const res = await api.ask(
+        nextThread.map((m) => ({ role: m.role, content: m.content })),
+      )
+      setMessages((m) => [...m, { role: 'assistant', content: res.answer }])
+    } catch (e) {
       setMessages((m) => [
         ...m,
         {
           role: 'assistant',
-          text:
-            "I can't answer questions yet — the backend's /ask endpoint isn't built. " +
-            'For now, the dashboard cards and the Agent Detail view show the same ' +
-            'underlying data this view will eventually reason over (descriptions, ' +
-            'registrations, span counts, error rates).',
+          content: `Couldn't answer: ${e.message}`,
+          error: true,
         },
       ])
+    } finally {
       setPending(false)
-    }, 300)
+    }
   }
 
   function onSubmit(e) {
@@ -105,7 +101,7 @@ export default function Ask({ seedQuestion, clearSeed }) {
       <div className="ask-thread" ref={threadRef}>
         {messages.map((m, i) => (
           <div key={i} className={`ask-message ${m.role}`}>
-            <div className="ask-bubble">{m.text}</div>
+            <div className="ask-bubble">{m.content}</div>
           </div>
         ))}
         {pending && (

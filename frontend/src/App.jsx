@@ -34,8 +34,6 @@ function AppInner() {
   const [restoring, setRestoring] = useState(initial !== null)
   const [tab, setTab] = useState('fleet') // 'fleet' | 'ask'
   const [overlay, setOverlay] = useState(null) // {kind:'detail',serviceName} | {kind:'add'} | null
-  // suggestedQuestion piped from AgentDetail → Ask
-  const [suggested, setSuggested] = useState(null)
 
   // Validate saved key on first mount.
   useEffect(() => {
@@ -79,12 +77,6 @@ function AppInner() {
     setOverlay(null)
   }
 
-  function askAbout(question) {
-    setSuggested(question)
-    setOverlay(null)
-    setTab('ask')
-  }
-
   if (restoring) {
     return (
       <div className="login-shell">
@@ -114,13 +106,12 @@ function AppInner() {
       <AgentDetail
         serviceName={overlay.serviceName}
         onBack={closeOverlay}
-        onAsk={askAbout}
       />
     )
   } else if (overlay?.kind === 'add') {
     mainContent = <AddAgent onClose={closeOverlay} />
   } else if (tab === 'ask') {
-    mainContent = <Ask seedQuestion={suggested} clearSeed={() => setSuggested(null)} />
+    mainContent = <Ask />
   } else {
     mainContent = (
       <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />

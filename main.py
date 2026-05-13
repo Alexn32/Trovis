@@ -28,12 +28,15 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import asker
 import database
 import describer
 from models import (
     AgentDescription,
     AgentRegistration,
     AgentSummary,
+    AskRequest,
+    AskResponse,
     HealthResponse,
     IngestResponse,
     LoginRequest,
@@ -470,6 +473,40 @@ async def login(body: LoginRequest) -> LoginResponse:
         email=account["email"],
         api_keys=[k["key"] for k in keys if k["active"]],
     )
+
+
+@app.post("/ask", response_model=AskResponse)
+async def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
+    """Answer a question about the user's whole fleet."""
+    account_id = getattr(request.state, "account_id", None)
+    msgs = [m.model_dump() for m in body.messages]
+    try:
+        answer = asker.ask_about_fleet(account_id, msgs)
+    except asker.AskApiKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AskResponse(answer=answer)
+
+
+@app.post("/agents/{service_name}/ask", response_model=AskResponse)
+async def ask_agent(
+    service_name: str, request: Request, body: AskRequest
+) -> AskResponse:
+    """Answer a question scoped to one agent."""
+    account_id = getattr(request.state, "account_id", None)
+    msgs = [m.model_dump() for m in body.messages]
+    try:
+        answer = asker.ask_about_agent(service_name, account_id, msgs)
+    except asker.AgentNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"agent '{service_name}' not found"
+        )
+    except asker.AskApiKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AskResponse(answer=answer)
 
 
 @app.post("/auth/keys", response_model=NewKeyResponse)
