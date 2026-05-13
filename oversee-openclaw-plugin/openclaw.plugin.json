@@ -8,12 +8,15 @@
   "activation": {
     "onStartup": true
   },
+  "contracts": {
+    "commands": ["oversee"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
       "endpoint": {
         "type": "string",
-        "description": "Oversee endpoint URL (default: hardcoded SaaS URL)"
+        "description": "Oversee endpoint URL. Required — the plugin is inert until this is set."
       },
       "agentName": {
         "type": "string",
@@ -22,6 +25,16 @@
       "apiKey": {
         "type": "string",
         "description": "Your Oversee API key from oversee.dev"
+      },
+      "enabled": {
+        "type": "boolean",
+        "description": "Set to false to load the plugin without emitting telemetry. Default: true.",
+        "default": true
+      },
+      "readUserData": {
+        "type": "boolean",
+        "description": "Include USER.md and MEMORY.md in registration data. These files may contain personal information. Default: false.",
+        "default": false
       }
     }
   }

@@ -21,6 +21,16 @@ Opens at http://localhost:5173. The dashboard expects the Oversee API at `http:/
 VITE_API_URL=http://my-server:8080 npm run dev
 ```
 
+If the backend has `OVERSEE_INGEST_KEY` set (production), the dashboard needs to send the matching key on every request. Provide it as a build-time env var:
+
+```bash
+VITE_API_URL=https://your-backend \
+VITE_OVERSEE_API_KEY=your_key \
+  npm run dev
+```
+
+Both vars are baked into the bundle at build time, so on Vercel they have to be set in **Settings → Environment Variables** before the build runs.
+
 ## Build for production
 
 ```bash

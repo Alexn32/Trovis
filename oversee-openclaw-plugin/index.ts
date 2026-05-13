@@ -12,14 +12,16 @@
  * OpenClaw plugin-hooks docs.
  *
  * Privacy:
- *   - Conversation telemetry (messages, tool params, prompts) captures
- *     metadata only: lengths, names, IDs, durations. Never content or
- *     parameter values.
- *   - Agent identity files (SOUL/IDENTITY/AGENTS/USER/MEMORY) ARE captured
- *     in full (truncated to 32KB per attribute), because that's the
- *     explicit purpose of agent_registration — the dashboard needs to know
- *     what each agent is. This is a different category than conversation
- *     data and is opt-in by installing the plugin.
+ *   - Conversation telemetry captures metadata only: message content
+ *     lengths (not content), tool names (not parameter values), model
+ *     provider/name, durations, success/failure. Never content or values.
+ *   - SOUL.md / IDENTITY.md / AGENTS.md are sent in full on startup
+ *     (truncated to 32 KB each) because they define what the agent is and
+ *     are needed for accurate descriptions.
+ *   - USER.md and MEMORY.md may contain personal data. They are NOT read
+ *     by default — operator must opt in via config.readUserData=true.
+ *   - The plugin is inert until an endpoint is explicitly configured.
+ *     There is no hardcoded fallback URL.
  * ============================================================================
  */
 
@@ -43,8 +45,8 @@ import * as os from "node:os"
 // ---------------------------------------------------------------------------
 
 const PLUGIN_VERSION = "0.1.0"
-const DEFAULT_ENDPOINT =
-  "https://web-production-e6bc4.up.railway.app/v1/traces"
+// No hardcoded default endpoint — the plugin is inert until the operator
+// explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
 const LOG = "[Oversee]"
 const OBSERVATION_PRIORITY = 0
@@ -60,6 +62,8 @@ interface PluginConfig {
   endpoint?: string
   agentName?: string
   apiKey?: string
+  enabled?: boolean
+  readUserData?: boolean
 }
 
 interface OpenClawContext {
@@ -153,12 +157,26 @@ interface AgentEndEvent extends BaseEvent {
   error?: unknown
 }
 
+interface CommandResult {
+  content: Array<{ type: string; text: string }>
+}
+
+interface PluginCommand {
+  name: string
+  aliases?: string[]
+  description: string
+  execute(args: string[], context?: unknown): Promise<CommandResult>
+}
+
 interface OpenClawApi {
   on<E>(
     name: string,
     handler: (event: E) => void | Promise<void>,
     opts?: { priority?: number; timeoutMs?: number },
   ): void
+  // Optional — older gateways may not support slash commands. wireCommands()
+  // feature-detects before calling.
+  registerCommand?(cmd: PluginCommand): void
   version?: string
   gateway?: { version?: string }
 }
@@ -173,19 +191,23 @@ interface OpenClawApi {
 
 const state: {
   initialized: boolean
+  disabled: boolean
   tracer: Tracer | null
   sdk: NodeSDK | null
   endpoint: string
   agentName: string
   apiKey: string | undefined
+  readUserData: boolean
   gatewayVersion: string
 } = {
   initialized: false,
+  disabled: false,
   tracer: null,
   sdk: null,
-  endpoint: DEFAULT_ENDPOINT,
+  endpoint: "",
   agentName: DEFAULT_AGENT_NAME,
   apiKey: undefined,
+  readUserData: false,
   gatewayVersion: "unknown",
 }
 
@@ -228,16 +250,39 @@ function initTelemetry(
 }
 
 function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
+  if (state.disabled) return null
   if (state.initialized) return state.tracer
 
   const pluginConfig = ctx?.pluginConfig
-  state.endpoint =
-    pluginConfig?.endpoint ?? process.env.OVERSEE_ENDPOINT ?? DEFAULT_ENDPOINT
+
+  // Disabled via openclaw.json takes precedence over any other config.
+  if (pluginConfig?.enabled === false) {
+    state.disabled = true
+    console.log(`${LOG} Plugin disabled via config.`)
+    return null
+  }
+
+  // No hardcoded default — operator must opt in by configuring an endpoint.
+  // If we get this far without one, mark disabled so we don't log on every
+  // subsequent hook firing.
+  const endpoint = pluginConfig?.endpoint ?? process.env.OVERSEE_ENDPOINT
+  if (!endpoint) {
+    state.disabled = true
+    console.log(
+      `${LOG} No endpoint configured. Set plugins.entries.oversee.config.endpoint to enable telemetry.`,
+    )
+    return null
+  }
+
+  state.endpoint = endpoint
   state.agentName =
     pluginConfig?.agentName ??
     process.env.OVERSEE_AGENT_NAME ??
     DEFAULT_AGENT_NAME
   state.apiKey = pluginConfig?.apiKey ?? process.env.OVERSEE_API_KEY
+  // USER.md and MEMORY.md may carry personal data; the operator has to
+  // explicitly opt in to having those files shipped to Oversee.
+  state.readUserData = Boolean(pluginConfig?.readUserData)
 
   state.tracer = initTelemetry(
     state.endpoint,
@@ -249,7 +294,8 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
 
   console.log(
     `${LOG} Plugin initialized. Sending telemetry to ${state.endpoint} ` +
-      `as service '${state.agentName}'`,
+      `as service '${state.agentName}'` +
+      (state.readUserData ? " (readUserData=true)" : ""),
   )
 
   return state.tracer
@@ -292,11 +338,19 @@ function sendAgentRegistration(
     kind: SpanKind.INTERNAL,
   })
 
+  // Purpose-defining files — always read once the plugin is initialized.
   const soul = readFileOrEmpty(workspacePath, "SOUL.md")
   const identity = readFileOrEmpty(workspacePath, "IDENTITY.md")
   const operatingManual = readFileOrEmpty(workspacePath, "AGENTS.md")
-  const userContext = readFileOrEmpty(workspacePath, "USER.md")
-  const memory = readFileOrEmpty(workspacePath, "MEMORY.md")
+
+  // Files that may contain personal data — only read with explicit consent
+  // via config.readUserData.
+  const userContext = state.readUserData
+    ? readFileOrEmpty(workspacePath, "USER.md")
+    : ""
+  const memory = state.readUserData
+    ? readFileOrEmpty(workspacePath, "MEMORY.md")
+    : ""
 
   span.setAttribute("oversee.event.type", "agent_registration")
   span.setAttribute("oversee.agent.id", agentId)
@@ -542,6 +596,98 @@ function wireEvents(api: OpenClawApi): void {
 }
 
 // ---------------------------------------------------------------------------
+// Command wiring
+// ---------------------------------------------------------------------------
+//
+// /oversee is the user-facing setup command. Same UX pattern as channel
+// plugins like /telegram or /whatsapp: the plugin knows what it needs, the
+// command tells the user how to provide it, and `/oversee status` reflects
+// the live connection state.
+
+function wireCommands(api: OpenClawApi): void {
+  if (typeof api?.registerCommand !== "function") {
+    // Older gateways without command support — skip silently.
+    return
+  }
+
+  api.registerCommand({
+    name: "oversee",
+    aliases: ["ov"],
+    description: "Connect to Oversee agent monitoring",
+    async execute(args, _context) {
+      const subcommand = args[0]?.toLowerCase()
+
+      if (subcommand === "connect" && args[1]) {
+        const endpoint = args[1]
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `✅ Oversee endpoint set to: ${endpoint}\n\n` +
+                `To make this permanent, add to your openclaw.json:\n\n` +
+                "```json\n" +
+                `"plugins": {\n` +
+                `  "entries": {\n` +
+                `    "oversee": {\n` +
+                `      "config": {\n` +
+                `        "endpoint": "${endpoint}"\n` +
+                `      }\n` +
+                `    }\n` +
+                `  }\n` +
+                `}\n` +
+                "```\n\n" +
+                `Then restart the gateway. Your agents will appear in Oversee within seconds.`,
+            },
+          ],
+        }
+      }
+
+      if (subcommand === "status") {
+        const endpoint = state.endpoint
+        const enabled = state.initialized
+        return {
+          content: [
+            {
+              type: "text",
+              text: enabled
+                ? `✅ Oversee is active.\n\n` +
+                  `• Endpoint: ${endpoint}\n` +
+                  `• Agent: ${state.agentName}\n` +
+                  `• Telemetry: flowing`
+                : `⚠️ Oversee is not connected.\n\n` +
+                  `To connect, get your endpoint URL from your Oversee dashboard ` +
+                  `(Add Agent → OpenClaw), then run:\n\n` +
+                  `/oversee connect YOUR_ENDPOINT_URL`,
+            },
+          ],
+        }
+      }
+
+      // Default: help / setup walkthrough.
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `🔍 **Oversee Agent Monitoring**\n\n` +
+              `Available commands:\n` +
+              `• \`/oversee connect <endpoint-url>\` — Connect to your Oversee instance\n` +
+              `• \`/oversee status\` — Check connection status\n\n` +
+              `**Setup:**\n` +
+              `1. Sign up at oversee.dev\n` +
+              `2. Go to Add Agent → OpenClaw\n` +
+              `3. Copy your endpoint URL\n` +
+              `4. Run: \`/oversee connect <your-endpoint-url>\`\n\n` +
+              `That's it — your agents will appear in Oversee automatically.`,
+          },
+        ],
+      }
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Plugin entry
 // ---------------------------------------------------------------------------
 
@@ -554,6 +700,15 @@ export default definePluginEntry({
     state.gatewayVersion =
       api?.version ?? api?.gateway?.version ?? "unknown"
 
+    // Env-var disable is checked at register() so we never even wire
+    // hooks when an operator wants the plugin totally inert. The
+    // pluginConfig.enabled flag from openclaw.json is checked later
+    // inside ensureInit, on the first hook that exposes pluginConfig.
+    if (process.env.OVERSEE_ENABLED === "false") {
+      console.log(`${LOG} Plugin disabled via OVERSEE_ENABLED=false.`)
+      return
+    }
+
     if (typeof api?.on !== "function") {
       console.warn(
         `${LOG} OpenClaw api.on() not available. Plugin cannot register handlers.`,
@@ -561,6 +716,7 @@ export default definePluginEntry({
       return
     }
 
+    wireCommands(api)
     wireEvents(api)
     // OTEL is initialized lazily inside the first hook (typically
     // gateway_start) that exposes pluginConfig. No init log here yet.
