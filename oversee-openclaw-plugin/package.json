@@ -1,6 +1,6 @@
 {
   "name": "@alexn32/openclaw-plugin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Oversee Agent Management — automatic telemetry for OpenClaw agents",
   "type": "module",
   "openclaw": {
