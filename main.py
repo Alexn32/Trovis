@@ -15,11 +15,13 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import database
 import describer
@@ -34,6 +36,12 @@ from models import (
 
 VERSION = "0.1.0"
 
+# Optional ingest auth. When set, every endpoint except /health requires
+# the matching X-Oversee-Api-Key header. When unset, auth is skipped
+# entirely — local-dev mode. Read once at module load (matches how
+# database.py reads DATABASE_URL).
+_INGEST_KEY = os.environ.get("OVERSEE_INGEST_KEY")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,6 +51,34 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Oversee", version=VERSION, lifespan=lifespan)
+
+
+# Middleware ordering note: in Starlette, the LAST-added middleware becomes
+# the OUTERMOST wrapper. We need CORS outermost so cross-origin preflights
+# (OPTIONS, sent by browsers without auth headers) pass through and so 401
+# responses still carry CORS headers the dashboard can read. Therefore the
+# auth middleware is registered first, CORS second.
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    # No key configured → local-dev mode, skip auth entirely.
+    if not _INGEST_KEY:
+        return await call_next(request)
+    # /health stays open so liveness probes and uptime checks don't need
+    # the key.
+    if request.url.path == "/health":
+        return await call_next(request)
+    # CORS handles OPTIONS preflights (it's outermost), but we guard here
+    # too in case anything else triggers an OPTIONS-style request.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if request.headers.get("X-Oversee-Api-Key") != _INGEST_KEY:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or missing API key"},
+        )
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
