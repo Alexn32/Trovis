@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import {
   bucketSpansByDay,
@@ -9,11 +9,13 @@ import {
   relativeTime,
   statusFor,
 } from './utils.js'
-import { Stat } from './ui.jsx'
+import { Spinner, Stat } from './ui.jsx'
 import {
   ArrowLeftIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  SendIcon,
+  SparkleIcon,
 } from './Icons.jsx'
 
 // Detail view for a single agent. Loads summary + spans in parallel, plus
@@ -21,7 +23,7 @@ import {
 // identity data). Renders 14-day activity bars, a recent-spans table with
 // expandable attributes, and suggested questions that hand off to Ask.
 
-export default function AgentDetail({ serviceName, onBack, onAsk }) {
+export default function AgentDetail({ serviceName, onBack }) {
   const [summary, setSummary] = useState(null)
   const [spans, setSpans] = useState([])
   const [registration, setRegistration] = useState(null)
@@ -77,7 +79,7 @@ export default function AgentDetail({ serviceName, onBack, onAsk }) {
             <RegistrationBlock registration={registration} />
           )}
           <SpansTable spans={spans} />
-          <SuggestedQuestions summary={summary} onAsk={onAsk} />
+          <AskAboutAgent summary={summary} />
         </>
       )}
     </div>
@@ -92,6 +94,9 @@ function DetailHead({ summary, registration }) {
         <span className={`status-dot status-${status}`} />
         <h2 className="detail-name">{summary.service_name}</h2>
       </div>
+      {summary.platform && (
+        <div className="agent-platform">{summary.platform}</div>
+      )}
       {(registration?.model || (summary.top_operations || []).length > 0) && (
         <div className="tag-row">
           {registration?.model && <span className="tag">{registration.model}</span>}
@@ -284,31 +289,122 @@ function SpanRow({ span }) {
   )
 }
 
-function SuggestedQuestions({ summary, onAsk }) {
+function AskAboutAgent({ summary }) {
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [pending, setPending] = useState(false)
+  const threadRef = useRef(null)
+
+  // Auto-scroll the thread when new messages arrive.
+  useEffect(() => {
+    if (threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight
+    }
+  }, [messages, pending])
+
   const rate = errorRatePercent(summary)
-  const questions = [
+  const suggestions = [
     `Why does ${summary.service_name} have a ${rate.toFixed(1)}% error rate?`,
     `What did ${summary.service_name} do today?`,
     `Is ${summary.service_name} behaving as configured?`,
     `How can I improve ${summary.service_name}'s performance?`,
   ]
+
+  async function submit(text) {
+    const q = (text ?? input).trim()
+    if (!q) return
+    const next = [...messages, { role: 'user', content: q }]
+    setMessages(next)
+    setInput('')
+    setPending(true)
+    try {
+      const res = await api.askAboutAgent(
+        summary.service_name,
+        next.map((m) => ({ role: m.role, content: m.content })),
+      )
+      setMessages((m) => [...m, { role: 'assistant', content: res.answer }])
+    } catch (e) {
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', content: `Couldn't answer: ${e.message}` },
+      ])
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function onSubmit(e) {
+    e.preventDefault()
+    submit()
+  }
+
   return (
     <section className="section-block">
       <div className="section-block-header">
-        <h3 className="section-label">Ask about this agent</h3>
+        <h3 className="section-label">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <SparkleIcon size={13} /> Ask about this agent
+          </span>
+        </h3>
       </div>
-      <div className="suggested-pills">
-        {questions.map((q, i) => (
-          <button
-            key={i}
-            type="button"
-            className="suggested-pill"
-            onClick={() => onAsk(q)}
-          >
-            {q}
-          </button>
-        ))}
-      </div>
+
+      {messages.length === 0 ? (
+        <div className="suggested-pills" style={{ marginBottom: 12 }}>
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="suggested-pill"
+              onClick={() => submit(s)}
+              disabled={pending}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div
+          ref={threadRef}
+          className="ask-thread"
+          style={{ maxHeight: 420, marginBottom: 12 }}
+        >
+          {messages.map((m, i) => (
+            <div key={i} className={`ask-message ${m.role}`}>
+              <div className="ask-bubble">{m.content}</div>
+            </div>
+          ))}
+          {pending && (
+            <div className="ask-message assistant">
+              <div className="ask-bubble">
+                <Spinner /> Thinking…
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <form
+        className="ask-input-row"
+        onSubmit={onSubmit}
+        style={{ borderTop: 'none', padding: 0 }}
+      >
+        <input
+          type="text"
+          className="ask-input"
+          placeholder={`Ask anything about ${summary.service_name}…`}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          disabled={pending}
+        />
+        <button
+          type="submit"
+          className="ask-send"
+          disabled={pending || !input.trim()}
+          aria-label="Send"
+        >
+          <SendIcon size={16} />
+        </button>
+      </form>
     </section>
   )
 }

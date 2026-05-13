@@ -109,6 +109,38 @@ def _ns_to_iso(ns: int | None) -> str | None:
     return datetime.fromtimestamp(int(ns) / 1_000_000_000, tz=timezone.utc).isoformat()
 
 
+def _detect_platform(resource_attrs_json: str | None) -> str | None:
+    """Infer a human-readable platform label from a span's resource
+    attributes. Returns None when no identifying signal is present — we'd
+    rather show no label than invent one. Detection order matters:
+    OpenClaw is a specific platform built ON the Oversee plugin, so it
+    wins over the generic plugin signal.
+    """
+    if not resource_attrs_json:
+        return None
+    try:
+        attrs = json.loads(resource_attrs_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(attrs, dict):
+        return None
+
+    if "openclaw.gateway.version" in attrs:
+        return "OpenClaw Agent"
+    if "oversee.plugin.version" in attrs:
+        return "Oversee-instrumented Agent"
+
+    lang = attrs.get("telemetry.sdk.language")
+    if isinstance(lang, str) and lang:
+        # Title-case so "python" → "Python Agent", "nodejs" → "Nodejs
+        # Agent". Special-case nodejs to its more recognizable form.
+        if lang.lower() == "nodejs":
+            return "Node.js Agent"
+        return f"{lang.title()} Agent"
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -421,6 +453,13 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
         f"AND r.account_id = {PH}" if account_id is not None else ""
     )
 
+    # An additional account filter for the sample-resource subquery
+    # (operates on a different spans alias, so the filter clause text
+    # differs from `span_filter`'s WHERE form).
+    sample_acct_filter = (
+        f"AND s2.account_id = {PH}" if account_id is not None else ""
+    )
+
     agg_sql = f"""
         SELECT
             service_name,
@@ -442,16 +481,26 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 FROM agent_registrations r
                 WHERE r.service_name = spans.service_name
                   {reg_filter}
-            )                                              AS has_registration
+            )                                              AS has_registration,
+            (
+                SELECT resource_attributes
+                FROM spans s2
+                WHERE s2.service_name = spans.service_name
+                  {sample_acct_filter}
+                ORDER BY s2.start_time_unix DESC
+                LIMIT 1
+            )                                              AS sample_resource_attributes
         FROM spans
         {span_filter}
         GROUP BY service_name
         ORDER BY last_seen_ns DESC
     """
     # Argument order matches the {PH} occurrences left-to-right in the SQL:
-    # desc_filter, reg_filter, span_filter.
+    # desc_filter, reg_filter, sample_acct_filter, span_filter.
     agg_args = (
-        (account_id, account_id, account_id) if account_id is not None else ()
+        (account_id, account_id, account_id, account_id)
+        if account_id is not None
+        else ()
     )
 
     top_ops_args_extra = (account_id,) if account_id is not None else ()
@@ -485,6 +534,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                     "description": row["description"],
                     # Postgres returns bool, SQLite returns 0/1 — coerce.
                     "has_registration": bool(row["has_registration"]),
+                    "platform": _detect_platform(
+                        row["sample_resource_attributes"]
+                    ),
                 }
             )
     return agents
@@ -578,6 +630,14 @@ def get_agent_summary(
         ORDER BY generated_at DESC, id DESC
         LIMIT 1
     """
+    sample_sql = f"""
+        SELECT resource_attributes
+        FROM spans
+        WHERE service_name = {PH}
+          {span_account_filter}
+        ORDER BY start_time_unix DESC
+        LIMIT 1
+    """
 
     span_args = (
         (service_name, account_id)
@@ -598,6 +658,9 @@ def get_agent_summary(
         cur.execute(desc_sql, desc_args)
         desc_row = cur.fetchone()
 
+        cur.execute(sample_sql, span_args)
+        sample_row = cur.fetchone()
+
     return {
         "service_name": service_name,
         "span_count": row["span_count"],
@@ -607,6 +670,9 @@ def get_agent_summary(
         "last_seen": _ns_to_iso(row["last_seen_ns"]),
         "top_operations": [r["span_name"] for r in top_ops_rows],
         "description": desc_row["description"] if desc_row else None,
+        "platform": _detect_platform(
+            sample_row["resource_attributes"] if sample_row else None
+        ),
     }
 
 
