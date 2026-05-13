@@ -66144,7 +66144,6 @@ var import_sdk_node = __toESM(require_src32(), 1);
 var import_exporter_trace_otlp_http = __toESM(require_src24(), 1);
 var import_resources = __toESM(require_src34(), 1);
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -66498,23 +66497,10 @@ function maskKey(key) {
   if (key.length <= 10) return key;
   return `${key.slice(0, 6)}\u2026${key.slice(-4)}`;
 }
-function persistConfig(key, value) {
-  execFile(
-    "openclaw",
-    [
-      "config",
-      "set",
-      `plugins.entries.oversee.config.${key}`,
-      String(value)
-    ],
-    (err) => {
-      if (err) {
-        console.log(
-          `${LOG} Could not persist ${key} via 'openclaw config set' \u2014 applied for this session only.`
-        );
-      }
-    }
-  );
+function persistHint(key, value) {
+  const display = typeof value === "boolean" ? value ? "true" : "false" : value;
+  return `Setting applied for this session. To make permanent, run:
+\`openclaw config set plugins.entries.oversee.config.${key} ${display}\``;
 }
 function wireCommands(api) {
   if (typeof api?.registerCommand !== "function") {
@@ -66532,41 +66518,47 @@ function wireCommands(api) {
       if (sub === "connect" && args[1]) {
         const endpoint = args[1];
         state.endpoint = endpoint;
-        persistConfig("endpoint", endpoint);
         return reply(
           `\u2705 Oversee endpoint set: \`${endpoint}\`
 
-In-memory state updated and saved to your openclaw.json (best-effort). The OTLP exporter was constructed at gateway start, so **restart the gateway** for spans to actually go to this URL.`
+` + persistHint("endpoint", endpoint) + `
+
+The OTLP exporter was constructed at gateway start, so **restart the gateway** after persisting for spans to actually go to this URL.`
         );
       }
       if (sub === "apikey" && args[1]) {
         const key = args[1];
         state.apiKey = key;
-        persistConfig("apiKey", key);
         return reply(
           `\u2705 Oversee API key set: \`${maskKey(key)}\`
 
-Saved to your openclaw.json (best-effort). The auth header is set on the exporter at gateway start, so **restart the gateway** for the new key to be sent.`
+` + persistHint("apiKey", key) + `
+
+The auth header is set on the exporter at gateway start, so **restart the gateway** after persisting for the new key to be sent.`
         );
       }
       if (sub === "capture" && (args[1] === "on" || args[1] === "off")) {
         const enable = args[1] === "on";
         state.captureOutputs = enable;
-        persistConfig("captureOutputs", enable);
         return reply(
           `\u2705 Output capture **${enable ? "enabled" : "disabled"}**.
 
-Takes effect immediately for new events. ` + (enable ? `Message content and tool results will now appear on spans as \`oversee.message.content\`, \`oversee.response.content\`, and \`oversee.tool.result\` (each truncated to 10 000 chars).` : `Message content and tool results will no longer be captured. Existing spans aren't modified.`)
+` + (enable ? `Message content and tool results will now appear on spans as \`oversee.message.content\`, \`oversee.response.content\`, and \`oversee.tool.result\` (each truncated to 10 000 chars).
+
+` : `Message content and tool results will no longer be captured. Existing spans aren't modified.
+
+`) + persistHint("captureOutputs", enable)
         );
       }
       if (sub === "userdata" && (args[1] === "on" || args[1] === "off")) {
         const enable = args[1] === "on";
         state.readUserData = enable;
-        persistConfig("readUserData", enable);
         return reply(
           `\u2705 User data ingestion **${enable ? "enabled" : "disabled"}**.
 
-Saved (best-effort). USER.md and MEMORY.md are read at gateway start during agent registration, so **restart the gateway** for this to take effect on the registration spans.`
+` + persistHint("readUserData", enable) + `
+
+USER.md and MEMORY.md are read at gateway start during agent registration, so **restart the gateway** after persisting for this to take effect on the registration spans.`
         );
       }
       if (sub === "settings") {

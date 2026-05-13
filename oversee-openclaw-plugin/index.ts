@@ -36,7 +36,6 @@ import {
 import { NodeSDK } from "@opentelemetry/sdk-node"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
 import { Resource } from "@opentelemetry/resources"
-import { execFile } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -730,29 +729,21 @@ function maskKey(key: string | undefined): string {
 }
 
 /**
- * Best-effort persist of a single config field to openclaw.json by
- * shelling out to the gateway's own CLI. Uses execFile (not exec) so a
- * user-supplied URL or key can't inject shell metacharacters. If the
- * `openclaw config set` subcommand doesn't exist or fails, we log and
- * fall back to the in-memory state change only.
+ * Build the "to make this permanent, run …" hint shown after every
+ * setting command. We never shell out to the gateway CLI ourselves —
+ * the plugin is a telemetry tool, not a config writer. The user
+ * (or their automation) is responsible for persisting the change.
+ *
+ * For booleans we render `on`/`off` to match the chat verbs the user
+ * just typed, even though the underlying config field is a JSON bool —
+ * the gateway's `config set` accepts both.
  */
-function persistConfig(key: string, value: string | boolean): void {
-  execFile(
-    "openclaw",
-    [
-      "config",
-      "set",
-      `plugins.entries.oversee.config.${key}`,
-      String(value),
-    ],
-    (err) => {
-      if (err) {
-        console.log(
-          `${LOG} Could not persist ${key} via 'openclaw config set' — ` +
-            `applied for this session only.`,
-        )
-      }
-    },
+function persistHint(key: string, value: string | boolean): string {
+  const display =
+    typeof value === "boolean" ? (value ? "true" : "false") : value
+  return (
+    `Setting applied for this session. To make permanent, run:\n` +
+    `\`openclaw config set plugins.entries.oversee.config.${key} ${display}\``
   )
 }
 
@@ -776,13 +767,12 @@ function wireCommands(api: OpenClawApi): void {
       if (sub === "connect" && args[1]) {
         const endpoint = args[1]
         state.endpoint = endpoint
-        persistConfig("endpoint", endpoint)
         return reply(
           `✅ Oversee endpoint set: \`${endpoint}\`\n\n` +
-            `In-memory state updated and saved to your openclaw.json ` +
-            `(best-effort). The OTLP exporter was constructed at gateway ` +
-            `start, so **restart the gateway** for spans to actually go to ` +
-            `this URL.`,
+            persistHint("endpoint", endpoint) +
+            `\n\nThe OTLP exporter was constructed at gateway start, so ` +
+            `**restart the gateway** after persisting for spans to ` +
+            `actually go to this URL.`,
         )
       }
 
@@ -790,12 +780,12 @@ function wireCommands(api: OpenClawApi): void {
       if (sub === "apikey" && args[1]) {
         const key = args[1]
         state.apiKey = key
-        persistConfig("apiKey", key)
         return reply(
           `✅ Oversee API key set: \`${maskKey(key)}\`\n\n` +
-            `Saved to your openclaw.json (best-effort). The auth header ` +
-            `is set on the exporter at gateway start, so **restart the ` +
-            `gateway** for the new key to be sent.`,
+            persistHint("apiKey", key) +
+            `\n\nThe auth header is set on the exporter at gateway ` +
+            `start, so **restart the gateway** after persisting for the ` +
+            `new key to be sent.`,
         )
       }
 
@@ -803,17 +793,16 @@ function wireCommands(api: OpenClawApi): void {
       if (sub === "capture" && (args[1] === "on" || args[1] === "off")) {
         const enable = args[1] === "on"
         state.captureOutputs = enable
-        persistConfig("captureOutputs", enable)
         return reply(
           `✅ Output capture **${enable ? "enabled" : "disabled"}**.\n\n` +
-            `Takes effect immediately for new events. ` +
             (enable
               ? `Message content and tool results will now appear on ` +
                 `spans as \`oversee.message.content\`, ` +
                 `\`oversee.response.content\`, and \`oversee.tool.result\` ` +
-                `(each truncated to 10 000 chars).`
+                `(each truncated to 10 000 chars).\n\n`
               : `Message content and tool results will no longer be ` +
-                `captured. Existing spans aren't modified.`),
+                `captured. Existing spans aren't modified.\n\n`) +
+            persistHint("captureOutputs", enable),
         )
       }
 
@@ -821,12 +810,12 @@ function wireCommands(api: OpenClawApi): void {
       if (sub === "userdata" && (args[1] === "on" || args[1] === "off")) {
         const enable = args[1] === "on"
         state.readUserData = enable
-        persistConfig("readUserData", enable)
         return reply(
           `✅ User data ingestion **${enable ? "enabled" : "disabled"}**.\n\n` +
-            `Saved (best-effort). USER.md and MEMORY.md are read at ` +
-            `gateway start during agent registration, so **restart the ` +
-            `gateway** for this to take effect on the registration spans.`,
+            persistHint("readUserData", enable) +
+            `\n\nUSER.md and MEMORY.md are read at gateway start during ` +
+            `agent registration, so **restart the gateway** after ` +
+            `persisting for this to take effect on the registration spans.`,
         )
       }
 
