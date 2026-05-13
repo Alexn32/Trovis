@@ -103,6 +103,20 @@ export const api = {
     }
   },
 
+  // --- ask ---
+  // messages is the full chat thread; backend is stateless. Returns
+  // { answer: string }.
+  ask: (messages) =>
+    request('/ask', {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    }),
+  askAboutAgent: (name, messages) =>
+    request(`/agents/${encodeURIComponent(name)}/ask`, {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    }),
+
   // --- auth ---
   signup: (email) =>
     request('/auth/signup', {
