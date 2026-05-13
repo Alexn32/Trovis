@@ -12,8 +12,13 @@ from __future__ import annotations
 # at module load time, so the file has to be in process env by then. A no-op
 # in production (Railway) since no .env exists there; the platform injects
 # variables directly.
+#
+# override=True so .env wins over any pre-existing values in the inherited
+# shell environment. Without this, an empty ANTHROPIC_API_KEY="" in the
+# parent shell silently shadows the real key in .env (load_dotenv's
+# default is to keep existing values).
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import os
 from contextlib import asynccontextmanager
@@ -211,19 +216,68 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=VERSION)
 
 
+def _auto_describe(
+    service_name: str, account_id: int | None, reason: str
+) -> bool:
+    """Synchronously generate and persist a Claude description for an agent.
+    Returns True on success. Swallows all errors so the trace ingest path
+    never fails because of a Claude API hiccup.
+
+    `reason` is just for the log line so we can tell which trigger fired
+    (a registration span vs. first-time telemetry arriving).
+    """
+    try:
+        result = describer.describe_agent(service_name, account_id=account_id)
+    except describer.AgentNotFoundError:
+        # Can happen if the registration was extracted before any spans
+        # for this service exist. The first-time path catches that case
+        # after insert_spans runs.
+        return False
+    except describer.APIKeyMissingError:
+        print(
+            f"[Oversee] Auto-describe for '{service_name}' skipped — "
+            f"ANTHROPIC_API_KEY not configured."
+        )
+        return False
+    except Exception as e:
+        print(f"[Oversee] Auto-describe for '{service_name}' failed: {e}")
+        return False
+
+    database.save_description(
+        service_name=result["service_name"],
+        description=result["description"],
+        span_count_analyzed=result["span_count_analyzed"],
+        account_id=account_id,
+    )
+    print(
+        f"[Oversee] Auto-described '{service_name}' "
+        f"(reason={reason}, source={result.get('source')}, "
+        f"chars={len(result['description'])})"
+    )
+    return True
+
+
 def _extract_registrations(
     spans: list[dict[str, Any]], account_id: int | None
-) -> None:
+) -> set[str]:
     """Pull out any agent_registration spans and persist them as registration
     rows. The spans themselves still get inserted into the spans table —
     this is an *additional* extraction so the registration data is queryable
-    as structured rows."""
+    as structured rows.
+
+    After each registration is saved, automatically generate a Claude
+    description for the agent. Returns the set of service_names that were
+    successfully auto-described so the caller can skip them in any
+    follow-up first-time describe pass.
+    """
+    described: set[str] = set()
     for span in spans:
         attrs = span.get("attributes") or {}
         if attrs.get("oversee.event.type") != "agent_registration":
             continue
+        service_name = span["service_name"]
         database.save_registration(
-            service_name=span["service_name"],
+            service_name=service_name,
             agent_id=attrs.get("oversee.agent.id") or "main",
             soul=attrs.get("oversee.agent.soul") or "",
             identity=attrs.get("oversee.agent.identity") or "",
@@ -234,6 +288,13 @@ def _extract_registrations(
             model=attrs.get("oversee.agent.model") or "",
             account_id=account_id,
         )
+        # Don't re-describe the same agent twice in one request if
+        # multiple registration spans arrived for it.
+        if service_name in described:
+            continue
+        if _auto_describe(service_name, account_id, reason="registration"):
+            described.add(service_name)
+    return described
 
 
 @app.post("/v1/traces", response_model=IngestResponse)
@@ -251,8 +312,32 @@ async def ingest_traces(request: Request) -> IngestResponse:
 
     account_id = getattr(request.state, "account_id", None)
     spans = _parse_otlp_json(payload)
-    _extract_registrations(spans, account_id=account_id)
+
+    # Snapshot which services in this batch are "first-time" — no prior
+    # spans for this account. We do this BEFORE inserting so we can tell
+    # apart "first telemetry batch" from "ongoing telemetry."
+    batch_services = {s["service_name"] for s in spans}
+    first_time_services = {
+        sn
+        for sn in batch_services
+        if database.get_agent_summary(sn, account_id=account_id) is None
+    }
+
+    # Insert spans first so any subsequent describe_agent calls see them.
     inserted = database.insert_spans(spans, account_id=account_id)
+
+    # Save registrations + auto-describe on the registration path.
+    described = _extract_registrations(spans, account_id=account_id)
+
+    # First-time describe path: a registration that arrived in the SAME
+    # batch as the first telemetry, or arrived in a prior batch but
+    # didn't trigger _auto_describe because we'd never seen telemetry
+    # for it yet. Skip anything already described in this request.
+    for sn in first_time_services - described:
+        if database.get_latest_registration(sn, account_id=account_id) is None:
+            continue
+        _auto_describe(sn, account_id, reason="first-telemetry")
+
     return IngestResponse(status="ok", spans_received=inserted)
 
 
