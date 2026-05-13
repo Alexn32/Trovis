@@ -1,23 +1,69 @@
-:root {
-  --color-bg: #ffffff;
-  --color-fg: #111827;
-  --color-muted: #6b7280;
-  --color-muted-2: #9ca3af;
-  --color-border: #e5e7eb;
-  --color-border-hover: #d1d5db;
-  --color-accent: #2563eb;
-  --color-accent-hover: #1d4ed8;
-  --color-accent-disabled: #93c5fd;
-  --color-green: #10b981;
-  --color-yellow: #f59e0b;
-  --color-red: #ef4444;
-  --color-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
-  --color-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.06), 0 2px 4px rgba(0, 0, 0, 0.04);
-  --radius: 8px;
-  --radius-sm: 6px;
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+/* =============================================================================
+   Oversee — design system
+   -----------------------------------------------------------------------------
+   All colors are CSS variables. The dark theme is defined first as the
+   default; the light theme overrides via [data-theme="light"]. ThemeProvider
+   sets the data-theme attribute on the root element from a localStorage
+   preference (system | light | dark), so the whole app re-themes by changing
+   one attribute.
+   ============================================================================= */
+
+:root,
+:root[data-theme="dark"] {
+  --bg-primary: #09090b;
+  --bg-surface: #111113;
+  --bg-surface-hover: #18181b;
+  --bg-elevated: #1c1c1f;
+  --border-default: #1e1e22;
+  --border-hover: #27272a;
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --text-dim: #52525b;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-faint: rgba(37, 99, 235, 0.16);
+  --success: #34d399;
+  --warning: #fbbf24;
+  --error: #f87171;
+  --idle: #6b7280;
+  --success-faint: rgba(52, 211, 153, 0.12);
+  --warning-faint: rgba(251, 191, 36, 0.12);
+  --error-faint: rgba(248, 113, 113, 0.12);
+  --idle-faint: rgba(107, 114, 128, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --code-bg: rgba(255, 255, 255, 0.05);
 }
+
+:root[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-surface: #f8f8f7;
+  --bg-surface-hover: #f0f0ee;
+  --bg-elevated: #ffffff;
+  --border-default: #e4e4e3;
+  --border-hover: #d4d4d3;
+  --text-primary: #1a1a1a;
+  --text-secondary: #525252;
+  --text-muted: #737373;
+  --text-dim: #a3a3a3;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-faint: rgba(37, 99, 235, 0.10);
+  --success: #059669;
+  --warning: #d97706;
+  --error: #dc2626;
+  --idle: #6b7280;
+  --success-faint: rgba(5, 150, 105, 0.10);
+  --warning-faint: rgba(217, 119, 6, 0.10);
+  --error-faint: rgba(220, 38, 38, 0.10);
+  --idle-faint: rgba(107, 114, 128, 0.10);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.07);
+  --code-bg: rgba(0, 0, 0, 0.05);
+}
+
+/* ---------- base ---------- */
 
 * {
   box-sizing: border-box;
@@ -27,296 +73,893 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--color-bg);
-  color: var(--color-fg);
-  font-family: var(--font);
-  font-size: 15px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+body {
+  min-height: 100vh;
 }
 
 button {
   font-family: inherit;
   font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+input,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+code,
+pre,
+.mono {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, monospace;
 }
 
 code {
-  font-family: var(--font-mono);
   font-size: 0.9em;
-  background: #f3f4f6;
+  background: var(--code-bg);
   padding: 1px 6px;
   border-radius: 4px;
+  color: var(--text-primary);
 }
 
-/* ------------------------------------------------------------------ Layout */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------- layout ---------- */
 
 .app {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 32px 24px 64px;
-}
-
-.header {
-  margin-bottom: 32px;
-}
-
-.logo {
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  margin: 0;
-}
-
-.subtitle {
-  color: var(--color-muted);
-  margin: 4px 0 0;
-  font-size: 14px;
-}
-
-.main {
-  /* empty — children manage their own spacing */
-}
-
-/* ----------------------------------------------------------------- States */
-
-.state {
-  padding: 64px 24px;
-  text-align: center;
-  color: var(--color-muted);
-}
-
-.state h2 {
-  color: var(--color-fg);
-  margin: 0 0 8px;
-}
-
-.state.error {
-  color: var(--color-red);
-}
-
-/* --------------------------------------------------------------- Registry */
-
-.registry {
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: 16px;
 }
 
-.card {
-  background: white;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--color-card-shadow);
-  padding: 24px;
-  cursor: pointer;
-  transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-default);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
 }
 
-.card:hover {
-  border-color: var(--color-border-hover);
-  box-shadow: var(--color-card-shadow-hover);
+.app-header-left {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  min-width: 0;
 }
 
-.card:focus-visible {
-  outline: 2px solid var(--color-accent);
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.brand-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-faint);
+}
+
+.tabs {
+  display: inline-flex;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.tab {
+  background: none;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 13px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.tab:hover:not(.tab-active) {
+  color: var(--text-primary);
+}
+
+.tab-active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fleet-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.fleet-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------- buttons ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 13px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.card-head {
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--bg-surface);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-hover);
+}
+
+.btn-ghost {
+  background: none;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.btn-icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+/* ---------- account badge ---------- */
+
+.account-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.account-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-faint);
+}
+
+.account-tail {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.account-logout {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.account-logout:hover {
+  color: var(--text-primary);
+}
+
+/* ---------- section headers ---------- */
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* ---------- views: shared ---------- */
+
+.view {
+  flex: 1;
+  padding: 24px;
+  min-width: 0;
+}
+
+.view-wide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+}
+
+@media (max-width: 1100px) {
+  .view-wide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .activity-feed {
+    display: none;
+  }
+}
+
+/* ---------- fleet summary ---------- */
+
+.fleet-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.stat-box {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stat-box-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.stat-box-value {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.stat-box-value.warn {
+  color: var(--warning);
+}
+
+.stat-box-value.error {
+  color: var(--error);
+}
+
+@media (max-width: 900px) {
+  .fleet-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ---------- agent grid ---------- */
+
+.agents-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agents-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.agents-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+/* ---------- agent card ---------- */
+
+.agent-card {
+  position: relative;
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-left: 4px solid var(--idle);
+  border-radius: 10px;
+  padding: 16px 18px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+}
+
+.agent-card:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-hover);
+}
+
+.agent-card:active {
+  transform: translateY(1px);
+}
+
+.agent-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.agent-card.status-green {
+  border-left-color: var(--success);
+}
+.agent-card.status-yellow {
+  border-left-color: var(--warning);
+}
+.agent-card.status-red {
+  border-left-color: var(--error);
+}
+.agent-card.status-gray {
+  border-left-color: var(--idle);
+}
+
+.agent-card-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
-.title-group {
+.agent-card-title {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
-}
-
-.service-name {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0;
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1;
 }
 
 .status-dot {
-  display: inline-block;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.status-green {
-  background: var(--color-green);
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+.status-dot.status-green {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-faint);
+}
+.status-dot.status-yellow {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px var(--warning-faint);
+}
+.status-dot.status-red {
+  background: var(--error);
+  box-shadow: 0 0 0 3px var(--error-faint);
+}
+.status-dot.status-gray {
+  background: var(--idle);
+  box-shadow: 0 0 0 3px var(--idle-faint);
 }
 
-.status-yellow {
-  background: var(--color-yellow);
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+.agent-name {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.status-gray {
-  background: var(--color-muted-2);
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 10px;
 }
 
-/* ------------------------------------------------------------- Description */
-
-.description {
-  margin: 0 0 16px;
-  color: var(--color-fg);
-  line-height: 1.55;
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-family: "IBM Plex Mono", monospace;
 }
 
-.description-empty {
-  color: var(--color-muted);
+.agent-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+
+.agent-description.empty {
+  color: var(--text-dim);
   font-style: italic;
 }
 
-/* ----------------------------------------------------------------- Stats */
-
-.stats {
+.agent-card-stats {
   display: flex;
-  gap: 32px;
-  flex-wrap: wrap;
+  gap: 24px;
+  font-size: 12px;
 }
 
-.stats-detail {
-  margin-bottom: 32px;
-}
-
-.stat {
+.agent-stat {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.stat-label {
-  font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-muted);
-}
-
-.stat-value {
-  font-size: 15px;
+.agent-stat-label {
+  color: var(--text-dim);
+  font-size: 10px;
   font-weight: 600;
-  color: var(--color-fg);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-.stat-bad {
-  color: var(--color-red);
+.agent-stat-value {
+  color: var(--text-primary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
 }
 
-/* --------------------------------------------------------------- Buttons */
+.agent-stat-value.warn {
+  color: var(--warning);
+}
+.agent-stat-value.error {
+  color: var(--error);
+}
 
-.btn {
-  display: inline-flex;
+/* ---------- sparkline ---------- */
+
+.sparkline {
+  width: 100px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.sparkline-empty {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+/* ---------- activity feed ---------- */
+
+.activity-feed {
+  position: sticky;
+  top: 80px;
+  align-self: flex-start;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+
+.activity-feed-header {
+  margin-bottom: 12px;
+}
+
+.activity-item {
+  display: flex;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.activity-item:last-child {
+  border-bottom: none;
+}
+
+.activity-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
   align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.activity-icon.alert {
+  color: var(--warning);
+  background: var(--warning-faint);
+}
+.activity-icon.activity {
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+}
+.activity-icon.insight {
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+}
+.activity-icon.registration {
+  color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.activity-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.activity-headline {
+  display: flex;
+  align-items: baseline;
   gap: 8px;
-  padding: 8px 14px;
-  border: none;
-  border-radius: var(--radius-sm);
+  margin-bottom: 2px;
+}
+
+.activity-agent {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
   font-weight: 500;
-  cursor: pointer;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  transition: background 0.15s ease;
 }
 
-.btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+.activity-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
-.btn-primary {
-  background: var(--color-accent);
-  color: white;
+.activity-message {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
-.btn-primary:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+.activity-empty {
+  text-align: center;
+  padding: 32px 12px;
+  color: var(--text-dim);
+  font-size: 13px;
 }
 
-.btn-primary:disabled {
-  background: var(--color-accent-disabled);
-  cursor: not-allowed;
+/* ---------- empty / loading / error states ---------- */
+
+.state-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-muted);
 }
 
-/* --------------------------------------------------------------- Spinner */
-
-.spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 50%;
-  display: inline-block;
-  animation: spin 0.7s linear infinite;
+.state-card h2 {
+  color: var(--text-primary);
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 600;
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+.state-card p {
+  margin: 0;
+  font-size: 13px;
 }
 
-/* --------------------------------------------------------------- Detail */
-
-.detail {
-  /* container only */
+.state-card.error h2 {
+  color: var(--error);
 }
 
-.back {
+/* ---------- agent detail ---------- */
+
+.detail-back {
   background: none;
   border: none;
-  color: var(--color-accent);
+  color: var(--text-muted);
+  font-size: 13px;
   padding: 0;
-  cursor: pointer;
-  font-weight: 500;
+  margin-bottom: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-back:hover {
+  color: var(--text-primary);
+}
+
+.detail-head {
   margin-bottom: 24px;
 }
 
-.back:hover {
-  text-decoration: underline;
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .detail-name {
-  font-size: 22px;
-  margin-bottom: 8px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 24px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin: 0;
 }
 
-.section-title {
+.detail-description {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin: 0 0 8px;
+  max-width: 920px;
+}
+
+.detail-description.empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.detail-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+@media (max-width: 900px) {
+  .detail-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.section-block {
+  margin-bottom: 28px;
+}
+
+.section-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+/* ---------- activity bar chart (detail) ---------- */
+
+.activity-chart {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.activity-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 100px;
+}
+
+.activity-bar {
+  flex: 1;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  min-height: 2px;
+  transition: background 0.15s ease;
+  cursor: pointer;
+}
+
+.activity-bar.bar-green {
+  background: var(--success);
+}
+.activity-bar.bar-yellow {
+  background: var(--warning);
+}
+.activity-bar.bar-red {
+  background: var(--error);
+}
+.activity-bar.bar-gray {
+  background: var(--idle);
+}
+
+.activity-bar:hover {
+  filter: brightness(1.2);
+}
+
+.activity-chart-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+/* ---------- registration collapsible ---------- */
+
+.registration-block {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.registration-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-primary);
   font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.registration-toggle:hover {
+  background: var(--bg-surface-hover);
+}
+
+.registration-source {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.registration-body {
+  padding: 0 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.registration-field-label {
+  font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-muted);
-  margin: 0 0 12px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin: 0 0 6px;
 }
 
-/* ----------------------------------------------------------- Spans table */
+.registration-field-body {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+
+/* ---------- spans table ---------- */
 
 .spans-table {
   width: 100%;
   border-collapse: collapse;
-  background: white;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
   overflow: hidden;
 }
 
 .spans-table thead {
-  background: #f9fafb;
+  background: var(--bg-elevated);
 }
 
 .spans-table th {
@@ -324,16 +967,25 @@ code {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-muted);
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
   padding: 10px 16px;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .spans-table td {
   padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border);
-  font-size: 14px;
+  border-bottom: 1px solid var(--border-default);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.spans-table tbody tr:nth-child(even of .span-row) td {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+:root[data-theme="light"] .spans-table tbody tr:nth-child(even of .span-row) td {
+  background: rgba(0, 0, 0, 0.015);
 }
 
 .spans-table tbody tr:last-child td {
@@ -344,118 +996,352 @@ code {
   cursor: pointer;
 }
 
-.span-row:hover {
-  background: #f9fafb;
-}
-
-.col-caret {
-  width: 24px;
-}
-
-.caret {
-  color: var(--color-muted);
-  width: 24px;
+.span-row:hover td {
+  background: var(--bg-surface-hover);
 }
 
 .span-name {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 500;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
 }
 
 .status-ok {
-  color: var(--color-green);
+  color: var(--success);
   font-weight: 700;
 }
 
 .status-error {
-  color: var(--color-red);
+  color: var(--error);
   font-weight: 700;
 }
 
-.muted {
-  color: var(--color-muted);
-  font-size: 13px;
-}
-
-.span-detail-row {
-  background: #f9fafb;
-}
-
-.span-detail-row td {
+.attrs-block td {
   padding: 0;
+  background: var(--bg-elevated);
 }
 
 .attrs-json {
   margin: 0;
-  padding: 16px 24px;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  padding: 14px 24px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
   line-height: 1.55;
-  color: #374151;
-  background: #f9fafb;
+  color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 400px;
   overflow: auto;
 }
 
-/* =========================================================================
-   Registry toolbar — the bar with the "+ Add Agent" button
-   ========================================================================= */
+/* ---------- suggested questions ---------- */
 
-.registry-header {
+.suggested-pills {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.registry-heading {
-  font-size: 16px;
+.suggested-pill {
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.suggested-pill:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+/* ---------- ask view ---------- */
+
+.ask-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 65px);
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 24px;
+}
+
+.ask-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
+  padding: 40px 16px;
+}
+
+.ask-empty-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: var(--accent-faint);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.ask-empty h2 {
+  font-size: 22px;
   font-weight: 600;
-  color: var(--color-fg);
+  color: var(--text-primary);
   margin: 0;
   letter-spacing: -0.01em;
 }
 
-.add-agent-btn {
+.ask-empty-subtitle {
+  color: var(--text-muted);
+  font-size: 14px;
+  margin: 0;
+  max-width: 480px;
+}
+
+.ask-suggestions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 24px;
+  width: 100%;
+  max-width: 640px;
+}
+
+.ask-suggestion {
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.ask-suggestion:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.ask-thread {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 0;
+  overflow-y: auto;
+}
+
+.ask-message {
+  display: flex;
+  max-width: 80%;
+}
+
+.ask-message.user {
+  align-self: flex-end;
+}
+
+.ask-message.assistant {
+  align-self: flex-start;
+}
+
+.ask-bubble {
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.ask-message.user .ask-bubble {
+  background: var(--accent);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.ask-message.assistant .ask-bubble {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+.ask-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border-default);
+}
+
+.ask-input {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.ask-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-faint);
+}
+
+.ask-send {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: var(--color-accent);
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  background: var(--accent);
   color: white;
   border: none;
-  border-radius: var(--radius-sm);
-  padding: 8px 14px;
-  font-weight: 500;
+  border-radius: 10px;
+}
+
+.ask-send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.ask-send:disabled {
+  opacity: 0.5;
+}
+
+/* =============================================================================
+   Login screen (dark theme)
+   ============================================================================= */
+
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-primary);
+}
+
+.login-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+  padding: 32px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.login-header {
+  margin-bottom: 24px;
+}
+
+.login-header .brand {
+  font-size: 20px;
+}
+
+.login-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-prompt {
+  color: var(--text-secondary);
   font-size: 14px;
-  cursor: pointer;
-  transition: background 0.15s ease;
+  margin: 0 0 6px;
+  line-height: 1.55;
 }
 
-.add-agent-btn:hover {
-  background: var(--color-accent-hover);
+.login-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
 }
 
-.add-agent-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
-
-.add-agent-btn .plus {
-  font-size: 16px;
+.field-label {
+  font-size: 11px;
   font-weight: 600;
-  line-height: 1;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
-/* =========================================================================
-   Add Agent wizard
-   ========================================================================= */
+.text-input {
+  padding: 10px 12px;
+  font-size: 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  color: var(--text-primary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-faint);
+}
+
+.helper-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.form-error {
+  color: var(--error);
+  font-size: 13px;
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--error-faint);
+  border-radius: 8px;
+  border-left: 3px solid var(--error);
+}
+
+.key-display {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.key-text {
+  flex: 1;
+  padding: 10px 12px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* =============================================================================
+   AddAgent wizard — restyled for dark theme
+   ============================================================================= */
 
 .add-agent {
-  /* container */
+  padding: 24px;
+  max-width: 920px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .wizard-header {
@@ -472,21 +1358,20 @@ code {
 }
 
 .step-indicator {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--color-muted);
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
 }
 
 .back-btn {
   background: none;
   border: none;
-  color: var(--color-accent);
+  color: var(--accent);
   padding: 0;
-  cursor: pointer;
   font-weight: 500;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .back-btn:hover {
@@ -495,40 +1380,38 @@ code {
 
 .close-btn {
   background: none;
-  border: none;
-  font-size: 24px;
+  border: 1px solid var(--border-default);
+  font-size: 18px;
   line-height: 1;
-  color: var(--color-muted);
-  cursor: pointer;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  transition: background 0.15s ease, color 0.15s ease;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 8px;
 }
 
 .close-btn:hover {
-  background: #f3f4f6;
-  color: var(--color-fg);
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
 }
 
 .wizard-title {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   margin: 0 0 8px;
+  color: var(--text-primary);
   letter-spacing: -0.015em;
 }
 
 .wizard-subtitle {
-  color: var(--color-muted);
+  color: var(--text-muted);
   margin: 0 0 32px;
-  font-size: 15px;
+  font-size: 14px;
 }
-
-/* ----- Platform / provider grid ----- */
 
 .platform-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
 }
 
 @media (max-width: 720px) {
@@ -539,54 +1422,42 @@ code {
 
 .platform-card {
   text-align: left;
-  background: white;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 16px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 14px 18px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-family: inherit;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .platform-card:hover {
-  border-color: var(--color-accent);
-  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.08);
-}
-
-.platform-card:active {
-  transform: translateY(1px);
-}
-
-.platform-card:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  background: var(--bg-surface-hover);
+  border-color: var(--accent);
 }
 
 .platform-card-label {
   font-weight: 600;
-  font-size: 15px;
-  color: var(--color-fg);
+  font-size: 14px;
+  color: var(--text-primary);
 }
 
 .platform-card-subtitle {
-  font-size: 13px;
-  color: var(--color-muted);
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
-/* ----- Step 3 header (agent name + endpoint) ----- */
-
 .step3-header {
-  background: #f9fafb;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: 20px 24px;
-  margin-bottom: 32px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 18px;
+  margin-bottom: 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
 }
 
 .field {
@@ -595,90 +1466,54 @@ code {
   gap: 6px;
 }
 
-.field-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-fg);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.text-input {
-  padding: 9px 12px;
-  font-size: 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  font-family: inherit;
-  background: white;
-  color: var(--color-fg);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.text-input:focus {
-  outline: none;
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
-}
-
-.helper-text {
-  font-size: 12px;
-  color: var(--color-muted);
-  margin: 0;
-}
-
 .endpoint-display {
   display: flex;
   align-items: stretch;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: white;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-elevated);
   overflow: hidden;
 }
 
 .endpoint-url {
   flex: 1;
   padding: 9px 12px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  background: white;
-  border-radius: 0;
-  color: var(--color-fg);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  color: var(--text-primary);
   overflow-x: auto;
   white-space: nowrap;
 }
 
 .copy-btn-inline {
   border: none;
-  border-left: 1px solid var(--color-border);
-  padding: 0 16px;
-  background: white;
-  color: var(--color-accent);
-  font-size: 13px;
+  border-left: 1px solid var(--border-default);
+  padding: 0 14px;
+  background: var(--bg-surface);
+  color: var(--accent);
+  font-size: 12px;
   font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s ease;
   white-space: nowrap;
 }
 
 .copy-btn-inline:hover {
-  background: #f3f4f6;
+  background: var(--bg-surface-hover);
 }
-
-/* ----- Code blocks ----- */
 
 .code-block {
   position: relative;
-  margin: 0 0 16px;
+  margin: 0 0 14px;
 }
 
 .code-pre {
-  background: #0f172a;
-  color: #f1f5f9;
-  padding: 16px 20px;
-  padding-right: 96px; /* room for the copy button */
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  font-size: 13px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  padding: 14px 18px;
+  padding-right: 96px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
   line-height: 1.6;
   margin: 0;
   overflow-x: auto;
@@ -687,108 +1522,86 @@ code {
 
 .copy-btn {
   position: absolute;
-  top: 10px;
-  right: 10px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #e2e8f0;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 4px;
+  top: 8px;
+  right: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s ease;
-  font-family: inherit;
 }
 
 .copy-btn:hover {
-  background: rgba(255, 255, 255, 0.18);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
 }
-
-/* ----- Agent message block (OpenClaw paste-to-agent) ----- */
 
 .agent-message-block {
   position: relative;
-  background: #f9fafb;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: 18px 22px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 16px 20px;
   padding-right: 130px;
-  margin: 0 0 16px;
+  margin: 0 0 14px;
 }
 
 .agent-message-pre {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.65;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
   margin: 0;
-  color: #1f2937;
+  color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .copy-btn-light {
-  background: white;
-  color: var(--color-accent);
-  border: 1px solid var(--color-border);
+  background: var(--bg-surface);
 }
-
-.copy-btn-light:hover {
-  background: #f3f4f6;
-}
-
-/* ----- Pill tabs ----- */
 
 .pill-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 24px;
+  gap: 6px;
+  margin-bottom: 20px;
 }
 
 .pill-tab {
-  background: white;
-  border: 1px solid var(--color-border);
-  color: var(--color-fg);
-  padding: 7px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  padding: 6px 14px;
   border-radius: 999px;
-  cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
-  font-family: inherit;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .pill-tab:hover:not(.pill-tab-active) {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .pill-tab-active {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+  background: var(--accent);
+  border-color: var(--accent);
   color: white;
 }
 
-.pill-tab:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
-
-/* ----- Numbered step inside an instruction page ----- */
-
 .numbered-step {
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 .numbered-step-title {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 0 0 10px;
-  font-size: 15px;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--color-fg);
+  color: var(--text-primary);
   line-height: 1.4;
 }
 
@@ -796,259 +1609,104 @@ code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  background: var(--color-accent);
+  width: 20px;
+  height: 20px;
+  background: var(--accent);
   color: white;
   border-radius: 50%;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .numbered-step-body {
-  margin-left: 34px;
+  margin-left: 30px;
 }
 
-/* ----- Callouts ----- */
-
 .callout {
-  padding: 12px 16px;
-  border-radius: var(--radius-sm);
-  margin: 16px 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  margin: 12px 0;
   border-left: 3px solid;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
 .callout-info {
-  background: #f0f9ff;
-  border-left-color: var(--color-accent);
-  color: #1e3a8a;
+  background: var(--accent-faint);
+  border-left-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .callout-success {
-  background: #ecfdf5;
-  border-left-color: var(--color-green);
-  color: #065f46;
+  background: var(--success-faint);
+  border-left-color: var(--success);
+  color: var(--text-primary);
 }
 
 .callout-blue {
-  background: #eff6ff;
-  border-left-color: var(--color-accent);
-  color: #1e3a8a;
+  background: var(--accent-faint);
+  border-left-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .callout-warning {
-  background: #fffbeb;
-  border-left-color: #f59e0b;
-  color: #78350f;
+  background: var(--warning-faint);
+  border-left-color: var(--warning);
+  color: var(--text-primary);
 }
 
 .callout code {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--code-bg);
 }
 
-/* ----- Misc Step 3 typography ----- */
-
 .instructions-title {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
-  margin: 0 0 16px;
+  margin: 0 0 14px;
+  color: var(--text-primary);
   letter-spacing: -0.01em;
 }
 
 .instructions-subtitle {
-  color: var(--color-muted);
-  margin: -12px 0 24px;
-  font-size: 15px;
+  color: var(--text-muted);
+  margin: -8px 0 20px;
+  font-size: 14px;
 }
 
 .tab-subtitle {
-  color: var(--color-muted);
-  margin: 0 0 20px;
-  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 18px;
+  font-size: 13px;
 }
 
 .explanatory {
-  color: var(--color-fg);
-  margin: 0 0 16px;
+  color: var(--text-primary);
+  margin: 0 0 14px;
   line-height: 1.55;
-}
-
-.section-title-spaced {
-  margin-top: 24px;
+  font-size: 13px;
 }
 
 .external-link {
-  color: var(--color-accent);
-  text-decoration: none;
+  color: var(--accent);
   font-weight: 500;
 }
 
-.external-link:hover {
-  text-decoration: underline;
-}
+/* ---------- spinner ---------- */
 
-/* =========================================================================
-   Login screen
-   ========================================================================= */
-
-.login-shell {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: #f9fafb;
-}
-
-.login-card {
-  background: white;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  box-shadow: var(--color-card-shadow);
-  padding: 32px;
-  width: 100%;
-  max-width: 440px;
-}
-
-.login-header {
-  margin-bottom: 24px;
-  text-align: left;
-}
-
-.login-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.login-prompt {
-  color: var(--color-fg);
-  font-size: 14px;
-  margin: 0 0 6px;
-  line-height: 1.55;
-}
-
-.login-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.btn-block {
-  width: 100%;
-  justify-content: center;
-}
-
-.btn-secondary {
-  background: white;
-  color: var(--color-fg);
-  border: 1px solid var(--color-border);
-}
-
-.btn-secondary:hover:not(:disabled) {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.btn-link {
-  background: none;
-  border: none;
-  color: var(--color-muted);
-  padding: 6px 0;
-  cursor: pointer;
-  font-size: 13px;
-  text-align: center;
-}
-
-.btn-link:hover:not(:disabled) {
-  color: var(--color-accent);
-}
-
-.btn-link:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.form-error {
-  color: var(--color-red);
-  font-size: 13px;
-  margin: 0;
-  padding: 8px 12px;
-  background: #fef2f2;
-  border-radius: var(--radius-sm);
-  border-left: 3px solid var(--color-red);
-}
-
-.key-display {
-  display: flex;
-  align-items: stretch;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: #f9fafb;
-  overflow: hidden;
-}
-
-.key-text {
-  flex: 1;
-  padding: 10px 12px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  background: #f9fafb;
-  color: var(--color-fg);
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-/* =========================================================================
-   Account badge in header
-   ========================================================================= */
-
-.header-with-account {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-}
-
-.account-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  background: #f9fafb;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  font-size: 13px;
-  color: var(--color-muted);
-}
-
-.account-dot {
-  width: 8px;
-  height: 8px;
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
   border-radius: 50%;
-  background: var(--color-green);
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+  display: inline-block;
+  animation: spin 0.7s linear infinite;
 }
 
-.account-label {
-  color: var(--color-fg);
-}
-
-.account-tail {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  background: white;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  padding: 1px 6px;
-  margin-left: 4px;
-}
-
-.account-badge .btn-link {
-  padding: 0 2px;
-  font-size: 13px;
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

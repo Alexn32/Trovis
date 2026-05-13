@@ -1,15 +1,16 @@
-// Tiny shared UI primitives used in both views. Kept here rather than
-// per-file so styling stays consistent without a component library.
+// Tiny shared UI primitives.
 
 export function Spinner() {
   return <span className="spinner" aria-label="Loading" />
 }
 
-export function Stat({ label, value, bad }) {
+export function Stat({ label, value, tone }) {
+  // `tone` is one of 'warn' | 'error' | undefined — controls the value color.
+  const valueClass = `stat-box-value${tone ? ' ' + tone : ''}`
   return (
-    <div className="stat">
-      <span className="stat-label">{label}</span>
-      <span className={`stat-value ${bad ? 'stat-bad' : ''}`}>{value}</span>
+    <div className="stat-box">
+      <span className="stat-box-label">{label}</span>
+      <span className={valueClass}>{value}</span>
     </div>
   )
 }

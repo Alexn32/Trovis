@@ -92,6 +92,16 @@ export const api = {
     request(`/agents/${encodeURIComponent(name)}/spans?limit=${limit}`),
   describeAgent: (name) =>
     request(`/agents/${encodeURIComponent(name)}/describe`, { method: 'POST' }),
+  // Registration is optional — 404 is a normal "no registration yet"
+  // result, so callers should accept null gracefully.
+  async getAgentRegistration(name) {
+    try {
+      return await request(`/agents/${encodeURIComponent(name)}/registration`)
+    } catch (e) {
+      if (e.status === 404) return null
+      throw e
+    }
+  },
 
   // --- auth ---
   signup: (email) =>

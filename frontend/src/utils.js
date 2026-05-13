@@ -12,19 +12,32 @@ export function relativeTime(iso) {
   return new Date(iso).toLocaleDateString()
 }
 
-// Status freshness as specified: green ≤5m, yellow ≤1h, gray otherwise.
-export function statusFromLastSeen(iso) {
-  if (!iso) return 'gray'
-  const diffSec = (Date.now() - new Date(iso).getTime()) / 1000
-  if (diffSec <= 300) return 'green'
-  if (diffSec <= 3600) return 'yellow'
+// Status freshness for an agent: green ≤5m, yellow ≤1h, gray otherwise.
+// Bumped to yellow if the agent has a high enough error rate, regardless
+// of recency.
+export function statusFor(agent) {
+  const errorRate = agent.span_count
+    ? (agent.error_count / agent.span_count) * 100
+    : 0
+  if (errorRate > 20) return 'red'
+  if (!agent.last_seen) return 'gray'
+  const diffSec = (Date.now() - new Date(agent.last_seen).getTime()) / 1000
+  if (diffSec <= 300) {
+    return errorRate > 5 ? 'yellow' : 'green'
+  }
+  if (diffSec <= 3600 || errorRate > 5) return 'yellow'
   return 'gray'
+}
+
+export function errorRatePercent(agent) {
+  if (!agent.span_count) return 0
+  return (agent.error_count / agent.span_count) * 100
 }
 
 export function formatDuration(ms) {
   if (ms == null || Number.isNaN(ms)) return '—'
   if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`
-  if (ms < 1000) return `${ms.toFixed(1)}ms`
+  if (ms < 1000) return `${ms.toFixed(0)}ms`
   return `${(ms / 1000).toFixed(2)}s`
 }
 
@@ -34,4 +47,67 @@ export function nsToMs(ns) {
 
 export function formatNsTimestamp(ns) {
   return new Date(ns / 1_000_000).toLocaleString()
+}
+
+// Extract a friendly model name from an agent's top operations or
+// description, if any. Returns empty string if nothing identifiable.
+// Used as a fallback when /registration isn't available; for agents with
+// registration data we'd prefer registration.model.
+export function inferModelFromAgent(agent) {
+  // No reliable signal in the /agents response yet. Caller can pass an
+  // overrideModel from the registration endpoint when available.
+  return ''
+}
+
+// Color helpers — return a CSS variable name (not a literal color) so the
+// caller can write style={{ color: cssVar(...) }} and have it theme-match.
+export function statusColor(status) {
+  switch (status) {
+    case 'green':
+      return 'var(--success)'
+    case 'yellow':
+      return 'var(--warning)'
+    case 'red':
+      return 'var(--error)'
+    default:
+      return 'var(--idle)'
+  }
+}
+
+// Group span timestamps into N equal-width time buckets between earliest
+// and latest. Returns counts per bucket. Used to feed Sparkline.
+export function bucketSpansForSparkline(spans, bucketCount = 12) {
+  if (!spans || spans.length === 0) return []
+  // start_time_unix is a nanosecond timestamp; convert to ms for bucketing.
+  const times = spans.map((s) => s.start_time_unix / 1_000_000)
+  const min = Math.min(...times)
+  const max = Math.max(...times)
+  if (max === min) {
+    // All spans at the same time — single bar.
+    return [spans.length]
+  }
+  const width = (max - min) / bucketCount
+  const buckets = new Array(bucketCount).fill(0)
+  for (const t of times) {
+    let idx = Math.floor((t - min) / width)
+    if (idx >= bucketCount) idx = bucketCount - 1
+    buckets[idx] += 1
+  }
+  return buckets
+}
+
+// Group span counts into the last `days` calendar days (UTC). Returns an
+// array of length `days` with the oldest first. Used by AgentDetail.
+export function bucketSpansByDay(spans, days = 14) {
+  const now = Date.now()
+  const dayMs = 24 * 60 * 60 * 1000
+  const buckets = new Array(days).fill(0)
+  if (!spans) return buckets
+  for (const s of spans) {
+    const t = s.start_time_unix / 1_000_000
+    const ageMs = now - t
+    const idx = days - 1 - Math.floor(ageMs / dayMs)
+    if (idx >= 0 && idx < days) buckets[idx] += 1
+  }
+  return buckets
 }

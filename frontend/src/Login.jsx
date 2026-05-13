@@ -36,8 +36,10 @@ export default function Login({ onAuthed }) {
     <div className="login-shell">
       <div className="login-card">
         <header className="login-header">
-          <h1 className="logo">Oversee</h1>
-          <p className="subtitle">Agent Management System</p>
+          <div className="brand">
+            <span className="brand-dot" />
+            Oversee
+          </div>
         </header>
 
         {mode === 'choose' && (
