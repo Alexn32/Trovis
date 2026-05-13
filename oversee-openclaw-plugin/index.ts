@@ -390,13 +390,13 @@ function registerAgents(tracer: Tracer, ctx: OpenClawContext): void {
     sendAgentRegistration(tracer, "main", defaultWorkspace, defaultModel)
   }
 
-  // Force a flush so registration spans appear in Oversee within seconds of
-  // startup, instead of waiting for BatchSpanProcessor's timeout.
-  if (state.sdk) {
-    state.sdk.forceFlush().catch((err) => {
-      console.warn(`${LOG} Force flush after registration failed:`, err)
-    })
-  }
+  // Previously we called sdk.forceFlush() here for snappier dashboard
+  // visibility, but NodeSDK doesn't expose forceFlush() — calling it
+  // threw inside gateway_start and blocked the plugin from emitting the
+  // registration span at all. The BatchSpanProcessor auto-flushes on
+  // its own schedule (default 5s), which is fine for startup. The first
+  // registration just lags by a few seconds rather than appearing
+  // instantly.
 }
 
 // ---------------------------------------------------------------------------
@@ -610,11 +610,11 @@ function wireCommands(api: OpenClawApi): void {
     return
   }
 
-  api.registerCommand({
+  const command = {
     name: "oversee",
     aliases: ["ov"],
     description: "Connect to Oversee agent monitoring",
-    async execute(args, _context) {
+    async execute(args: string[], _context: unknown): Promise<CommandResult> {
       const subcommand = args[0]?.toLowerCase()
 
       if (subcommand === "connect" && args[1]) {
@@ -684,7 +684,25 @@ function wireCommands(api: OpenClawApi): void {
         ],
       }
     },
-  })
+  }
+
+  // OpenClaw's registerCommand contract may not match what we send (a
+  // recent gateway error was "Command handler must be a function" — that
+  // suggests it expects either a different property name or a different
+  // call signature). Until we can verify against real docs, swallow the
+  // error so command-registration failure doesn't take down the rest of
+  // the plugin (telemetry hooks are the important part).
+  try {
+    api.registerCommand(command)
+    console.log(`${LOG} /oversee command registered.`)
+  } catch (e) {
+    console.warn(
+      `${LOG} Failed to register /oversee command: ${(e as Error).message}. ` +
+        `Telemetry will continue to work; command-based setup is unavailable. ` +
+        `Command shape sent: name="${command.name}", aliases=${JSON.stringify(command.aliases)}, ` +
+        `execute=${typeof command.execute}.`,
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,7 +734,17 @@ export default definePluginEntry({
       return
     }
 
-    wireCommands(api)
+    // Belt-and-braces: a bad command shape thrown synchronously from
+    // wireCommands must never prevent wireEvents from running. Telemetry
+    // is what people install this plugin for; the /oversee command is a
+    // convenience.
+    try {
+      wireCommands(api)
+    } catch (e) {
+      console.warn(
+        `${LOG} wireCommands threw: ${(e as Error).message}. Continuing with telemetry only.`,
+      )
+    }
     wireEvents(api)
     // OTEL is initialized lazily inside the first hook (typically
     // gateway_start) that exposes pluginConfig. No init log here yet.
