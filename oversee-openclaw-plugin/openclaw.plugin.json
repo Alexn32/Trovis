@@ -35,6 +35,11 @@
         "type": "boolean",
         "description": "Include USER.md and MEMORY.md in registration data. These files may contain personal information. Default: false.",
         "default": false
+      },
+      "captureOutputs": {
+        "type": "boolean",
+        "description": "Capture message content and tool outputs for richer dashboard insights. Default: false.",
+        "default": false
       }
     }
   }

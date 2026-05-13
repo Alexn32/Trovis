@@ -36,6 +36,7 @@ import {
 import { NodeSDK } from "@opentelemetry/sdk-node"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
 import { Resource } from "@opentelemetry/resources"
+import { execFile } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -64,6 +65,7 @@ interface PluginConfig {
   apiKey?: string
   enabled?: boolean
   readUserData?: boolean
+  captureOutputs?: boolean
 }
 
 interface OpenClawContext {
@@ -118,6 +120,9 @@ interface MessageReceivedEvent extends BaseEvent {
 interface MessageSentEvent extends BaseEvent {
   success?: boolean
   error?: unknown
+  // Optional outbound text. Captured into a span attribute only when
+  // state.captureOutputs is true.
+  content?: string
 }
 
 interface BeforeToolCallEvent extends BaseEvent {
@@ -133,6 +138,10 @@ interface AfterToolCallEvent extends BaseEvent {
   success?: boolean
   error?: unknown
   durationMs?: number
+  // Optional tool return value. Captured into a span attribute only
+  // when state.captureOutputs is true. May be a string, object, or
+  // anything else JSON-serializable.
+  result?: unknown
 }
 
 interface ModelCallStartedEvent extends BaseEvent {
@@ -198,6 +207,7 @@ const state: {
   agentName: string
   apiKey: string | undefined
   readUserData: boolean
+  captureOutputs: boolean
   gatewayVersion: string
 } = {
   initialized: false,
@@ -208,6 +218,7 @@ const state: {
   agentName: DEFAULT_AGENT_NAME,
   apiKey: undefined,
   readUserData: false,
+  captureOutputs: false,
   gatewayVersion: "unknown",
 }
 
@@ -283,6 +294,13 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   // USER.md and MEMORY.md may carry personal data; the operator has to
   // explicitly opt in to having those files shipped to Oversee.
   state.readUserData = Boolean(pluginConfig?.readUserData)
+  // Message content / tool outputs are opt-in for the same reason. Use
+  // ?? (not ||) so an explicit `false` in pluginConfig overrides a
+  // `true` env var.
+  state.captureOutputs = Boolean(
+    pluginConfig?.captureOutputs ??
+      (process.env.OVERSEE_CAPTURE_OUTPUTS === "true"),
+  )
 
   state.tracer = initTelemetry(
     state.endpoint,
@@ -296,6 +314,9 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
     `${LOG} Plugin initialized. Sending telemetry to ${state.endpoint} ` +
       `as service '${state.agentName}'` +
       (state.readUserData ? " (readUserData=true)" : ""),
+  )
+  console.log(
+    `${LOG} Output capture: ${state.captureOutputs ? "enabled" : "disabled"}`,
   )
 
   return state.tracer
@@ -313,9 +334,9 @@ function readFileOrEmpty(workspacePath: string, filename: string): string {
   }
 }
 
-function truncate(s: string): string {
-  if (s.length <= ATTR_BYTE_LIMIT) return s
-  return s.slice(0, ATTR_BYTE_LIMIT) + "[truncated]"
+function truncate(s: string, limit: number = ATTR_BYTE_LIMIT): string {
+  if (s.length <= limit) return s
+  return s.slice(0, limit) + "[truncated]"
 }
 
 function resolveDefaultWorkspace(): string {
@@ -471,6 +492,17 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "oversee.trace.id", ctx.traceId)
     setIfPresent(span, "oversee.trace.span_id", ctx.spanId)
     setIfPresent(span, "oversee.trace.parent_span_id", ctx.parentSpanId)
+    // Capture inbound message text when the operator opted in.
+    if (
+      state.captureOutputs &&
+      typeof event?.content === "string" &&
+      event.content.length > 0
+    ) {
+      span.setAttribute(
+        "oversee.message.content",
+        truncate(event.content, 10_000),
+      )
+    }
     span.end()
   })
 
@@ -490,6 +522,17 @@ function wireEvents(api: OpenClawApi): void {
         message:
           typeof event?.error === "string" ? event.error : "delivery failed",
       })
+    }
+    // Capture outbound response body when opted in.
+    if (
+      state.captureOutputs &&
+      typeof event?.content === "string" &&
+      event.content.length > 0
+    ) {
+      span.setAttribute(
+        "oversee.response.content",
+        truncate(event.content, 10_000),
+      )
     }
     span.end()
   })
@@ -530,6 +573,28 @@ function wireEvents(api: OpenClawApi): void {
         message:
           typeof event?.error === "string" ? event.error : "tool failed",
       })
+    }
+    // Capture the tool's return value when opted in. Strings pass through
+    // as-is; anything else gets JSON.stringify'd. Truncated to 10 000
+    // chars to stay safely inside OTLP attribute limits.
+    if (
+      state.captureOutputs &&
+      event?.result !== undefined &&
+      event.result !== null
+    ) {
+      let raw: string | null = null
+      if (typeof event.result === "string") {
+        raw = event.result
+      } else {
+        try {
+          raw = JSON.stringify(event.result)
+        } catch {
+          raw = null
+        }
+      }
+      if (typeof raw === "string" && raw.length > 0) {
+        entry.span.setAttribute("oversee.tool.result", truncate(raw, 10_000))
+      }
     }
     entry.span.end()
   })
@@ -604,6 +669,40 @@ function wireEvents(api: OpenClawApi): void {
 // command tells the user how to provide it, and `/oversee status` reflects
 // the live connection state.
 
+/** Mask an API key for display in chat — first 6 chars + "…" + last 4. */
+function maskKey(key: string | undefined): string {
+  if (!key) return "(not set)"
+  if (key.length <= 10) return key
+  return `${key.slice(0, 6)}…${key.slice(-4)}`
+}
+
+/**
+ * Best-effort persist of a single config field to openclaw.json by
+ * shelling out to the gateway's own CLI. Uses execFile (not exec) so a
+ * user-supplied URL or key can't inject shell metacharacters. If the
+ * `openclaw config set` subcommand doesn't exist or fails, we log and
+ * fall back to the in-memory state change only.
+ */
+function persistConfig(key: string, value: string | boolean): void {
+  execFile(
+    "openclaw",
+    [
+      "config",
+      "set",
+      `plugins.entries.oversee.config.${key}`,
+      String(value),
+    ],
+    (err) => {
+      if (err) {
+        console.log(
+          `${LOG} Could not persist ${key} via 'openclaw config set' — ` +
+            `applied for this session only.`,
+        )
+      }
+    },
+  )
+}
+
 function wireCommands(api: OpenClawApi): void {
   if (typeof api?.registerCommand !== "function") {
     // Older gateways without command support — skip silently.
@@ -615,74 +714,117 @@ function wireCommands(api: OpenClawApi): void {
     aliases: ["ov"],
     description: "Connect to Oversee agent monitoring",
     async execute(args: string[], _context: unknown): Promise<CommandResult> {
-      const subcommand = args[0]?.toLowerCase()
+      const sub = args[0]?.toLowerCase()
+      const reply = (text: string): CommandResult => ({
+        content: [{ type: "text", text }],
+      })
 
-      if (subcommand === "connect" && args[1]) {
+      // --- connect <url> -------------------------------------------------
+      if (sub === "connect" && args[1]) {
         const endpoint = args[1]
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `✅ Oversee endpoint set to: ${endpoint}\n\n` +
-                `To make this permanent, add to your openclaw.json:\n\n` +
-                "```json\n" +
-                `"plugins": {\n` +
-                `  "entries": {\n` +
-                `    "oversee": {\n` +
-                `      "config": {\n` +
-                `        "endpoint": "${endpoint}"\n` +
-                `      }\n` +
-                `    }\n` +
-                `  }\n` +
-                `}\n` +
-                "```\n\n" +
-                `Then restart the gateway. Your agents will appear in Oversee within seconds.`,
-            },
-          ],
-        }
+        state.endpoint = endpoint
+        persistConfig("endpoint", endpoint)
+        return reply(
+          `✅ Oversee endpoint set: \`${endpoint}\`\n\n` +
+            `In-memory state updated and saved to your openclaw.json ` +
+            `(best-effort). The OTLP exporter was constructed at gateway ` +
+            `start, so **restart the gateway** for spans to actually go to ` +
+            `this URL.`,
+        )
       }
 
-      if (subcommand === "status") {
-        const endpoint = state.endpoint
+      // --- apikey <key> --------------------------------------------------
+      if (sub === "apikey" && args[1]) {
+        const key = args[1]
+        state.apiKey = key
+        persistConfig("apiKey", key)
+        return reply(
+          `✅ Oversee API key set: \`${maskKey(key)}\`\n\n` +
+            `Saved to your openclaw.json (best-effort). The auth header ` +
+            `is set on the exporter at gateway start, so **restart the ` +
+            `gateway** for the new key to be sent.`,
+        )
+      }
+
+      // --- capture on|off ------------------------------------------------
+      if (sub === "capture" && (args[1] === "on" || args[1] === "off")) {
+        const enable = args[1] === "on"
+        state.captureOutputs = enable
+        persistConfig("captureOutputs", enable)
+        return reply(
+          `✅ Output capture **${enable ? "enabled" : "disabled"}**.\n\n` +
+            `Takes effect immediately for new events. ` +
+            (enable
+              ? `Message content and tool results will now appear on ` +
+                `spans as \`oversee.message.content\`, ` +
+                `\`oversee.response.content\`, and \`oversee.tool.result\` ` +
+                `(each truncated to 10 000 chars).`
+              : `Message content and tool results will no longer be ` +
+                `captured. Existing spans aren't modified.`),
+        )
+      }
+
+      // --- userdata on|off -----------------------------------------------
+      if (sub === "userdata" && (args[1] === "on" || args[1] === "off")) {
+        const enable = args[1] === "on"
+        state.readUserData = enable
+        persistConfig("readUserData", enable)
+        return reply(
+          `✅ User data ingestion **${enable ? "enabled" : "disabled"}**.\n\n` +
+            `Saved (best-effort). USER.md and MEMORY.md are read at ` +
+            `gateway start during agent registration, so **restart the ` +
+            `gateway** for this to take effect on the registration spans.`,
+        )
+      }
+
+      // --- settings ------------------------------------------------------
+      if (sub === "settings") {
+        const lines = [
+          `⚙️ **Oversee Settings**`,
+          ``,
+          `• Endpoint: \`${state.endpoint || "(not set)"}\``,
+          `• API key: \`${maskKey(state.apiKey)}\``,
+          `• Agent name: \`${state.agentName}\``,
+          `• Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
+          `• User data: **${state.readUserData ? "on" : "off"}**`,
+          `• Telemetry: ${state.initialized ? "flowing" : "not initialized"}`,
+        ]
+        return reply(lines.join("\n"))
+      }
+
+      // --- status --------------------------------------------------------
+      if (sub === "status") {
         const enabled = state.initialized
-        return {
-          content: [
-            {
-              type: "text",
-              text: enabled
-                ? `✅ Oversee is active.\n\n` +
-                  `• Endpoint: ${endpoint}\n` +
-                  `• Agent: ${state.agentName}\n` +
-                  `• Telemetry: flowing`
-                : `⚠️ Oversee is not connected.\n\n` +
-                  `To connect, get your endpoint URL from your Oversee dashboard ` +
-                  `(Add Agent → OpenClaw), then run:\n\n` +
-                  `/oversee connect YOUR_ENDPOINT_URL`,
-            },
-          ],
-        }
+        return reply(
+          enabled
+            ? `✅ Oversee is active.\n\n` +
+                `• Endpoint: \`${state.endpoint}\`\n` +
+                `• Agent: \`${state.agentName}\`\n` +
+                `• Telemetry: flowing`
+            : `⚠️ Oversee is not connected.\n\n` +
+                `Get your endpoint URL from your Oversee dashboard ` +
+                `(Add Agent → OpenClaw), then run:\n\n` +
+                `\`/oversee connect <your-endpoint-url>\``,
+        )
       }
 
-      // Default: help / setup walkthrough.
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `🔍 **Oversee Agent Monitoring**\n\n` +
-              `Available commands:\n` +
-              `• \`/oversee connect <endpoint-url>\` — Connect to your Oversee instance\n` +
-              `• \`/oversee status\` — Check connection status\n\n` +
-              `**Setup:**\n` +
-              `1. Sign up at oversee.dev\n` +
-              `2. Go to Add Agent → OpenClaw\n` +
-              `3. Copy your endpoint URL\n` +
-              `4. Run: \`/oversee connect <your-endpoint-url>\`\n\n` +
-              `That's it — your agents will appear in Oversee automatically.`,
-          },
-        ],
-      }
+      // --- default / help ------------------------------------------------
+      return reply(
+        `🔍 **Oversee Agent Monitoring**\n\n` +
+          `**Setup**\n` +
+          `• \`/oversee connect <url>\` — set the Oversee endpoint\n` +
+          `• \`/oversee apikey <key>\` — set your API key\n\n` +
+          `**Capture toggles**\n` +
+          `• \`/oversee capture on\` / \`off\` — message + tool output capture (default off)\n` +
+          `• \`/oversee userdata on\` / \`off\` — USER.md + MEMORY.md in registration (default off)\n\n` +
+          `**Inspect**\n` +
+          `• \`/oversee settings\` — show all current config\n` +
+          `• \`/oversee status\` — connection state + telemetry flowing or not\n\n` +
+          `Setting commands update in-memory state immediately and ` +
+          `best-effort-persist to \`openclaw.json\` via \`openclaw config ` +
+          `set\`. \`connect\` and \`apikey\` need a gateway restart to ` +
+          `re-init the OTLP exporter.`,
+      )
     },
   }
 

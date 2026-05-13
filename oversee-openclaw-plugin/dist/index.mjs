@@ -66144,6 +66144,7 @@ var import_sdk_node = __toESM(require_src32(), 1);
 var import_exporter_trace_otlp_http = __toESM(require_src24(), 1);
 var import_resources = __toESM(require_src34(), 1);
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -66161,6 +66162,7 @@ var state = {
   agentName: DEFAULT_AGENT_NAME,
   apiKey: void 0,
   readUserData: false,
+  captureOutputs: false,
   gatewayVersion: "unknown"
 };
 function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
@@ -66207,6 +66209,9 @@ function ensureInit(ctx) {
   state.agentName = pluginConfig?.agentName ?? process.env.OVERSEE_AGENT_NAME ?? DEFAULT_AGENT_NAME;
   state.apiKey = pluginConfig?.apiKey ?? process.env.OVERSEE_API_KEY;
   state.readUserData = Boolean(pluginConfig?.readUserData);
+  state.captureOutputs = Boolean(
+    pluginConfig?.captureOutputs ?? process.env.OVERSEE_CAPTURE_OUTPUTS === "true"
+  );
   state.tracer = initTelemetry(
     state.endpoint,
     state.agentName,
@@ -66217,6 +66222,9 @@ function ensureInit(ctx) {
   console.log(
     `${LOG} Plugin initialized. Sending telemetry to ${state.endpoint} as service '${state.agentName}'` + (state.readUserData ? " (readUserData=true)" : "")
   );
+  console.log(
+    `${LOG} Output capture: ${state.captureOutputs ? "enabled" : "disabled"}`
+  );
   return state.tracer;
 }
 function readFileOrEmpty(workspacePath, filename) {
@@ -66226,9 +66234,9 @@ function readFileOrEmpty(workspacePath, filename) {
     return "";
   }
 }
-function truncate(s) {
-  if (s.length <= ATTR_BYTE_LIMIT) return s;
-  return s.slice(0, ATTR_BYTE_LIMIT) + "[truncated]";
+function truncate(s, limit = ATTR_BYTE_LIMIT) {
+  if (s.length <= limit) return s;
+  return s.slice(0, limit) + "[truncated]";
 }
 function resolveDefaultWorkspace() {
   const dockerPath = "/data/.openclaw/workspace";
@@ -66332,6 +66340,12 @@ function wireEvents(api) {
     setIfPresent(span, "oversee.trace.id", ctx.traceId);
     setIfPresent(span, "oversee.trace.span_id", ctx.spanId);
     setIfPresent(span, "oversee.trace.parent_span_id", ctx.parentSpanId);
+    if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
+      span.setAttribute(
+        "oversee.message.content",
+        truncate(event.content, 1e4)
+      );
+    }
     span.end();
   });
   safeOn(api, "message_sent", (event) => {
@@ -66348,6 +66362,12 @@ function wireEvents(api) {
         code: SpanStatusCode.ERROR,
         message: typeof event?.error === "string" ? event.error : "delivery failed"
       });
+    }
+    if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
+      span.setAttribute(
+        "oversee.response.content",
+        truncate(event.content, 1e4)
+      );
     }
     span.end();
   });
@@ -66381,6 +66401,21 @@ function wireEvents(api) {
         code: SpanStatusCode.ERROR,
         message: typeof event?.error === "string" ? event.error : "tool failed"
       });
+    }
+    if (state.captureOutputs && event?.result !== void 0 && event.result !== null) {
+      let raw = null;
+      if (typeof event.result === "string") {
+        raw = event.result;
+      } else {
+        try {
+          raw = JSON.stringify(event.result);
+        } catch {
+          raw = null;
+        }
+      }
+      if (typeof raw === "string" && raw.length > 0) {
+        entry.span.setAttribute("oversee.tool.result", truncate(raw, 1e4));
+      }
     }
     entry.span.end();
   });
@@ -66433,6 +66468,29 @@ function wireEvents(api) {
     span.end();
   });
 }
+function maskKey(key) {
+  if (!key) return "(not set)";
+  if (key.length <= 10) return key;
+  return `${key.slice(0, 6)}\u2026${key.slice(-4)}`;
+}
+function persistConfig(key, value) {
+  execFile(
+    "openclaw",
+    [
+      "config",
+      "set",
+      `plugins.entries.oversee.config.${key}`,
+      String(value)
+    ],
+    (err) => {
+      if (err) {
+        console.log(
+          `${LOG} Could not persist ${key} via 'openclaw config set' \u2014 applied for this session only.`
+        );
+      }
+    }
+  );
+}
 function wireCommands(api) {
   if (typeof api?.registerCommand !== "function") {
     return;
@@ -66442,74 +66500,94 @@ function wireCommands(api) {
     aliases: ["ov"],
     description: "Connect to Oversee agent monitoring",
     async execute(args, _context) {
-      const subcommand = args[0]?.toLowerCase();
-      if (subcommand === "connect" && args[1]) {
+      const sub = args[0]?.toLowerCase();
+      const reply = (text) => ({
+        content: [{ type: "text", text }]
+      });
+      if (sub === "connect" && args[1]) {
         const endpoint = args[1];
-        return {
-          content: [
-            {
-              type: "text",
-              text: `\u2705 Oversee endpoint set to: ${endpoint}
+        state.endpoint = endpoint;
+        persistConfig("endpoint", endpoint);
+        return reply(
+          `\u2705 Oversee endpoint set: \`${endpoint}\`
 
-To make this permanent, add to your openclaw.json:
-
-\`\`\`json
-"plugins": {
-  "entries": {
-    "oversee": {
-      "config": {
-        "endpoint": "${endpoint}"
+In-memory state updated and saved to your openclaw.json (best-effort). The OTLP exporter was constructed at gateway start, so **restart the gateway** for spans to actually go to this URL.`
+        );
       }
-    }
-  }
-}
-\`\`\`
+      if (sub === "apikey" && args[1]) {
+        const key = args[1];
+        state.apiKey = key;
+        persistConfig("apiKey", key);
+        return reply(
+          `\u2705 Oversee API key set: \`${maskKey(key)}\`
 
-Then restart the gateway. Your agents will appear in Oversee within seconds.`
-            }
-          ]
-        };
+Saved to your openclaw.json (best-effort). The auth header is set on the exporter at gateway start, so **restart the gateway** for the new key to be sent.`
+        );
       }
-      if (subcommand === "status") {
-        const endpoint = state.endpoint;
+      if (sub === "capture" && (args[1] === "on" || args[1] === "off")) {
+        const enable = args[1] === "on";
+        state.captureOutputs = enable;
+        persistConfig("captureOutputs", enable);
+        return reply(
+          `\u2705 Output capture **${enable ? "enabled" : "disabled"}**.
+
+Takes effect immediately for new events. ` + (enable ? `Message content and tool results will now appear on spans as \`oversee.message.content\`, \`oversee.response.content\`, and \`oversee.tool.result\` (each truncated to 10 000 chars).` : `Message content and tool results will no longer be captured. Existing spans aren't modified.`)
+        );
+      }
+      if (sub === "userdata" && (args[1] === "on" || args[1] === "off")) {
+        const enable = args[1] === "on";
+        state.readUserData = enable;
+        persistConfig("readUserData", enable);
+        return reply(
+          `\u2705 User data ingestion **${enable ? "enabled" : "disabled"}**.
+
+Saved (best-effort). USER.md and MEMORY.md are read at gateway start during agent registration, so **restart the gateway** for this to take effect on the registration spans.`
+        );
+      }
+      if (sub === "settings") {
+        const lines = [
+          `\u2699\uFE0F **Oversee Settings**`,
+          ``,
+          `\u2022 Endpoint: \`${state.endpoint || "(not set)"}\``,
+          `\u2022 API key: \`${maskKey(state.apiKey)}\``,
+          `\u2022 Agent name: \`${state.agentName}\``,
+          `\u2022 Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
+          `\u2022 User data: **${state.readUserData ? "on" : "off"}**`,
+          `\u2022 Telemetry: ${state.initialized ? "flowing" : "not initialized"}`
+        ];
+        return reply(lines.join("\n"));
+      }
+      if (sub === "status") {
         const enabled = state.initialized;
-        return {
-          content: [
-            {
-              type: "text",
-              text: enabled ? `\u2705 Oversee is active.
+        return reply(
+          enabled ? `\u2705 Oversee is active.
 
-\u2022 Endpoint: ${endpoint}
-\u2022 Agent: ${state.agentName}
+\u2022 Endpoint: \`${state.endpoint}\`
+\u2022 Agent: \`${state.agentName}\`
 \u2022 Telemetry: flowing` : `\u26A0\uFE0F Oversee is not connected.
 
-To connect, get your endpoint URL from your Oversee dashboard (Add Agent \u2192 OpenClaw), then run:
+Get your endpoint URL from your Oversee dashboard (Add Agent \u2192 OpenClaw), then run:
 
-/oversee connect YOUR_ENDPOINT_URL`
-            }
-          ]
-        };
+\`/oversee connect <your-endpoint-url>\``
+        );
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `\u{1F50D} **Oversee Agent Monitoring**
+      return reply(
+        `\u{1F50D} **Oversee Agent Monitoring**
 
-Available commands:
-\u2022 \`/oversee connect <endpoint-url>\` \u2014 Connect to your Oversee instance
-\u2022 \`/oversee status\` \u2014 Check connection status
+**Setup**
+\u2022 \`/oversee connect <url>\` \u2014 set the Oversee endpoint
+\u2022 \`/oversee apikey <key>\` \u2014 set your API key
 
-**Setup:**
-1. Sign up at oversee.dev
-2. Go to Add Agent \u2192 OpenClaw
-3. Copy your endpoint URL
-4. Run: \`/oversee connect <your-endpoint-url>\`
+**Capture toggles**
+\u2022 \`/oversee capture on\` / \`off\` \u2014 message + tool output capture (default off)
+\u2022 \`/oversee userdata on\` / \`off\` \u2014 USER.md + MEMORY.md in registration (default off)
 
-That's it \u2014 your agents will appear in Oversee automatically.`
-          }
-        ]
-      };
+**Inspect**
+\u2022 \`/oversee settings\` \u2014 show all current config
+\u2022 \`/oversee status\` \u2014 connection state + telemetry flowing or not
+
+Setting commands update in-memory state immediately and best-effort-persist to \`openclaw.json\` via \`openclaw config set\`. \`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`
+      );
     }
   };
   try {
