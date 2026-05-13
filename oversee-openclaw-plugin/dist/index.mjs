@@ -66148,18 +66148,19 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 var PLUGIN_VERSION = "0.1.0";
-var DEFAULT_ENDPOINT = "https://web-production-e6bc4.up.railway.app/v1/traces";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Oversee]";
 var OBSERVATION_PRIORITY = 0;
 var ATTR_BYTE_LIMIT = 32 * 1024;
 var state = {
   initialized: false,
+  disabled: false,
   tracer: null,
   sdk: null,
-  endpoint: DEFAULT_ENDPOINT,
+  endpoint: "",
   agentName: DEFAULT_AGENT_NAME,
   apiKey: void 0,
+  readUserData: false,
   gatewayVersion: "unknown"
 };
 function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
@@ -66186,11 +66187,26 @@ function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
   return trace.getTracer("@oversee/openclaw-plugin", PLUGIN_VERSION);
 }
 function ensureInit(ctx) {
+  if (state.disabled) return null;
   if (state.initialized) return state.tracer;
   const pluginConfig = ctx?.pluginConfig;
-  state.endpoint = pluginConfig?.endpoint ?? process.env.OVERSEE_ENDPOINT ?? DEFAULT_ENDPOINT;
+  if (pluginConfig?.enabled === false) {
+    state.disabled = true;
+    console.log(`${LOG} Plugin disabled via config.`);
+    return null;
+  }
+  const endpoint = pluginConfig?.endpoint ?? process.env.OVERSEE_ENDPOINT;
+  if (!endpoint) {
+    state.disabled = true;
+    console.log(
+      `${LOG} No endpoint configured. Set plugins.entries.oversee.config.endpoint to enable telemetry.`
+    );
+    return null;
+  }
+  state.endpoint = endpoint;
   state.agentName = pluginConfig?.agentName ?? process.env.OVERSEE_AGENT_NAME ?? DEFAULT_AGENT_NAME;
   state.apiKey = pluginConfig?.apiKey ?? process.env.OVERSEE_API_KEY;
+  state.readUserData = Boolean(pluginConfig?.readUserData);
   state.tracer = initTelemetry(
     state.endpoint,
     state.agentName,
@@ -66199,7 +66215,7 @@ function ensureInit(ctx) {
   );
   state.initialized = true;
   console.log(
-    `${LOG} Plugin initialized. Sending telemetry to ${state.endpoint} as service '${state.agentName}'`
+    `${LOG} Plugin initialized. Sending telemetry to ${state.endpoint} as service '${state.agentName}'` + (state.readUserData ? " (readUserData=true)" : "")
   );
   return state.tracer;
 }
@@ -66229,8 +66245,8 @@ function sendAgentRegistration(tracer, agentId, workspacePath, model) {
   const soul = readFileOrEmpty(workspacePath, "SOUL.md");
   const identity = readFileOrEmpty(workspacePath, "IDENTITY.md");
   const operatingManual = readFileOrEmpty(workspacePath, "AGENTS.md");
-  const userContext = readFileOrEmpty(workspacePath, "USER.md");
-  const memory = readFileOrEmpty(workspacePath, "MEMORY.md");
+  const userContext = state.readUserData ? readFileOrEmpty(workspacePath, "USER.md") : "";
+  const memory = state.readUserData ? readFileOrEmpty(workspacePath, "MEMORY.md") : "";
   span.setAttribute("oversee.event.type", "agent_registration");
   span.setAttribute("oversee.agent.id", agentId);
   span.setAttribute("oversee.agent.workspace_path", workspacePath);
@@ -66428,6 +66444,10 @@ var index_default = definePluginEntry({
   description: "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Oversee dashboard.",
   register(api) {
     state.gatewayVersion = api?.version ?? api?.gateway?.version ?? "unknown";
+    if (process.env.OVERSEE_ENABLED === "false") {
+      console.log(`${LOG} Plugin disabled via OVERSEE_ENABLED=false.`);
+      return;
+    }
     if (typeof api?.on !== "function") {
       console.warn(
         `${LOG} OpenClaw api.on() not available. Plugin cannot register handlers.`
