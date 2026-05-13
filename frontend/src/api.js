@@ -2,22 +2,55 @@
 // at build time via VITE_API_URL so the same bundle can point at local
 // dev, staging, or a customer demo deployment.
 //
-// The API key is held in module-level state and set by App.jsx after the
-// user logs in. VITE_OVERSEE_API_KEY (if set at build time) seeds the
-// initial value — handy for staging deploys where every visitor uses the
-// same demo key — but normal users provide their own key via the login
-// screen.
+// The API key lives in three places, in priority order:
+//   1. module-level `API_KEY` — the live value used on every request
+//   2. localStorage `oversee_api_key` — persisted across reloads, written
+//      by setApiKey / cleared by clearApiKey
+//   3. VITE_OVERSEE_API_KEY env var — build-time seed for staging deploys
+//      where every visitor uses the same demo key
+//
+// On module load we pick (2) if present, else (3), else null. App.jsx
+// then validates the chosen key on mount and falls back to the login
+// screen on 401.
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+const LS_KEY = 'oversee_api_key'
 
-let API_KEY = import.meta.env.VITE_OVERSEE_API_KEY || null
+function _readKeyFromStorage() {
+  try {
+    return localStorage.getItem(LS_KEY)
+  } catch {
+    // localStorage can throw in some sandboxed iframes / private modes.
+    return null
+  }
+}
+
+function _writeKeyToStorage(key) {
+  try {
+    if (key) {
+      localStorage.setItem(LS_KEY, key)
+    } else {
+      localStorage.removeItem(LS_KEY)
+    }
+  } catch {
+    // Quota exceeded, blocked, etc. — silently degrade. The in-memory
+    // module state still works; the user just has to re-login on reload.
+  }
+}
+
+let API_KEY =
+  _readKeyFromStorage() ||
+  import.meta.env.VITE_OVERSEE_API_KEY ||
+  null
 
 export function setApiKey(key) {
   API_KEY = key || null
+  _writeKeyToStorage(API_KEY)
 }
 
 export function clearApiKey() {
   API_KEY = null
+  _writeKeyToStorage(null)
 }
 
 export function getApiKey() {
