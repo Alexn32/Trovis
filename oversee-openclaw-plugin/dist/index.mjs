@@ -66176,7 +66176,15 @@ function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
     url: endpoint,
     headers: apiKey ? { "X-Oversee-Api-Key": apiKey } : void 0
   });
-  const sdk = new import_sdk_node.NodeSDK({ resource, traceExporter: exporter });
+  const sdk = new import_sdk_node.NodeSDK({
+    resource,
+    traceExporter: exporter,
+    // The actual fix for the hostid concern: NodeSDK normally merges
+    // our resource with the output of default detectors (host, process,
+    // env). autoDetectResources: false skips that merge so only the
+    // attributes above are shipped.
+    autoDetectResources: false
+  });
   sdk.start();
   state.sdk = sdk;
   const shutdown = () => {
@@ -66191,6 +66199,11 @@ function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
 function ensureInit(ctx) {
   if (state.disabled) return null;
   if (state.initialized) return state.tracer;
+  if (process.env.OVERSEE_ENABLED === "false") {
+    state.disabled = true;
+    console.log(`${LOG} Plugin disabled via OVERSEE_ENABLED=false`);
+    return null;
+  }
   const pluginConfig = ctx?.pluginConfig;
   if (pluginConfig?.enabled === false) {
     state.disabled = true;
