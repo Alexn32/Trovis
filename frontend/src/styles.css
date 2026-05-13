@@ -889,3 +889,166 @@ code {
 .external-link:hover {
   text-decoration: underline;
 }
+
+/* =========================================================================
+   Login screen
+   ========================================================================= */
+
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #f9fafb;
+}
+
+.login-card {
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--color-card-shadow);
+  padding: 32px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.login-header {
+  margin-bottom: 24px;
+  text-align: left;
+}
+
+.login-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-prompt {
+  color: var(--color-fg);
+  font-size: 14px;
+  margin: 0 0 6px;
+  line-height: 1.55;
+}
+
+.login-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.btn-block {
+  width: 100%;
+  justify-content: center;
+}
+
+.btn-secondary {
+  background: white;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--color-muted);
+  padding: 6px 0;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: center;
+}
+
+.btn-link:hover:not(:disabled) {
+  color: var(--color-accent);
+}
+
+.btn-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-error {
+  color: var(--color-red);
+  font-size: 13px;
+  margin: 0;
+  padding: 8px 12px;
+  background: #fef2f2;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-red);
+}
+
+.key-display {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #f9fafb;
+  overflow: hidden;
+}
+
+.key-text {
+  flex: 1;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: #f9fafb;
+  color: var(--color-fg);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* =========================================================================
+   Account badge in header
+   ========================================================================= */
+
+.header-with-account {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.account-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f9fafb;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+.account-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-green);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+
+.account-label {
+  color: var(--color-fg);
+}
+
+.account-tail {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 4px;
+}
+
+.account-badge .btn-link {
+  padding: 0 2px;
+  font-size: 13px;
+}

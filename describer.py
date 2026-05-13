@@ -157,7 +157,9 @@ def _build_registration_prompt(
 # ---------------------------------------------------------------------------
 
 
-def describe_agent(service_name: str) -> dict[str, Any]:
+def describe_agent(
+    service_name: str, account_id: int | None = None,
+) -> dict[str, Any]:
     """Generate a plain-English description of an agent.
 
     If the agent has sent its identity files via an agent_registration span,
@@ -165,11 +167,14 @@ def describe_agent(service_name: str) -> dict[str, Any]:
     from telemetry alone. Otherwise we fall back to inferring purely from
     observed span behavior.
 
+    `account_id` scopes every database read so a user can only describe
+    agents they own. Pass None for legacy / unauthenticated paths.
+
     Raises:
         AgentNotFoundError: no spans exist for service_name.
         APIKeyMissingError: ANTHROPIC_API_KEY is not configured.
     """
-    summary = database.get_agent_summary(service_name)
+    summary = database.get_agent_summary(service_name, account_id=account_id)
     if summary is None:
         raise AgentNotFoundError(service_name)
 
@@ -179,8 +184,12 @@ def describe_agent(service_name: str) -> dict[str, Any]:
             "ANTHROPIC_API_KEY is not set. Export it before generating descriptions."
         )
 
-    spans = database.get_agent_spans(service_name, limit=100)
-    registration = database.get_latest_registration(service_name)
+    spans = database.get_agent_spans(
+        service_name, limit=100, account_id=account_id
+    )
+    registration = database.get_latest_registration(
+        service_name, account_id=account_id
+    )
 
     # The registration must carry meaningful identity content — an empty
     # row would be worse than telemetry-only because Claude would invent
