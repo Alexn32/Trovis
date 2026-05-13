@@ -27,6 +27,7 @@ export default function AgentDetail({ serviceName, onBack }) {
   const [summary, setSummary] = useState(null)
   const [spans, setSpans] = useState([])
   const [registration, setRegistration] = useState(null)
+  const [outputs, setOutputs] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -37,12 +38,17 @@ export default function AgentDetail({ serviceName, onBack }) {
       api.getAgentSummary(serviceName),
       api.getAgentSpans(serviceName, 50),
       api.getAgentRegistration(serviceName),
+      // Outputs endpoint returns [] when nothing's been captured (plugin
+      // captureOutputs flag is off) — so this is always safe to call,
+      // it just means the section renders its "not enabled" callout.
+      api.getAgentOutputs(serviceName, 10).catch(() => []),
     ])
-      .then(([s, sp, reg]) => {
+      .then(([s, sp, reg, outs]) => {
         if (cancelled) return
         setSummary(s)
         setSpans(sp)
         setRegistration(reg)
+        setOutputs(outs || [])
         setLoading(false)
       })
       .catch((e) => {
@@ -79,6 +85,7 @@ export default function AgentDetail({ serviceName, onBack }) {
             <RegistrationBlock registration={registration} />
           )}
           <SpansTable spans={spans} />
+          <RecentOutputs outputs={outputs} />
           <AskAboutAgent summary={summary} />
         </>
       )}
@@ -286,6 +293,64 @@ function SpanRow({ span }) {
         </tr>
       )}
     </>
+  )
+}
+
+function RecentOutputs({ outputs }) {
+  return (
+    <section className="section-block">
+      <div className="section-block-header">
+        <h3 className="section-label">
+          Recent outputs{' '}
+          <span style={{ color: 'var(--text-dim)' }}>· {outputs.length}</span>
+        </h3>
+      </div>
+      {outputs.length === 0 ? (
+        <div className="callout callout-info">
+          Output capture is not enabled for this agent. To see what your
+          agents produce, run <code>/oversee capture on</code> in your
+          agent's chat, or add <code>captureOutputs: true</code> to your
+          plugin config.
+        </div>
+      ) : (
+        <div className="outputs-list">
+          {outputs.map((o, i) => (
+            <OutputItem key={i} output={o} />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function OutputItem({ output }) {
+  const [expanded, setExpanded] = useState(false)
+  const content = output.content || ''
+  const truncated = content.length > 200
+  const displayed = !expanded && truncated ? content.slice(0, 200) + '…' : content
+  // Pretty-print the type label: 'tool_result' → 'tool result'.
+  const typeLabel =
+    output.content_type === 'tool_result' ? 'tool result' : output.content_type
+  return (
+    <div className="output-item">
+      <div className="output-meta">
+        <span className={`output-badge output-badge-${output.content_type}`}>
+          {typeLabel}
+        </span>
+        <span className="output-timestamp">{relativeTime(output.timestamp)}</span>
+        <span className="output-operation mono">{output.operation}</span>
+      </div>
+      <div className="output-content">{displayed}</div>
+      {truncated && (
+        <button
+          type="button"
+          className="output-toggle"
+          onClick={() => setExpanded((e) => !e)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </div>
   )
 }
 

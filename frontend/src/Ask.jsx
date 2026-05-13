@@ -31,16 +31,28 @@ export default function Ask() {
   async function submit(text) {
     const q = (text ?? input).trim()
     if (!q) return
-    // Build the next thread (user turn appended). We submit this exact
-    // thread to the backend so it has the full conversational context.
-    const nextThread = [...messages, { role: 'user', content: q }]
-    setMessages(nextThread)
+    // The thread we DISPLAY: just the user's plain question. The thread
+    // we SEND to the API: the latest user turn is prefixed with a
+    // context block containing captured outputs from across the fleet,
+    // so Claude can answer "what did my agent write today?"-style
+    // questions. UI-vs-API divergence is intentional: we don't want the
+    // user seeing a long preamble before their own question.
+    const displayThread = [...messages, { role: 'user', content: q }]
+    setMessages(displayThread)
     setInput('')
     setPending(true)
+
     try {
-      const res = await api.ask(
-        nextThread.map((m) => ({ role: m.role, content: m.content })),
+      const contextBlock = await buildOutputContext()
+      const enrichedQ = contextBlock ? `${contextBlock}\n\n---\n\n${q}` : q
+      // Replace just the latest user turn with the enriched version;
+      // prior turns are sent as-is.
+      const apiThread = displayThread.map((m, i, arr) =>
+        i === arr.length - 1
+          ? { role: 'user', content: enrichedQ }
+          : { role: m.role, content: m.content },
       )
+      const res = await api.ask(apiThread)
       setMessages((m) => [...m, { role: 'assistant', content: res.answer }])
     } catch (e) {
       setMessages((m) => [
@@ -54,6 +66,53 @@ export default function Ask() {
     } finally {
       setPending(false)
     }
+  }
+
+  // Fetch the fleet, then captured outputs per agent in parallel. If any
+  // outputs exist anywhere, build a context block listing them. If none
+  // exist, return a short instruction telling Claude to stick to
+  // metadata so it doesn't hallucinate content. Failures degrade
+  // silently — a network blip shouldn't break the question.
+  async function buildOutputContext() {
+    let agents
+    try {
+      agents = await api.listAgents()
+    } catch {
+      return ''
+    }
+    if (!agents || agents.length === 0) return ''
+
+    const outputsByAgent = await Promise.all(
+      agents.map((a) =>
+        api.getAgentOutputs(a.service_name, 5).catch(() => []),
+      ),
+    )
+
+    let anyOutputs = false
+    const lines = ['Recent captured outputs across the user\'s agents:']
+    for (let i = 0; i < agents.length; i++) {
+      const outs = outputsByAgent[i] || []
+      if (outs.length === 0) continue
+      anyOutputs = true
+      for (const o of outs) {
+        const snippet = (o.content || '').replace(/\s+/g, ' ').slice(0, 400)
+        lines.push(
+          `- ${agents[i].service_name} [${o.content_type}] ${o.operation}: ${snippet}`,
+        )
+      }
+    }
+
+    if (!anyOutputs) {
+      return (
+        'Output capture is not enabled for any of the user\'s agents. ' +
+        'You can describe agent metadata (operation names, span counts, ' +
+        'error rates, durations) but you cannot quote the actual content ' +
+        'of messages, responses, or tool results — that data has not been ' +
+        'captured. If the user asks about content, suggest they enable ' +
+        'capture by running `/oversee capture on` in their agent\'s chat.'
+      )
+    }
+    return lines.join('\n')
   }
 
   function onSubmit(e) {

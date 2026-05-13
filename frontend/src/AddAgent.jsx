@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { getApiKey } from './api.js'
 
 // ============================================================================
 // AddAgent — the three-step onboarding wizard.
@@ -634,124 +635,189 @@ with tracer.start_as_current_span("my-operation") as span:
 // Instruction pages — OpenClaw
 // ---------------------------------------------------------------------------
 
-function OpenClawInstructions({ agentName, endpoint }) {
-  const configBlock = fill(
-`{
-  "plugins": {
-    "entries": {
-      "oversee": {
-        "endpoint": "OVERSEE_ENDPOINT",
-        "agentName": "AGENT_NAME",
-        "enabled": true,
-        "hooks": {
-          "allowConversationAccess": true
-        }
-      }
-    }
-  }
-}`,
-    agentName, endpoint,
-  )
-
-  const chatMessage = fill(
-`I need you to install the Oversee monitoring plugin so we can track agent telemetry. Here's what to do:
-
-1. Install the Oversee plugin package:
-npm install @oversee/openclaw-plugin
-
-2. Open openclaw.json and add this to the plugins section (create the plugins block if it doesn't exist):
-{
-  "plugins": {
-    "entries": {
-      "oversee": {
-        "endpoint": "OVERSEE_ENDPOINT",
-        "agentName": "AGENT_NAME",
-        "enabled": true,
-        "hooks": {
-          "allowConversationAccess": true
-        }
-      }
-    }
-  }
+// OpenClaw is special among the platforms: the user is already logged in
+// to Oversee, so we can pre-fill the endpoint and their API key directly.
+// The wizard's Step3Header agentName/endpoint fields are ignored here —
+// the values that matter are the live session ones.
+function computeOverseeEndpoint() {
+  const base =
+    import.meta.env.VITE_API_URL ||
+    (typeof window !== 'undefined' ? window.location.origin : '')
+  return base.replace(/\/+$/, '') + '/v1/traces'
 }
 
-3. Restart the gateway so the plugin loads.
-
-4. Confirm when complete.`,
-    agentName, endpoint,
-  )
+function OpenClawInstructions() {
+  const endpoint = computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  const installCmd = 'openclaw plugins install clawhub:@alexn32/openclaw-plugin'
 
   return (
     <>
       <h2 className="instructions-title">Connect OpenClaw agents</h2>
       <p className="instructions-subtitle">
-        Install the Oversee plugin — every agent on this OpenClaw instance is monitored automatically.
+        Install the plugin and every agent on this OpenClaw instance starts
+        reporting telemetry to Oversee.
       </p>
+
       <Callout variant="blue">
-        <strong>OpenClaw + Oversee:</strong> One plugin install gives you automatic
-        monitoring of every agent — messages, tool calls, LLM requests, and run completions.
+        <strong>OpenClaw + Oversee:</strong> Install the plugin, connect
+        through chat, and every agent is monitored automatically.
       </Callout>
-      <Tabs tabs={[
-        {
-          label: 'Terminal setup',
-          content: (
-            <>
-              <p className="tab-subtitle">Run these commands in your terminal or Claude Code.</p>
-              <NumberedStep n={1} title="Navigate to your OpenClaw project">
-                <CodeBlock code="cd /path/to/your-openclaw-project" />
-              </NumberedStep>
-              <NumberedStep n={2} title="Install the Oversee plugin">
-                <CodeBlock code="npm install @oversee/openclaw-plugin" />
-              </NumberedStep>
-              <NumberedStep
-                n={3}
-                title="Add the Oversee config to your openclaw.json (create the plugins block if it doesn't exist)"
-              >
-                <CodeBlock code={configBlock} />
-              </NumberedStep>
-              <NumberedStep n={4} title="Restart your OpenClaw gateway">
-                <CodeBlock code="openclaw gateway restart" />
-              </NumberedStep>
-              <NumberedStep n={5} title="Send any message to your agent. It will appear in Oversee within seconds." />
-              <Callout variant="info">
-                <strong>allowConversationAccess: true</strong> enables full telemetry
-                including LLM calls and run completions. Without it you still get message
-                and tool call telemetry.
-              </Callout>
-              <Callout variant="info">
-                Every agent running on this OpenClaw instance is automatically monitored.
-                Individual agents are identified by their workspace name.
-              </Callout>
-              <Callout variant="info">
-                <strong>Coming soon:</strong> once published to ClawHub, installation will
-                be a single command: <code>openclaw plugins install clawhub:@oversee/openclaw-plugin</code>
-              </Callout>
-              <SuccessCallout />
-            </>
-          ),
-        },
-        {
-          label: 'Chat setup',
-          content: (
-            <>
-              <p className="tab-subtitle">Paste this message to your OpenClaw agent.</p>
-              <p className="explanatory">
-                Copy the message below and paste it into your OpenClaw agent's chat. The
-                agent will install the Oversee plugin and update your configuration. Some
-                agents may decline if their safety rules prevent self-modification — use
-                the Terminal setup tab instead.
-              </p>
-              <AgentMessageBlock code={chatMessage} />
-              <Callout variant="warning">
-                If your agent declines to modify its own configuration, use the Terminal
-                setup tab. Agents with strict safety boundaries may refuse infrastructure
-                changes — this is expected and correct behavior.
-              </Callout>
-              <SuccessCallout />
-            </>
-          ),
-        },
-      ]} />
+
+      <PrefillBlock label="Your Oversee endpoint" value={endpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <Tabs
+        tabs={[
+          {
+            label: 'Chat setup (recommended)',
+            content: (
+              <OpenClawChatSetup
+                endpoint={endpoint}
+                apiKey={apiKey}
+                installCmd={installCmd}
+              />
+            ),
+          },
+          {
+            label: 'Terminal setup',
+            content: (
+              <OpenClawTerminalSetup
+                endpoint={endpoint}
+                apiKey={apiKey}
+                installCmd={installCmd}
+              />
+            ),
+          },
+        ]}
+      />
+    </>
+  )
+}
+
+function PrefillBlock({ label, value, placeholder }) {
+  const [copied, setCopied] = useState(false)
+  async function copy() {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // navigator.clipboard requires a secure context; degrade silently
+    }
+  }
+  return (
+    <div className="field" style={{ marginBottom: 14 }}>
+      <label className="field-label">{label}</label>
+      <div className="endpoint-display">
+        <code className="endpoint-url">
+          {value || placeholder || '(not set)'}
+        </code>
+        {value && (
+          <button
+            type="button"
+            className="copy-btn-inline"
+            onClick={copy}
+          >
+            {copied ? '✓ Copied' : 'Copy'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
+  const connectCmd = `/oversee connect ${endpoint}`
+  const apikeyCmd = `/oversee apikey ${apiKey || 'YOUR_KEY'}`
+  return (
+    <>
+      <p className="tab-subtitle">
+        Paste these into any of your agent's chats. Each command runs in the
+        OpenClaw gateway and applies to every agent on the instance.
+      </p>
+
+      <NumberedStep n={1} title="Install the Oversee plugin">
+        <CodeBlock code={installCmd} />
+        <p className="helper-text">
+          Paste this to your agent or run in terminal — either works.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Connect to your Oversee instance">
+        <CodeBlock code={connectCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Set your API key">
+        <CodeBlock code={apikeyCmd} />
+        {!apiKey && (
+          <p className="helper-text">
+            We couldn't read your API key from this session — replace
+            <code> YOUR_KEY</code> with the value from your dashboard.
+          </p>
+        )}
+      </NumberedStep>
+
+      <NumberedStep n={4} title="(Optional) Enable output capture">
+        <CodeBlock code="/oversee capture on" />
+        <p className="helper-text">
+          Recommended — lets you see what your agents actually produce
+          (messages, responses, tool results) in the dashboard.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={5} title="Verify">
+        <CodeBlock code="/oversee status" />
+      </NumberedStep>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
+function OpenClawTerminalSetup({ endpoint, apiKey, installCmd }) {
+  const configCommands =
+    `openclaw config set plugins.entries.oversee.config.endpoint "${endpoint}"\n` +
+    `openclaw config set plugins.entries.oversee.config.apiKey "${apiKey || 'YOUR_KEY'}"`
+  const captureCmd =
+    'openclaw config set plugins.entries.oversee.config.captureOutputs true'
+  return (
+    <>
+      <p className="tab-subtitle">
+        Run these in the terminal where <code>openclaw</code> is installed.
+      </p>
+
+      <NumberedStep n={1} title="Install the Oversee plugin">
+        <CodeBlock code={installCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Set the endpoint and API key">
+        <CodeBlock code={configCommands} />
+        {!apiKey && (
+          <p className="helper-text">
+            We couldn't read your API key from this session — replace
+            <code> YOUR_KEY</code> with the value from your dashboard.
+          </p>
+        )}
+      </NumberedStep>
+
+      <NumberedStep n={3} title="(Optional) Enable output capture">
+        <CodeBlock code={captureCmd} />
+        <p className="helper-text">
+          Recommended — lets you see what your agents actually produce.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={4} title="Restart the gateway">
+        <CodeBlock code="openclaw gateway restart" />
+      </NumberedStep>
+
+      <SuccessCallout />
     </>
   )
 }
@@ -1015,11 +1081,17 @@ export default function AddAgent({ onClose }) {
       {step === 2 && needsProvider && <ProviderStep onSelect={handleProviderPick} />}
       {showInstructions && (
         <>
-          <Step3Header
-            agentName={agentName}
-            setAgentName={setAgentName}
-            endpoint={endpoint}
-          />
+          {platform !== 'openclaw' && (
+            // OpenClaw auto-fills endpoint + key from the live session
+            // (the user is already logged in to Oversee), so the generic
+            // wizard inputs would just duplicate what OpenClawInstructions
+            // displays at the top of its own section.
+            <Step3Header
+              agentName={agentName}
+              setAgentName={setAgentName}
+              endpoint={endpoint}
+            />
+          )}
           <InstructionsView
             platform={platform}
             provider={provider}
