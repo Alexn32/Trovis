@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS spans (
     span_id             TEXT      NOT NULL,
     parent_span_id      TEXT,
     service_name        TEXT      NOT NULL,
+    agent_id            TEXT      DEFAULT 'main',
     span_name           TEXT      NOT NULL,
     kind                INTEGER   DEFAULT 0,
     start_time_unix     BIGINT    NOT NULL,
@@ -189,6 +190,7 @@ CREATE TABLE IF NOT EXISTS spans (
     span_id             TEXT    NOT NULL,
     parent_span_id      TEXT,
     service_name        TEXT    NOT NULL,
+    agent_id            TEXT    DEFAULT 'main',
     span_name           TEXT    NOT NULL,
     kind                INTEGER DEFAULT 0,
     start_time_unix     INTEGER NOT NULL,
@@ -290,6 +292,7 @@ _ACCOUNT_ID_TABLES = ("spans", "descriptions", "agent_registrations")
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_spans_service_name ON spans(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time_unix)",
+    "CREATE INDEX IF NOT EXISTS idx_spans_service_agent ON spans(service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_descriptions_service_name ON descriptions(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_registrations_service_name ON agent_registrations(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key)",
@@ -330,6 +333,12 @@ def init_db() -> None:
         # Backfill the account_id column on existing tables — idempotent.
         for table in _ACCOUNT_ID_TABLES:
             _try_add_column(cur, table, "account_id", "INTEGER")
+        # Multi-agent column. Older spans rows pre-date per-agent telemetry;
+        # the DEFAULT applies to new rows, and on both backends a SELECT of
+        # the now-NULL backfill returns 'main' (PG rewrites with the default,
+        # SQLite returns the column default for missing rows). We also
+        # COALESCE on reads to be defensive.
+        _try_add_column(cur, "spans", "agent_id", "TEXT DEFAULT 'main'")
         for idx in _INDEXES:
             cur.execute(idx)
 
@@ -366,10 +375,25 @@ def shutdown_db() -> None:
 
 
 _INSERT_COLUMNS = (
-    "trace_id, span_id, parent_span_id, service_name, span_name, kind, "
+    "trace_id, span_id, parent_span_id, service_name, agent_id, span_name, kind, "
     "start_time_unix, end_time_unix, status_code, status_message, "
     "attributes, resource_attributes, account_id"
 )
+
+
+def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
+    """Extract the per-event agent id from a parsed span's attributes.
+
+    The OpenClaw plugin stamps this on every hook span as `oversee.agent.id`.
+    Other OTEL SDKs don't set it; those agents are single-instance, so we
+    default to 'main' to keep them grouped as one entry per service.
+    """
+    if not attrs:
+        return "main"
+    val = attrs.get("oversee.agent.id")
+    if isinstance(val, str) and val:
+        return val
+    return "main"
 
 
 def insert_spans(
@@ -386,6 +410,7 @@ def insert_spans(
             s["span_id"],
             s.get("parent_span_id") or None,
             s["service_name"],
+            _agent_id_from_attrs(s.get("attributes")),
             s["span_name"],
             s.get("kind", 0),
             s["start_time_unix"],
@@ -407,7 +432,7 @@ def insert_spans(
                 rows,
             )
         else:
-            placeholders = ", ".join(["?"] * 13)
+            placeholders = ", ".join(["?"] * 14)
             cur.executemany(
                 f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES ({placeholders})",
                 rows,
@@ -438,13 +463,17 @@ def save_description(
 
 
 def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
-    """List every agent that has reported telemetry, with latest description.
+    """Return the fleet as instance groups, each with a nested list of agents.
+
+    Spans are grouped by `(service_name, agent_id)` first to compute per-agent
+    stats, then folded into one record per `service_name`. A single-agent
+    instance still gets a one-element `agents` list — the frontend collapses
+    those visually.
 
     When account_id is provided, results are strictly scoped to that account
-    (pre-multi-tenant rows with NULL account_id are excluded — they have no
-    owner). When None, returns ALL rows (local-dev / pre-auth behavior).
+    (pre-multi-tenant rows with NULL account_id are excluded). When None,
+    returns ALL rows (local-dev / pre-auth behavior).
     """
-    # Build the per-table filter fragments and the args tuple in lock-step.
     span_filter = f"WHERE account_id = {PH}" if account_id is not None else ""
     desc_filter = (
         f"AND d.account_id = {PH}" if account_id is not None else ""
@@ -452,22 +481,24 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     reg_filter = (
         f"AND r.account_id = {PH}" if account_id is not None else ""
     )
-
-    # An additional account filter for the sample-resource subquery
-    # (operates on a different spans alias, so the filter clause text
-    # differs from `span_filter`'s WHERE form).
     sample_acct_filter = (
         f"AND s2.account_id = {PH}" if account_id is not None else ""
     )
 
+    # Per (service_name, agent_id) aggregation — every row is one bubble in
+    # the nested `agents[]` list. The description and sample_resource lookup
+    # only need to fire once per service_name, but it's cheaper to repeat the
+    # subquery than to issue a separate round-trip per group; both are 1-row
+    # lookups with the right indexes.
     agg_sql = f"""
         SELECT
             service_name,
-            COUNT(*)                                       AS span_count,
+            COALESCE(agent_id, 'main')                       AS agent_id,
+            COUNT(*)                                         AS span_count,
             SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
-            MIN(start_time_unix)                           AS first_seen_ns,
-            MAX(start_time_unix)                           AS last_seen_ns,
+            MIN(start_time_unix)                             AS first_seen_ns,
+            MAX(start_time_unix)                             AS last_seen_ns,
             (
                 SELECT description
                 FROM descriptions d
@@ -475,13 +506,14 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                   {desc_filter}
                 ORDER BY d.generated_at DESC, d.id DESC
                 LIMIT 1
-            )                                              AS description,
+            )                                                AS description,
             EXISTS (
                 SELECT 1
                 FROM agent_registrations r
                 WHERE r.service_name = spans.service_name
+                  AND COALESCE(r.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
                   {reg_filter}
-            )                                              AS has_registration,
+            )                                                AS has_registration,
             (
                 SELECT resource_attributes
                 FROM spans s2
@@ -489,10 +521,10 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                   {sample_acct_filter}
                 ORDER BY s2.start_time_unix DESC
                 LIMIT 1
-            )                                              AS sample_resource_attributes
+            )                                                AS sample_resource_attributes
         FROM spans
         {span_filter}
-        GROUP BY service_name
+        GROUP BY service_name, COALESCE(agent_id, 'main')
         ORDER BY last_seen_ns DESC
     """
     # Argument order matches the {PH} occurrences left-to-right in the SQL:
@@ -503,6 +535,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
         else ()
     )
 
+    # Top operations are computed per instance (service_name), not per
+    # agent — useful at the group level. Per-agent top-ops would inflate
+    # the payload without buying much.
     top_ops_args_extra = (account_id,) if account_id is not None else ()
     top_ops_sql = f"""
         SELECT span_name, COUNT(*) AS c
@@ -514,58 +549,125 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
         LIMIT 5
     """
 
+    # Fold the per-(service, agent) rows into groups keyed by service_name.
+    # Group-level totals are summed from the per-agent rows so a single SQL
+    # round-trip is enough.
+    groups: dict[str, dict[str, Any]] = {}
+
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(agg_sql, agg_args)
         agg_rows = cur.fetchall()
 
-        agents: list[dict[str, Any]] = []
         for row in agg_rows:
-            cur.execute(top_ops_sql, (row["service_name"], *top_ops_args_extra))
-            top_ops_rows = cur.fetchall()
-            agents.append(
-                {
-                    "service_name": row["service_name"],
-                    "span_count": row["span_count"],
-                    "error_count": row["error_count"] or 0,
-                    "avg_duration_ms": float(row["avg_duration_ms"] or 0.0),
-                    "first_seen": _ns_to_iso(row["first_seen_ns"]),
-                    "last_seen": _ns_to_iso(row["last_seen_ns"]),
-                    "top_operations": [r["span_name"] for r in top_ops_rows],
+            sn = row["service_name"]
+            agent_record = {
+                "agent_id": row["agent_id"] or "main",
+                "span_count": row["span_count"],
+                "error_count": row["error_count"] or 0,
+                "avg_duration_ms": float(row["avg_duration_ms"] or 0.0),
+                "first_seen": _ns_to_iso(row["first_seen_ns"]),
+                "last_seen": _ns_to_iso(row["last_seen_ns"]),
+                "has_registration": bool(row["has_registration"]),
+            }
+            if sn not in groups:
+                groups[sn] = {
+                    "service_name": sn,
+                    "agents": [],
+                    "total_spans": 0,
+                    "total_errors": 0,
+                    # Weighted-duration accumulator + total span count for
+                    # the post-loop weighted average. Kept here so we don't
+                    # need a second SQL pass.
+                    "_weighted_sum_ms": 0.0,
+                    "first_seen": agent_record["first_seen"],
+                    "last_seen": agent_record["last_seen"],
+                    "top_operations": [],
                     "description": row["description"],
-                    # Postgres returns bool, SQLite returns 0/1 — coerce.
-                    "has_registration": bool(row["has_registration"]),
+                    "has_registration": False,
                     "platform": _detect_platform(
                         row["sample_resource_attributes"]
                     ),
                 }
+            g = groups[sn]
+            g["agents"].append(agent_record)
+            g["total_spans"] += agent_record["span_count"]
+            g["total_errors"] += agent_record["error_count"]
+            g["_weighted_sum_ms"] += (
+                agent_record["avg_duration_ms"] * agent_record["span_count"]
             )
-    return agents
+            # Earliest/latest seen across all agents in the instance.
+            if (
+                agent_record["first_seen"]
+                and (not g["first_seen"] or agent_record["first_seen"] < g["first_seen"])
+            ):
+                g["first_seen"] = agent_record["first_seen"]
+            if (
+                agent_record["last_seen"]
+                and (not g["last_seen"] or agent_record["last_seen"] > g["last_seen"])
+            ):
+                g["last_seen"] = agent_record["last_seen"]
+            g["has_registration"] = g["has_registration"] or agent_record["has_registration"]
+
+        # Resolve per-instance derived fields. top_operations needs one
+        # extra round-trip per group (small N — number of distinct services).
+        for sn, g in groups.items():
+            cur.execute(top_ops_sql, (sn, *top_ops_args_extra))
+            g["top_operations"] = [r["span_name"] for r in cur.fetchall()]
+            g["avg_duration_ms"] = (
+                g["_weighted_sum_ms"] / g["total_spans"]
+                if g["total_spans"]
+                else 0.0
+            )
+            del g["_weighted_sum_ms"]
+
+    # Sort instances by their most recent span across any agent.
+    return sorted(
+        groups.values(),
+        key=lambda g: g["last_seen"] or "",
+        reverse=True,
+    )
 
 
 def get_agent_spans(
-    service_name: str, limit: int = 50, account_id: int | None = None,
+    service_name: str,
+    limit: int = 50,
+    account_id: int | None = None,
+    agent_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the most recent spans for an agent, newest first."""
+    """Return the most recent spans for an agent, newest first.
+
+    When `agent_id` is provided, the result is scoped to that sub-agent
+    within the instance. NULL agent_id rows (pre-multi-agent data) match
+    against the literal string 'main' so they show up under the default
+    sub-agent.
+    """
     account_filter = (
         f"AND account_id = {PH}" if account_id is not None else ""
     )
+    agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    )
     sql = f"""
-        SELECT id, trace_id, span_id, parent_span_id, service_name, span_name,
+        SELECT id, trace_id, span_id, parent_span_id, service_name,
+               COALESCE(agent_id, 'main') AS agent_id, span_name,
                kind, start_time_unix, end_time_unix, status_code, status_message,
                attributes, resource_attributes, created_at
         FROM spans
         WHERE service_name = {PH}
           {account_filter}
+          {agent_filter}
         ORDER BY start_time_unix DESC
         LIMIT {PH}
     """
-    args: tuple[Any, ...] = (
-        (service_name, account_id, limit)
-        if account_id is not None
-        else (service_name, limit)
-    )
+    # Args follow placeholder order: service_name, [account_id], [agent_id], limit.
+    args_list: list[Any] = [service_name]
+    if account_id is not None:
+        args_list.append(account_id)
+    if agent_id is not None:
+        args_list.append(agent_id)
+    args_list.append(limit)
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, args)
+        cur.execute(sql, tuple(args_list))
         rows = cur.fetchall()
 
     spans: list[dict[str, Any]] = []
@@ -577,6 +679,7 @@ def get_agent_spans(
                 "span_id": r["span_id"],
                 "parent_span_id": r["parent_span_id"],
                 "service_name": r["service_name"],
+                "agent_id": r["agent_id"] or "main",
                 "span_name": r["span_name"],
                 "kind": r["kind"],
                 "start_time_unix": r["start_time_unix"],
@@ -592,14 +695,25 @@ def get_agent_spans(
 
 
 def get_agent_summary(
-    service_name: str, account_id: int | None = None,
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Single-agent summary. Returns None if the agent has no spans."""
+    """Per-instance (or per-agent) summary. Returns None if no spans match.
+
+    When `agent_id` is provided, all SUM/AVG aggregates are scoped to that
+    sub-agent. The instance description is still returned unfiltered — there's
+    one description per service_name, regardless of how many sub-agents an
+    instance has.
+    """
     span_account_filter = (
         f"AND account_id = {PH}" if account_id is not None else ""
     )
     desc_account_filter = (
         f"AND account_id = {PH}" if account_id is not None else ""
+    )
+    span_agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
     )
 
     agg_sql = f"""
@@ -612,12 +726,14 @@ def get_agent_summary(
         FROM spans
         WHERE service_name = {PH}
           {span_account_filter}
+          {span_agent_filter}
     """
     top_ops_sql = f"""
         SELECT span_name, COUNT(*) AS c
         FROM spans
         WHERE service_name = {PH}
           {span_account_filter}
+          {span_agent_filter}
         GROUP BY span_name
         ORDER BY c DESC
         LIMIT 5
@@ -635,16 +751,25 @@ def get_agent_summary(
         FROM spans
         WHERE service_name = {PH}
           {span_account_filter}
+          {span_agent_filter}
         ORDER BY start_time_unix DESC
         LIMIT 1
     """
 
-    span_args = (
+    # Build the args tuple aligned with the {PH} order: service_name first,
+    # then optional account_id, then optional agent_id.
+    span_args_list: list[Any] = [service_name]
+    if account_id is not None:
+        span_args_list.append(account_id)
+    if agent_id is not None:
+        span_args_list.append(agent_id)
+    span_args = tuple(span_args_list)
+    # desc_sql has no agent filter — description is per service_name.
+    desc_args = (
         (service_name, account_id)
         if account_id is not None
         else (service_name,)
     )
-    desc_args = span_args  # same shape (service_name [, account_id])
 
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(agg_sql, span_args)
@@ -663,6 +788,7 @@ def get_agent_summary(
 
     return {
         "service_name": service_name,
+        "agent_id": agent_id or "main" if agent_id is not None else None,
         "span_count": row["span_count"],
         "error_count": row["error_count"] or 0,
         "avg_duration_ms": float(row["avg_duration_ms"] or 0.0),
@@ -677,9 +803,17 @@ def get_agent_summary(
 
 
 def get_latest_description(
-    service_name: str, account_id: int | None = None,
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,  # noqa: ARG001 — accepted for API symmetry
 ) -> dict[str, Any] | None:
-    """Return the most recent description for an agent, or None."""
+    """Return the most recent description for an agent, or None.
+
+    The `agent_id` argument is accepted so callers can pass it uniformly
+    along with other per-agent lookups, but descriptions are tracked per
+    `service_name` (one description per instance), so the filter is a
+    no-op.
+    """
     account_filter = (
         f"AND account_id = {PH}" if account_id is not None else ""
     )
@@ -754,11 +888,20 @@ def save_registration(
 
 
 def get_latest_registration(
-    service_name: str, account_id: int | None = None,
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the most recent registration for an agent, or None."""
+    """Return the most recent registration for an agent, or None.
+
+    When `agent_id` is provided, the result is scoped to that sub-agent.
+    Multi-agent instances each have their own registration row.
+    """
     account_filter = (
         f"AND account_id = {PH}" if account_id is not None else ""
+    )
+    agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
     )
     sql = f"""
         SELECT service_name, agent_id, soul, identity, operating_manual,
@@ -766,14 +909,16 @@ def get_latest_registration(
         FROM agent_registrations
         WHERE service_name = {PH}
           {account_filter}
+          {agent_filter}
         ORDER BY created_at DESC, id DESC
         LIMIT 1
     """
-    args = (
-        (service_name, account_id)
-        if account_id is not None
-        else (service_name,)
-    )
+    args_list: list[Any] = [service_name]
+    if account_id is not None:
+        args_list.append(account_id)
+    if agent_id is not None:
+        args_list.append(agent_id)
+    args = tuple(args_list)
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, args)
         row = cur.fetchone()
@@ -963,6 +1108,7 @@ def get_agent_outputs(
     service_name: str,
     account_id: int | None = None,
     limit: int = 20,
+    agent_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return spans that carry captured content (message body, response
     body, or tool result) for an agent, newest first.
@@ -976,11 +1122,15 @@ def get_agent_outputs(
     """
     limit = max(1, min(100, int(limit)))
     account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    )
     sql = f"""
         SELECT span_name, start_time_unix, end_time_unix, attributes
         FROM spans
         WHERE service_name = {PH}
           {account_filter}
+          {agent_filter}
           AND (
             attributes LIKE {PH}
             OR attributes LIKE {PH}
@@ -992,6 +1142,8 @@ def get_agent_outputs(
     base_args: tuple[Any, ...] = (service_name,)
     if account_id is not None:
         base_args = (*base_args, account_id)
+    if agent_id is not None:
+        base_args = (*base_args, agent_id)
     args = (*base_args, *_CAPTURE_ATTR_PATTERNS, limit)
 
     with _connect() as conn, _cursor(conn) as cur:

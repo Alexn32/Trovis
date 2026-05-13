@@ -484,6 +484,23 @@ function setIfPresent(span: Span, key: string, value: unknown): void {
   span.setAttribute(key, value as string | number | boolean)
 }
 
+/**
+ * Best-effort agent ID lookup. Different OpenClaw hook payloads put it in
+ * different places — sometimes on the event payload directly, sometimes
+ * only on the context. We try both. The backend uses this attribute to
+ * split multi-agent gateways into separate dashboard entries
+ * (`<service.name>-<agent_id>` when agent_id isn't 'main'), so getting
+ * it on every span is what makes multi-agent OpenClaw work end-to-end.
+ */
+function pickAgentId(event: unknown, ctx: OpenClawContext): string | undefined {
+  const fromEvent = (event as { agentId?: unknown })?.agentId
+  if (typeof fromEvent === "string" && fromEvent.length > 0) return fromEvent
+  if (typeof ctx?.agentId === "string" && ctx.agentId.length > 0) {
+    return ctx.agentId
+  }
+  return undefined
+}
+
 // ---------------------------------------------------------------------------
 // Hook wiring
 // ---------------------------------------------------------------------------
@@ -522,6 +539,9 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "oversee.trace.id", ctx.traceId)
     setIfPresent(span, "oversee.trace.span_id", ctx.spanId)
     setIfPresent(span, "oversee.trace.parent_span_id", ctx.parentSpanId)
+    // Multi-agent gateways: the backend uses this to split spans into
+    // per-agent virtual service names (`<service>-<agent_id>`).
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
     // Capture inbound message text when the operator opted in.
     if (
       state.captureOutputs &&
@@ -545,6 +565,7 @@ function wireEvents(api: OpenClawApi): void {
     const success = event?.success ?? !event?.error
     span.setAttribute("oversee.event.type", "message_sent")
     setIfPresent(span, "oversee.session.key", ctx.sessionKey)
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
     span.setAttribute("oversee.delivery.success", Boolean(success))
     if (!success) {
       span.setStatus({
@@ -581,7 +602,7 @@ function wireEvents(api: OpenClawApi): void {
       "oversee.tool.param_keys",
       JSON.stringify(Object.keys(event?.params ?? {})),
     )
-    setIfPresent(span, "oversee.agent.id", ctx.agentId)
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
 
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() })
@@ -639,6 +660,7 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "gen_ai.system", event?.provider)
     setIfPresent(span, "gen_ai.request.model", event?.model)
     span.setAttribute("oversee.model.call_id", event.callId)
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
 
     modelSpans.set(event.callId, { span, startedAt: Date.now() })
@@ -671,6 +693,7 @@ function wireEvents(api: OpenClawApi): void {
       kind: SpanKind.INTERNAL,
     })
     span.setAttribute("oversee.event.type", "agent_run_complete")
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
 
     const success = event?.success ?? !event?.error

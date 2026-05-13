@@ -185,7 +185,9 @@ def _build_registration_prompt(
 
 
 def describe_agent(
-    service_name: str, account_id: int | None = None,
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Generate a plain-English description of an agent.
 
@@ -197,11 +199,17 @@ def describe_agent(
     `account_id` scopes every database read so a user can only describe
     agents they own. Pass None for legacy / unauthenticated paths.
 
+    `agent_id` optionally scopes the prompt's telemetry sample to one
+    sub-agent within a multi-agent instance. The saved description is
+    still indexed per `service_name` regardless of the scope.
+
     Raises:
         AgentNotFoundError: no spans exist for service_name.
         APIKeyMissingError: ANTHROPIC_API_KEY is not configured.
     """
-    summary = database.get_agent_summary(service_name, account_id=account_id)
+    summary = database.get_agent_summary(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
     if summary is None:
         raise AgentNotFoundError(service_name)
 
@@ -212,10 +220,10 @@ def describe_agent(
         )
 
     spans = database.get_agent_spans(
-        service_name, limit=100, account_id=account_id
+        service_name, limit=100, account_id=account_id, agent_id=agent_id
     )
     registration = database.get_latest_registration(
-        service_name, account_id=account_id
+        service_name, account_id=account_id, agent_id=agent_id
     )
     # Captured outputs (gated by the plugin's captureOutputs flag at
     # emit time). Empty list when nothing's been captured. Concrete
@@ -223,7 +231,7 @@ def describe_agent(
     # useful signal for Claude — when present they should dominate
     # telemetry-only descriptions.
     outputs = database.get_agent_outputs(
-        service_name, account_id=account_id, limit=5
+        service_name, account_id=account_id, limit=5, agent_id=agent_id
     )
 
     # The registration must carry meaningful identity content — an empty

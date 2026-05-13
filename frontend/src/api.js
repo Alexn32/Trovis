@@ -83,20 +83,40 @@ async function request(path, options = {}) {
   return res.json()
 }
 
+// Append `?agent_id=…` to a URL when the caller is scoped to a sub-agent.
+// Multi-agent OpenClaw instances ship many distinct `agent_id`s under one
+// `service.name`; without the filter every per-instance endpoint returns
+// the aggregate.
+function _withAgent(path, agentId) {
+  if (!agentId) return path
+  const sep = path.includes('?') ? '&' : '?'
+  return `${path}${sep}agent_id=${encodeURIComponent(agentId)}`
+}
+
 export const api = {
   // --- data ---
   listAgents: () => request('/agents'),
-  getAgentSummary: (name) =>
-    request(`/agents/${encodeURIComponent(name)}/summary`),
-  getAgentSpans: (name, limit = 50) =>
-    request(`/agents/${encodeURIComponent(name)}/spans?limit=${limit}`),
-  describeAgent: (name) =>
-    request(`/agents/${encodeURIComponent(name)}/describe`, { method: 'POST' }),
+  getAgentSummary: (name, agentId) =>
+    request(_withAgent(`/agents/${encodeURIComponent(name)}/summary`, agentId)),
+  getAgentSpans: (name, limit = 50, agentId) =>
+    request(
+      _withAgent(
+        `/agents/${encodeURIComponent(name)}/spans?limit=${limit}`,
+        agentId,
+      ),
+    ),
+  describeAgent: (name, agentId) =>
+    request(
+      _withAgent(`/agents/${encodeURIComponent(name)}/describe`, agentId),
+      { method: 'POST' },
+    ),
   // Registration is optional — 404 is a normal "no registration yet"
   // result, so callers should accept null gracefully.
-  async getAgentRegistration(name) {
+  async getAgentRegistration(name, agentId) {
     try {
-      return await request(`/agents/${encodeURIComponent(name)}/registration`)
+      return await request(
+        _withAgent(`/agents/${encodeURIComponent(name)}/registration`, agentId),
+      )
     } catch (e) {
       if (e.status === 404) return null
       throw e
@@ -104,8 +124,13 @@ export const api = {
   },
   // Captured outputs (only populated when the plugin had captureOutputs
   // enabled at emit time). Returns [] when nothing's been captured.
-  getAgentOutputs: (name, limit = 20) =>
-    request(`/agents/${encodeURIComponent(name)}/outputs?limit=${limit}`),
+  getAgentOutputs: (name, limit = 20, agentId) =>
+    request(
+      _withAgent(
+        `/agents/${encodeURIComponent(name)}/outputs?limit=${limit}`,
+        agentId,
+      ),
+    ),
 
   // --- ask ---
   // messages is the full chat thread; backend is stateless. Returns
@@ -115,11 +140,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ messages }),
     }),
-  askAboutAgent: (name, messages) =>
-    request(`/agents/${encodeURIComponent(name)}/ask`, {
-      method: 'POST',
-      body: JSON.stringify({ messages }),
-    }),
+  askAboutAgent: (name, messages, agentId) =>
+    request(
+      _withAgent(`/agents/${encodeURIComponent(name)}/ask`, agentId),
+      {
+        method: 'POST',
+        body: JSON.stringify({ messages }),
+      },
+    ),
 
   // --- auth ---
   signup: (email) =>

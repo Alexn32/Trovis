@@ -33,6 +33,7 @@ import database
 import describer
 from models import (
     AgentDescription,
+    AgentGroup,
     AgentOutput,
     AgentRegistration,
     AgentSummary,
@@ -345,16 +346,26 @@ async def ingest_traces(request: Request) -> IngestResponse:
     return IngestResponse(status="ok", spans_received=inserted)
 
 
-@app.get("/agents", response_model=list[AgentSummary])
-async def list_agents(request: Request) -> list[AgentSummary]:
+@app.get("/agents", response_model=list[AgentGroup])
+async def list_agents(request: Request) -> list[AgentGroup]:
+    """Return the fleet grouped by `service.name`, with a nested list of
+    sub-agents inside each instance.
+    """
     account_id = getattr(request.state, "account_id", None)
-    return [AgentSummary(**a) for a in database.get_agents(account_id=account_id)]
+    return [AgentGroup(**a) for a in database.get_agents(account_id=account_id)]
 
 
 @app.get("/agents/{service_name}/summary", response_model=AgentSummary)
-async def agent_summary(service_name: str, request: Request) -> AgentSummary:
+async def agent_summary(
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
+) -> AgentSummary:
+    """Per-instance summary by default; per-agent when `?agent_id=` is set."""
     account_id = getattr(request.state, "account_id", None)
-    summary = database.get_agent_summary(service_name, account_id=account_id)
+    summary = database.get_agent_summary(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
     if summary is None:
         raise HTTPException(status_code=404, detail=f"agent '{service_name}' not found")
     return AgentSummary(**summary)
@@ -365,22 +376,34 @@ async def agent_spans(
     service_name: str,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
+    agent_id: str | None = Query(default=None),
 ) -> list[SpanRecord]:
     account_id = getattr(request.state, "account_id", None)
     return [
         SpanRecord(**s)
-        for s in database.get_agent_spans(service_name, limit, account_id=account_id)
+        for s in database.get_agent_spans(
+            service_name, limit, account_id=account_id, agent_id=agent_id
+        )
     ]
 
 
 @app.post("/agents/{service_name}/describe", response_model=AgentDescription)
 async def generate_description(
-    service_name: str, request: Request
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
 ) -> AgentDescription:
-    """Generate a fresh Claude-written description and persist it."""
+    """Generate a fresh Claude-written description and persist it.
+
+    `agent_id` scopes the telemetry that feeds the prompt; the saved
+    description is still indexed per-instance, so a re-describe of any
+    sub-agent updates the shared description.
+    """
     account_id = getattr(request.state, "account_id", None)
     try:
-        result = describer.describe_agent(service_name, account_id=account_id)
+        result = describer.describe_agent(
+            service_name, account_id=account_id, agent_id=agent_id
+        )
     except describer.AgentNotFoundError:
         raise HTTPException(status_code=404, detail=f"agent '{service_name}' not found")
     except describer.APIKeyMissingError as e:
@@ -412,11 +435,19 @@ async def latest_description(
 
 @app.get("/agents/{service_name}/registration", response_model=AgentRegistration)
 async def latest_registration(
-    service_name: str, request: Request
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
 ) -> AgentRegistration:
-    """Return the most recent registration payload (SOUL, IDENTITY, etc.) for this agent."""
+    """Return the most recent registration payload (SOUL, IDENTITY, etc.).
+
+    Without `?agent_id=`, returns the most recent across any sub-agent;
+    with it, scoped to that sub-agent's registration row.
+    """
     account_id = getattr(request.state, "account_id", None)
-    reg = database.get_latest_registration(service_name, account_id=account_id)
+    reg = database.get_latest_registration(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
     if reg is None:
         raise HTTPException(
             status_code=404,
@@ -430,6 +461,7 @@ async def agent_outputs(
     service_name: str,
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
+    agent_id: str | None = Query(default=None),
 ) -> list[AgentOutput]:
     """Return recent captured outputs (message bodies, responses, tool
     results) for this agent. Empty list when nothing's been captured —
@@ -438,7 +470,10 @@ async def agent_outputs(
     return [
         AgentOutput(**o)
         for o in database.get_agent_outputs(
-            service_name, account_id=account_id, limit=limit
+            service_name,
+            account_id=account_id,
+            limit=limit,
+            agent_id=agent_id,
         )
     ]
 
@@ -510,13 +545,19 @@ async def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
 
 @app.post("/agents/{service_name}/ask", response_model=AskResponse)
 async def ask_agent(
-    service_name: str, request: Request, body: AskRequest
+    service_name: str,
+    request: Request,
+    body: AskRequest,
+    agent_id: str | None = Query(default=None),
 ) -> AskResponse:
-    """Answer a question scoped to one agent."""
+    """Answer a question scoped to one instance, or one sub-agent when
+    `?agent_id=` is set."""
     account_id = getattr(request.state, "account_id", None)
     msgs = [m.model_dump() for m in body.messages]
     try:
-        answer = asker.ask_about_agent(service_name, account_id, msgs)
+        answer = asker.ask_about_agent(
+            service_name, account_id, msgs, agent_id=agent_id
+        )
     except asker.AgentNotFoundError:
         raise HTTPException(
             status_code=404, detail=f"agent '{service_name}' not found"
