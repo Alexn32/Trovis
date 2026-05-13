@@ -71,6 +71,38 @@ class AgentRegistration(BaseModel):
     created_at: str
 
 
+# ---------------------------------------------------------------------------
+# Auth — multi-tenant v1
+# ---------------------------------------------------------------------------
+
+
+class SignupRequest(BaseModel):
+    email: str
+
+
+class SignupResponse(BaseModel):
+    email: str
+    api_key: str
+    message: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+
+
+class LoginResponse(BaseModel):
+    email: str
+    api_keys: list[str] = Field(default_factory=list)
+
+
+class NewKeyResponse(BaseModel):
+    """Response shape for POST /auth/keys — a freshly-minted key for the
+    currently authenticated account."""
+
+    api_key: str
+    name: str = "default"
+
+
 class SpanRecord(BaseModel):
     """One row from the spans table, with JSON columns parsed back into dicts."""
 

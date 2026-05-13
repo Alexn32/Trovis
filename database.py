@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -210,30 +211,113 @@ CREATE TABLE IF NOT EXISTS agent_registrations (
 )
 """
 
+_ACCOUNTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS accounts (
+    id         SERIAL    PRIMARY KEY,
+    email      TEXT      NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_ACCOUNTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS accounts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT    NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+_API_KEYS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS api_keys (
+    id         SERIAL    PRIMARY KEY,
+    account_id INTEGER   NOT NULL REFERENCES accounts(id),
+    key        TEXT      NOT NULL UNIQUE,
+    name       TEXT      DEFAULT 'default',
+    active     BOOLEAN   DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_API_KEYS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS api_keys (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    key        TEXT    NOT NULL UNIQUE,
+    name       TEXT    DEFAULT 'default',
+    active     INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+# Tables that gained account_id post-launch. The column is nullable so
+# pre-multi-tenant rows (with NULL account_id) survive — but they're
+# strictly filtered out for authenticated requests, since they have no
+# owner.
+_ACCOUNT_ID_TABLES = ("spans", "descriptions", "agent_registrations")
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_spans_service_name ON spans(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time_unix)",
     "CREATE INDEX IF NOT EXISTS idx_descriptions_service_name ON descriptions(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_registrations_service_name ON agent_registrations(service_name)",
+    "CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key)",
+    "CREATE INDEX IF NOT EXISTS idx_api_keys_account_id ON api_keys(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_spans_account_id ON spans(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_descriptions_account_id ON descriptions(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_registrations_account_id ON agent_registrations(account_id)",
 ]
 
 
 def init_db() -> None:
-    """Create tables and indexes. Initializes the pg pool when applicable."""
+    """Create tables, run column migrations, and create indexes. Also
+    initializes the Postgres connection pool when applicable."""
     global _pool
     if USE_POSTGRES:
         _pool = ThreadedConnectionPool(
             minconn=2, maxconn=10, dsn=_DATABASE_URL,
         )
-        ddls = [_SPANS_DDL_PG, _DESC_DDL_PG, _REG_DDL_PG]
+        ddls = [
+            _SPANS_DDL_PG,
+            _DESC_DDL_PG,
+            _REG_DDL_PG,
+            _ACCOUNTS_DDL_PG,
+            _API_KEYS_DDL_PG,
+        ]
     else:
-        ddls = [_SPANS_DDL_SQLITE, _DESC_DDL_SQLITE, _REG_DDL_SQLITE]
+        ddls = [
+            _SPANS_DDL_SQLITE,
+            _DESC_DDL_SQLITE,
+            _REG_DDL_SQLITE,
+            _ACCOUNTS_DDL_SQLITE,
+            _API_KEYS_DDL_SQLITE,
+        ]
 
     with _connect() as conn, _cursor(conn) as cur:
         for ddl in ddls:
             cur.execute(ddl)
+        # Backfill the account_id column on existing tables — idempotent.
+        for table in _ACCOUNT_ID_TABLES:
+            _try_add_column(cur, table, "account_id", "INTEGER")
         for idx in _INDEXES:
             cur.execute(idx)
+
+
+def _try_add_column(cur, table: str, column: str, type_decl: str) -> None:
+    """Add a column if it doesn't already exist. Idempotent on both backends.
+
+    Postgres has native `ADD COLUMN IF NOT EXISTS`; SQLite doesn't, so we
+    catch the duplicate-column error there.
+    """
+    if USE_POSTGRES:
+        cur.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type_decl}"
+        )
+    else:
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_decl}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
 
 def shutdown_db() -> None:
@@ -252,12 +336,15 @@ def shutdown_db() -> None:
 _INSERT_COLUMNS = (
     "trace_id, span_id, parent_span_id, service_name, span_name, kind, "
     "start_time_unix, end_time_unix, status_code, status_message, "
-    "attributes, resource_attributes"
+    "attributes, resource_attributes, account_id"
 )
 
 
-def insert_spans(spans: list[dict[str, Any]]) -> int:
-    """Bulk-insert parsed spans. Returns the row count."""
+def insert_spans(
+    spans: list[dict[str, Any]], account_id: int | None = None,
+) -> int:
+    """Bulk-insert parsed spans. Returns the row count. Tags each row with
+    account_id when provided (None preserves the pre-multi-tenant behavior)."""
     if not spans:
         return 0
 
@@ -275,6 +362,7 @@ def insert_spans(spans: list[dict[str, Any]]) -> int:
             s.get("status_message", "") or "",
             json.dumps(s.get("attributes", {})),
             json.dumps(s.get("resource_attributes", {})),
+            account_id,
         )
         for s in spans
     ]
@@ -287,7 +375,7 @@ def insert_spans(spans: list[dict[str, Any]]) -> int:
                 rows,
             )
         else:
-            placeholders = ", ".join(["?"] * 12)
+            placeholders = ", ".join(["?"] * 13)
             cur.executemany(
                 f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES ({placeholders})",
                 rows,
@@ -296,15 +384,20 @@ def insert_spans(spans: list[dict[str, Any]]) -> int:
 
 
 def save_description(
-    service_name: str, description: str, span_count_analyzed: int,
+    service_name: str,
+    description: str,
+    span_count_analyzed: int,
+    account_id: int | None = None,
 ) -> None:
     """Persist a newly generated description (append-only — history kept)."""
     sql = f"""
-        INSERT INTO descriptions (service_name, description, span_count_analyzed)
-        VALUES ({PH}, {PH}, {PH})
+        INSERT INTO descriptions (service_name, description, span_count_analyzed, account_id)
+        VALUES ({PH}, {PH}, {PH}, {PH})
     """
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, (service_name, description, span_count_analyzed))
+        cur.execute(
+            sql, (service_name, description, span_count_analyzed, account_id)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -312,13 +405,23 @@ def save_description(
 # ---------------------------------------------------------------------------
 
 
-def get_agents() -> list[dict[str, Any]]:
-    """List every agent that has reported telemetry, with latest description."""
-    # No bound parameters → SQL is portable between SQLite and Postgres as-is.
-    # The correlated subquery for `description` is the standard way to get
-    # "latest row per group" in both dialects (avoids the SQLite-only
-    # bare-column-on-MAX trick that doesn't port to Postgres).
-    agg_sql = """
+def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
+    """List every agent that has reported telemetry, with latest description.
+
+    When account_id is provided, results are strictly scoped to that account
+    (pre-multi-tenant rows with NULL account_id are excluded — they have no
+    owner). When None, returns ALL rows (local-dev / pre-auth behavior).
+    """
+    # Build the per-table filter fragments and the args tuple in lock-step.
+    span_filter = f"WHERE account_id = {PH}" if account_id is not None else ""
+    desc_filter = (
+        f"AND d.account_id = {PH}" if account_id is not None else ""
+    )
+    reg_filter = (
+        f"AND r.account_id = {PH}" if account_id is not None else ""
+    )
+
+    agg_sql = f"""
         SELECT
             service_name,
             COUNT(*)                                       AS span_count,
@@ -330,6 +433,7 @@ def get_agents() -> list[dict[str, Any]]:
                 SELECT description
                 FROM descriptions d
                 WHERE d.service_name = spans.service_name
+                  {desc_filter}
                 ORDER BY d.generated_at DESC, d.id DESC
                 LIMIT 1
             )                                              AS description,
@@ -337,27 +441,37 @@ def get_agents() -> list[dict[str, Any]]:
                 SELECT 1
                 FROM agent_registrations r
                 WHERE r.service_name = spans.service_name
+                  {reg_filter}
             )                                              AS has_registration
         FROM spans
+        {span_filter}
         GROUP BY service_name
         ORDER BY last_seen_ns DESC
     """
+    # Argument order matches the {PH} occurrences left-to-right in the SQL:
+    # desc_filter, reg_filter, span_filter.
+    agg_args = (
+        (account_id, account_id, account_id) if account_id is not None else ()
+    )
+
+    top_ops_args_extra = (account_id,) if account_id is not None else ()
     top_ops_sql = f"""
         SELECT span_name, COUNT(*) AS c
         FROM spans
         WHERE service_name = {PH}
+          {f"AND account_id = {PH}" if account_id is not None else ""}
         GROUP BY span_name
         ORDER BY c DESC
         LIMIT 5
     """
 
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(agg_sql)
+        cur.execute(agg_sql, agg_args)
         agg_rows = cur.fetchall()
 
         agents: list[dict[str, Any]] = []
         for row in agg_rows:
-            cur.execute(top_ops_sql, (row["service_name"],))
+            cur.execute(top_ops_sql, (row["service_name"], *top_ops_args_extra))
             top_ops_rows = cur.fetchall()
             agents.append(
                 {
@@ -376,19 +490,30 @@ def get_agents() -> list[dict[str, Any]]:
     return agents
 
 
-def get_agent_spans(service_name: str, limit: int = 50) -> list[dict[str, Any]]:
+def get_agent_spans(
+    service_name: str, limit: int = 50, account_id: int | None = None,
+) -> list[dict[str, Any]]:
     """Return the most recent spans for an agent, newest first."""
+    account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
     sql = f"""
         SELECT id, trace_id, span_id, parent_span_id, service_name, span_name,
                kind, start_time_unix, end_time_unix, status_code, status_message,
                attributes, resource_attributes, created_at
         FROM spans
         WHERE service_name = {PH}
+          {account_filter}
         ORDER BY start_time_unix DESC
         LIMIT {PH}
     """
+    args: tuple[Any, ...] = (
+        (service_name, account_id, limit)
+        if account_id is not None
+        else (service_name, limit)
+    )
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, (service_name, limit))
+        cur.execute(sql, args)
         rows = cur.fetchall()
 
     spans: list[dict[str, Any]] = []
@@ -414,8 +539,17 @@ def get_agent_spans(service_name: str, limit: int = 50) -> list[dict[str, Any]]:
     return spans
 
 
-def get_agent_summary(service_name: str) -> dict[str, Any] | None:
+def get_agent_summary(
+    service_name: str, account_id: int | None = None,
+) -> dict[str, Any] | None:
     """Single-agent summary. Returns None if the agent has no spans."""
+    span_account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
+    desc_account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
+
     agg_sql = f"""
         SELECT
             COUNT(*)                                       AS span_count,
@@ -425,11 +559,13 @@ def get_agent_summary(service_name: str) -> dict[str, Any] | None:
             MAX(start_time_unix)                           AS last_seen_ns
         FROM spans
         WHERE service_name = {PH}
+          {span_account_filter}
     """
     top_ops_sql = f"""
         SELECT span_name, COUNT(*) AS c
         FROM spans
         WHERE service_name = {PH}
+          {span_account_filter}
         GROUP BY span_name
         ORDER BY c DESC
         LIMIT 5
@@ -438,20 +574,28 @@ def get_agent_summary(service_name: str) -> dict[str, Any] | None:
         SELECT description
         FROM descriptions
         WHERE service_name = {PH}
+          {desc_account_filter}
         ORDER BY generated_at DESC, id DESC
         LIMIT 1
     """
 
+    span_args = (
+        (service_name, account_id)
+        if account_id is not None
+        else (service_name,)
+    )
+    desc_args = span_args  # same shape (service_name [, account_id])
+
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(agg_sql, (service_name,))
+        cur.execute(agg_sql, span_args)
         row = cur.fetchone()
         if not row or not row["span_count"]:
             return None
 
-        cur.execute(top_ops_sql, (service_name,))
+        cur.execute(top_ops_sql, span_args)
         top_ops_rows = cur.fetchall()
 
-        cur.execute(desc_sql, (service_name,))
+        cur.execute(desc_sql, desc_args)
         desc_row = cur.fetchone()
 
     return {
@@ -466,17 +610,28 @@ def get_agent_summary(service_name: str) -> dict[str, Any] | None:
     }
 
 
-def get_latest_description(service_name: str) -> dict[str, Any] | None:
+def get_latest_description(
+    service_name: str, account_id: int | None = None,
+) -> dict[str, Any] | None:
     """Return the most recent description for an agent, or None."""
+    account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
     sql = f"""
         SELECT service_name, description, span_count_analyzed, generated_at
         FROM descriptions
         WHERE service_name = {PH}
+          {account_filter}
         ORDER BY generated_at DESC, id DESC
         LIMIT 1
     """
+    args = (
+        (service_name, account_id)
+        if account_id is not None
+        else (service_name,)
+    )
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, (service_name,))
+        cur.execute(sql, args)
         row = cur.fetchone()
 
     if row is None:
@@ -504,14 +659,15 @@ def save_registration(
     memory: str,
     workspace_path: str,
     model: str,
+    account_id: int | None = None,
 ) -> None:
     """Persist an agent registration. Append-only so we keep history of how
     an agent's identity changed over time."""
     sql = f"""
         INSERT INTO agent_registrations (
             service_name, agent_id, soul, identity, operating_manual,
-            user_context, memory, workspace_path, model
-        ) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})
+            user_context, memory, workspace_path, model, account_id
+        ) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})
     """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
@@ -526,22 +682,34 @@ def save_registration(
                 memory or "",
                 workspace_path or "",
                 model or "",
+                account_id,
             ),
         )
 
 
-def get_latest_registration(service_name: str) -> dict[str, Any] | None:
+def get_latest_registration(
+    service_name: str, account_id: int | None = None,
+) -> dict[str, Any] | None:
     """Return the most recent registration for an agent, or None."""
+    account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
     sql = f"""
         SELECT service_name, agent_id, soul, identity, operating_manual,
                user_context, memory, workspace_path, model, created_at
         FROM agent_registrations
         WHERE service_name = {PH}
+          {account_filter}
         ORDER BY created_at DESC, id DESC
         LIMIT 1
     """
+    args = (
+        (service_name, account_id)
+        if account_id is not None
+        else (service_name,)
+    )
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, (service_name,))
+        cur.execute(sql, args)
         row = cur.fetchone()
 
     if row is None:
@@ -558,3 +726,153 @@ def get_latest_registration(service_name: str) -> dict[str, Any] | None:
         "model": row["model"] or "",
         "created_at": _ts_to_str(row["created_at"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Accounts and API keys
+# ---------------------------------------------------------------------------
+
+
+class EmailAlreadyExistsError(Exception):
+    """Raised when create_account hits the unique constraint on email."""
+
+
+def create_account(email: str) -> dict[str, Any]:
+    """Insert a new account. Raises EmailAlreadyExistsError if the email is
+    taken. Returns {id, email, created_at} for the new row.
+
+    The RETURNING clause differs between backends: Postgres has it natively;
+    SQLite has it since 3.35 (March 2021) but we use lastrowid + SELECT as a
+    safer fallback that works on any 3.x.
+    """
+    # Normalize email so comparison is case-insensitive on the application
+    # side. We don't add a lowercase index to the table because that's a
+    # one-way decision; keeping the original casing in storage preserves
+    # the option to change normalization later.
+    email = (email or "").strip().lower()
+    if not email:
+        raise ValueError("email is required")
+
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            if USE_POSTGRES:
+                cur.execute(
+                    f"INSERT INTO accounts (email) VALUES ({PH}) RETURNING id, email, created_at",
+                    (email,),
+                )
+                row = cur.fetchone()
+            else:
+                cur.execute(
+                    f"INSERT INTO accounts (email) VALUES ({PH})", (email,)
+                )
+                new_id = cur.lastrowid
+                cur.execute(
+                    f"SELECT id, email, created_at FROM accounts WHERE id = {PH}",
+                    (new_id,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        msg = str(e).lower()
+        if "unique" in msg or "duplicate" in msg:
+            raise EmailAlreadyExistsError(email) from e
+        raise
+
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "created_at": _ts_to_str(row["created_at"]),
+    }
+
+
+def get_account_by_email(email: str) -> dict[str, Any] | None:
+    """Look up an account by email. Returns None if not found."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    sql = f"SELECT id, email, created_at FROM accounts WHERE email = {PH}"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (email,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "created_at": _ts_to_str(row["created_at"]),
+    }
+
+
+def generate_api_key(account_id: int, name: str = "default") -> str:
+    """Mint a new API key for an account and persist it. Returns the key
+    string. The key is shown to the user exactly once — we don't have a
+    'retrieve key' flow because we don't store anything that lets us
+    distinguish a real key from a forgery without the bytes themselves."""
+    # 32 random hex chars = 128 bits of entropy. Plenty for a v1 scheme.
+    key = "ov_sk_" + secrets.token_hex(16)
+    sql = f"""
+        INSERT INTO api_keys (account_id, key, name)
+        VALUES ({PH}, {PH}, {PH})
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (account_id, key, name or "default"))
+    return key
+
+
+def validate_api_key(key: str | None) -> dict[str, Any] | None:
+    """Look up a key. Returns {account_id, email, key_name} if active and
+    valid, else None. This is the hot path for every authenticated request —
+    keep it a single indexed lookup."""
+    if not key:
+        return None
+    sql = f"""
+        SELECT k.account_id, a.email, k.name AS key_name
+        FROM api_keys k
+        JOIN accounts a ON a.id = k.account_id
+        WHERE k.key = {PH} AND k.active = TRUE
+        LIMIT 1
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (key,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "account_id": row["account_id"],
+        "email": row["email"],
+        "key_name": row["key_name"],
+    }
+
+
+def get_api_keys_for_account(account_id: int) -> list[dict[str, Any]]:
+    """Return all keys for an account (most-recent first). Returns the full
+    key strings — only safe because this function is only reachable from
+    /auth/login (a public endpoint protected by email knowledge) and from
+    the user's own authenticated session."""
+    sql = f"""
+        SELECT key, name, active, created_at
+        FROM api_keys
+        WHERE account_id = {PH}
+        ORDER BY created_at DESC, id DESC
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (account_id,))
+        rows = cur.fetchall()
+    return [
+        {
+            "key": r["key"],
+            "name": r["name"],
+            "active": bool(r["active"]),
+            "created_at": _ts_to_str(r["created_at"]),
+        }
+        for r in rows
+    ]
+
+
+def has_any_keys() -> bool:
+    """True if any active API key exists. The middleware uses this to
+    decide whether to enforce auth — once any key exists, auth is required
+    on every protected endpoint. One-way transition: no auth → has auth."""
+    sql = "SELECT 1 FROM api_keys WHERE active = TRUE LIMIT 1"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql)
+        return cur.fetchone() is not None

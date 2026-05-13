@@ -31,16 +31,20 @@ from models import (
     AgentSummary,
     HealthResponse,
     IngestResponse,
+    LoginRequest,
+    LoginResponse,
+    NewKeyResponse,
+    SignupRequest,
+    SignupResponse,
     SpanRecord,
 )
 
 VERSION = "0.1.0"
 
-# Optional ingest auth. When set, every endpoint except /health requires
-# the matching X-Oversee-Api-Key header. When unset, auth is skipped
-# entirely — local-dev mode. Read once at module load (matches how
-# database.py reads DATABASE_URL).
-_INGEST_KEY = os.environ.get("OVERSEE_INGEST_KEY")
+# Endpoints that are always reachable without an API key. /health for
+# uptime probes; /auth/signup and /auth/login because the user can't have
+# a key yet when calling them.
+_OPEN_PATHS = {"/health", "/auth/signup", "/auth/login"}
 
 
 @asynccontextmanager
@@ -60,23 +64,41 @@ app = FastAPI(title="Oversee", version=VERSION, lifespan=lifespan)
 # auth middleware is registered first, CORS second.
 
 @app.middleware("http")
-async def require_api_key(request: Request, call_next):
-    # No key configured → local-dev mode, skip auth entirely.
-    if not _INGEST_KEY:
+async def auth_middleware(request: Request, call_next):
+    """Multi-tenant API-key gate.
+
+    - /health, /auth/signup, /auth/login, and all OPTIONS preflights bypass.
+    - If the database has no active API keys (fresh install / local dev),
+      every request passes through with `request.state.account_id = None`
+      so existing handlers behave as before.
+    - Otherwise, X-Oversee-Api-Key is required and must match an active
+      key. The looked-up account_id is attached to request.state for
+      handlers to scope their queries.
+    """
+    path = request.url.path
+    if path in _OPEN_PATHS or request.method == "OPTIONS":
+        request.state.account_id = None
         return await call_next(request)
-    # /health stays open so liveness probes and uptime checks don't need
-    # the key.
-    if request.url.path == "/health":
+
+    header_key = request.headers.get("X-Oversee-Api-Key")
+    if header_key:
+        result = database.validate_api_key(header_key)
+        if not result:
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Invalid or missing API key"},
+            )
+        request.state.account_id = result["account_id"]
         return await call_next(request)
-    # CORS handles OPTIONS preflights (it's outermost), but we guard here
-    # too in case anything else triggers an OPTIONS-style request.
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    if request.headers.get("X-Oversee-Api-Key") != _INGEST_KEY:
+
+    # No key provided. Only allowed if no keys exist anywhere — that's
+    # the pre-signup / local-dev mode.
+    if database.has_any_keys():
         return JSONResponse(
             status_code=401,
             content={"error": "Invalid or missing API key"},
         )
+    request.state.account_id = None
     return await call_next(request)
 
 
@@ -189,7 +211,9 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=VERSION)
 
 
-def _extract_registrations(spans: list[dict[str, Any]]) -> None:
+def _extract_registrations(
+    spans: list[dict[str, Any]], account_id: int | None
+) -> None:
     """Pull out any agent_registration spans and persist them as registration
     rows. The spans themselves still get inserted into the spans table —
     this is an *additional* extraction so the registration data is queryable
@@ -208,6 +232,7 @@ def _extract_registrations(spans: list[dict[str, Any]]) -> None:
             memory=attrs.get("oversee.agent.memory") or "",
             workspace_path=attrs.get("oversee.agent.workspace_path") or "",
             model=attrs.get("oversee.agent.model") or "",
+            account_id=account_id,
         )
 
 
@@ -224,20 +249,23 @@ async def ingest_traces(request: Request) -> IngestResponse:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
 
+    account_id = getattr(request.state, "account_id", None)
     spans = _parse_otlp_json(payload)
-    _extract_registrations(spans)
-    inserted = database.insert_spans(spans)
+    _extract_registrations(spans, account_id=account_id)
+    inserted = database.insert_spans(spans, account_id=account_id)
     return IngestResponse(status="ok", spans_received=inserted)
 
 
 @app.get("/agents", response_model=list[AgentSummary])
-async def list_agents() -> list[AgentSummary]:
-    return [AgentSummary(**a) for a in database.get_agents()]
+async def list_agents(request: Request) -> list[AgentSummary]:
+    account_id = getattr(request.state, "account_id", None)
+    return [AgentSummary(**a) for a in database.get_agents(account_id=account_id)]
 
 
 @app.get("/agents/{service_name}/summary", response_model=AgentSummary)
-async def agent_summary(service_name: str) -> AgentSummary:
-    summary = database.get_agent_summary(service_name)
+async def agent_summary(service_name: str, request: Request) -> AgentSummary:
+    account_id = getattr(request.state, "account_id", None)
+    summary = database.get_agent_summary(service_name, account_id=account_id)
     if summary is None:
         raise HTTPException(status_code=404, detail=f"agent '{service_name}' not found")
     return AgentSummary(**summary)
@@ -246,16 +274,24 @@ async def agent_summary(service_name: str) -> AgentSummary:
 @app.get("/agents/{service_name}/spans", response_model=list[SpanRecord])
 async def agent_spans(
     service_name: str,
+    request: Request,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SpanRecord]:
-    return [SpanRecord(**s) for s in database.get_agent_spans(service_name, limit)]
+    account_id = getattr(request.state, "account_id", None)
+    return [
+        SpanRecord(**s)
+        for s in database.get_agent_spans(service_name, limit, account_id=account_id)
+    ]
 
 
 @app.post("/agents/{service_name}/describe", response_model=AgentDescription)
-async def generate_description(service_name: str) -> AgentDescription:
+async def generate_description(
+    service_name: str, request: Request
+) -> AgentDescription:
     """Generate a fresh Claude-written description and persist it."""
+    account_id = getattr(request.state, "account_id", None)
     try:
-        result = describer.describe_agent(service_name)
+        result = describer.describe_agent(service_name, account_id=account_id)
     except describer.AgentNotFoundError:
         raise HTTPException(status_code=404, detail=f"agent '{service_name}' not found")
     except describer.APIKeyMissingError as e:
@@ -265,14 +301,18 @@ async def generate_description(service_name: str) -> AgentDescription:
         service_name=result["service_name"],
         description=result["description"],
         span_count_analyzed=result["span_count_analyzed"],
+        account_id=account_id,
     )
     return AgentDescription(**result)
 
 
 @app.get("/agents/{service_name}/description", response_model=AgentDescription)
-async def latest_description(service_name: str) -> AgentDescription:
+async def latest_description(
+    service_name: str, request: Request
+) -> AgentDescription:
     """Return the most recent saved description for this agent."""
-    desc = database.get_latest_description(service_name)
+    account_id = getattr(request.state, "account_id", None)
+    desc = database.get_latest_description(service_name, account_id=account_id)
     if desc is None:
         raise HTTPException(
             status_code=404,
@@ -282,12 +322,86 @@ async def latest_description(service_name: str) -> AgentDescription:
 
 
 @app.get("/agents/{service_name}/registration", response_model=AgentRegistration)
-async def latest_registration(service_name: str) -> AgentRegistration:
+async def latest_registration(
+    service_name: str, request: Request
+) -> AgentRegistration:
     """Return the most recent registration payload (SOUL, IDENTITY, etc.) for this agent."""
-    reg = database.get_latest_registration(service_name)
+    account_id = getattr(request.state, "account_id", None)
+    reg = database.get_latest_registration(service_name, account_id=account_id)
     if reg is None:
         raise HTTPException(
             status_code=404,
             detail=f"no registration found for agent '{service_name}'",
         )
     return AgentRegistration(**reg)
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints — multi-tenant v1
+# ---------------------------------------------------------------------------
+#
+# /auth/signup and /auth/login are intentionally simple: email is the only
+# identifier and there is no password. The API key IS the credential. This
+# is enough for v1 demo / early users; proper email verification + password
+# reset is a later concern.
+
+
+@app.post("/auth/signup", response_model=SignupResponse, status_code=201)
+async def signup(body: SignupRequest) -> SignupResponse:
+    """Create an account and mint its first API key."""
+    try:
+        account = database.create_account(body.email)
+    except database.EmailAlreadyExistsError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"an account with email '{body.email}' already exists",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    api_key = database.generate_api_key(account["id"])
+    return SignupResponse(
+        email=account["email"],
+        api_key=api_key,
+        message="Save your API key — you'll need it to connect agents and access your dashboard.",
+    )
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+async def login(body: LoginRequest) -> LoginResponse:
+    """Look up an account by email and return its active API keys.
+
+    No password in v1 — knowing the email is sufficient. This is a
+    deliberate v1 simplification; proper auth comes later.
+    """
+    account = database.get_account_by_email(body.email)
+    if account is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no account found for '{body.email}'",
+        )
+    keys = database.get_api_keys_for_account(account["id"])
+    return LoginResponse(
+        email=account["email"],
+        api_keys=[k["key"] for k in keys if k["active"]],
+    )
+
+
+@app.post("/auth/keys", response_model=NewKeyResponse)
+async def new_key(request: Request) -> NewKeyResponse:
+    """Mint a new API key for the currently authenticated account.
+
+    Goes through the auth middleware just like every other protected
+    endpoint, so `request.state.account_id` is guaranteed to be set when
+    keys exist in the DB. (When no keys exist, the middleware passes
+    account_id=None — but then this endpoint has nothing to attach the
+    new key to, so we 401 explicitly.)
+    """
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="authentication required to mint additional keys",
+        )
+    api_key = database.generate_api_key(account_id)
+    return NewKeyResponse(api_key=api_key, name="default")
