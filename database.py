@@ -490,6 +490,17 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     # only need to fire once per service_name, but it's cheaper to repeat the
     # subquery than to issue a separate round-trip per group; both are 1-row
     # lookups with the right indexes.
+    #
+    # Note on GROUP BY: we group by the bare `agent_id` column (not
+    # `COALESCE(agent_id, 'main')`). Postgres is strict about subqueries
+    # referencing outer-query columns that aren't either in GROUP BY or
+    # aggregated, and the `has_registration` EXISTS subquery below
+    # correlates on `spans.agent_id`. SQLite tolerates the COALESCE-only
+    # grouping, but Postgres returns "column must appear in GROUP BY".
+    # In practice every row has `agent_id = 'main'` or an explicit value
+    # (the ADD COLUMN default backfills, and inserts always tag a value),
+    # so the two forms produce the same groups — but only the bare-column
+    # form is portable. COALESCE is moved into the SELECT projection.
     agg_sql = f"""
         SELECT
             service_name,
@@ -524,7 +535,7 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             )                                                AS sample_resource_attributes
         FROM spans
         {span_filter}
-        GROUP BY service_name, COALESCE(agent_id, 'main')
+        GROUP BY service_name, agent_id
         ORDER BY last_seen_ns DESC
     """
     # Argument order matches the {PH} occurrences left-to-right in the SQL:
