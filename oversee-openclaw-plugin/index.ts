@@ -232,6 +232,18 @@ function initTelemetry(
   apiKey: string | undefined,
   gatewayVersion: string,
 ): Tracer {
+  // Resource attributes are EXPLICITLY set — no auto-detectors. This
+  // prevents OTEL's default resource detectors from reading host
+  // identifiers (`/etc/hostid`, hostname, MAC-derived UUIDs) and
+  // process metadata (PID, runtime version) and shipping them in every
+  // span's resource attributes.
+  //
+  // Kept beyond just service.name: version metadata that's deliberately
+  // emitted by THIS plugin (not auto-detected). The dashboard's
+  // platform-detection logic relies on `openclaw.gateway.version` to
+  // identify OpenClaw agents — dropping it would make every OpenClaw
+  // install register as a generic "OpenTelemetry Agent" in the UI.
+  // These four fields are the entire resource attribute footprint.
   const resource = new Resource({
     "service.name": agentName,
     "service.version": PLUGIN_VERSION,
@@ -244,7 +256,15 @@ function initTelemetry(
     headers: apiKey ? { "X-Oversee-Api-Key": apiKey } : undefined,
   })
 
-  const sdk = new NodeSDK({ resource, traceExporter: exporter })
+  const sdk = new NodeSDK({
+    resource,
+    traceExporter: exporter,
+    // The actual fix for the hostid concern: NodeSDK normally merges
+    // our resource with the output of default detectors (host, process,
+    // env). autoDetectResources: false skips that merge so only the
+    // attributes above are shipped.
+    autoDetectResources: false,
+  })
   sdk.start()
   state.sdk = sdk
 
@@ -263,6 +283,16 @@ function initTelemetry(
 function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   if (state.disabled) return null
   if (state.initialized) return state.tracer
+
+  // Defense-in-depth: register() also checks OVERSEE_ENABLED=false and
+  // bails before wiring hooks, so this path is rarely reached. But if
+  // for some reason hooks WERE wired and the operator set the env var
+  // late, this stops any telemetry from going out.
+  if (process.env.OVERSEE_ENABLED === "false") {
+    state.disabled = true
+    console.log(`${LOG} Plugin disabled via OVERSEE_ENABLED=false`)
+    return null
+  }
 
   const pluginConfig = ctx?.pluginConfig
 
