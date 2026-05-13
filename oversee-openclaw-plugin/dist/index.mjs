@@ -66278,11 +66278,6 @@ function registerAgents(tracer, ctx) {
   } else {
     sendAgentRegistration(tracer, "main", defaultWorkspace, defaultModel);
   }
-  if (state.sdk) {
-    state.sdk.forceFlush().catch((err) => {
-      console.warn(`${LOG} Force flush after registration failed:`, err);
-    });
-  }
 }
 function safeOn(api, name, handler) {
   try {
@@ -66442,7 +66437,7 @@ function wireCommands(api) {
   if (typeof api?.registerCommand !== "function") {
     return;
   }
-  api.registerCommand({
+  const command = {
     name: "oversee",
     aliases: ["ov"],
     description: "Connect to Oversee agent monitoring",
@@ -66516,7 +66511,15 @@ That's it \u2014 your agents will appear in Oversee automatically.`
         ]
       };
     }
-  });
+  };
+  try {
+    api.registerCommand(command);
+    console.log(`${LOG} /oversee command registered.`);
+  } catch (e) {
+    console.warn(
+      `${LOG} Failed to register /oversee command: ${e.message}. Telemetry will continue to work; command-based setup is unavailable. Command shape sent: name="${command.name}", aliases=${JSON.stringify(command.aliases)}, execute=${typeof command.execute}.`
+    );
+  }
 }
 var index_default = definePluginEntry({
   id: "oversee",
@@ -66534,7 +66537,13 @@ var index_default = definePluginEntry({
       );
       return;
     }
-    wireCommands(api);
+    try {
+      wireCommands(api);
+    } catch (e) {
+      console.warn(
+        `${LOG} wireCommands threw: ${e.message}. Continuing with telemetry only.`
+      );
+    }
     wireEvents(api);
   }
 });
