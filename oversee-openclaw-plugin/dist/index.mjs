@@ -66148,7 +66148,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.1.0";
+var PLUGIN_VERSION = "0.2.0";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Oversee]";
 var OBSERVATION_PRIORITY = 0;
