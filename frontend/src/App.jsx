@@ -1,28 +1,43 @@
 import { useEffect, useState } from 'react'
-import AgentRegistry from './AgentRegistry.jsx'
+import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
+import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
+import Ask from './Ask.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
 import { api, clearApiKey, getApiKey } from './api.js'
+import {
+  MonitorIcon,
+  MoonIcon,
+  PlusIcon,
+  SunIcon,
+} from './Icons.jsx'
 
-// Top-level routing + auth gate.
-//   authed = null    → show <Login />
-//   authed = '<key>' → show the dashboard, key already set on api client
-//
-// The key lives in localStorage (persists across reloads). On mount we
-// validate any saved key against /agents — if it 401s we clear storage
-// and drop to the login screen. `restoring` covers the brief window
-// between mount and validation completing so we don't flash the
-// dashboard with a stale key.
+// Top-level shell.
+//   - ThemeProvider wraps everything and writes data-theme to <html>.
+//   - Auth gate: null key → Login; otherwise the dashboard.
+//   - The dashboard has three views (Fleet / Ask / AgentDetail / AddAgent)
+//     tracked in local state. Fleet and Ask are tab-selectable; AgentDetail
+//     and AddAgent are pushed on top of whichever tab is active.
+
 export default function App() {
+  return (
+    <ThemeProvider>
+      <AppInner />
+    </ThemeProvider>
+  )
+}
+
+function AppInner() {
   const initial = getApiKey()
   const [authed, setAuthed] = useState(initial)
-  // Only need to "restore" if we already have a key to validate. Fresh
-  // visitors with no saved key go straight to the login screen.
   const [restoring, setRestoring] = useState(initial !== null)
-  const [view, setView] = useState('registry')
-  const [selected, setSelected] = useState(null)
+  const [tab, setTab] = useState('fleet') // 'fleet' | 'ask'
+  const [overlay, setOverlay] = useState(null) // {kind:'detail',serviceName} | {kind:'add'} | null
+  // suggestedQuestion piped from AgentDetail → Ask
+  const [suggested, setSuggested] = useState(null)
 
+  // Validate saved key on first mount.
   useEffect(() => {
     if (!initial) return
     let cancelled = false
@@ -31,42 +46,43 @@ export default function App() {
       .then((ok) => {
         if (cancelled) return
         if (!ok) {
-          // Saved key got revoked/rotated since last visit. Wipe and
-          // send the user to the login screen.
           clearApiKey()
           setAuthed(null)
         }
         setRestoring(false)
       })
       .catch(() => {
-        // Network error etc. — don't lock the user out, let them through
-        // and the dashboard's own error states will surface the problem.
         if (!cancelled) setRestoring(false)
       })
     return () => {
       cancelled = true
     }
-    // One-shot on mount: subsequent logins/logouts set state directly,
-    // they don't need re-validation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  function showRegistry() {
-    setView('registry')
-    setSelected(null)
-  }
-  function showDetail(name) {
-    setSelected(name)
-    setView('detail')
-  }
-  function showAddAgent() {
-    setView('addAgent')
-  }
   function logout() {
     clearApiKey()
     setAuthed(null)
-    setView('registry')
-    setSelected(null)
+    setTab('fleet')
+    setOverlay(null)
+  }
+
+  function openDetail(serviceName) {
+    setOverlay({ kind: 'detail', serviceName })
+  }
+
+  function openAddAgent() {
+    setOverlay({ kind: 'add' })
+  }
+
+  function closeOverlay() {
+    setOverlay(null)
+  }
+
+  function askAbout(question) {
+    setSuggested(question)
+    setOverlay(null)
+    setTab('ask')
   }
 
   if (restoring) {
@@ -74,8 +90,10 @@ export default function App() {
       <div className="login-shell">
         <div className="login-card">
           <header className="login-header">
-            <h1 className="logo">Oversee</h1>
-            <p className="subtitle">Agent Management System</p>
+            <div className="brand">
+              <span className="brand-dot" />
+              Oversee
+            </div>
           </header>
           <div className="login-body">
             <p className="login-prompt">Restoring session…</p>
@@ -89,39 +107,109 @@ export default function App() {
     return <Login onAuthed={(key) => setAuthed(key)} />
   }
 
+  // Decide what to render in the main area. Overlays win over the tab.
+  let mainContent
+  if (overlay?.kind === 'detail') {
+    mainContent = (
+      <AgentDetail
+        serviceName={overlay.serviceName}
+        onBack={closeOverlay}
+        onAsk={askAbout}
+      />
+    )
+  } else if (overlay?.kind === 'add') {
+    mainContent = <AddAgent onClose={closeOverlay} />
+  } else if (tab === 'ask') {
+    mainContent = <Ask seedQuestion={suggested} clearSeed={() => setSuggested(null)} />
+  } else {
+    mainContent = (
+      <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />
+    )
+  }
+
   return (
     <div className="app">
-      <header className="header header-with-account">
-        <div>
-          <h1 className="logo">Oversee</h1>
-          <p className="subtitle">Agent Management System</p>
-        </div>
-        <AccountBadge apiKey={authed} onLogout={logout} />
-      </header>
-      <main className="main">
-        {view === 'addAgent' && <AddAgent onClose={showRegistry} />}
-        {view === 'detail' && (
-          <AgentDetail serviceName={selected} onBack={showRegistry} />
-        )}
-        {view === 'registry' && (
-          <AgentRegistry onSelect={showDetail} onAddAgent={showAddAgent} />
-        )}
-      </main>
+      <Header
+        tab={tab}
+        onTabChange={(t) => {
+          setTab(t)
+          setOverlay(null)
+        }}
+        onAddAgent={openAddAgent}
+        apiKey={authed}
+        onLogout={logout}
+      />
+      <main className="app-main">{mainContent}</main>
     </div>
   )
 }
 
+function Header({ tab, onTabChange, onAddAgent, apiKey, onLogout }) {
+  return (
+    <header className="app-header">
+      <div className="app-header-left">
+        <div className="brand">
+          <span className="brand-dot" />
+          Oversee
+        </div>
+        <nav className="tabs" role="tablist" aria-label="Views">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'fleet'}
+            className={`tab ${tab === 'fleet' ? 'tab-active' : ''}`}
+            onClick={() => onTabChange('fleet')}
+          >
+            Fleet
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'ask'}
+            className={`tab ${tab === 'ask' ? 'tab-active' : ''}`}
+            onClick={() => onTabChange('ask')}
+          >
+            Ask
+          </button>
+        </nav>
+      </div>
+      <div className="app-header-right">
+        <ThemeToggle />
+        <button type="button" className="btn btn-primary" onClick={onAddAgent}>
+          <PlusIcon /> Add Agent
+        </button>
+        <AccountBadge apiKey={apiKey} onLogout={onLogout} />
+      </div>
+    </header>
+  )
+}
+
+function ThemeToggle() {
+  const { theme, cycle } = useTheme()
+  const label = theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'
+  const Icon =
+    theme === 'system' ? MonitorIcon : theme === 'light' ? SunIcon : MoonIcon
+  return (
+    <button
+      type="button"
+      className="btn-icon"
+      onClick={cycle}
+      aria-label={`Theme: ${label}. Click to cycle.`}
+      title={`Theme: ${label}`}
+    >
+      <Icon size={15} />
+    </button>
+  )
+}
+
 function AccountBadge({ apiKey, onLogout }) {
-  // Show a 4-char tail of the key so the user can visually confirm which
-  // account they're on without exposing the whole secret in the UI.
   const tail = apiKey ? apiKey.slice(-4) : '----'
   return (
     <div className="account-badge">
       <span className="account-dot" />
-      <span className="account-label">
-        Connected <code className="account-tail">…{tail}</code>
-      </span>
-      <button type="button" className="btn btn-link" onClick={onLogout}>
+      <span>Connected</span>
+      <code className="account-tail">…{tail}</code>
+      <button type="button" className="account-logout" onClick={onLogout}>
         Log out
       </button>
     </div>
