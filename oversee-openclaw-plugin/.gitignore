@@ -3,6 +3,10 @@ build/
 *.tsbuildinfo
 # dist/ is intentionally tracked — the plugin ships pre-compiled so the
 # gateway can load it directly without a build step at install time.
+
+# npm pack output, plus the contents you get from `tar -xf` on it.
+*.tgz
+package/
 .DS_Store
 *.log
 npm-debug.log*
