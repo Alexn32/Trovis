@@ -942,3 +942,96 @@ def has_any_keys() -> bool:
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql)
         return cur.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# Captured outputs (gated by the plugin's captureOutputs flag)
+# ---------------------------------------------------------------------------
+
+
+# Attributes the plugin sets when captureOutputs is enabled. One span
+# carries at most one of these (they're emitted on different span types:
+# message_received / message_sent / tool_call).
+_CAPTURE_ATTR_PATTERNS = (
+    '%"oversee.message.content":%',
+    '%"oversee.response.content":%',
+    '%"oversee.tool.result":%',
+)
+
+
+def get_agent_outputs(
+    service_name: str,
+    account_id: int | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return spans that carry captured content (message body, response
+    body, or tool result) for an agent, newest first.
+
+    Implementation note: the spans table stores `attributes` as a TEXT
+    column holding JSON. Rather than per-row casting to JSONB on Postgres
+    (and json_extract on SQLite), we use portable LIKE patterns on the
+    serialized form — `"key":` matches the key boundary precisely without
+    catching incidental occurrences in values. The Python pass then
+    parses the JSON to pull out the actual content.
+    """
+    limit = max(1, min(100, int(limit)))
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    sql = f"""
+        SELECT span_name, start_time_unix, end_time_unix, attributes
+        FROM spans
+        WHERE service_name = {PH}
+          {account_filter}
+          AND (
+            attributes LIKE {PH}
+            OR attributes LIKE {PH}
+            OR attributes LIKE {PH}
+          )
+        ORDER BY start_time_unix DESC
+        LIMIT {PH}
+    """
+    base_args: tuple[Any, ...] = (service_name,)
+    if account_id is not None:
+        base_args = (*base_args, account_id)
+    args = (*base_args, *_CAPTURE_ATTR_PATTERNS, limit)
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+
+    outputs: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            attrs = json.loads(r["attributes"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(attrs, dict):
+            continue
+
+        # Detect which capture attribute fired. Order matters only when
+        # a span carries more than one — which shouldn't happen with the
+        # current plugin, but we prefer the most specific signal.
+        if "oversee.tool.result" in attrs:
+            content_type = "tool_result"
+            content = attrs.get("oversee.tool.result") or ""
+        elif "oversee.response.content" in attrs:
+            content_type = "response"
+            content = attrs.get("oversee.response.content") or ""
+        elif "oversee.message.content" in attrs:
+            content_type = "message"
+            content = attrs.get("oversee.message.content") or ""
+        else:
+            # WHERE clause matched but JSON parse showed no key — happens
+            # if a value contained the literal pattern. Skip cleanly.
+            continue
+
+        duration_ms = (r["end_time_unix"] - r["start_time_unix"]) / 1_000_000.0
+        outputs.append(
+            {
+                "operation": r["span_name"],
+                "timestamp": _ns_to_iso(r["start_time_unix"]),
+                "content_type": content_type,
+                "content": str(content),
+                "duration_ms": duration_ms,
+            }
+        )
+    return outputs
