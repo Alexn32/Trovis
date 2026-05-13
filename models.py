@@ -37,6 +37,10 @@ class AgentSummary(BaseModel):
     top_operations: list[str] = Field(default_factory=list)
     description: str | None = None
     has_registration: bool = False
+    # Best-effort label inferred from resource attributes
+    # (e.g. "OpenClaw Agent", "Python Agent"). None when no
+    # identifying signal is present.
+    platform: str | None = None
 
 
 class AgentDescription(BaseModel):
@@ -101,6 +105,29 @@ class NewKeyResponse(BaseModel):
 
     api_key: str
     name: str = "default"
+
+
+# ---------------------------------------------------------------------------
+# Ask — conversational Q&A over agent telemetry
+# ---------------------------------------------------------------------------
+
+
+class AskMessage(BaseModel):
+    """One turn in a chat thread. role is 'user' or 'assistant'."""
+
+    role: str
+    content: str
+
+
+class AskRequest(BaseModel):
+    """Caller sends the full thread; backend is stateless. The last
+    message must have role='user'."""
+
+    messages: list[AskMessage] = Field(default_factory=list)
+
+
+class AskResponse(BaseModel):
+    answer: str
 
 
 class SpanRecord(BaseModel):

@@ -181,9 +181,6 @@ function AgentCard({ agent, onSelect }) {
     // service_name is stable; refetch only on change.
   }, [agent.service_name])
 
-  const platformTag = derivePlatform(agent)
-  const modelTag = deriveModel(agent)
-
   return (
     <button
       type="button"
@@ -205,12 +202,7 @@ function AgentCard({ agent, onSelect }) {
         />
       </div>
 
-      {(platformTag || modelTag) && (
-        <div className="tag-row">
-          {platformTag && <span className="tag">{platformTag}</span>}
-          {modelTag && <span className="tag">{modelTag}</span>}
-        </div>
-      )}
+      {agent.platform && <div className="agent-platform">{agent.platform}</div>}
 
       <p className={`agent-description ${agent.description ? '' : 'empty'}`}>
         {agent.description || 'No description yet — auto-generated when telemetry includes registration data.'}
@@ -246,23 +238,6 @@ function AgentCard({ agent, onSelect }) {
       </div>
     </button>
   )
-}
-
-// Best-effort platform inference from top_operations. If we see span names
-// that look like LLM-framework operations, tag them; otherwise omit. The
-// goal is to NEVER hardcode an "OpenClaw-specific" assumption — we only
-// recognize patterns that arrive in the data.
-function derivePlatform(agent) {
-  const ops = agent.top_operations || []
-  if (ops.some((o) => o?.startsWith('agent_'))) return 'agent_*'
-  if (ops.some((o) => o === 'agent_registration')) return 'registered'
-  return ''
-}
-
-function deriveModel() {
-  // No reliable model attribute on the /agents response shape. The
-  // AgentDetail view pulls from /registration where it exists.
-  return ''
 }
 
 // ============================================================================

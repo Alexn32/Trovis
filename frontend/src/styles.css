@@ -548,6 +548,14 @@ a:hover {
   white-space: nowrap;
 }
 
+.agent-platform {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -4px 0 8px;
+  /* Aligns with the agent-name above (which has a 20px status dot + 10px gap).
+     Pull this back so the subtitle visually hugs the name. */
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;
