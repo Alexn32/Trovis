@@ -79,18 +79,25 @@ def ask_about_agent(
     service_name: str,
     account_id: int | None,
     messages: list[dict[str, str]],
+    agent_id: str | None = None,
 ) -> str:
-    """Answer a question scoped to one agent."""
+    """Answer a question scoped to one instance, or one sub-agent when
+    `agent_id` is set."""
     api_key = _require_api_key()
-    summary = database.get_agent_summary(service_name, account_id=account_id)
+    summary = database.get_agent_summary(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
     if summary is None:
         raise AgentNotFoundError(service_name)
 
     spans = database.get_agent_spans(
-        service_name, limit=RECENT_SPAN_LIMIT, account_id=account_id
+        service_name,
+        limit=RECENT_SPAN_LIMIT,
+        account_id=account_id,
+        agent_id=agent_id,
     )
     registration = database.get_latest_registration(
-        service_name, account_id=account_id
+        service_name, account_id=account_id, agent_id=agent_id
     )
     context = _format_agent_context(summary, spans, registration)
     return _call_claude(api_key, SYSTEM_AGENT, context, messages)
@@ -114,16 +121,14 @@ def _format_fleet_context(agents: list[dict[str, Any]]) -> str:
     if not agents:
         return "The user's fleet is currently empty — no agents have reported telemetry."
 
-    lines: list[str] = [f"Total agents: {len(agents)}", ""]
+    lines: list[str] = [f"Total instances: {len(agents)}", ""]
     for a in agents:
-        rate = (
-            (a["error_count"] / a["span_count"] * 100)
-            if a["span_count"]
-            else 0.0
-        )
+        total_spans = a.get("total_spans") or 0
+        total_errors = a.get("total_errors") or 0
+        rate = (total_errors / total_spans * 100) if total_spans else 0.0
         lines.append(f"## {a['service_name']}")
         lines.append(
-            f"- spans={a['span_count']} errors={a['error_count']} "
+            f"- spans={total_spans} errors={total_errors} "
             f"error_rate={rate:.1f}% avg_duration_ms={a['avg_duration_ms']:.0f}"
         )
         lines.append(
@@ -132,6 +137,20 @@ def _format_fleet_context(agents: list[dict[str, Any]]) -> str:
         top_ops = a.get("top_operations") or []
         if top_ops:
             lines.append(f"- top_operations: {', '.join(top_ops)}")
+        sub_agents = a.get("agents") or []
+        # Only spell out the per-agent breakdown when there's actually a
+        # multi-agent layout — the single-'main' case adds noise without
+        # any new info.
+        non_main = [ag for ag in sub_agents if ag.get("agent_id") != "main"]
+        if non_main or len(sub_agents) > 1:
+            lines.append(
+                f"- agents ({len(sub_agents)}): "
+                + ", ".join(
+                    f"{ag['agent_id']} (spans={ag['span_count']}, "
+                    f"errors={ag['error_count']})"
+                    for ag in sub_agents
+                )
+            )
         if a.get("description"):
             lines.append(f"- description: {a['description']}")
         lines.append("")
@@ -150,8 +169,14 @@ def _format_agent_context(
     )
     top_ops = summary.get("top_operations") or []
 
+    header = (
+        f"# Agent: {summary['service_name']} "
+        f"(sub-agent: {summary['agent_id']})"
+        if summary.get("agent_id")
+        else f"# Agent: {summary['service_name']}"
+    )
     lines: list[str] = [
-        f"# Agent: {summary['service_name']}",
+        header,
         "",
         "## Summary",
         f"- spans={summary['span_count']} errors={summary['error_count']} "

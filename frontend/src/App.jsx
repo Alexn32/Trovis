@@ -33,7 +33,11 @@ function AppInner() {
   const [authed, setAuthed] = useState(initial)
   const [restoring, setRestoring] = useState(initial !== null)
   const [tab, setTab] = useState('fleet') // 'fleet' | 'ask'
-  const [overlay, setOverlay] = useState(null) // {kind:'detail',serviceName} | {kind:'add'} | null
+  // Overlay variants:
+  //   {kind: 'detail', serviceName, agentId?} — agentId set when drilling
+  //     into a specific sub-agent of a multi-agent instance.
+  //   {kind: 'add'}
+  const [overlay, setOverlay] = useState(null)
 
   // Validate saved key on first mount.
   useEffect(() => {
@@ -65,8 +69,8 @@ function AppInner() {
     setOverlay(null)
   }
 
-  function openDetail(serviceName) {
-    setOverlay({ kind: 'detail', serviceName })
+  function openDetail(serviceName, agentId) {
+    setOverlay({ kind: 'detail', serviceName, agentId })
   }
 
   function openAddAgent() {
@@ -105,6 +109,7 @@ function AppInner() {
     mainContent = (
       <AgentDetail
         serviceName={overlay.serviceName}
+        agentId={overlay.agentId}
         onBack={closeOverlay}
       />
     )

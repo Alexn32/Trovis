@@ -66324,6 +66324,14 @@ function setIfPresent(span, key, value) {
   if (typeof value === "string" && value.length === 0) return;
   span.setAttribute(key, value);
 }
+function pickAgentId(event, ctx) {
+  const fromEvent = event?.agentId;
+  if (typeof fromEvent === "string" && fromEvent.length > 0) return fromEvent;
+  if (typeof ctx?.agentId === "string" && ctx.agentId.length > 0) {
+    return ctx.agentId;
+  }
+  return void 0;
+}
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
   const modelSpans = /* @__PURE__ */ new Map();
@@ -66353,6 +66361,7 @@ function wireEvents(api) {
     setIfPresent(span, "oversee.trace.id", ctx.traceId);
     setIfPresent(span, "oversee.trace.span_id", ctx.spanId);
     setIfPresent(span, "oversee.trace.parent_span_id", ctx.parentSpanId);
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
     if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
       span.setAttribute(
         "oversee.message.content",
@@ -66369,6 +66378,7 @@ function wireEvents(api) {
     const success = event?.success ?? !event?.error;
     span.setAttribute("oversee.event.type", "message_sent");
     setIfPresent(span, "oversee.session.key", ctx.sessionKey);
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
     span.setAttribute("oversee.delivery.success", Boolean(success));
     if (!success) {
       span.setStatus({
@@ -66396,7 +66406,7 @@ function wireEvents(api) {
       "oversee.tool.param_keys",
       JSON.stringify(Object.keys(event?.params ?? {}))
     );
-    setIfPresent(span, "oversee.agent.id", ctx.agentId);
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId);
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() });
   });
@@ -66441,6 +66451,7 @@ function wireEvents(api) {
     setIfPresent(span, "gen_ai.system", event?.provider);
     setIfPresent(span, "gen_ai.request.model", event?.model);
     span.setAttribute("oversee.model.call_id", event.callId);
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId);
     modelSpans.set(event.callId, { span, startedAt: Date.now() });
   });
@@ -66464,6 +66475,7 @@ function wireEvents(api) {
       kind: SpanKind.INTERNAL
     });
     span.setAttribute("oversee.event.type", "agent_run_complete");
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId);
     const success = event?.success ?? !event?.error;
     if (typeof success === "boolean") {

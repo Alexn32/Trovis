@@ -625,6 +625,137 @@ a:hover {
   color: var(--error);
 }
 
+/* ---------- multi-agent group cards ---------- */
+
+/* The wrapping <div> for a group card. The flat single-agent card uses
+   <button class="agent-card">; the group card uses
+   <div class="agent-card agent-card-group"> + an inner header button so
+   we can nest a second clickable region (the expand toggle) without
+   breaking the "no nested buttons" HTML rule. */
+.agent-card-group {
+  padding: 0;
+  cursor: default;
+}
+
+.agent-card-group:hover {
+  /* The outer container shouldn't react to hover; the header button does. */
+  background: var(--bg-surface);
+  border-color: var(--border-default);
+}
+
+.agent-card-header-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 16px 18px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 10px 10px 0 0;
+}
+
+.agent-card-header-btn:hover {
+  background: var(--bg-elev);
+}
+
+.agent-sub-count {
+  margin-left: 6px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.agent-card-subagents {
+  border-top: 1px solid var(--border-default);
+  padding: 8px 12px 12px;
+}
+
+.agent-card-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin: 2px 0 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.agent-card-expand:hover {
+  color: var(--text-primary);
+  background: var(--bg-elev);
+}
+
+.subagent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.subagent-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto auto auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.subagent-row:hover {
+  border-color: var(--border-strong);
+}
+
+.subagent-id {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.subagent-stat {
+  color: var(--text-muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.subagent-stat.warn {
+  color: var(--warning);
+}
+
+.subagent-stat.error {
+  color: var(--error);
+}
+
+.subagent-seen {
+  font-family: inherit;
+  color: var(--text-dim);
+}
+
+.detail-sub-agent {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
 /* ---------- sparkline ---------- */
 
 .sparkline {

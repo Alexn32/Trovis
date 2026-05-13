@@ -19,16 +19,22 @@ class HealthResponse(BaseModel):
 
 
 class AgentSummary(BaseModel):
-    """Aggregate view of one agent, derived from its observed spans.
+    """Aggregate view of one agent (or one sub-agent within an instance),
+    derived from observed spans.
 
-    `description` is the most recent Claude-generated description of this
-    agent, or None if one has not been requested yet. `has_registration`
-    indicates whether the agent has sent its identity files (SOUL, IDENTITY,
-    etc.) via an agent_registration span — when true, descriptions are far
-    more accurate.
+    `description` is the most recent Claude-generated description of the
+    instance, or None if one has not been requested yet. `has_registration`
+    indicates whether the agent has sent its identity files (SOUL,
+    IDENTITY, etc.) via an agent_registration span — when true,
+    descriptions are far more accurate.
+
+    `agent_id` is populated only when the summary is scoped to a sub-agent
+    (via `?agent_id=` on the route); otherwise it stays None to represent
+    the full instance aggregate.
     """
 
     service_name: str
+    agent_id: str | None = None
     span_count: int
     error_count: int
     avg_duration_ms: float
@@ -40,6 +46,41 @@ class AgentSummary(BaseModel):
     # Best-effort label inferred from resource attributes
     # (e.g. "OpenClaw Agent", "Python Agent"). None when no
     # identifying signal is present.
+    platform: str | None = None
+
+
+class AgentInstance(BaseModel):
+    """One sub-agent inside an `AgentGroup`. A flat single-agent instance
+    still emits one of these (with `agent_id='main'`) so the response
+    shape is consistent for both shapes."""
+
+    agent_id: str
+    span_count: int
+    error_count: int
+    avg_duration_ms: float
+    first_seen: str | None = None
+    last_seen: str | None = None
+    has_registration: bool = False
+
+
+class AgentGroup(BaseModel):
+    """The /agents response shape — one row per OTEL `service.name`, with
+    a nested list of sub-agents inside. A single-agent instance returns
+    one element in `agents` (its agent_id is 'main' for SDKs that don't
+    set `oversee.agent.id`); the frontend collapses that case into a
+    flat card.
+    """
+
+    service_name: str
+    agents: list[AgentInstance] = Field(default_factory=list)
+    total_spans: int
+    total_errors: int
+    avg_duration_ms: float
+    first_seen: str | None = None
+    last_seen: str | None = None
+    top_operations: list[str] = Field(default_factory=list)
+    description: str | None = None
+    has_registration: bool = False
     platform: str | None = None
 
 
@@ -155,6 +196,7 @@ class SpanRecord(BaseModel):
     span_id: str
     parent_span_id: str | None = None
     service_name: str
+    agent_id: str = "main"
     span_name: str
     kind: int = 0
     start_time_unix: int

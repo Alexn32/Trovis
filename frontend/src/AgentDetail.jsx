@@ -18,12 +18,13 @@ import {
   SparkleIcon,
 } from './Icons.jsx'
 
-// Detail view for a single agent. Loads summary + spans in parallel, plus
-// /registration (which 404s gracefully when the agent hasn't provided
-// identity data). Renders 14-day activity bars, a recent-spans table with
-// expandable attributes, and suggested questions that hand off to Ask.
+// Detail view for one agent. The `agentId` prop is optional — when set,
+// every fetch is scoped to that sub-agent within a multi-agent instance
+// (via `?agent_id=` on the backend), and the header surfaces which
+// sub-agent we're looking at. When omitted, we get the instance
+// aggregate (the only mode pre-multi-agent).
 
-export default function AgentDetail({ serviceName, onBack }) {
+export default function AgentDetail({ serviceName, agentId, onBack }) {
   const [summary, setSummary] = useState(null)
   const [spans, setSpans] = useState([])
   const [registration, setRegistration] = useState(null)
@@ -35,13 +36,13 @@ export default function AgentDetail({ serviceName, onBack }) {
     let cancelled = false
     setLoading(true)
     Promise.all([
-      api.getAgentSummary(serviceName),
-      api.getAgentSpans(serviceName, 50),
-      api.getAgentRegistration(serviceName),
+      api.getAgentSummary(serviceName, agentId),
+      api.getAgentSpans(serviceName, 50, agentId),
+      api.getAgentRegistration(serviceName, agentId),
       // Outputs endpoint returns [] when nothing's been captured (plugin
       // captureOutputs flag is off) — so this is always safe to call,
       // it just means the section renders its "not enabled" callout.
-      api.getAgentOutputs(serviceName, 10).catch(() => []),
+      api.getAgentOutputs(serviceName, 10, agentId).catch(() => []),
     ])
       .then(([s, sp, reg, outs]) => {
         if (cancelled) return
@@ -60,7 +61,7 @@ export default function AgentDetail({ serviceName, onBack }) {
     return () => {
       cancelled = true
     }
-  }, [serviceName])
+  }, [serviceName, agentId])
 
   return (
     <div className="view">
@@ -78,7 +79,11 @@ export default function AgentDetail({ serviceName, onBack }) {
 
       {summary && (
         <>
-          <DetailHead summary={summary} registration={registration} />
+          <DetailHead
+            summary={summary}
+            registration={registration}
+            agentId={agentId}
+          />
           <DetailStats summary={summary} />
           <ActivityChart spans={spans} />
           {registration && (
@@ -86,29 +91,43 @@ export default function AgentDetail({ serviceName, onBack }) {
           )}
           <SpansTable spans={spans} />
           <RecentOutputs outputs={outputs} />
-          <AskAboutAgent summary={summary} />
+          <AskAboutAgent summary={summary} agentId={agentId} />
         </>
       )}
     </div>
   )
 }
 
-function DetailHead({ summary, registration }) {
+function DetailHead({ summary, registration, agentId }) {
   const status = statusFor(summary)
+  // Prefer the explicit scoping prop; fall back to the value the backend
+  // returned on the summary (set when ?agent_id= was on the request) and
+  // finally to the registration's agent_id when available.
+  const shownAgentId =
+    agentId || summary.agent_id || registration?.agent_id || null
+  const isSubScoped = Boolean(agentId)
   return (
     <header className="detail-head">
       <div className="detail-title-row">
         <span className={`status-dot status-${status}`} />
-        <h2 className="detail-name">{summary.service_name}</h2>
+        <h2 className="detail-name">
+          {summary.service_name}
+          {isSubScoped && (
+            <span className="detail-sub-agent">
+              {' '}
+              · <span className="mono">{shownAgentId}</span>
+            </span>
+          )}
+        </h2>
       </div>
       {summary.platform && (
         <div className="agent-platform">{summary.platform}</div>
       )}
-      {(registration?.model || (summary.top_operations || []).length > 0) && (
+      {(registration?.model || shownAgentId) && (
         <div className="tag-row">
           {registration?.model && <span className="tag">{registration.model}</span>}
-          {registration?.agent_id && (
-            <span className="tag">agent: {registration.agent_id}</span>
+          {shownAgentId && (
+            <span className="tag">agent: {shownAgentId}</span>
           )}
         </div>
       )}
@@ -354,7 +373,7 @@ function OutputItem({ output }) {
   )
 }
 
-function AskAboutAgent({ summary }) {
+function AskAboutAgent({ summary, agentId }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [pending, setPending] = useState(false)
@@ -386,6 +405,7 @@ function AskAboutAgent({ summary }) {
       const res = await api.askAboutAgent(
         summary.service_name,
         next.map((m) => ({ role: m.role, content: m.content })),
+        agentId,
       )
       setMessages((m) => [...m, { role: 'assistant', content: res.answer }])
     } catch (e) {
