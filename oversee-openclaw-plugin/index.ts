@@ -157,12 +157,26 @@ interface AgentEndEvent extends BaseEvent {
   error?: unknown
 }
 
+interface CommandResult {
+  content: Array<{ type: string; text: string }>
+}
+
+interface PluginCommand {
+  name: string
+  aliases?: string[]
+  description: string
+  execute(args: string[], context?: unknown): Promise<CommandResult>
+}
+
 interface OpenClawApi {
   on<E>(
     name: string,
     handler: (event: E) => void | Promise<void>,
     opts?: { priority?: number; timeoutMs?: number },
   ): void
+  // Optional — older gateways may not support slash commands. wireCommands()
+  // feature-detects before calling.
+  registerCommand?(cmd: PluginCommand): void
   version?: string
   gateway?: { version?: string }
 }
@@ -582,6 +596,98 @@ function wireEvents(api: OpenClawApi): void {
 }
 
 // ---------------------------------------------------------------------------
+// Command wiring
+// ---------------------------------------------------------------------------
+//
+// /oversee is the user-facing setup command. Same UX pattern as channel
+// plugins like /telegram or /whatsapp: the plugin knows what it needs, the
+// command tells the user how to provide it, and `/oversee status` reflects
+// the live connection state.
+
+function wireCommands(api: OpenClawApi): void {
+  if (typeof api?.registerCommand !== "function") {
+    // Older gateways without command support — skip silently.
+    return
+  }
+
+  api.registerCommand({
+    name: "oversee",
+    aliases: ["ov"],
+    description: "Connect to Oversee agent monitoring",
+    async execute(args, _context) {
+      const subcommand = args[0]?.toLowerCase()
+
+      if (subcommand === "connect" && args[1]) {
+        const endpoint = args[1]
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `✅ Oversee endpoint set to: ${endpoint}\n\n` +
+                `To make this permanent, add to your openclaw.json:\n\n` +
+                "```json\n" +
+                `"plugins": {\n` +
+                `  "entries": {\n` +
+                `    "oversee": {\n` +
+                `      "config": {\n` +
+                `        "endpoint": "${endpoint}"\n` +
+                `      }\n` +
+                `    }\n` +
+                `  }\n` +
+                `}\n` +
+                "```\n\n" +
+                `Then restart the gateway. Your agents will appear in Oversee within seconds.`,
+            },
+          ],
+        }
+      }
+
+      if (subcommand === "status") {
+        const endpoint = state.endpoint
+        const enabled = state.initialized
+        return {
+          content: [
+            {
+              type: "text",
+              text: enabled
+                ? `✅ Oversee is active.\n\n` +
+                  `• Endpoint: ${endpoint}\n` +
+                  `• Agent: ${state.agentName}\n` +
+                  `• Telemetry: flowing`
+                : `⚠️ Oversee is not connected.\n\n` +
+                  `To connect, get your endpoint URL from your Oversee dashboard ` +
+                  `(Add Agent → OpenClaw), then run:\n\n` +
+                  `/oversee connect YOUR_ENDPOINT_URL`,
+            },
+          ],
+        }
+      }
+
+      // Default: help / setup walkthrough.
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `🔍 **Oversee Agent Monitoring**\n\n` +
+              `Available commands:\n` +
+              `• \`/oversee connect <endpoint-url>\` — Connect to your Oversee instance\n` +
+              `• \`/oversee status\` — Check connection status\n\n` +
+              `**Setup:**\n` +
+              `1. Sign up at oversee.dev\n` +
+              `2. Go to Add Agent → OpenClaw\n` +
+              `3. Copy your endpoint URL\n` +
+              `4. Run: \`/oversee connect <your-endpoint-url>\`\n\n` +
+              `That's it — your agents will appear in Oversee automatically.`,
+          },
+        ],
+      }
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Plugin entry
 // ---------------------------------------------------------------------------
 
@@ -610,6 +716,7 @@ export default definePluginEntry({
       return
     }
 
+    wireCommands(api)
     wireEvents(api)
     // OTEL is initialized lazily inside the first hook (typically
     // gateway_start) that exposes pluginConfig. No init log here yet.

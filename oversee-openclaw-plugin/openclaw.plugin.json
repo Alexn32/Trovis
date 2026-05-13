@@ -8,6 +8,9 @@
   "activation": {
     "onStartup": true
   },
+  "contracts": {
+    "commands": ["oversee"]
+  },
   "configSchema": {
     "type": "object",
     "properties": {

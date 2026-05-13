@@ -66438,6 +66438,86 @@ function wireEvents(api) {
     span.end();
   });
 }
+function wireCommands(api) {
+  if (typeof api?.registerCommand !== "function") {
+    return;
+  }
+  api.registerCommand({
+    name: "oversee",
+    aliases: ["ov"],
+    description: "Connect to Oversee agent monitoring",
+    async execute(args, _context) {
+      const subcommand = args[0]?.toLowerCase();
+      if (subcommand === "connect" && args[1]) {
+        const endpoint = args[1];
+        return {
+          content: [
+            {
+              type: "text",
+              text: `\u2705 Oversee endpoint set to: ${endpoint}
+
+To make this permanent, add to your openclaw.json:
+
+\`\`\`json
+"plugins": {
+  "entries": {
+    "oversee": {
+      "config": {
+        "endpoint": "${endpoint}"
+      }
+    }
+  }
+}
+\`\`\`
+
+Then restart the gateway. Your agents will appear in Oversee within seconds.`
+            }
+          ]
+        };
+      }
+      if (subcommand === "status") {
+        const endpoint = state.endpoint;
+        const enabled = state.initialized;
+        return {
+          content: [
+            {
+              type: "text",
+              text: enabled ? `\u2705 Oversee is active.
+
+\u2022 Endpoint: ${endpoint}
+\u2022 Agent: ${state.agentName}
+\u2022 Telemetry: flowing` : `\u26A0\uFE0F Oversee is not connected.
+
+To connect, get your endpoint URL from your Oversee dashboard (Add Agent \u2192 OpenClaw), then run:
+
+/oversee connect YOUR_ENDPOINT_URL`
+            }
+          ]
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `\u{1F50D} **Oversee Agent Monitoring**
+
+Available commands:
+\u2022 \`/oversee connect <endpoint-url>\` \u2014 Connect to your Oversee instance
+\u2022 \`/oversee status\` \u2014 Check connection status
+
+**Setup:**
+1. Sign up at oversee.dev
+2. Go to Add Agent \u2192 OpenClaw
+3. Copy your endpoint URL
+4. Run: \`/oversee connect <your-endpoint-url>\`
+
+That's it \u2014 your agents will appear in Oversee automatically.`
+          }
+        ]
+      };
+    }
+  });
+}
 var index_default = definePluginEntry({
   id: "oversee",
   name: "Oversee Agent Management",
@@ -66454,6 +66534,7 @@ var index_default = definePluginEntry({
       );
       return;
     }
+    wireCommands(api);
     wireEvents(api);
   }
 });
