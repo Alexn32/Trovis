@@ -22,15 +22,15 @@ class AgentSummary(BaseModel):
     """Aggregate view of one agent (or one sub-agent within an instance),
     derived from observed spans.
 
-    `description` is the most recent Claude-generated description of the
-    instance, or None if one has not been requested yet. `has_registration`
-    indicates whether the agent has sent its identity files (SOUL,
-    IDENTITY, etc.) via an agent_registration span — when true,
+    `description` is the most recent Claude-generated description for
+    this scope (per-instance when `agent_id` is None, per-sub-agent
+    otherwise). `has_registration` indicates whether the agent has sent
+    its identity files via an agent_registration span — when true,
     descriptions are far more accurate.
 
-    `agent_id` is populated only when the summary is scoped to a sub-agent
-    (via `?agent_id=` on the route); otherwise it stays None to represent
-    the full instance aggregate.
+    `display_name` is the operator-set human-readable label for this
+    agent, or None when no override exists. `agent_id` is populated
+    only when the summary is scoped to a sub-agent.
     """
 
     service_name: str
@@ -47,12 +47,17 @@ class AgentSummary(BaseModel):
     # (e.g. "OpenClaw Agent", "Python Agent"). None when no
     # identifying signal is present.
     platform: str | None = None
+    display_name: str | None = None
 
 
 class AgentInstance(BaseModel):
     """One sub-agent inside an `AgentGroup`. A flat single-agent instance
     still emits one of these (with `agent_id='main'`) so the response
-    shape is consistent for both shapes."""
+    shape is consistent for both shapes.
+
+    Each sub-agent carries its own description (generated from its own
+    registration / telemetry) and its own display_name override.
+    """
 
     agent_id: str
     span_count: int
@@ -61,6 +66,8 @@ class AgentInstance(BaseModel):
     first_seen: str | None = None
     last_seen: str | None = None
     has_registration: bool = False
+    description: str | None = None
+    display_name: str | None = None
 
 
 class AgentGroup(BaseModel):
@@ -69,6 +76,10 @@ class AgentGroup(BaseModel):
     one element in `agents` (its agent_id is 'main' for SDKs that don't
     set `oversee.agent.id`); the frontend collapses that case into a
     flat card.
+
+    Group-level `description` / `display_name` default to the values
+    from the `'main'` sub-agent when present (else the first agent
+    listed), so the Fleet card has something sensible to show.
     """
 
     service_name: str
@@ -82,6 +93,18 @@ class AgentGroup(BaseModel):
     description: str | None = None
     has_registration: bool = False
     platform: str | None = None
+    display_name: str | None = None
+
+
+class DisplayNameRequest(BaseModel):
+    """Body for PUT /agents/{service_name}/display-name. `agent_id`
+    scopes the override to one sub-agent — pass 'main' for the default
+    sub-agent in a single-agent instance. Empty `display_name` clears
+    the override.
+    """
+
+    agent_id: str = "main"
+    display_name: str = ""
 
 
 class AgentDescription(BaseModel):

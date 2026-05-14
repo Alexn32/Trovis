@@ -14,6 +14,7 @@ import {
   ArrowLeftIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  PencilIcon,
   SendIcon,
   SparkleIcon,
 } from './Icons.jsx'
@@ -106,20 +107,111 @@ function DetailHead({ summary, registration, agentId }) {
   const shownAgentId =
     agentId || summary.agent_id || registration?.agent_id || null
   const isSubScoped = Boolean(agentId)
+
+  // Display-name state — seeded from the summary and updated locally on
+  // save so the UI flips without a re-fetch. Empty string clears the
+  // override.
+  const [displayName, setDisplayName] = useState(summary.display_name || '')
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(displayName)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState(null)
+
+  function startEdit() {
+    setDraft(displayName)
+    setSaveError(null)
+    setEditing(true)
+  }
+  function cancelEdit() {
+    setEditing(false)
+    setSaveError(null)
+  }
+  async function saveEdit() {
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const trimmed = draft.trim()
+      await api.setDisplayName(
+        summary.service_name,
+        shownAgentId || 'main',
+        trimmed,
+      )
+      setDisplayName(trimmed)
+      setEditing(false)
+    } catch (e) {
+      setSaveError(e.message || 'Could not save')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const headlineRaw = summary.service_name
+  const headline = displayName || headlineRaw
+
   return (
     <header className="detail-head">
       <div className="detail-title-row">
         <span className={`status-dot status-${status}`} />
-        <h2 className="detail-name">
-          {summary.service_name}
-          {isSubScoped && (
-            <span className="detail-sub-agent">
-              {' '}
-              · <span className="mono">{shownAgentId}</span>
-            </span>
-          )}
-        </h2>
+        {editing ? (
+          <form
+            className="detail-name-edit"
+            onSubmit={(e) => {
+              e.preventDefault()
+              saveEdit()
+            }}
+          >
+            <input
+              type="text"
+              className="text-input"
+              placeholder={headlineRaw}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              autoFocus
+              disabled={saving}
+            />
+            <button
+              type="submit"
+              className="btn btn-primary btn-sm"
+              disabled={saving}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-link btn-sm"
+              onClick={cancelEdit}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <>
+            <h2 className="detail-name">
+              {headline}
+              {isSubScoped && (
+                <span className="detail-sub-agent">
+                  {' '}
+                  · <span className="mono">{shownAgentId}</span>
+                </span>
+              )}
+            </h2>
+            <button
+              type="button"
+              className="detail-name-edit-btn"
+              onClick={startEdit}
+              aria-label="Edit display name"
+              title="Edit display name"
+            >
+              <PencilIcon />
+            </button>
+          </>
+        )}
       </div>
+      {displayName && !editing && (
+        <div className="detail-name-raw">{headlineRaw}</div>
+      )}
+      {saveError && <p className="form-error">{saveError}</p>}
       {summary.platform && (
         <div className="agent-platform">{summary.platform}</div>
       )}

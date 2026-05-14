@@ -39,6 +39,7 @@ from models import (
     AgentSummary,
     AskRequest,
     AskResponse,
+    DisplayNameRequest,
     HealthResponse,
     IngestResponse,
     LoginRequest,
@@ -222,17 +223,23 @@ async def health() -> HealthResponse:
 
 
 def _auto_describe(
-    service_name: str, account_id: int | None, reason: str
+    service_name: str,
+    account_id: int | None,
+    reason: str,
+    agent_id: str | None = None,
 ) -> bool:
-    """Synchronously generate and persist a Claude description for an agent.
-    Returns True on success. Swallows all errors so the trace ingest path
-    never fails because of a Claude API hiccup.
+    """Synchronously generate and persist a Claude description for one
+    sub-agent of a service. Returns True on success. Swallows all errors
+    so the trace ingest path never fails because of a Claude API hiccup.
 
-    `reason` is just for the log line so we can tell which trigger fired
-    (a registration span vs. first-time telemetry arriving).
+    `reason` is just for the log line. `agent_id` scopes both the
+    prompt's source telemetry AND the saved description row — so donny
+    and main each get their own description from their own SOUL.md.
     """
     try:
-        result = describer.describe_agent(service_name, account_id=account_id)
+        result = describer.describe_agent(
+            service_name, account_id=account_id, agent_id=agent_id
+        )
     except describer.AgentNotFoundError:
         # Can happen if the registration was extracted before any spans
         # for this service exist. The first-time path catches that case
@@ -240,12 +247,15 @@ def _auto_describe(
         return False
     except describer.APIKeyMissingError:
         print(
-            f"[Oversee] Auto-describe for '{service_name}' skipped — "
-            f"ANTHROPIC_API_KEY not configured."
+            f"[Oversee] Auto-describe for '{service_name}/{agent_id or 'main'}' "
+            f"skipped — ANTHROPIC_API_KEY not configured."
         )
         return False
     except Exception as e:
-        print(f"[Oversee] Auto-describe for '{service_name}' failed: {e}")
+        print(
+            f"[Oversee] Auto-describe for '{service_name}/{agent_id or 'main'}' "
+            f"failed: {e}"
+        )
         return False
 
     database.save_description(
@@ -253,9 +263,10 @@ def _auto_describe(
         description=result["description"],
         span_count_analyzed=result["span_count_analyzed"],
         account_id=account_id,
+        agent_id=agent_id or "main",
     )
     print(
-        f"[Oversee] Auto-described '{service_name}' "
+        f"[Oversee] Auto-described '{service_name}/{agent_id or 'main'}' "
         f"(reason={reason}, source={result.get('source')}, "
         f"chars={len(result['description'])})"
     )
@@ -264,26 +275,26 @@ def _auto_describe(
 
 def _extract_registrations(
     spans: list[dict[str, Any]], account_id: int | None
-) -> set[str]:
-    """Pull out any agent_registration spans and persist them as registration
-    rows. The spans themselves still get inserted into the spans table —
-    this is an *additional* extraction so the registration data is queryable
-    as structured rows.
+) -> set[tuple[str, str]]:
+    """Pull out any agent_registration spans and persist them as
+    registration rows. After each registration is saved, kick off a
+    per-agent auto-describe.
 
-    After each registration is saved, automatically generate a Claude
-    description for the agent. Returns the set of service_names that were
-    successfully auto-described so the caller can skip them in any
-    follow-up first-time describe pass.
+    Dedup key is (service_name, agent_id) — each sub-agent gets its own
+    description from its own SOUL.md / IDENTITY.md. Returns the set of
+    (service_name, agent_id) pairs that were successfully auto-described
+    so the caller can skip them in any first-time describe pass.
     """
-    described: set[str] = set()
+    described: set[tuple[str, str]] = set()
     for span in spans:
         attrs = span.get("attributes") or {}
         if attrs.get("oversee.event.type") != "agent_registration":
             continue
         service_name = span["service_name"]
+        agent_id = attrs.get("oversee.agent.id") or "main"
         database.save_registration(
             service_name=service_name,
-            agent_id=attrs.get("oversee.agent.id") or "main",
+            agent_id=agent_id,
             soul=attrs.get("oversee.agent.soul") or "",
             identity=attrs.get("oversee.agent.identity") or "",
             operating_manual=attrs.get("oversee.agent.operating_manual") or "",
@@ -293,12 +304,14 @@ def _extract_registrations(
             model=attrs.get("oversee.agent.model") or "",
             account_id=account_id,
         )
-        # Don't re-describe the same agent twice in one request if
-        # multiple registration spans arrived for it.
-        if service_name in described:
+        # Don't re-describe the same (service, agent) twice in one batch.
+        key = (service_name, agent_id)
+        if key in described:
             continue
-        if _auto_describe(service_name, account_id, reason="registration"):
-            described.add(service_name)
+        if _auto_describe(
+            service_name, account_id, reason="registration", agent_id=agent_id
+        ):
+            described.add(key)
     return described
 
 
@@ -318,14 +331,22 @@ async def ingest_traces(request: Request) -> IngestResponse:
     account_id = getattr(request.state, "account_id", None)
     spans = _parse_otlp_json(payload)
 
-    # Snapshot which services in this batch are "first-time" — no prior
-    # spans for this account. We do this BEFORE inserting so we can tell
-    # apart "first telemetry batch" from "ongoing telemetry."
-    batch_services = {s["service_name"] for s in spans}
-    first_time_services = {
-        sn
-        for sn in batch_services
-        if database.get_agent_summary(sn, account_id=account_id) is None
+    # Snapshot which (service, agent) pairs in this batch are
+    # "first-time" — no prior spans for this account. We check before
+    # inserting so we can distinguish first-batch telemetry from
+    # ongoing telemetry. With per-agent descriptions, this needs to be
+    # per-(service, agent), not just per-service.
+    batch_pairs: set[tuple[str, str]] = {
+        (s["service_name"], _agent_id_for_span(s))
+        for s in spans
+    }
+    first_time_pairs = {
+        pair
+        for pair in batch_pairs
+        if database.get_agent_summary(
+            pair[0], account_id=account_id, agent_id=pair[1]
+        )
+        is None
     }
 
     # Insert spans first so any subsequent describe_agent calls see them.
@@ -338,12 +359,33 @@ async def ingest_traces(request: Request) -> IngestResponse:
     # batch as the first telemetry, or arrived in a prior batch but
     # didn't trigger _auto_describe because we'd never seen telemetry
     # for it yet. Skip anything already described in this request.
-    for sn in first_time_services - described:
-        if database.get_latest_registration(sn, account_id=account_id) is None:
+    for service_name, agent_id in first_time_pairs - described:
+        if (
+            database.get_latest_registration(
+                service_name, account_id=account_id, agent_id=agent_id
+            )
+            is None
+        ):
             continue
-        _auto_describe(sn, account_id, reason="first-telemetry")
+        _auto_describe(
+            service_name,
+            account_id,
+            reason="first-telemetry",
+            agent_id=agent_id,
+        )
 
     return IngestResponse(status="ok", spans_received=inserted)
+
+
+def _agent_id_for_span(span: dict[str, Any]) -> str:
+    """Mirror of database._agent_id_from_attrs but local to main.py so
+    ingest can compute the (service, agent) pair without importing
+    private helpers."""
+    attrs = span.get("attributes") or {}
+    val = attrs.get("oversee.agent.id")
+    if isinstance(val, str) and val:
+        return val
+    return "main"
 
 
 @app.get("/agents", response_model=list[AgentGroup])
@@ -395,9 +437,9 @@ async def generate_description(
 ) -> AgentDescription:
     """Generate a fresh Claude-written description and persist it.
 
-    `agent_id` scopes the telemetry that feeds the prompt; the saved
-    description is still indexed per-instance, so a re-describe of any
-    sub-agent updates the shared description.
+    `agent_id` scopes both the prompt's source telemetry AND the saved
+    description — each sub-agent gets its own description row, generated
+    from its own SOUL.md / IDENTITY.md.
     """
     account_id = getattr(request.state, "account_id", None)
     try:
@@ -414,23 +456,51 @@ async def generate_description(
         description=result["description"],
         span_count_analyzed=result["span_count_analyzed"],
         account_id=account_id,
+        agent_id=agent_id or "main",
     )
     return AgentDescription(**result)
 
 
 @app.get("/agents/{service_name}/description", response_model=AgentDescription)
 async def latest_description(
-    service_name: str, request: Request
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
 ) -> AgentDescription:
-    """Return the most recent saved description for this agent."""
+    """Return the most recent saved description for this agent.
+
+    Without `?agent_id=`, returns the most recent across any sub-agent
+    (the headline description for the instance). With it, scoped to
+    that sub-agent only.
+    """
     account_id = getattr(request.state, "account_id", None)
-    desc = database.get_latest_description(service_name, account_id=account_id)
+    desc = database.get_latest_description(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
     if desc is None:
         raise HTTPException(
             status_code=404,
             detail=f"no description has been generated for agent '{service_name}' yet",
         )
     return AgentDescription(**desc)
+
+
+@app.put("/agents/{service_name}/display-name", status_code=204)
+async def set_agent_display_name(
+    service_name: str,
+    request: Request,
+    body: DisplayNameRequest,
+) -> None:
+    """Set or clear the operator's display name override for one
+    sub-agent. Empty/whitespace `display_name` clears the override.
+    No-content response (204) on success."""
+    account_id = getattr(request.state, "account_id", None)
+    database.set_display_name(
+        service_name=service_name,
+        agent_id=body.agent_id or "main",
+        display_name=body.display_name,
+        account_id=account_id,
+    )
 
 
 @app.get("/agents/{service_name}/registration", response_model=AgentRegistration)
