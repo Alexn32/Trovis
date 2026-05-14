@@ -66283,9 +66283,30 @@ function sendAgentRegistration(tracer, agentId, workspacePath, model) {
     `${LOG} Registered agent '${agentId}' from workspace ${workspacePath} (soul: ${soul.length}b, identity: ${identity.length}b)`
   );
 }
+function loadConfigFromDisk() {
+  const candidates = [];
+  const envPath = process.env.OPENCLAW_CONFIG_PATH;
+  if (envPath && envPath.length > 0) candidates.push(envPath);
+  candidates.push("/data/.openclaw/openclaw.json");
+  candidates.push(path.join(os.homedir(), ".openclaw", "openclaw.json"));
+  for (const p of candidates) {
+    try {
+      const raw = fs.readFileSync(p, "utf-8");
+      const parsed = JSON.parse(raw);
+      return parsed;
+    } catch {
+    }
+  }
+  return null;
+}
 function registerAgents(tracer, ctx) {
-  const defaults = ctx?.config?.agents?.defaults;
-  const list = ctx?.config?.agents?.list;
+  let cfg = ctx?.config;
+  if (!cfg) {
+    cfg = loadConfigFromDisk();
+  }
+  const agentsCfg = cfg?.agents;
+  const defaults = agentsCfg?.defaults;
+  const list = agentsCfg?.list;
   const defaultWorkspace = ctx?.workspaceDir ?? defaults?.workspace ?? resolveDefaultWorkspace();
   const defaultModel = defaults?.model?.primary ?? "unknown";
   if (Array.isArray(list) && list.length > 0) {
@@ -66303,9 +66324,9 @@ function safeOn(api, name, handler) {
   try {
     api.on(
       name,
-      (event) => {
+      (...args) => {
         try {
-          handler(event);
+          handler(args[0], args[1]);
         } catch (e) {
           console.warn(`${LOG} Handler for '${name}' threw:`, e);
         }
@@ -66324,25 +66345,28 @@ function setIfPresent(span, key, value) {
   span.setAttribute(key, value);
 }
 function pickAgentId(event, ctx) {
-  const fromEvent = event?.agentId;
-  if (typeof fromEvent === "string" && fromEvent.length > 0) return fromEvent;
-  if (typeof ctx?.agentId === "string" && ctx.agentId.length > 0) {
-    return ctx.agentId;
+  const ev = event ?? {};
+  const c = ctx ?? {};
+  const sessionKey = typeof ev.sessionKey === "string" && ev.sessionKey || typeof c.sessionKey === "string" && c.sessionKey || "";
+  if (typeof sessionKey === "string" && sessionKey.startsWith("agent:")) {
+    const parts = sessionKey.split(":");
+    if (parts.length >= 2 && parts[1]) return parts[1];
   }
-  return void 0;
+  const direct = typeof ev.context?.agentId === "string" && ev.context.agentId || typeof c.agentId === "string" && c.agentId || typeof ev.agentId === "string" && ev.agentId || "";
+  return direct || "main";
 }
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
   const modelSpans = /* @__PURE__ */ new Map();
-  safeOn(api, "gateway_start", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "gateway_start", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    registerAgents(tracer, event?.context ?? {});
+    registerAgents(tracer, hookCtx ?? event?.context ?? {});
   });
-  safeOn(api, "message_received", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "message_received", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("message_received", { kind: SpanKind.SERVER });
     span.setAttribute("oversee.event.type", "message_received");
     setIfPresent(span, "oversee.session.key", ctx.sessionKey);
@@ -66369,10 +66393,10 @@ function wireEvents(api) {
     }
     span.end();
   });
-  safeOn(api, "message_sending", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "message_sending", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT });
     span.setAttribute("oversee.event.type", "message_sending");
     setIfPresent(span, "oversee.session.key", ctx.sessionKey);
@@ -66391,10 +66415,10 @@ function wireEvents(api) {
     }
     span.end();
   });
-  safeOn(api, "message_sent", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "message_sent", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("message_sent", { kind: SpanKind.CLIENT });
     const success = event?.success ?? !event?.error;
     span.setAttribute("oversee.event.type", "message_sent");
@@ -66409,10 +66433,10 @@ function wireEvents(api) {
     }
     span.end();
   });
-  safeOn(api, "before_tool_call", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "before_tool_call", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("tool_call", { kind: SpanKind.INTERNAL });
     span.setAttribute("oversee.event.type", "tool_call");
     span.setAttribute("oversee.tool.name", event.toolName);
@@ -66425,8 +66449,8 @@ function wireEvents(api) {
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId);
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() });
   });
-  safeOn(api, "after_tool_call", (event) => {
-    ensureInit(event?.context);
+  safeOn(api, "after_tool_call", (event, hookCtx) => {
+    ensureInit(hookCtx ?? event?.context);
     const entry = toolSpans.get(event.toolCallId);
     if (!entry) return;
     toolSpans.delete(event.toolCallId);
@@ -66457,10 +66481,10 @@ function wireEvents(api) {
     }
     entry.span.end();
   });
-  safeOn(api, "model_call_started", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "model_call_started", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT });
     span.setAttribute("oversee.event.type", "model_call");
     setIfPresent(span, "gen_ai.system", event?.provider);
@@ -66470,8 +66494,8 @@ function wireEvents(api) {
     setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId);
     modelSpans.set(event.callId, { span, startedAt: Date.now() });
   });
-  safeOn(api, "model_call_ended", (event) => {
-    ensureInit(event?.context);
+  safeOn(api, "model_call_ended", (event, hookCtx) => {
+    ensureInit(hookCtx ?? event?.context);
     const entry = modelSpans.get(event.callId);
     if (!entry) return;
     modelSpans.delete(event.callId);
@@ -66482,10 +66506,10 @@ function wireEvents(api) {
     }
     entry.span.end();
   });
-  safeOn(api, "llm_output", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "llm_output", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL });
     span.setAttribute("oversee.event.type", "llm_output");
     setIfPresent(span, "oversee.session.key", ctx.sessionKey);
@@ -66508,10 +66532,10 @@ function wireEvents(api) {
     }
     span.end();
   });
-  safeOn(api, "agent_end", (event) => {
-    const tracer = ensureInit(event?.context);
+  safeOn(api, "agent_end", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
-    const ctx = event?.context ?? {};
+    const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("agent_run_complete", {
       kind: SpanKind.INTERNAL
     });

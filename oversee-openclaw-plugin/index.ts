@@ -452,15 +452,56 @@ function sendAgentRegistration(
   )
 }
 
+/**
+ * Read `openclaw.json` directly from disk. Used as a fallback when the
+ * `gateway_start` ctx doesn't carry a populated `config.agents.list`
+ * (which is the case in non-bundled-plugin setups — every gateway we've
+ * observed so far ships an empty config object to the plugin hook).
+ *
+ * Returns `null` if no readable config is found at any candidate path.
+ * Tries an env override first, then the Docker volume location, then
+ * the home-dir default.
+ */
+function loadConfigFromDisk(): unknown {
+  const candidates: string[] = []
+  const envPath = process.env.OPENCLAW_CONFIG_PATH
+  if (envPath && envPath.length > 0) candidates.push(envPath)
+  candidates.push("/data/.openclaw/openclaw.json")
+  candidates.push(path.join(os.homedir(), ".openclaw", "openclaw.json"))
+
+  for (const p of candidates) {
+    try {
+      const raw = fs.readFileSync(p, "utf-8")
+      const parsed = JSON.parse(raw) as unknown
+      return parsed
+    } catch {
+      // path missing or unreadable — try the next one.
+    }
+  }
+  return null
+}
+
 function registerAgents(tracer: Tracer, ctx: OpenClawContext): void {
-  const defaults = ctx?.config?.agents?.defaults
-  const list = ctx?.config?.agents?.list
+  // If the hook ctx didn't carry config (the common case in real
+  // gateways), fall back to reading openclaw.json from disk. The
+  // file-based shape mirrors what we'd expect on `ctx.config`.
+  let cfg: unknown = ctx?.config
+  if (!cfg) {
+    cfg = loadConfigFromDisk()
+  }
+  const agentsCfg = (cfg as { agents?: unknown })?.agents as
+    | { defaults?: { workspace?: string; model?: { primary?: string } }; list?: Array<{ id?: string; workspace?: string; model?: { primary?: string } }> }
+    | undefined
+
+  const defaults = agentsCfg?.defaults
+  const list = agentsCfg?.list
   const defaultWorkspace =
     ctx?.workspaceDir ?? defaults?.workspace ?? resolveDefaultWorkspace()
   const defaultModel = defaults?.model?.primary ?? "unknown"
 
   if (Array.isArray(list) && list.length > 0) {
     for (const agent of list) {
+      // Each agent in the config can override the default workspace.
       const ws = agent?.workspace ?? defaultWorkspace
       const id = agent?.id ?? "unknown"
       const model = agent?.model?.primary ?? defaultModel
@@ -486,18 +527,22 @@ function registerAgents(tracer: Tracer, ctx: OpenClawContext): void {
 function safeOn<E>(
   api: OpenClawApi,
   name: string,
-  handler: (event: E) => void,
+  handler: (event: E, ctx?: OpenClawContext) => void,
 ): void {
   try {
+    // OpenClaw passes (event, ctx) as two separate arguments to hook
+    // handlers — the second is required for multi-agent context since
+    // event.context is empty in practice. We capture both via rest args
+    // and forward to the typed handler.
     api.on<E>(
       name,
-      (event) => {
+      ((...args: unknown[]) => {
         try {
-          handler(event)
+          handler(args[0] as E, args[1] as OpenClawContext | undefined)
         } catch (e) {
           console.warn(`${LOG} Handler for '${name}' threw:`, e)
         }
-      },
+      }) as unknown as (event: E) => void,
       { priority: OBSERVATION_PRIORITY },
     )
   } catch (e) {
@@ -521,13 +566,37 @@ function setIfPresent(span: Span, key: string, value: unknown): void {
  * (`<service.name>-<agent_id>` when agent_id isn't 'main'), so getting
  * it on every span is what makes multi-agent OpenClaw work end-to-end.
  */
-function pickAgentId(event: unknown, ctx: OpenClawContext): string | undefined {
-  const fromEvent = (event as { agentId?: unknown })?.agentId
-  if (typeof fromEvent === "string" && fromEvent.length > 0) return fromEvent
-  if (typeof ctx?.agentId === "string" && ctx.agentId.length > 0) {
-    return ctx.agentId
+/**
+ * Resolve the agent ID for a hook event. OpenClaw doesn't expose
+ * `agentId` directly on the event or context; instead it encodes the
+ * agent in `sessionKey`, formatted as `agent:<agentId>:<sessionId>`.
+ * Parse that first. Fall through to a couple of direct field reads in
+ * case a future gateway version exposes it differently. Defaults to
+ * `'main'` so single-agent gateways still get a stable group.
+ */
+function pickAgentId(event: unknown, ctx?: unknown): string {
+  const ev = (event ?? {}) as {
+    sessionKey?: unknown
+    agentId?: unknown
+    context?: { agentId?: unknown }
   }
-  return undefined
+  const c = (ctx ?? {}) as { sessionKey?: unknown; agentId?: unknown }
+
+  const sessionKey =
+    (typeof ev.sessionKey === "string" && ev.sessionKey) ||
+    (typeof c.sessionKey === "string" && c.sessionKey) ||
+    ""
+  if (typeof sessionKey === "string" && sessionKey.startsWith("agent:")) {
+    const parts = sessionKey.split(":")
+    if (parts.length >= 2 && parts[1]) return parts[1]
+  }
+
+  const direct =
+    (typeof ev.context?.agentId === "string" && ev.context.agentId) ||
+    (typeof c.agentId === "string" && c.agentId) ||
+    (typeof ev.agentId === "string" && ev.agentId) ||
+    ""
+  return direct || "main"
 }
 
 // ---------------------------------------------------------------------------
@@ -540,17 +609,17 @@ function wireEvents(api: OpenClawApi): void {
   const modelSpans = new Map<string, { span: Span; startedAt: number }>()
 
   // -- Gateway start: init OTEL + read agent identity files --
-  safeOn<GatewayStartEvent>(api, "gateway_start", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<GatewayStartEvent>(api, "gateway_start", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    registerAgents(tracer, event?.context ?? ({} as OpenClawContext))
+    registerAgents(tracer, ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext))
   })
 
   // -- Inbound messages --
-  safeOn<MessageReceivedEvent>(api, "message_received", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<MessageReceivedEvent>(api, "message_received", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("message_received", { kind: SpanKind.SERVER })
     span.setAttribute("oversee.event.type", "message_received")
     setIfPresent(span, "oversee.session.key", ctx.sessionKey)
@@ -591,10 +660,10 @@ function wireEvents(api: OpenClawApi): void {
   // cancel — and the handler returns undefined so the original event
   // flows through unchanged. Without this hook, we'd only see delivery
   // metadata (via message_sent) and never the response content itself.
-  safeOn<MessageSendingEvent>(api, "message_sending", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<MessageSendingEvent>(api, "message_sending", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT })
     span.setAttribute("oversee.event.type", "message_sending")
     setIfPresent(span, "oversee.session.key", ctx.sessionKey)
@@ -624,10 +693,10 @@ function wireEvents(api: OpenClawApi): void {
   // `message_sending` above). Kept as a separate span so the dashboard
   // can show "tried to deliver, succeeded/failed" independently from
   // what the agent said.
-  safeOn<MessageSentEvent>(api, "message_sent", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<MessageSentEvent>(api, "message_sent", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("message_sent", { kind: SpanKind.CLIENT })
     const success = event?.success ?? !event?.error
     span.setAttribute("oversee.event.type", "message_sent")
@@ -645,10 +714,10 @@ function wireEvents(api: OpenClawApi): void {
   })
 
   // -- Tool calls (before / after pair) --
-  safeOn<BeforeToolCallEvent>(api, "before_tool_call", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<BeforeToolCallEvent>(api, "before_tool_call", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("tool_call", { kind: SpanKind.INTERNAL })
     span.setAttribute("oversee.event.type", "tool_call")
     span.setAttribute("oversee.tool.name", event.toolName)
@@ -664,8 +733,8 @@ function wireEvents(api: OpenClawApi): void {
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() })
   })
 
-  safeOn<AfterToolCallEvent>(api, "after_tool_call", (event) => {
-    ensureInit(event?.context)
+  safeOn<AfterToolCallEvent>(api, "after_tool_call", (event, hookCtx) => {
+    ensureInit(hookCtx ?? event?.context)
     const entry = toolSpans.get(event.toolCallId)
     if (!entry) return
     toolSpans.delete(event.toolCallId)
@@ -707,10 +776,10 @@ function wireEvents(api: OpenClawApi): void {
   })
 
   // -- Model calls (started / ended pair) --
-  safeOn<ModelCallStartedEvent>(api, "model_call_started", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<ModelCallStartedEvent>(api, "model_call_started", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT })
     span.setAttribute("oversee.event.type", "model_call")
     setIfPresent(span, "gen_ai.system", event?.provider)
@@ -722,8 +791,8 @@ function wireEvents(api: OpenClawApi): void {
     modelSpans.set(event.callId, { span, startedAt: Date.now() })
   })
 
-  safeOn<ModelCallEndedEvent>(api, "model_call_ended", (event) => {
-    ensureInit(event?.context)
+  safeOn<ModelCallEndedEvent>(api, "model_call_ended", (event, hookCtx) => {
+    ensureInit(hookCtx ?? event?.context)
     const entry = modelSpans.get(event.callId)
     if (!entry) return
     modelSpans.delete(event.callId)
@@ -746,10 +815,10 @@ function wireEvents(api: OpenClawApi): void {
   // only triggers for external-channel deliveries like Slack/Discord).
   // Observation-only: handler returns undefined so the gateway's normal
   // output path is undisturbed.
-  safeOn<LlmOutputEvent>(api, "llm_output", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<LlmOutputEvent>(api, "llm_output", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL })
     span.setAttribute("oversee.event.type", "llm_output")
     setIfPresent(span, "oversee.session.key", ctx.sessionKey)
@@ -778,10 +847,10 @@ function wireEvents(api: OpenClawApi): void {
   })
 
   // -- Agent run completion --
-  safeOn<AgentEndEvent>(api, "agent_end", (event) => {
-    const tracer = ensureInit(event?.context)
+  safeOn<AgentEndEvent>(api, "agent_end", (event, hookCtx) => {
+    const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
-    const ctx = event?.context ?? ({} as OpenClawContext)
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("agent_run_complete", {
       kind: SpanKind.INTERNAL,
     })
