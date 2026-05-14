@@ -66508,15 +66508,16 @@ function wireCommands(api) {
   }
   const command = {
     name: "oversee",
-    aliases: ["ov"],
     description: "Connect to Oversee agent monitoring",
-    async execute(args, _context) {
-      const sub = args[0]?.toLowerCase();
-      const reply = (text) => ({
-        content: [{ type: "text", text }]
-      });
-      if (sub === "connect" && args[1]) {
-        const endpoint = args[1];
+    acceptsArgs: true,
+    async handler(ctx) {
+      const raw = (ctx?.args ?? "").trim();
+      const parts = raw.length > 0 ? raw.split(/\s+/) : [];
+      const sub = parts[0]?.toLowerCase() ?? "";
+      const arg1 = parts[1] ?? "";
+      const reply = (text) => ({ text });
+      if (sub === "connect" && arg1) {
+        const endpoint = arg1;
         state.endpoint = endpoint;
         return reply(
           `\u2705 Oversee endpoint set: \`${endpoint}\`
@@ -66526,8 +66527,8 @@ function wireCommands(api) {
 The OTLP exporter was constructed at gateway start, so **restart the gateway** after persisting for spans to actually go to this URL.`
         );
       }
-      if (sub === "apikey" && args[1]) {
-        const key = args[1];
+      if (sub === "apikey" && arg1) {
+        const key = arg1;
         state.apiKey = key;
         return reply(
           `\u2705 Oversee API key set: \`${maskKey(key)}\`
@@ -66537,8 +66538,8 @@ The OTLP exporter was constructed at gateway start, so **restart the gateway** a
 The auth header is set on the exporter at gateway start, so **restart the gateway** after persisting for the new key to be sent.`
         );
       }
-      if (sub === "capture" && (args[1] === "on" || args[1] === "off")) {
-        const enable = args[1] === "on";
+      if (sub === "capture" && (arg1 === "on" || arg1 === "off")) {
+        const enable = arg1 === "on";
         state.captureOutputs = enable;
         return reply(
           `\u2705 Output capture **${enable ? "enabled" : "disabled"}**.
@@ -66550,8 +66551,8 @@ The auth header is set on the exporter at gateway start, so **restart the gatewa
 `) + persistHint("captureOutputs", enable)
         );
       }
-      if (sub === "userdata" && (args[1] === "on" || args[1] === "off")) {
-        const enable = args[1] === "on";
+      if (sub === "userdata" && (arg1 === "on" || arg1 === "off")) {
+        const enable = arg1 === "on";
         state.readUserData = enable;
         return reply(
           `\u2705 User data ingestion **${enable ? "enabled" : "disabled"}**.
@@ -66603,7 +66604,7 @@ Get your endpoint URL from your Oversee dashboard (Add Agent \u2192 OpenClaw), t
 \u2022 \`/oversee settings\` \u2014 show all current config
 \u2022 \`/oversee status\` \u2014 connection state + telemetry flowing or not
 
-Setting commands update in-memory state immediately and best-effort-persist to \`openclaw.json\` via \`openclaw config set\`. \`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`
+Setting commands update in-memory state immediately. To make permanent, run \`openclaw config set plugins.entries.oversee.config.<key> <value>\`. \`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`
       );
     }
   };
@@ -66612,7 +66613,7 @@ Setting commands update in-memory state immediately and best-effort-persist to \
     console.log(`${LOG} /oversee command registered.`);
   } catch (e) {
     console.warn(
-      `${LOG} Failed to register /oversee command: ${e.message}. Telemetry will continue to work; command-based setup is unavailable. Command shape sent: name="${command.name}", aliases=${JSON.stringify(command.aliases)}, execute=${typeof command.execute}.`
+      `${LOG} Failed to register /oversee command: ${e.message}. Telemetry will continue to work; command-based setup is unavailable.`
     );
   }
 }
