@@ -165,15 +165,23 @@ interface AgentEndEvent extends BaseEvent {
   error?: unknown
 }
 
+// Per docs.openclaw.ai: a slash-command handler receives a ctx object
+// containing the raw argument string (everything typed after the
+// command name) and returns `{ text }`. We don't get a pre-parsed
+// array — splitting on whitespace is the handler's responsibility.
+interface CommandContext {
+  args?: string
+}
+
 interface CommandResult {
-  content: Array<{ type: string; text: string }>
+  text: string
 }
 
 interface PluginCommand {
   name: string
-  aliases?: string[]
   description: string
-  execute(args: string[], context?: unknown): Promise<CommandResult>
+  acceptsArgs?: boolean
+  handler(ctx: CommandContext): Promise<CommandResult>
 }
 
 interface OpenClawApi {
@@ -753,19 +761,23 @@ function wireCommands(api: OpenClawApi): void {
     return
   }
 
-  const command = {
+  const command: PluginCommand = {
     name: "oversee",
-    aliases: ["ov"],
     description: "Connect to Oversee agent monitoring",
-    async execute(args: string[], _context: unknown): Promise<CommandResult> {
-      const sub = args[0]?.toLowerCase()
-      const reply = (text: string): CommandResult => ({
-        content: [{ type: "text", text }],
-      })
+    acceptsArgs: true,
+    async handler(ctx: CommandContext): Promise<CommandResult> {
+      // ctx.args is the raw text after the command name — split it
+      // ourselves. Multiple spaces collapse via /\s+/. Empty args means
+      // the user typed bare `/oversee` (the help screen).
+      const raw = (ctx?.args ?? "").trim()
+      const parts = raw.length > 0 ? raw.split(/\s+/) : []
+      const sub = parts[0]?.toLowerCase() ?? ""
+      const arg1 = parts[1] ?? ""
+      const reply = (text: string): CommandResult => ({ text })
 
       // --- connect <url> -------------------------------------------------
-      if (sub === "connect" && args[1]) {
-        const endpoint = args[1]
+      if (sub === "connect" && arg1) {
+        const endpoint = arg1
         state.endpoint = endpoint
         return reply(
           `✅ Oversee endpoint set: \`${endpoint}\`\n\n` +
@@ -777,8 +789,8 @@ function wireCommands(api: OpenClawApi): void {
       }
 
       // --- apikey <key> --------------------------------------------------
-      if (sub === "apikey" && args[1]) {
-        const key = args[1]
+      if (sub === "apikey" && arg1) {
+        const key = arg1
         state.apiKey = key
         return reply(
           `✅ Oversee API key set: \`${maskKey(key)}\`\n\n` +
@@ -790,8 +802,8 @@ function wireCommands(api: OpenClawApi): void {
       }
 
       // --- capture on|off ------------------------------------------------
-      if (sub === "capture" && (args[1] === "on" || args[1] === "off")) {
-        const enable = args[1] === "on"
+      if (sub === "capture" && (arg1 === "on" || arg1 === "off")) {
+        const enable = arg1 === "on"
         state.captureOutputs = enable
         return reply(
           `✅ Output capture **${enable ? "enabled" : "disabled"}**.\n\n` +
@@ -807,8 +819,8 @@ function wireCommands(api: OpenClawApi): void {
       }
 
       // --- userdata on|off -----------------------------------------------
-      if (sub === "userdata" && (args[1] === "on" || args[1] === "off")) {
-        const enable = args[1] === "on"
+      if (sub === "userdata" && (arg1 === "on" || arg1 === "off")) {
+        const enable = arg1 === "on"
         state.readUserData = enable
         return reply(
           `✅ User data ingestion **${enable ? "enabled" : "disabled"}**.\n\n` +
@@ -862,29 +874,23 @@ function wireCommands(api: OpenClawApi): void {
           `**Inspect**\n` +
           `• \`/oversee settings\` — show all current config\n` +
           `• \`/oversee status\` — connection state + telemetry flowing or not\n\n` +
-          `Setting commands update in-memory state immediately and ` +
-          `best-effort-persist to \`openclaw.json\` via \`openclaw config ` +
-          `set\`. \`connect\` and \`apikey\` need a gateway restart to ` +
-          `re-init the OTLP exporter.`,
+          `Setting commands update in-memory state immediately. To make ` +
+          `permanent, run \`openclaw config set plugins.entries.oversee.config.<key> <value>\`. ` +
+          `\`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`,
       )
     },
   }
 
-  // OpenClaw's registerCommand contract may not match what we send (a
-  // recent gateway error was "Command handler must be a function" — that
-  // suggests it expects either a different property name or a different
-  // call signature). Until we can verify against real docs, swallow the
-  // error so command-registration failure doesn't take down the rest of
-  // the plugin (telemetry hooks are the important part).
+  // Defensive try/catch — if the gateway's registerCommand contract
+  // drifts again, command-registration failure shouldn't take down the
+  // rest of the plugin (telemetry hooks are what matters).
   try {
     api.registerCommand(command)
     console.log(`${LOG} /oversee command registered.`)
   } catch (e) {
     console.warn(
       `${LOG} Failed to register /oversee command: ${(e as Error).message}. ` +
-        `Telemetry will continue to work; command-based setup is unavailable. ` +
-        `Command shape sent: name="${command.name}", aliases=${JSON.stringify(command.aliases)}, ` +
-        `execute=${typeof command.execute}.`,
+        `Telemetry will continue to work; command-based setup is unavailable.`,
     )
   }
 }
