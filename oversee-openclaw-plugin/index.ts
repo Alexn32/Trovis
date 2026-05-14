@@ -169,21 +169,16 @@ interface ModelCallEndedEvent extends BaseEvent {
 // `llm_output` fires after the model returns a response, regardless of
 // the delivery channel (web chat, Slack, etc.). This is the only hook
 // that exposes the raw model output for web chat — `message_sending`
-// only fires for external channel deliveries. The plugin SDK docs
-// don't pin down a single field name for the content (different
-// providers / OpenClaw versions surface it differently), so we accept
-// several candidates and pick the first one that's a non-empty string.
-// Requires `hooks.allowConversationAccess: true` in plugin config.
+// only fires for external channel deliveries. The response text comes
+// in as `assistantTexts`, a string[] containing one or more assistant
+// turns (typically a single entry but the field is plural to support
+// multi-turn outputs). Requires `hooks.allowConversationAccess: true`.
 interface LlmOutputEvent extends BaseEvent {
   callId?: string
   runId?: string
   provider?: string
   model?: string
-  // Content candidates — see `pickLlmOutputText` for the resolution order.
-  content?: unknown
-  text?: unknown
-  output?: unknown
-  response?: unknown
+  assistantTexts?: string[]
 }
 
 interface AgentEndEvent extends BaseEvent {
@@ -535,42 +530,6 @@ function pickAgentId(event: unknown, ctx: OpenClawContext): string | undefined {
   return undefined
 }
 
-/**
- * Extract the model's output text from an `llm_output` event. The plugin
- * SDK doesn't pin a single field name and different providers / OpenClaw
- * versions surface it differently, so we try a few candidates in order
- * and return the first non-empty string. If we find a non-string value
- * (a structured response object), JSON-stringify it as a last resort so
- * the operator at least sees something on the span. Returns undefined
- * when nothing useful is present.
- */
-function pickLlmOutputText(event: LlmOutputEvent): string | undefined {
-  const candidates: unknown[] = [
-    event?.content,
-    event?.text,
-    event?.output,
-    event?.response,
-  ]
-  for (const c of candidates) {
-    if (typeof c === "string" && c.length > 0) return c
-  }
-  // Fallback: stringify the first non-null structured candidate. Keeps
-  // visibility when a provider returns e.g. {role, content: [...]}.
-  for (const c of candidates) {
-    if (c !== undefined && c !== null && typeof c !== "string") {
-      try {
-        const s = JSON.stringify(c)
-        if (typeof s === "string" && s.length > 0 && s !== "{}" && s !== "[]") {
-          return s
-        }
-      } catch {
-        // ignore — circular refs etc.
-      }
-    }
-  }
-  return undefined
-}
-
 // ---------------------------------------------------------------------------
 // Hook wiring
 // ---------------------------------------------------------------------------
@@ -800,18 +759,20 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "gen_ai.system", event?.provider)
     setIfPresent(span, "gen_ai.request.model", event?.model)
 
-    const text = pickLlmOutputText(event)
+    // The model's response text arrives as `assistantTexts`, a string[]
+    // of one or more assistant turns. We join with newlines so a
+    // multi-turn response collapses into a single readable blob.
+    const responseText = event?.assistantTexts?.join("\n") ?? ""
     setIfPresent(
       span,
       "oversee.response.content_length",
-      typeof text === "string" ? text.length : undefined,
+      responseText.length > 0 ? responseText.length : undefined,
     )
-    if (
-      state.captureOutputs &&
-      typeof text === "string" &&
-      text.length > 0
-    ) {
-      span.setAttribute("oversee.response.content", truncate(text, 10_000))
+    if (state.captureOutputs && responseText.length > 0) {
+      span.setAttribute(
+        "oversee.response.content",
+        truncate(responseText, 10_000),
+      )
     }
     span.end()
   })

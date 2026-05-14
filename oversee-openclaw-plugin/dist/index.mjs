@@ -66331,29 +66331,6 @@ function pickAgentId(event, ctx) {
   }
   return void 0;
 }
-function pickLlmOutputText(event) {
-  const candidates = [
-    event?.content,
-    event?.text,
-    event?.output,
-    event?.response
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.length > 0) return c;
-  }
-  for (const c of candidates) {
-    if (c !== void 0 && c !== null && typeof c !== "string") {
-      try {
-        const s = JSON.stringify(c);
-        if (typeof s === "string" && s.length > 0 && s !== "{}" && s !== "[]") {
-          return s;
-        }
-      } catch {
-      }
-    }
-  }
-  return void 0;
-}
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
   const modelSpans = /* @__PURE__ */ new Map();
@@ -66517,14 +66494,17 @@ function wireEvents(api) {
     setIfPresent(span, "oversee.model.call_id", event?.callId);
     setIfPresent(span, "gen_ai.system", event?.provider);
     setIfPresent(span, "gen_ai.request.model", event?.model);
-    const text = pickLlmOutputText(event);
+    const responseText = event?.assistantTexts?.join("\n") ?? "";
     setIfPresent(
       span,
       "oversee.response.content_length",
-      typeof text === "string" ? text.length : void 0
+      responseText.length > 0 ? responseText.length : void 0
     );
-    if (state.captureOutputs && typeof text === "string" && text.length > 0) {
-      span.setAttribute("oversee.response.content", truncate(text, 1e4));
+    if (state.captureOutputs && responseText.length > 0) {
+      span.setAttribute(
+        "oversee.response.content",
+        truncate(responseText, 1e4)
+      );
     }
     span.end();
   });
