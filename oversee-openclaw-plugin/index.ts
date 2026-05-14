@@ -116,12 +116,19 @@ interface MessageReceivedEvent extends BaseEvent {
   metadata?: Record<string, unknown>
 }
 
+// `message_sending` is the pre-delivery decision hook. The gateway lets
+// plugins rewrite or cancel the outbound text from here, but we never
+// touch it — the handler returns undefined and the original event flows
+// through. This is the only hook that exposes the agent's actual
+// response content; `message_sent` carries delivery status only.
+interface MessageSendingEvent extends BaseEvent {
+  content?: string
+  threadId?: string
+}
+
 interface MessageSentEvent extends BaseEvent {
   success?: boolean
   error?: unknown
-  // Optional outbound text. Captured into a span attribute only when
-  // state.captureOutputs is true.
-  content?: string
 }
 
 interface BeforeToolCallEvent extends BaseEvent {
@@ -563,7 +570,45 @@ function wireEvents(api: OpenClawApi): void {
     span.end()
   })
 
-  // -- Outbound delivery --
+  // -- Outbound response content (pre-delivery decision hook) --
+  // `message_sending` is the only hook that carries the agent's actual
+  // outbound text. We register it purely to observe — never rewrite or
+  // cancel — and the handler returns undefined so the original event
+  // flows through unchanged. Without this hook, we'd only see delivery
+  // metadata (via message_sent) and never the response content itself.
+  safeOn<MessageSendingEvent>(api, "message_sending", (event) => {
+    const tracer = ensureInit(event?.context)
+    if (!tracer) return
+    const ctx = event?.context ?? ({} as OpenClawContext)
+    const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT })
+    span.setAttribute("oversee.event.type", "message_sending")
+    setIfPresent(span, "oversee.session.key", ctx.sessionKey)
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "oversee.message.thread_id", event?.threadId)
+    setIfPresent(
+      span,
+      "oversee.response.content_length",
+      typeof event?.content === "string" ? event.content.length : undefined,
+    )
+    if (
+      state.captureOutputs &&
+      typeof event?.content === "string" &&
+      event.content.length > 0
+    ) {
+      span.setAttribute(
+        "oversee.response.content",
+        truncate(event.content, 10_000),
+      )
+    }
+    span.end()
+  })
+
+  // -- Outbound delivery status (post-delivery) --
+  // `message_sent` fires after the gateway has handed the message off.
+  // It carries success/error metadata, NOT content (that lived on
+  // `message_sending` above). Kept as a separate span so the dashboard
+  // can show "tried to deliver, succeeded/failed" independently from
+  // what the agent said.
   safeOn<MessageSentEvent>(api, "message_sent", (event) => {
     const tracer = ensureInit(event?.context)
     if (!tracer) return
@@ -580,17 +625,6 @@ function wireEvents(api: OpenClawApi): void {
         message:
           typeof event?.error === "string" ? event.error : "delivery failed",
       })
-    }
-    // Capture outbound response body when opted in.
-    if (
-      state.captureOutputs &&
-      typeof event?.content === "string" &&
-      event.content.length > 0
-    ) {
-      span.setAttribute(
-        "oversee.response.content",
-        truncate(event.content, 10_000),
-      )
     }
     span.end()
   })
