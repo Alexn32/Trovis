@@ -66331,6 +66331,29 @@ function pickAgentId(event, ctx) {
   }
   return void 0;
 }
+function pickLlmOutputText(event) {
+  const candidates = [
+    event?.content,
+    event?.text,
+    event?.output,
+    event?.response
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.length > 0) return c;
+  }
+  for (const c of candidates) {
+    if (c !== void 0 && c !== null && typeof c !== "string") {
+      try {
+        const s = JSON.stringify(c);
+        if (typeof s === "string" && s.length > 0 && s !== "{}" && s !== "[]") {
+          return s;
+        }
+      } catch {
+      }
+    }
+  }
+  return void 0;
+}
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
   const modelSpans = /* @__PURE__ */ new Map();
@@ -66481,6 +66504,29 @@ function wireEvents(api) {
       entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome });
     }
     entry.span.end();
+  });
+  safeOn(api, "llm_output", (event) => {
+    const tracer = ensureInit(event?.context);
+    if (!tracer) return;
+    const ctx = event?.context ?? {};
+    const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL });
+    span.setAttribute("oversee.event.type", "llm_output");
+    setIfPresent(span, "oversee.session.key", ctx.sessionKey);
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
+    setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId);
+    setIfPresent(span, "oversee.model.call_id", event?.callId);
+    setIfPresent(span, "gen_ai.system", event?.provider);
+    setIfPresent(span, "gen_ai.request.model", event?.model);
+    const text = pickLlmOutputText(event);
+    setIfPresent(
+      span,
+      "oversee.response.content_length",
+      typeof text === "string" ? text.length : void 0
+    );
+    if (state.captureOutputs && typeof text === "string" && text.length > 0) {
+      span.setAttribute("oversee.response.content", truncate(text, 1e4));
+    }
+    span.end();
   });
   safeOn(api, "agent_end", (event) => {
     const tracer = ensureInit(event?.context);
