@@ -66369,6 +66369,28 @@ function wireEvents(api) {
     }
     span.end();
   });
+  safeOn(api, "message_sending", (event) => {
+    const tracer = ensureInit(event?.context);
+    if (!tracer) return;
+    const ctx = event?.context ?? {};
+    const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT });
+    span.setAttribute("oversee.event.type", "message_sending");
+    setIfPresent(span, "oversee.session.key", ctx.sessionKey);
+    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx));
+    setIfPresent(span, "oversee.message.thread_id", event?.threadId);
+    setIfPresent(
+      span,
+      "oversee.response.content_length",
+      typeof event?.content === "string" ? event.content.length : void 0
+    );
+    if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
+      span.setAttribute(
+        "oversee.response.content",
+        truncate(event.content, 1e4)
+      );
+    }
+    span.end();
+  });
   safeOn(api, "message_sent", (event) => {
     const tracer = ensureInit(event?.context);
     if (!tracer) return;
@@ -66384,12 +66406,6 @@ function wireEvents(api) {
         code: SpanStatusCode.ERROR,
         message: typeof event?.error === "string" ? event.error : "delivery failed"
       });
-    }
-    if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
-      span.setAttribute(
-        "oversee.response.content",
-        truncate(event.content, 1e4)
-      );
     }
     span.end();
   });
