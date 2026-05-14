@@ -117,6 +117,30 @@ function DetailHead({ summary, registration, agentId }) {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
 
+  // Description state — seeded from the summary. The auto-describe
+  // pipeline fires on registration / first telemetry / catchup, but
+  // when none of those hits an agent (e.g. has spans pre-dating the
+  // per-agent description scoping) we expose a manual trigger below.
+  const [description, setDescription] = useState(summary.description || '')
+  const [describing, setDescribing] = useState(false)
+  const [describeError, setDescribeError] = useState(null)
+
+  async function generateDescription() {
+    setDescribing(true)
+    setDescribeError(null)
+    try {
+      const result = await api.describeAgent(
+        summary.service_name,
+        shownAgentId || 'main',
+      )
+      setDescription(result.description || '')
+    } catch (e) {
+      setDescribeError(e.message || 'Could not generate description')
+    } finally {
+      setDescribing(false)
+    }
+  }
+
   function startEdit() {
     setDraft(displayName)
     setSaveError(null)
@@ -223,10 +247,33 @@ function DetailHead({ summary, registration, agentId }) {
           )}
         </div>
       )}
-      <p className={`detail-description ${summary.description ? '' : 'empty'}`}>
-        {summary.description ||
-          'No description yet — descriptions auto-generate when an agent sends registration data.'}
-      </p>
+      {description ? (
+        <p className="detail-description">{description}</p>
+      ) : (
+        <div className="detail-description-empty">
+          <p className="detail-description empty">
+            No description yet — descriptions auto-generate when an agent
+            sends registration data.
+          </p>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={generateDescription}
+            disabled={describing}
+          >
+            {describing ? (
+              <>
+                <Spinner /> Generating…
+              </>
+            ) : (
+              <>
+                <SparkleIcon size={13} /> Generate now
+              </>
+            )}
+          </button>
+          {describeError && <p className="form-error">{describeError}</p>}
+        </div>
+      )}
     </header>
   )
 }

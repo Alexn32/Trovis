@@ -355,11 +355,24 @@ async def ingest_traces(request: Request) -> IngestResponse:
     # Save registrations + auto-describe on the registration path.
     described = _extract_registrations(spans, account_id=account_id)
 
-    # First-time describe path: a registration that arrived in the SAME
-    # batch as the first telemetry, or arrived in a prior batch but
-    # didn't trigger _auto_describe because we'd never seen telemetry
-    # for it yet. Skip anything already described in this request.
-    for service_name, agent_id in first_time_pairs - described:
+    # Catch-up describe pass: covers every (service, agent) in this
+    # batch that has a registration but no per-agent description yet.
+    # This subsumes the old "first-time telemetry" trigger AND handles
+    # the case where an agent has been emitting spans for a while but
+    # its description still lives under the old service-name-only key
+    # (e.g. donny on an instance that was described before per-agent
+    # scoping shipped). The early-out on `get_latest_description` keeps
+    # this cheap on hot batches — one indexed lookup per (service,
+    # agent) pair, and it short-circuits the moment a description
+    # exists.
+    for service_name, agent_id in batch_pairs - described:
+        if (
+            database.get_latest_description(
+                service_name, account_id=account_id, agent_id=agent_id
+            )
+            is not None
+        ):
+            continue
         if (
             database.get_latest_registration(
                 service_name, account_id=account_id, agent_id=agent_id
@@ -367,10 +380,15 @@ async def ingest_traces(request: Request) -> IngestResponse:
             is None
         ):
             continue
+        reason = (
+            "first-telemetry"
+            if (service_name, agent_id) in first_time_pairs
+            else "catchup"
+        )
         _auto_describe(
             service_name,
             account_id,
-            reason="first-telemetry",
+            reason=reason,
             agent_id=agent_id,
         )
 

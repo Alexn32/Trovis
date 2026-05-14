@@ -1010,6 +1010,19 @@ a:hover {
   font-style: italic;
 }
 
+/* Wraps the empty-state message + "Generate now" button so they sit
+   stacked but feel grouped. */
+.detail-description-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.detail-description-empty .detail-description {
+  margin: 0;
+}
+
 .detail-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
