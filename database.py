@@ -177,6 +177,7 @@ _DESC_DDL_PG = """
 CREATE TABLE IF NOT EXISTS descriptions (
     id                  SERIAL PRIMARY KEY,
     service_name        TEXT      NOT NULL,
+    agent_id            TEXT      DEFAULT 'main',
     description         TEXT      NOT NULL,
     span_count_analyzed INTEGER,
     generated_at        TIMESTAMP DEFAULT NOW()
@@ -207,6 +208,7 @@ _DESC_DDL_SQLITE = """
 CREATE TABLE IF NOT EXISTS descriptions (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     service_name        TEXT    NOT NULL,
+    agent_id            TEXT    DEFAULT 'main',
     description         TEXT    NOT NULL,
     span_count_analyzed INTEGER,
     generated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -283,6 +285,33 @@ CREATE TABLE IF NOT EXISTS api_keys (
 )
 """
 
+# Operator-editable display name for an agent — keyed by the triple
+# (account, service_name, agent_id) so each sub-agent gets its own.
+# UPSERT on the unique triple to keep it a single row per agent.
+_DISPLAY_DDL_PG = """
+CREATE TABLE IF NOT EXISTS agent_display_names (
+    id           SERIAL    PRIMARY KEY,
+    account_id   INTEGER,
+    service_name TEXT      NOT NULL,
+    agent_id     TEXT      NOT NULL DEFAULT 'main',
+    display_name TEXT      NOT NULL,
+    updated_at   TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, service_name, agent_id)
+)
+"""
+
+_DISPLAY_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS agent_display_names (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER,
+    service_name TEXT    NOT NULL,
+    agent_id     TEXT    NOT NULL DEFAULT 'main',
+    display_name TEXT    NOT NULL,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, service_name, agent_id)
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -294,12 +323,15 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time_unix)",
     "CREATE INDEX IF NOT EXISTS idx_spans_service_agent ON spans(service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_descriptions_service_name ON descriptions(service_name)",
+    "CREATE INDEX IF NOT EXISTS idx_descriptions_service_agent ON descriptions(service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_registrations_service_name ON agent_registrations(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key)",
     "CREATE INDEX IF NOT EXISTS idx_api_keys_account_id ON api_keys(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_spans_account_id ON spans(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_descriptions_account_id ON descriptions(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_registrations_account_id ON agent_registrations(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_display_names_service_agent ON agent_display_names(service_name, agent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_display_names_account_id ON agent_display_names(account_id)",
 ]
 
 
@@ -317,6 +349,7 @@ def init_db() -> None:
             _REG_DDL_PG,
             _ACCOUNTS_DDL_PG,
             _API_KEYS_DDL_PG,
+            _DISPLAY_DDL_PG,
         ]
     else:
         ddls = [
@@ -325,6 +358,7 @@ def init_db() -> None:
             _REG_DDL_SQLITE,
             _ACCOUNTS_DDL_SQLITE,
             _API_KEYS_DDL_SQLITE,
+            _DISPLAY_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -339,6 +373,9 @@ def init_db() -> None:
         # SQLite returns the column default for missing rows). We also
         # COALESCE on reads to be defensive.
         _try_add_column(cur, "spans", "agent_id", "TEXT DEFAULT 'main'")
+        # Same backfill for descriptions — pre-multi-agent rows were
+        # generated from main's SOUL.md, so 'main' is the correct tag.
+        _try_add_column(cur, "descriptions", "agent_id", "TEXT DEFAULT 'main'")
         for idx in _INDEXES:
             cur.execute(idx)
 
@@ -445,15 +482,29 @@ def save_description(
     description: str,
     span_count_analyzed: int,
     account_id: int | None = None,
+    agent_id: str | None = None,
 ) -> None:
-    """Persist a newly generated description (append-only — history kept)."""
+    """Persist a newly generated description (append-only — history kept).
+
+    `agent_id` scopes the description to one sub-agent within an
+    instance. Passing None defaults to 'main' — pre-multi-agent
+    descriptions were always for the lone 'main' agent, so this keeps
+    backwards-compat for callers that don't pass agent_id.
+    """
     sql = f"""
-        INSERT INTO descriptions (service_name, description, span_count_analyzed, account_id)
-        VALUES ({PH}, {PH}, {PH}, {PH})
+        INSERT INTO descriptions (service_name, agent_id, description, span_count_analyzed, account_id)
+        VALUES ({PH}, {PH}, {PH}, {PH}, {PH})
     """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            sql, (service_name, description, span_count_analyzed, account_id)
+            sql,
+            (
+                service_name,
+                agent_id or "main",
+                description,
+                span_count_analyzed,
+                account_id,
+            ),
         )
 
 
@@ -481,6 +532,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     reg_filter = (
         f"AND r.account_id = {PH}" if account_id is not None else ""
     )
+    dn_filter = (
+        f"AND dn.account_id = {PH}" if account_id is not None else ""
+    )
     sample_acct_filter = (
         f"AND s2.account_id = {PH}" if account_id is not None else ""
     )
@@ -501,6 +555,11 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     # (the ADD COLUMN default backfills, and inserts always tag a value),
     # so the two forms produce the same groups — but only the bare-column
     # form is portable. COALESCE is moved into the SELECT projection.
+    # Both the description and the display_name subqueries correlate on
+    # `spans.agent_id` (so each sub-agent gets its own value). Postgres
+    # requires every column referenced in a subquery to be in the outer
+    # GROUP BY or aggregated — `agent_id` IS in the GROUP BY, so the
+    # `COALESCE(spans.agent_id, 'main')` reads are legal there.
     agg_sql = f"""
         SELECT
             service_name,
@@ -514,6 +573,7 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 SELECT description
                 FROM descriptions d
                 WHERE d.service_name = spans.service_name
+                  AND COALESCE(d.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
                   {desc_filter}
                 ORDER BY d.generated_at DESC, d.id DESC
                 LIMIT 1
@@ -525,6 +585,14 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                   AND COALESCE(r.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
                   {reg_filter}
             )                                                AS has_registration,
+            (
+                SELECT display_name
+                FROM agent_display_names dn
+                WHERE dn.service_name = spans.service_name
+                  AND COALESCE(dn.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
+                  {dn_filter}
+                LIMIT 1
+            )                                                AS display_name,
             (
                 SELECT resource_attributes
                 FROM spans s2
@@ -539,9 +607,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
         ORDER BY last_seen_ns DESC
     """
     # Argument order matches the {PH} occurrences left-to-right in the SQL:
-    # desc_filter, reg_filter, sample_acct_filter, span_filter.
+    # desc_filter, reg_filter, dn_filter, sample_acct_filter, span_filter.
     agg_args = (
-        (account_id, account_id, account_id, account_id)
+        (account_id, account_id, account_id, account_id, account_id)
         if account_id is not None
         else ()
     )
@@ -579,6 +647,12 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 "first_seen": _ns_to_iso(row["first_seen_ns"]),
                 "last_seen": _ns_to_iso(row["last_seen_ns"]),
                 "has_registration": bool(row["has_registration"]),
+                # Per-agent description and display name. Each sub-agent
+                # gets its own values — the group-level fields below
+                # surface the 'main' sub-agent's values as a default for
+                # the Fleet card.
+                "description": row["description"],
+                "display_name": row["display_name"],
             }
             if sn not in groups:
                 groups[sn] = {
@@ -593,7 +667,11 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                     "first_seen": agent_record["first_seen"],
                     "last_seen": agent_record["last_seen"],
                     "top_operations": [],
-                    "description": row["description"],
+                    # Group-level description/display_name start with
+                    # whatever the first sub-agent in this group has;
+                    # we'll prefer 'main' below if we see it.
+                    "description": agent_record["description"],
+                    "display_name": agent_record["display_name"],
                     "has_registration": False,
                     "platform": _detect_platform(
                         row["sample_resource_attributes"]
@@ -603,6 +681,13 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             g["agents"].append(agent_record)
             g["total_spans"] += agent_record["span_count"]
             g["total_errors"] += agent_record["error_count"]
+            # Prefer 'main' for the group-level description/display_name
+            # when it exists; otherwise leave whatever was seen first.
+            if agent_record["agent_id"] == "main":
+                if agent_record["description"]:
+                    g["description"] = agent_record["description"]
+                if agent_record["display_name"]:
+                    g["display_name"] = agent_record["display_name"]
             g["_weighted_sum_ms"] += (
                 agent_record["avg_duration_ms"] * agent_record["span_count"]
             )
@@ -749,11 +834,19 @@ def get_agent_summary(
         ORDER BY c DESC
         LIMIT 5
     """
+    # Description scoping mirrors span scoping: when agent_id is set,
+    # return that sub-agent's description; otherwise return the most
+    # recent across any sub-agent of the service (acts as a sensible
+    # "instance description" for the group view).
+    desc_agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    )
     desc_sql = f"""
         SELECT description
         FROM descriptions
         WHERE service_name = {PH}
           {desc_account_filter}
+          {desc_agent_filter}
         ORDER BY generated_at DESC, id DESC
         LIMIT 1
     """
@@ -775,12 +868,28 @@ def get_agent_summary(
     if agent_id is not None:
         span_args_list.append(agent_id)
     span_args = tuple(span_args_list)
-    # desc_sql has no agent filter — description is per service_name.
-    desc_args = (
-        (service_name, account_id)
-        if account_id is not None
-        else (service_name,)
-    )
+    # desc_sql now optionally takes the same agent_id filter.
+    desc_args_list: list[Any] = [service_name]
+    if account_id is not None:
+        desc_args_list.append(account_id)
+    if agent_id is not None:
+        desc_args_list.append(agent_id)
+    desc_args = tuple(desc_args_list)
+
+    # Display name is its own tiny lookup — at most one row per
+    # (service, agent). Cheap enough to fire unconditionally.
+    dn_sql = f"""
+        SELECT display_name
+        FROM agent_display_names
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          {f"AND account_id = {PH}" if account_id is not None else ""}
+        LIMIT 1
+    """
+    dn_args_list: list[Any] = [service_name, agent_id or "main"]
+    if account_id is not None:
+        dn_args_list.append(account_id)
+    dn_args = tuple(dn_args_list)
 
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(agg_sql, span_args)
@@ -797,6 +906,9 @@ def get_agent_summary(
         cur.execute(sample_sql, span_args)
         sample_row = cur.fetchone()
 
+        cur.execute(dn_sql, dn_args)
+        dn_row = cur.fetchone()
+
     return {
         "service_name": service_name,
         "agent_id": agent_id or "main" if agent_id is not None else None,
@@ -810,45 +922,50 @@ def get_agent_summary(
         "platform": _detect_platform(
             sample_row["resource_attributes"] if sample_row else None
         ),
+        "display_name": dn_row["display_name"] if dn_row else None,
     }
 
 
 def get_latest_description(
     service_name: str,
     account_id: int | None = None,
-    agent_id: str | None = None,  # noqa: ARG001 — accepted for API symmetry
+    agent_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the most recent description for an agent, or None.
 
-    The `agent_id` argument is accepted so callers can pass it uniformly
-    along with other per-agent lookups, but descriptions are tracked per
-    `service_name` (one description per instance), so the filter is a
-    no-op.
+    When `agent_id` is provided, scopes to that sub-agent. When omitted,
+    returns the latest description across any sub-agent — useful as the
+    "headline" description for an instance group.
     """
     account_filter = (
         f"AND account_id = {PH}" if account_id is not None else ""
     )
+    agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    )
     sql = f"""
-        SELECT service_name, description, span_count_analyzed, generated_at
+        SELECT service_name, agent_id, description, span_count_analyzed, generated_at
         FROM descriptions
         WHERE service_name = {PH}
           {account_filter}
+          {agent_filter}
         ORDER BY generated_at DESC, id DESC
         LIMIT 1
     """
-    args = (
-        (service_name, account_id)
-        if account_id is not None
-        else (service_name,)
-    )
+    args_list: list[Any] = [service_name]
+    if account_id is not None:
+        args_list.append(account_id)
+    if agent_id is not None:
+        args_list.append(agent_id)
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, args)
+        cur.execute(sql, tuple(args_list))
         row = cur.fetchone()
 
     if row is None:
         return None
     return {
         "service_name": row["service_name"],
+        "agent_id": row["agent_id"] or "main",
         "description": row["description"],
         "span_count_analyzed": row["span_count_analyzed"],
         "generated_at": _ts_to_str(row["generated_at"]),
@@ -948,6 +1065,100 @@ def get_latest_registration(
         "model": row["model"] or "",
         "created_at": _ts_to_str(row["created_at"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent display names (operator-editable per-agent labels)
+# ---------------------------------------------------------------------------
+
+
+def set_display_name(
+    service_name: str,
+    agent_id: str,
+    display_name: str,
+    account_id: int | None = None,
+) -> None:
+    """Upsert the operator-set display name for an agent. UNIQUE on
+    (account_id, service_name, agent_id) — a second call for the same
+    triple overwrites the previous value.
+
+    Trims whitespace; an empty string after trimming clears the row
+    (deletes it), so the agent falls back to its raw `service_name` /
+    `agent_id` labels in the UI.
+    """
+    clean = (display_name or "").strip()
+    if clean == "":
+        # Clear the row entirely so the UI falls back to defaults.
+        account_clause = (
+            f"AND account_id = {PH}"
+            if account_id is not None
+            else "AND account_id IS NULL"
+        )
+        sql = f"""
+            DELETE FROM agent_display_names
+            WHERE service_name = {PH}
+              AND COALESCE(agent_id, 'main') = {PH}
+              {account_clause}
+        """
+        args: tuple[Any, ...] = (service_name, agent_id or "main")
+        if account_id is not None:
+            args = (*args, account_id)
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(sql, args)
+        return
+
+    # Both backends support `INSERT ... ON CONFLICT ... DO UPDATE` for
+    # upsert semantics on the UNIQUE triple. SQLite has supported it
+    # since 3.24 (2018); Postgres since 9.5.
+    if USE_POSTGRES:
+        sql = """
+            INSERT INTO agent_display_names (
+                account_id, service_name, agent_id, display_name
+            ) VALUES (%s, %s, %s, %s)
+            ON CONFLICT (account_id, service_name, agent_id)
+            DO UPDATE SET display_name = EXCLUDED.display_name,
+                          updated_at = NOW()
+        """
+    else:
+        sql = """
+            INSERT INTO agent_display_names (
+                account_id, service_name, agent_id, display_name
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT (account_id, service_name, agent_id)
+            DO UPDATE SET display_name = excluded.display_name,
+                          updated_at = CURRENT_TIMESTAMP
+        """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (account_id, service_name, agent_id or "main", clean))
+
+
+def get_display_name(
+    service_name: str,
+    agent_id: str,
+    account_id: int | None = None,
+) -> str | None:
+    """Return the operator-set display name for an agent, or None when
+    no override exists."""
+    account_filter = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    sql = f"""
+        SELECT display_name
+        FROM agent_display_names
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          {account_filter}
+        LIMIT 1
+    """
+    args: tuple[Any, ...] = (service_name, agent_id or "main")
+    if account_id is not None:
+        args = (*args, account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        row = cur.fetchone()
+    return row["display_name"] if row else None
 
 
 # ---------------------------------------------------------------------------

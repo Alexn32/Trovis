@@ -244,8 +244,11 @@ function AgentCard({ group, onSelect }) {
         <div className="agent-card-title">
           <span className={`status-dot status-${status}`} />
           <span className="agent-name" title={group.service_name}>
-            {group.service_name}
+            {group.display_name || group.service_name}
           </span>
+          {group.display_name && (
+            <span className="agent-name-secondary">{group.service_name}</span>
+          )}
         </div>
         <Sparkline
           data={sparkData ?? []}
@@ -334,8 +337,11 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent }) {
           <div className="agent-card-title">
             <span className={`status-dot status-${status}`} />
             <span className="agent-name" title={group.service_name}>
-              {group.service_name}
+              {group.display_name || group.service_name}
             </span>
+            {group.display_name && (
+              <span className="agent-name-secondary">{group.service_name}</span>
+            )}
             <span className="agent-sub-count">
               · {group.agents.length} agents
             </span>
@@ -434,7 +440,16 @@ function SubAgentRow({ subAgent, onSelect }) {
     <li>
       <button type="button" className="subagent-row" onClick={onSelect}>
         <span className={`status-dot status-${status}`} />
-        <span className="subagent-id mono">{subAgent.agent_id}</span>
+        <span className="subagent-id">
+          {subAgent.display_name ? (
+            <>
+              {subAgent.display_name}{' '}
+              <span className="subagent-id-raw mono">({subAgent.agent_id})</span>
+            </>
+          ) : (
+            <span className="mono">{subAgent.agent_id}</span>
+          )}
+        </span>
         <span className="subagent-stat">
           {subAgent.span_count.toLocaleString()} spans
         </span>

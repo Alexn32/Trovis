@@ -80,6 +80,11 @@ async function request(path, options = {}) {
     err.status = res.status
     throw err
   }
+  // 204 No Content and other empty-body responses return null —
+  // res.json() would throw on an empty body.
+  if (res.status === 204 || res.headers.get('content-length') === '0') {
+    return null
+  }
   return res.json()
 }
 
@@ -131,6 +136,20 @@ export const api = {
         agentId,
       ),
     ),
+  // Operator-set human-readable label for one sub-agent. Empty
+  // displayName clears the override. Returns no body (204) on success.
+  setDisplayName(name, agentId, displayName) {
+    return request(
+      `/agents/${encodeURIComponent(name)}/display-name`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          agent_id: agentId || 'main',
+          display_name: displayName ?? '',
+        }),
+      },
+    )
+  },
 
   // --- ask ---
   // messages is the full chat thread; backend is stateless. Returns
