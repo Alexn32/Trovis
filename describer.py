@@ -274,3 +274,202 @@ def describe_agent(
         "span_count_analyzed": len(spans),
         "source": source,
     }
+
+
+# ---------------------------------------------------------------------------
+# Weekly summary + capability map (cached by main.py's endpoints)
+# ---------------------------------------------------------------------------
+
+
+WEEKLY_SYSTEM_PROMPT = (
+    "You are an AI analyst for Oversee. Given week-over-week stats for an "
+    "AI agent, write a 2-3 sentence plain-English summary of the week for "
+    "a non-technical operations manager. Lead with what the agent did, "
+    "then the most notable trend, then any concern or highlight. Be "
+    "direct and confident — no hedging, no 'it appears to'. Reference "
+    "concrete numbers when meaningful."
+)
+
+
+def _format_weekly_prompt(
+    service_name: str,
+    agent_id: str | None,
+    this_week: dict[str, Any],
+    last_week: dict[str, Any] | None,
+    registration: dict[str, Any] | None,
+    outputs: list[dict[str, Any]] | None,
+) -> str:
+    lines: list[str] = [
+        f"Agent: {service_name}" + (f" / {agent_id}" if agent_id else ""),
+        "",
+        "## This week",
+        f"- runs: {this_week['runs']}",
+        f"- errors: {this_week['errors']}",
+        f"- success_rate: {this_week['success_rate']:.1f}%",
+        f"- avg_duration_ms: {this_week['avg_duration_ms']:.0f}",
+    ]
+    if this_week.get("tools_used"):
+        lines.append(f"- tools_used: {', '.join(this_week['tools_used'])}")
+    if this_week.get("operations"):
+        lines.append(f"- operations: {', '.join(this_week['operations'])}")
+
+    if last_week:
+        lines.extend(
+            [
+                "",
+                "## Previous week (days 8-14)",
+                f"- runs: {last_week['runs']}",
+                f"- errors: {last_week['errors']}",
+                f"- success_rate: {last_week['success_rate']:.1f}%",
+                f"- avg_duration_ms: {last_week['avg_duration_ms']:.0f}",
+            ]
+        )
+    else:
+        lines.extend(["", "Previous week: no data (new agent)."])
+
+    if registration:
+        soul = registration.get("soul") or registration.get("identity") or ""
+        if soul:
+            lines.extend(["", "## Identity (truncated)", soul[:600]])
+
+    if outputs:
+        lines.extend(["", "## Recent captured outputs"])
+        for o in outputs[:3]:
+            content = (o.get("content") or "").replace("\n", " ")
+            lines.append(f"- [{o.get('content_type')}] {content[:200]}")
+
+    return "\n".join(lines)
+
+
+def weekly_summary(
+    service_name: str,
+    agent_id: str | None,
+    this_week: dict[str, Any],
+    last_week: dict[str, Any] | None,
+    registration: dict[str, Any] | None,
+    outputs: list[dict[str, Any]] | None,
+) -> str:
+    """Generate the 2-3 sentence weekly summary for one agent.
+
+    Raises APIKeyMissingError when ANTHROPIC_API_KEY is unset so the
+    caller can return a typed error to the client.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise APIKeyMissingError(
+            "ANTHROPIC_API_KEY is not set. Export it before generating summaries."
+        )
+    user_prompt = _format_weekly_prompt(
+        service_name, agent_id, this_week, last_week, registration, outputs
+    )
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=300,
+        system=WEEKLY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    return "".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    ).strip()
+
+
+CAPABILITIES_SYSTEM_PROMPT = (
+    "You are an AI analyst for Oversee. Based on an agent's "
+    "configuration and observed behavior, list its capabilities in "
+    "three categories. READS FROM: what data sources it accesses. "
+    "WRITES TO: what systems it changes. CAN DO: what concrete "
+    "actions it performs. Be specific and use plain English (a "
+    "non-technical manager should understand each entry). Return "
+    "valid JSON exactly matching this schema: "
+    '{"reads_from": [...], "writes_to": [...], "can_do": [...]}. '
+    "Return ONLY the JSON object — no prose, no markdown fence, no "
+    "explanation. Aim for 3-7 items per list. If a category is "
+    "truly empty (e.g. a read-only agent with no writes), return an "
+    "empty array, not null."
+)
+
+
+def _format_capabilities_prompt(
+    service_name: str,
+    agent_id: str | None,
+    registration: dict[str, Any] | None,
+    tools_used: list[str] | None,
+    operations: list[str] | None,
+) -> str:
+    lines: list[str] = [
+        f"Agent: {service_name}" + (f" / {agent_id}" if agent_id else ""),
+    ]
+    if registration:
+        for field in ("soul", "identity", "operating_manual"):
+            v = registration.get(field) or ""
+            if v:
+                lines.extend(["", f"## {field}.md", v[:2000]])
+    if tools_used:
+        lines.extend(["", "## Tools observed", ", ".join(tools_used)])
+    if operations:
+        lines.extend(["", "## Operations observed", ", ".join(operations)])
+    if not registration and not tools_used and not operations:
+        lines.append("(no registration or telemetry available)")
+    return "\n".join(lines)
+
+
+def capabilities(
+    service_name: str,
+    agent_id: str | None,
+    registration: dict[str, Any] | None,
+    tools_used: list[str] | None,
+    operations: list[str] | None,
+) -> dict[str, list[str]]:
+    """Generate the capability map JSON.
+
+    Robustly parses Claude's response — strips any accidental code
+    fences and falls back to an empty triple when the JSON is
+    unparseable so the endpoint can still return a 200 with empty
+    lists rather than a 500.
+    """
+    import json as _json
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise APIKeyMissingError(
+            "ANTHROPIC_API_KEY is not set. Export it before generating capabilities."
+        )
+
+    user_prompt = _format_capabilities_prompt(
+        service_name, agent_id, registration, tools_used, operations
+    )
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=600,
+        system=CAPABILITIES_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    raw = "".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    ).strip()
+
+    # Tolerate ```json fences just in case Claude ignores the "no fences"
+    # instruction.
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    try:
+        parsed = _json.loads(raw)
+    except (TypeError, ValueError):
+        parsed = {}
+
+    def _str_list(v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(x).strip() for x in v if isinstance(x, (str, int, float)) and str(x).strip()]
+
+    return {
+        "reads_from": _str_list(parsed.get("reads_from")),
+        "writes_to": _str_list(parsed.get("writes_to")),
+        "can_do": _str_list(parsed.get("can_do")),
+    }

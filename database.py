@@ -337,6 +337,38 @@ CREATE TABLE IF NOT EXISTS agent_owners (
 )
 """
 
+# Cache table for Claude-generated insights (weekly summaries,
+# capability maps, …). Polymorphic on `kind` so both insight types
+# share one table; `data` is a JSON blob whose shape is determined
+# by the caller. UPSERT on the unique 4-tuple keeps it a single row
+# per (account, service, agent, kind). TTL enforcement happens on the
+# read side (see get_insight's max_age_seconds parameter).
+_INSIGHTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS agent_insights (
+    id           SERIAL    PRIMARY KEY,
+    account_id   INTEGER,
+    service_name TEXT      NOT NULL,
+    agent_id     TEXT      NOT NULL DEFAULT 'main',
+    kind         TEXT      NOT NULL,
+    data         TEXT      NOT NULL,
+    generated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, service_name, agent_id, kind)
+)
+"""
+
+_INSIGHTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS agent_insights (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER,
+    service_name TEXT    NOT NULL,
+    agent_id     TEXT    NOT NULL DEFAULT 'main',
+    kind         TEXT    NOT NULL,
+    data         TEXT    NOT NULL,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, service_name, agent_id, kind)
+)
+"""
+
 # Operator-editable display name for an agent — keyed by the triple
 # (account, service_name, agent_id) so each sub-agent gets its own.
 # UPSERT on the unique triple to keep it a single row per agent.
@@ -388,6 +420,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_service_agent ON agent_owners(service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_account_id ON agent_owners(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_team_member ON agent_owners(team_member_id)",
+    "CREATE INDEX IF NOT EXISTS idx_insights_account_id ON agent_insights(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_insights_service_agent_kind ON agent_insights(service_name, agent_id, kind)",
 ]
 
 
@@ -410,6 +444,7 @@ def init_db() -> None:
             # references it. Order matters on first init only.
             _TEAM_DDL_PG,
             _OWNERS_DDL_PG,
+            _INSIGHTS_DDL_PG,
         ]
     else:
         ddls = [
@@ -421,6 +456,7 @@ def init_db() -> None:
             _DISPLAY_DDL_SQLITE,
             _TEAM_DDL_SQLITE,
             _OWNERS_DDL_SQLITE,
+            _INSIGHTS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -1567,6 +1603,205 @@ def get_agent_owner(
         "name": row["name"],
         "email": row["email"],
         "role": row["role"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-agent windowed aggregates (for weekly summaries)
+# ---------------------------------------------------------------------------
+
+
+def get_window_aggregate(
+    service_name: str,
+    agent_id: str,
+    start_time_ns: int,
+    end_time_ns: int,
+    account_id: int | None = None,
+) -> dict[str, Any]:
+    """Aggregate one agent's spans over an arbitrary time window.
+
+    Returns runs, errors, success_rate, avg_duration_ms, plus the
+    distinct tool names and operations seen in-window. `runs` counts
+    every span — message_received, tool_call, etc. — but the operations
+    list collapses to distinct `span_name`. Tool names are extracted
+    from spans that look like tool_calls (`oversee.tool.name` in the
+    attributes blob — checked via LIKE).
+    """
+    account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
+    base_args: list[Any] = [service_name, agent_id or "main", start_time_ns, end_time_ns]
+    if account_id is not None:
+        base_args.append(account_id)
+
+    agg_sql = f"""
+        SELECT
+            COUNT(*)                                       AS runs,
+            SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
+            AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms
+        FROM spans
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          AND start_time_unix >= {PH}
+          AND start_time_unix <  {PH}
+          {account_filter}
+    """
+    ops_sql = f"""
+        SELECT DISTINCT span_name
+        FROM spans
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          AND start_time_unix >= {PH}
+          AND start_time_unix <  {PH}
+          {account_filter}
+    """
+    # Tool names live inside the attributes JSON blob. Cheap LIKE filter
+    # to narrow candidate rows, then parse in Python to extract the
+    # actual values.
+    tools_sql = f"""
+        SELECT attributes
+        FROM spans
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          AND start_time_unix >= {PH}
+          AND start_time_unix <  {PH}
+          AND attributes LIKE '%"oversee.tool.name":%'
+          {account_filter}
+    """
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(agg_sql, tuple(base_args))
+        agg = cur.fetchone()
+        cur.execute(ops_sql, tuple(base_args))
+        ops_rows = cur.fetchall()
+        cur.execute(tools_sql, tuple(base_args))
+        tools_rows = cur.fetchall()
+
+    runs = (agg["runs"] if agg else 0) or 0
+    errors = (agg["errors"] if agg else 0) or 0
+    avg_ms = float(agg["avg_duration_ms"]) if agg and agg["avg_duration_ms"] else 0.0
+    success_rate = ((runs - errors) / runs * 100.0) if runs else 0.0
+
+    operations = sorted({r["span_name"] for r in ops_rows if r["span_name"]})
+
+    tool_set: set[str] = set()
+    for r in tools_rows:
+        try:
+            attrs = json.loads(r["attributes"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        name = attrs.get("oversee.tool.name")
+        if isinstance(name, str) and name:
+            tool_set.add(name)
+
+    return {
+        "runs": runs,
+        "errors": errors,
+        "success_rate": success_rate,
+        "avg_duration_ms": avg_ms,
+        "operations": operations,
+        "tools_used": sorted(tool_set),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Insights cache (weekly summaries, capability maps)
+# ---------------------------------------------------------------------------
+
+
+def save_insight(
+    account_id: int | None,
+    service_name: str,
+    agent_id: str,
+    kind: str,
+    data: dict[str, Any],
+) -> None:
+    """Upsert a JSON insight payload. `kind` distinguishes the row type
+    (e.g. 'weekly_summary', 'capabilities'). `data` is JSON-serialized
+    and the unique 4-tuple guarantees one row per kind per agent."""
+    payload = json.dumps(data)
+    if USE_POSTGRES:
+        sql = """
+            INSERT INTO agent_insights (account_id, service_name, agent_id, kind, data, generated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (account_id, service_name, agent_id, kind)
+            DO UPDATE SET data = EXCLUDED.data, generated_at = NOW()
+        """
+    else:
+        sql = """
+            INSERT INTO agent_insights (account_id, service_name, agent_id, kind, data, generated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT (account_id, service_name, agent_id, kind)
+            DO UPDATE SET data = excluded.data, generated_at = CURRENT_TIMESTAMP
+        """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, (account_id, service_name, agent_id or "main", kind, payload))
+
+
+def get_insight(
+    account_id: int | None,
+    service_name: str,
+    agent_id: str,
+    kind: str,
+    max_age_seconds: int | None = None,
+) -> dict[str, Any] | None:
+    """Read a cached insight. Returns the parsed payload + generated_at
+    when fresh enough; returns None when missing OR when older than
+    `max_age_seconds`. Stale rows aren't deleted — they get overwritten
+    by the next save_insight() call.
+    """
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    sql = f"""
+        SELECT data, generated_at
+        FROM agent_insights
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          AND kind = {PH}
+          {account_clause}
+        LIMIT 1
+    """
+    args: tuple[Any, ...] = (service_name, agent_id or "main", kind)
+    if account_id is not None:
+        args = (*args, account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        row = cur.fetchone()
+    if row is None:
+        return None
+
+    # TTL check. Postgres returns a datetime, SQLite a string — both
+    # need normalizing. We compare in UTC seconds since epoch.
+    if max_age_seconds is not None:
+        from datetime import datetime, timezone
+
+        raw = row["generated_at"]
+        try:
+            if isinstance(raw, str):
+                # SQLite returns "YYYY-MM-DD HH:MM:SS" in UTC.
+                gen = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if gen.tzinfo is None:
+                    gen = gen.replace(tzinfo=timezone.utc)
+            else:
+                gen = raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - gen).total_seconds()
+            if age > max_age_seconds:
+                return None
+        except (ValueError, AttributeError):
+            # If we can't parse the timestamp, treat as fresh — better
+            # to serve a slightly old summary than to retry indefinitely.
+            pass
+
+    try:
+        data = json.loads(row["data"])
+    except (TypeError, ValueError):
+        return None
+    return {
+        "data": data,
+        "generated_at": _ts_to_str(row["generated_at"]),
     }
 
 

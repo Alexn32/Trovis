@@ -147,6 +147,50 @@ class AgentOwnerSet(BaseModel):
     team_member_id: int
 
 
+class WeeklyTrends(BaseModel):
+    """Week-over-week percent deltas. Each field is None when there's
+    no previous-week data to compare against. Positive = up, negative
+    = down. For `errors_delta_pct` the frontend renders the inverse
+    color (down is good); the other fields render up-is-good."""
+
+    runs_delta_pct: float | None = None
+    errors_delta_pct: float | None = None
+    success_rate_delta_pct: float | None = None
+    avg_duration_delta_pct: float | None = None
+
+
+class WeeklySummary(BaseModel):
+    """Response for GET /agents/{service_name}/weekly. `summary` is
+    the 2-3 sentence Claude-generated paragraph (or empty when the
+    Anthropic API key isn't configured). `generated_at` reflects when
+    the cached summary was produced; the stats themselves are always
+    fresh."""
+
+    runs: int
+    errors: int
+    success_rate: float
+    avg_duration_ms: float
+    tools_used: list[str] = Field(default_factory=list)
+    operations: list[str] = Field(default_factory=list)
+    cost_estimate: float | None = None
+    trends: WeeklyTrends = Field(default_factory=WeeklyTrends)
+    summary: str = ""
+    summary_unavailable: bool = False
+    generated_at: str | None = None
+
+
+class Capabilities(BaseModel):
+    """Response for GET /agents/{service_name}/capabilities. Each
+    field is a list of plain-English phrases. Empty list when Claude
+    couldn't infer any items (or when the key is missing)."""
+
+    reads_from: list[str] = Field(default_factory=list)
+    writes_to: list[str] = Field(default_factory=list)
+    can_do: list[str] = Field(default_factory=list)
+    generated_at: str | None = None
+    unavailable: bool = False
+
+
 class OwnedAgent(BaseModel):
     """One (sub-)agent assignment for a team member, as returned by
     GET /team/{member_id}/agents. Carries enough to render a clickable
