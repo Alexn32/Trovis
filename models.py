@@ -147,6 +147,19 @@ class AgentOwnerSet(BaseModel):
     team_member_id: int
 
 
+class OwnedAgent(BaseModel):
+    """One (sub-)agent assignment for a team member, as returned by
+    GET /team/{member_id}/agents. Carries enough to render a clickable
+    row that links to the agent's detail page, plus a couple of stats
+    so the team member's "agents" list is informative on its own."""
+
+    service_name: str
+    agent_id: str
+    display_name: str | None = None
+    last_seen: str | None = None
+    span_count: int = 0
+
+
 class AgentDescription(BaseModel):
     """A single Claude-generated description of an agent.
 

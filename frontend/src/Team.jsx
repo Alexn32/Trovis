@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
+import { ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
+import { relativeTime } from './utils.js'
 
 // Team management view. Two sections:
 //   - Add form at the top (name required; email + role optional).
@@ -9,7 +11,7 @@ import { Spinner } from './ui.jsx'
 // member (handled on the backend), so removing a person doesn't leave
 // dangling assignments.
 
-export default function Team() {
+export default function Team({ onSelectAgent }) {
   const [members, setMembers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -79,7 +81,12 @@ export default function Team() {
       {!loading && members.length > 0 && (
         <ul className="team-list">
           {members.map((m) => (
-            <TeamRow key={m.id} member={m} onDelete={handleDelete} />
+            <TeamRow
+              key={m.id}
+              member={m}
+              onDelete={handleDelete}
+              onSelectAgent={onSelectAgent}
+            />
           ))}
         </ul>
       )}
@@ -162,45 +169,138 @@ function AddMemberForm({ onCreated }) {
   )
 }
 
-function TeamRow({ member, onDelete }) {
+function TeamRow({ member, onDelete, onSelectAgent }) {
   const [confirming, setConfirming] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  // null = not yet loaded; [] = loaded and empty.
+  const [agents, setAgents] = useState(null)
+  const [loadingAgents, setLoadingAgents] = useState(false)
+  const [agentsError, setAgentsError] = useState(null)
+
+  async function toggleExpanded() {
+    const next = !expanded
+    setExpanded(next)
+    // Lazy-load on first expand. Subsequent expands reuse the cached
+    // list — the team page is short-lived enough that stale data
+    // between renders isn't a real concern.
+    if (next && agents === null && !loadingAgents) {
+      setLoadingAgents(true)
+      setAgentsError(null)
+      try {
+        setAgents(await api.getTeamMemberAgents(member.id))
+      } catch (e) {
+        setAgentsError(e.message || 'Could not load assignments')
+      } finally {
+        setLoadingAgents(false)
+      }
+    }
+  }
+
   return (
-    <li className="team-row">
-      <div className="team-row-main">
-        <div className="team-row-name">{member.name}</div>
-        <div className="team-row-meta">
-          {member.role && <span className="team-row-role">{member.role}</span>}
-          {member.email && (
-            <span className="team-row-email mono">{member.email}</span>
-          )}
-        </div>
-      </div>
-      {confirming ? (
-        <div className="team-row-confirm">
-          <span>Remove?</span>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => onDelete(member.id)}
-          >
-            Yes, remove
-          </button>
-          <button
-            type="button"
-            className="btn btn-link btn-sm"
-            onClick={() => setConfirming(false)}
-          >
-            Cancel
-          </button>
-        </div>
-      ) : (
+    <li className="team-row-wrapper">
+      <div className="team-row">
         <button
           type="button"
-          className="btn-link-inline team-row-delete"
-          onClick={() => setConfirming(true)}
+          className="team-row-toggle"
+          onClick={toggleExpanded}
+          aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse assignments' : 'Show assignments'}
         >
-          Remove
+          {expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
         </button>
+        <div className="team-row-main" onClick={toggleExpanded}>
+          <div className="team-row-name">{member.name}</div>
+          <div className="team-row-meta">
+            {member.role && (
+              <span className="team-row-role">{member.role}</span>
+            )}
+            {member.email && (
+              <span className="team-row-email mono">{member.email}</span>
+            )}
+          </div>
+        </div>
+        {confirming ? (
+          <div className="team-row-confirm">
+            <span>Remove?</span>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => onDelete(member.id)}
+            >
+              Yes, remove
+            </button>
+            <button
+              type="button"
+              className="btn btn-link btn-sm"
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn-link-inline team-row-delete"
+            onClick={() => setConfirming(true)}
+          >
+            Remove
+          </button>
+        )}
+      </div>
+
+      {expanded && (
+        <div className="team-row-assignments">
+          {loadingAgents && (
+            <div className="team-assignments-empty">Loading…</div>
+          )}
+          {agentsError && !loadingAgents && (
+            <div className="team-assignments-empty error">{agentsError}</div>
+          )}
+          {!loadingAgents && agents && agents.length === 0 && (
+            <div className="team-assignments-empty">
+              No agents assigned. Open any agent and use the "Assign owner"
+              button to point them at this person.
+            </div>
+          )}
+          {!loadingAgents && agents && agents.length > 0 && (
+            <ul className="team-assignments-list">
+              {agents.map((a) => (
+                <li key={`${a.service_name}/${a.agent_id}`}>
+                  <button
+                    type="button"
+                    className="team-assignment-row"
+                    onClick={() =>
+                      onSelectAgent &&
+                      onSelectAgent(
+                        a.service_name,
+                        a.agent_id === 'main' ? undefined : a.agent_id,
+                      )
+                    }
+                  >
+                    <span className="team-assignment-name">
+                      {a.display_name || a.service_name}
+                      {a.agent_id && a.agent_id !== 'main' && (
+                        <span className="team-assignment-sub mono">
+                          {' '}
+                          · {a.agent_id}
+                        </span>
+                      )}
+                    </span>
+                    <span className="team-assignment-meta">
+                      {a.span_count.toLocaleString()} spans
+                      {a.last_seen && (
+                        <>
+                          {' · '}
+                          {relativeTime(a.last_seen)}
+                        </>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </li>
   )

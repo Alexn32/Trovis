@@ -1469,6 +1469,71 @@ def remove_agent_owner(
         return cur.rowcount > 0
 
 
+def get_agents_for_team_member(
+    account_id: int | None, member_id: int
+) -> list[dict[str, Any]]:
+    """Return the list of (service_name, agent_id) assignments for one
+    team member, with the agent's display_name override (if any) and
+    a couple of basic stats — span count and last-seen — folded in
+    via correlated subqueries. Ordering is service_name then agent_id
+    so the list reads predictably across re-renders.
+    """
+    account_clause = (
+        f"AND o.account_id = {PH}"
+        if account_id is not None
+        else "AND o.account_id IS NULL"
+    )
+    # Correlated subqueries handle the per-row stats; with the
+    # idx_spans_service_agent index each lookup is one indexed seek.
+    # Same applies to the display_names LEFT JOIN.
+    sql = f"""
+        SELECT
+            o.service_name,
+            COALESCE(o.agent_id, 'main')                 AS agent_id,
+            dn.display_name                              AS display_name,
+            (SELECT MAX(start_time_unix)
+               FROM spans s
+              WHERE s.service_name = o.service_name
+                AND COALESCE(s.agent_id, 'main') = COALESCE(o.agent_id, 'main')
+                {("AND s.account_id = " + PH) if account_id is not None else ""}
+            )                                            AS last_seen_ns,
+            (SELECT COUNT(*)
+               FROM spans s
+              WHERE s.service_name = o.service_name
+                AND COALESCE(s.agent_id, 'main') = COALESCE(o.agent_id, 'main')
+                {("AND s.account_id = " + PH) if account_id is not None else ""}
+            )                                            AS span_count
+        FROM agent_owners o
+        LEFT JOIN agent_display_names dn
+          ON dn.service_name = o.service_name
+         AND COALESCE(dn.agent_id, 'main') = COALESCE(o.agent_id, 'main')
+         {("AND dn.account_id = " + PH) if account_id is not None else "AND dn.account_id IS NULL"}
+        WHERE o.team_member_id = {PH}
+          {account_clause}
+        ORDER BY o.service_name ASC, COALESCE(o.agent_id, 'main') ASC
+    """
+    # Args order: last_seen acct, span_count acct, dn acct, member_id, owners acct.
+    args_list: list[Any] = []
+    if account_id is not None:
+        args_list.extend([account_id, account_id, account_id])
+    args_list.append(member_id)
+    if account_id is not None:
+        args_list.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args_list))
+        rows = cur.fetchall()
+    return [
+        {
+            "service_name": r["service_name"],
+            "agent_id": r["agent_id"] or "main",
+            "display_name": r["display_name"],
+            "last_seen": _ns_to_iso(r["last_seen_ns"]) if r["last_seen_ns"] else None,
+            "span_count": r["span_count"] or 0,
+        }
+        for r in rows
+    ]
+
+
 def get_agent_owner(
     account_id: int | None, service_name: str, agent_id: str
 ) -> dict[str, Any] | None:

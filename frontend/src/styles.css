@@ -1252,6 +1252,106 @@ a:hover {
   color: var(--error);
 }
 
+/* Wrapper around the row + expansion so they share the same card
+   look but the assignment list visually flows out below. */
+.team-row-wrapper {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.team-list .team-row-wrapper + .team-row-wrapper {
+  margin-top: 0; /* gap on the parent list already handles spacing */
+}
+
+/* The chevron toggle on the left. Click target also covers the
+   name/meta column so the whole row is clickable. */
+.team-list .team-row {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+.team-row-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.team-row-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-elev);
+}
+
+.team-row-assignments {
+  padding: 4px 16px 14px 48px;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border-default);
+}
+
+.team-assignments-empty {
+  padding: 12px 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+.team-assignments-empty.error {
+  color: var(--error);
+  font-style: normal;
+}
+
+.team-assignments-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.team-assignment-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.team-assignment-row:hover {
+  border-color: var(--border-strong);
+}
+
+.team-assignment-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.team-assignment-sub {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.team-assignment-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: "IBM Plex Mono", monospace;
+  white-space: nowrap;
+}
+
 .detail-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
