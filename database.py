@@ -285,6 +285,58 @@ CREATE TABLE IF NOT EXISTS api_keys (
 )
 """
 
+# Human team members an operator manages. Per-account scoping; email
+# is optional but UNIQUE within an account when set (NULLs allowed as
+# duplicates per standard SQL semantics on both PG and SQLite).
+_TEAM_DDL_PG = """
+CREATE TABLE IF NOT EXISTS team_members (
+    id         SERIAL    PRIMARY KEY,
+    account_id INTEGER   NOT NULL,
+    name       TEXT      NOT NULL,
+    email      TEXT,
+    role       TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, email)
+)
+"""
+
+_TEAM_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS team_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    name       TEXT    NOT NULL,
+    email      TEXT,
+    role       TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, email)
+)
+"""
+
+# Assignment of a sub-agent to a human owner. UNIQUE on the triple so
+# each (account, service, agent) has at most one owner. Re-assigning
+# is an UPSERT.
+_OWNERS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS agent_owners (
+    id              SERIAL  PRIMARY KEY,
+    account_id      INTEGER NOT NULL,
+    service_name    TEXT    NOT NULL,
+    agent_id        TEXT    DEFAULT 'main',
+    team_member_id  INTEGER REFERENCES team_members(id),
+    UNIQUE (account_id, service_name, agent_id)
+)
+"""
+
+_OWNERS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS agent_owners (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL,
+    service_name    TEXT    NOT NULL,
+    agent_id        TEXT    DEFAULT 'main',
+    team_member_id  INTEGER REFERENCES team_members(id),
+    UNIQUE (account_id, service_name, agent_id)
+)
+"""
+
 # Operator-editable display name for an agent — keyed by the triple
 # (account, service_name, agent_id) so each sub-agent gets its own.
 # UPSERT on the unique triple to keep it a single row per agent.
@@ -332,6 +384,10 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_registrations_account_id ON agent_registrations(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_display_names_service_agent ON agent_display_names(service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_display_names_account_id ON agent_display_names(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_team_members_account_id ON team_members(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_owners_service_agent ON agent_owners(service_name, agent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_owners_account_id ON agent_owners(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_owners_team_member ON agent_owners(team_member_id)",
 ]
 
 
@@ -350,6 +406,10 @@ def init_db() -> None:
             _ACCOUNTS_DDL_PG,
             _API_KEYS_DDL_PG,
             _DISPLAY_DDL_PG,
+            # team_members must come before agent_owners — the FK
+            # references it. Order matters on first init only.
+            _TEAM_DDL_PG,
+            _OWNERS_DDL_PG,
         ]
     else:
         ddls = [
@@ -359,6 +419,8 @@ def init_db() -> None:
             _ACCOUNTS_DDL_SQLITE,
             _API_KEYS_DDL_SQLITE,
             _DISPLAY_DDL_SQLITE,
+            _TEAM_DDL_SQLITE,
+            _OWNERS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -535,6 +597,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     dn_filter = (
         f"AND dn.account_id = {PH}" if account_id is not None else ""
     )
+    own_filter = (
+        f"AND o.account_id = {PH}" if account_id is not None else ""
+    )
     sample_acct_filter = (
         f"AND s2.account_id = {PH}" if account_id is not None else ""
     )
@@ -594,6 +659,32 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 LIMIT 1
             )                                                AS display_name,
             (
+                SELECT m.name
+                FROM agent_owners o
+                JOIN team_members m ON m.id = o.team_member_id
+                WHERE o.service_name = spans.service_name
+                  AND COALESCE(o.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
+                  {own_filter}
+                LIMIT 1
+            )                                                AS owner_name,
+            (
+                SELECT m.role
+                FROM agent_owners o
+                JOIN team_members m ON m.id = o.team_member_id
+                WHERE o.service_name = spans.service_name
+                  AND COALESCE(o.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
+                  {own_filter}
+                LIMIT 1
+            )                                                AS owner_role,
+            (
+                SELECT o.team_member_id
+                FROM agent_owners o
+                WHERE o.service_name = spans.service_name
+                  AND COALESCE(o.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
+                  {own_filter}
+                LIMIT 1
+            )                                                AS owner_id,
+            (
                 SELECT resource_attributes
                 FROM spans s2
                 WHERE s2.service_name = spans.service_name
@@ -607,9 +698,11 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
         ORDER BY last_seen_ns DESC
     """
     # Argument order matches the {PH} occurrences left-to-right in the SQL:
-    # desc_filter, reg_filter, dn_filter, sample_acct_filter, span_filter.
+    # desc_filter (1) + reg_filter (1) + dn_filter (1) + 3× own_filter
+    # (the three owner subqueries each carry their own account scope) +
+    # sample_acct_filter (1) + span_filter (1) = 8 placeholders.
     agg_args = (
-        (account_id, account_id, account_id, account_id, account_id)
+        (account_id,) * 8
         if account_id is not None
         else ()
     )
@@ -653,6 +746,11 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 # the Fleet card.
                 "description": row["description"],
                 "display_name": row["display_name"],
+                # Owner — the human team member assigned. None when
+                # the sub-agent has no owner.
+                "owner_id": row["owner_id"],
+                "owner_name": row["owner_name"],
+                "owner_role": row["owner_role"],
             }
             if sn not in groups:
                 groups[sn] = {
@@ -667,11 +765,13 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                     "first_seen": agent_record["first_seen"],
                     "last_seen": agent_record["last_seen"],
                     "top_operations": [],
-                    # Group-level description/display_name start with
-                    # whatever the first sub-agent in this group has;
-                    # we'll prefer 'main' below if we see it.
+                    # Group-level description/display_name/owner start
+                    # with whatever the first sub-agent in this group
+                    # has; we'll prefer 'main' below if we see it.
                     "description": agent_record["description"],
                     "display_name": agent_record["display_name"],
+                    "owner_name": agent_record["owner_name"],
+                    "owner_role": agent_record["owner_role"],
                     "has_registration": False,
                     "platform": _detect_platform(
                         row["sample_resource_attributes"]
@@ -681,13 +781,16 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             g["agents"].append(agent_record)
             g["total_spans"] += agent_record["span_count"]
             g["total_errors"] += agent_record["error_count"]
-            # Prefer 'main' for the group-level description/display_name
-            # when it exists; otherwise leave whatever was seen first.
+            # Prefer 'main' for the group-level description/display_name/
+            # owner when it exists; otherwise leave whatever was seen first.
             if agent_record["agent_id"] == "main":
                 if agent_record["description"]:
                     g["description"] = agent_record["description"]
                 if agent_record["display_name"]:
                     g["display_name"] = agent_record["display_name"]
+                if agent_record["owner_name"]:
+                    g["owner_name"] = agent_record["owner_name"]
+                    g["owner_role"] = agent_record["owner_role"]
             g["_weighted_sum_ms"] += (
                 agent_record["avg_duration_ms"] * agent_record["span_count"]
             )
@@ -891,6 +994,19 @@ def get_agent_summary(
         dn_args_list.append(account_id)
     dn_args = tuple(dn_args_list)
 
+    # Owner lookup — joins agent_owners → team_members. Same shape as
+    # get_agent_owner but inlined so we keep this in one round-trip.
+    owner_sql = f"""
+        SELECT m.id AS team_member_id, m.name AS owner_name, m.role AS owner_role
+        FROM agent_owners o
+        JOIN team_members m ON m.id = o.team_member_id
+        WHERE o.service_name = {PH}
+          AND COALESCE(o.agent_id, 'main') = {PH}
+          {f"AND o.account_id = {PH}" if account_id is not None else ""}
+        LIMIT 1
+    """
+    owner_args = dn_args  # same triple
+
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(agg_sql, span_args)
         row = cur.fetchone()
@@ -909,6 +1025,9 @@ def get_agent_summary(
         cur.execute(dn_sql, dn_args)
         dn_row = cur.fetchone()
 
+        cur.execute(owner_sql, owner_args)
+        owner_row = cur.fetchone()
+
     return {
         "service_name": service_name,
         "agent_id": agent_id or "main" if agent_id is not None else None,
@@ -923,6 +1042,9 @@ def get_agent_summary(
             sample_row["resource_attributes"] if sample_row else None
         ),
         "display_name": dn_row["display_name"] if dn_row else None,
+        "owner_id": owner_row["team_member_id"] if owner_row else None,
+        "owner_name": owner_row["owner_name"] if owner_row else None,
+        "owner_role": owner_row["owner_role"] if owner_row else None,
     }
 
 
@@ -1159,6 +1281,228 @@ def get_display_name(
         cur.execute(sql, args)
         row = cur.fetchone()
     return row["display_name"] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Team members + agent ownership
+# ---------------------------------------------------------------------------
+
+
+class TeamMemberEmailExistsError(Exception):
+    """Raised when create_team_member hits UNIQUE(account_id, email)."""
+
+
+def create_team_member(
+    account_id: int | None,
+    name: str,
+    email: str | None = None,
+    role: str | None = None,
+) -> dict[str, Any]:
+    """Insert a new team member and return the resulting row.
+
+    Name is required; email and role are optional. Email is stored as
+    NULL when not provided (so multiple "no email" entries coexist —
+    the UNIQUE constraint treats NULLs as distinct).
+    """
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("name is required")
+    clean_email = (email or "").strip() or None
+    clean_role = (role or "").strip() or None
+
+    if USE_POSTGRES:
+        sql = """
+            INSERT INTO team_members (account_id, name, email, role)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, account_id, name, email, role, created_at
+        """
+        args = (account_id, clean_name, clean_email, clean_role)
+        try:
+            with _connect() as conn, _cursor(conn) as cur:
+                cur.execute(sql, args)
+                row = cur.fetchone()
+        except psycopg2.errors.UniqueViolation as e:
+            raise TeamMemberEmailExistsError(
+                f"a team member with email '{clean_email}' already exists"
+            ) from e
+    else:
+        sql = """
+            INSERT INTO team_members (account_id, name, email, role)
+            VALUES (?, ?, ?, ?)
+        """
+        try:
+            with _connect() as conn, _cursor(conn) as cur:
+                cur.execute(sql, (account_id, clean_name, clean_email, clean_role))
+                new_id = cur.lastrowid
+                cur.execute(
+                    "SELECT id, account_id, name, email, role, created_at "
+                    "FROM team_members WHERE id = ?",
+                    (new_id,),
+                )
+                row = cur.fetchone()
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE" in str(e):
+                raise TeamMemberEmailExistsError(
+                    f"a team member with email '{clean_email}' already exists"
+                ) from e
+            raise
+
+    return {
+        "id": row["id"],
+        "account_id": row["account_id"],
+        "name": row["name"],
+        "email": row["email"],
+        "role": row["role"],
+        "created_at": _ts_to_str(row["created_at"]),
+    }
+
+
+def get_team_members(account_id: int | None) -> list[dict[str, Any]]:
+    """Return the team members for an account, oldest first (insertion
+    order is the natural sort for a team roster)."""
+    account_filter = (
+        f"WHERE account_id = {PH}"
+        if account_id is not None
+        else "WHERE account_id IS NULL"
+    )
+    sql = f"""
+        SELECT id, account_id, name, email, role, created_at
+        FROM team_members
+        {account_filter}
+        ORDER BY id ASC
+    """
+    args: tuple[Any, ...] = (account_id,) if account_id is not None else ()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+    return [
+        {
+            "id": r["id"],
+            "account_id": r["account_id"],
+            "name": r["name"],
+            "email": r["email"],
+            "role": r["role"],
+            "created_at": _ts_to_str(r["created_at"]),
+        }
+        for r in rows
+    ]
+
+
+def delete_team_member(account_id: int | None, member_id: int) -> bool:
+    """Delete a team member and clear any agent assignments that
+    pointed to them. SQLite's FK enforcement requires PRAGMA
+    foreign_keys=ON (we don't rely on it), so we handle the cascade in
+    code: clean agent_owners first, then drop the team_member row.
+    Returns True when a row was deleted.
+    """
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+
+    with _connect() as conn, _cursor(conn) as cur:
+        # Clear any agent assignments before deleting the team member.
+        # Scope by account to avoid clearing rows owned by another tenant.
+        cur.execute(
+            f"DELETE FROM agent_owners WHERE team_member_id = {PH} {account_clause}",
+            (member_id,) if account_id is None else (member_id, account_id),
+        )
+        # Then delete the member itself.
+        cur.execute(
+            f"DELETE FROM team_members WHERE id = {PH} {account_clause}",
+            (member_id,) if account_id is None else (member_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def set_agent_owner(
+    account_id: int | None,
+    service_name: str,
+    agent_id: str,
+    team_member_id: int,
+) -> None:
+    """Upsert the owner assignment for one sub-agent. UNIQUE on
+    (account_id, service_name, agent_id) — re-assigning overwrites."""
+    if USE_POSTGRES:
+        sql = """
+            INSERT INTO agent_owners (account_id, service_name, agent_id, team_member_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (account_id, service_name, agent_id)
+            DO UPDATE SET team_member_id = EXCLUDED.team_member_id
+        """
+    else:
+        sql = """
+            INSERT INTO agent_owners (account_id, service_name, agent_id, team_member_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (account_id, service_name, agent_id)
+            DO UPDATE SET team_member_id = excluded.team_member_id
+        """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            sql,
+            (account_id, service_name, agent_id or "main", team_member_id),
+        )
+
+
+def remove_agent_owner(
+    account_id: int | None, service_name: str, agent_id: str
+) -> bool:
+    """Delete the owner assignment for one sub-agent. Returns True
+    when a row was removed."""
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    sql = f"""
+        DELETE FROM agent_owners
+        WHERE service_name = {PH}
+          AND COALESCE(agent_id, 'main') = {PH}
+          {account_clause}
+    """
+    args: tuple[Any, ...] = (service_name, agent_id or "main")
+    if account_id is not None:
+        args = (*args, account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        return cur.rowcount > 0
+
+
+def get_agent_owner(
+    account_id: int | None, service_name: str, agent_id: str
+) -> dict[str, Any] | None:
+    """Return the team member assigned to a sub-agent, or None when
+    unassigned. Joins through agent_owners so we get the full member
+    record in one round-trip."""
+    account_clause = (
+        f"AND o.account_id = {PH}"
+        if account_id is not None
+        else "AND o.account_id IS NULL"
+    )
+    sql = f"""
+        SELECT m.id, m.name, m.email, m.role
+        FROM agent_owners o
+        JOIN team_members m ON m.id = o.team_member_id
+        WHERE o.service_name = {PH}
+          AND COALESCE(o.agent_id, 'main') = {PH}
+          {account_clause}
+        LIMIT 1
+    """
+    args: tuple[Any, ...] = (service_name, agent_id or "main")
+    if account_id is not None:
+        args = (*args, account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "team_member_id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "role": row["role"],
+    }
 
 
 # ---------------------------------------------------------------------------

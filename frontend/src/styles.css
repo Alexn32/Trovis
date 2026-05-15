@@ -1023,6 +1023,235 @@ a:hover {
   margin: 0;
 }
 
+/* ---------- owner row (in AgentDetail header) ---------- */
+
+.owner-row {
+  position: relative;
+  margin: 4px 0 12px;
+  font-size: 13px;
+}
+
+.owner-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+.owner-label strong {
+  color: var(--text-primary);
+}
+.owner-role {
+  color: var(--text-dim);
+}
+
+.owner-assign-link {
+  background: transparent;
+  border: 1px dashed var(--border-default);
+  border-radius: 6px;
+  color: var(--text-dim);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.owner-assign-link:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.btn-link-inline {
+  background: transparent;
+  border: none;
+  color: var(--text-link, var(--text-secondary));
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+.btn-link-inline:hover {
+  color: var(--text-primary);
+}
+
+.owner-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 320px;
+  max-width: 480px;
+  z-index: 20;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  padding: 8px;
+}
+
+.owner-dropdown-empty {
+  padding: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.owner-dropdown-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.owner-dropdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.owner-dropdown-item:hover {
+  background: var(--bg-elev);
+}
+.owner-dropdown-item.selected {
+  background: var(--bg-elev);
+  font-weight: 500;
+}
+.owner-dropdown-role {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.owner-dropdown-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-default);
+}
+
+.owner-dropdown-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid var(--border-default);
+}
+.owner-dropdown-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Owner tags on Fleet cards. */
+.owner-tag {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.owner-tag strong {
+  color: var(--text-primary);
+}
+.owner-tag-role {
+  color: var(--text-dim);
+}
+
+.subagent-owner {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---------- team view ---------- */
+
+.team-header {
+  margin-bottom: 24px;
+}
+
+.team-subtitle {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  max-width: 640px;
+}
+
+.team-add-form {
+  display: grid;
+  grid-template-columns: 1.4fr 1.4fr 1fr auto;
+  gap: 8px;
+  margin-bottom: 24px;
+  align-items: start;
+}
+.team-add-error {
+  grid-column: 1 / -1;
+}
+
+.team-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.team-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+}
+
+.team-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.team-row-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.team-row-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.team-row-role {
+  color: var(--text-secondary);
+}
+
+.team-row-email {
+  color: var(--text-dim);
+}
+
+.team-row-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.team-row-delete {
+  color: var(--text-dim);
+}
+.team-row-delete:hover {
+  color: var(--error);
+}
+
 .detail-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);

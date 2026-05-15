@@ -5,6 +5,7 @@ import AgentDetail from './AgentDetail.jsx'
 import Ask from './Ask.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
+import Team from './Team.jsx'
 import { api, clearApiKey, getApiKey } from './api.js'
 import {
   MonitorIcon,
@@ -32,7 +33,7 @@ function AppInner() {
   const initial = getApiKey()
   const [authed, setAuthed] = useState(initial)
   const [restoring, setRestoring] = useState(initial !== null)
-  const [tab, setTab] = useState('fleet') // 'fleet' | 'ask'
+  const [tab, setTab] = useState('fleet') // 'fleet' | 'ask' | 'team'
   // Overlay variants:
   //   {kind: 'detail', serviceName, agentId?} — agentId set when drilling
   //     into a specific sub-agent of a multi-agent instance.
@@ -117,6 +118,8 @@ function AppInner() {
     mainContent = <AddAgent onClose={closeOverlay} />
   } else if (tab === 'ask') {
     mainContent = <Ask />
+  } else if (tab === 'team') {
+    mainContent = <Team />
   } else {
     mainContent = (
       <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />
@@ -166,6 +169,15 @@ function Header({ tab, onTabChange, onAddAgent, apiKey, onLogout }) {
             onClick={() => onTabChange('ask')}
           >
             Ask
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'team'}
+            className={`tab ${tab === 'team' ? 'tab-active' : ''}`}
+            onClick={() => onTabChange('team')}
+          >
+            Team
           </button>
         </nav>
       </div>
