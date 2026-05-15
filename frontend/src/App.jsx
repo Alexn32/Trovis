@@ -119,7 +119,7 @@ function AppInner() {
   } else if (tab === 'ask') {
     mainContent = <Ask />
   } else if (tab === 'team') {
-    mainContent = <Team />
+    mainContent = <Team onSelectAgent={openDetail} />
   } else {
     mainContent = (
       <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />

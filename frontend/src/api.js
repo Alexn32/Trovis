@@ -157,6 +157,9 @@ export const api = {
     request('/team', { method: 'POST', body: JSON.stringify(data) }),
   deleteTeamMember: (id) =>
     request(`/team/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Agents owned by one team member. Returns [] when none assigned.
+  getTeamMemberAgents: (id) =>
+    request(`/team/${encodeURIComponent(id)}/agents`),
   // Assign a team member as the human owner of one sub-agent. The data
   // payload is `{ agent_id, team_member_id }`. Returns null (204).
   setAgentOwner: (serviceName, data) =>

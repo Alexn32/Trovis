@@ -48,6 +48,7 @@ from models import (
     NewKeyResponse,
     SignupRequest,
     SignupResponse,
+    OwnedAgent,
     SpanRecord,
     TeamMember,
     TeamMemberCreate,
@@ -601,6 +602,21 @@ async def remove_team_member(member_id: int, request: Request) -> None:
     pointed to them. 204 even when no row was deleted — idempotent."""
     account_id = getattr(request.state, "account_id", None)
     database.delete_team_member(account_id=account_id, member_id=member_id)
+
+
+@app.get("/team/{member_id}/agents", response_model=list[OwnedAgent])
+async def get_team_member_agents(
+    member_id: int, request: Request
+) -> list[OwnedAgent]:
+    """Return the agents owned by this team member, with display name
+    and basic stats. Empty list when the member has no assignments."""
+    account_id = getattr(request.state, "account_id", None)
+    return [
+        OwnedAgent(**a)
+        for a in database.get_agents_for_team_member(
+            account_id=account_id, member_id=member_id
+        )
+    ]
 
 
 @app.get("/agents/{service_name}/registration", response_model=AgentRegistration)
