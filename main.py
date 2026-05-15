@@ -48,10 +48,13 @@ from models import (
     NewKeyResponse,
     SignupRequest,
     SignupResponse,
+    Capabilities,
     OwnedAgent,
     SpanRecord,
     TeamMember,
     TeamMemberCreate,
+    WeeklySummary,
+    WeeklyTrends,
 )
 
 VERSION = "0.1.0"
@@ -662,6 +665,219 @@ async def agent_outputs(
             agent_id=agent_id,
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# Weekly summary + capability map
+# ---------------------------------------------------------------------------
+#
+# Both endpoints follow the same pattern: compute the cheap stuff (DB
+# aggregates) every time, cache the expensive Claude-generated bits
+# with a TTL. The summary text / capability JSON is what gets cached
+# (via agent_insights); the underlying stats are always recomputed.
+
+_WEEKLY_SUMMARY_TTL_SECONDS = 60 * 60  # 1 hour
+_CAPABILITIES_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+_NS_PER_DAY = 24 * 60 * 60 * 1_000_000_000
+
+
+def _pct_delta(current: float, previous: float) -> float | None:
+    """Percent change from `previous` to `current`. None when no prior
+    baseline (previous == 0 with current also 0 → no signal). Caps
+    very large deltas at ±999% so the UI doesn't have to handle
+    huge numbers from divide-by-near-zero cases.
+    """
+    if previous == 0:
+        return None if current == 0 else 999.0
+    raw = (current - previous) / previous * 100.0
+    if raw > 999.0:
+        return 999.0
+    if raw < -999.0:
+        return -999.0
+    return raw
+
+
+@app.get("/agents/{service_name}/weekly", response_model=WeeklySummary)
+async def weekly_summary_endpoint(
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
+) -> WeeklySummary:
+    """Weekly stats + Claude-generated plain-English summary. Stats
+    are always fresh; the summary text is cached for 1 hour."""
+    account_id = getattr(request.state, "account_id", None)
+    aid = agent_id or "main"
+
+    # Day-aligned windows: now-back-7d for "this week", and the prior
+    # 7d for the comparison. Both denoted in nanoseconds because that's
+    # what the spans table stores.
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    week_ns = 7 * _NS_PER_DAY
+    this_week = database.get_window_aggregate(
+        service_name=service_name,
+        agent_id=aid,
+        start_time_ns=now_ns - week_ns,
+        end_time_ns=now_ns,
+        account_id=account_id,
+    )
+    last_week = database.get_window_aggregate(
+        service_name=service_name,
+        agent_id=aid,
+        start_time_ns=now_ns - 2 * week_ns,
+        end_time_ns=now_ns - week_ns,
+        account_id=account_id,
+    )
+    last_week_has_data = last_week["runs"] > 0
+    lw_for_trends = last_week if last_week_has_data else None
+
+    trends = WeeklyTrends()
+    if lw_for_trends:
+        trends = WeeklyTrends(
+            runs_delta_pct=_pct_delta(this_week["runs"], lw_for_trends["runs"]),
+            errors_delta_pct=_pct_delta(this_week["errors"], lw_for_trends["errors"]),
+            success_rate_delta_pct=_pct_delta(
+                this_week["success_rate"], lw_for_trends["success_rate"]
+            ),
+            avg_duration_delta_pct=_pct_delta(
+                this_week["avg_duration_ms"], lw_for_trends["avg_duration_ms"]
+            ),
+        )
+
+    # Cache lookup for the Claude-generated text. Stats are NEVER
+    # cached — they're always recomputed from the database.
+    cached = database.get_insight(
+        account_id=account_id,
+        service_name=service_name,
+        agent_id=aid,
+        kind="weekly_summary",
+        max_age_seconds=_WEEKLY_SUMMARY_TTL_SECONDS,
+    )
+    summary_text = ""
+    summary_unavailable = False
+    generated_at: str | None = None
+
+    if cached:
+        summary_text = cached["data"].get("summary", "")
+        generated_at = cached["generated_at"]
+    else:
+        # Pull registration + a few captured outputs to give Claude
+        # extra context. Both are optional — the summary still works
+        # without them.
+        registration = database.get_latest_registration(
+            service_name, account_id=account_id, agent_id=aid
+        )
+        outputs = database.get_agent_outputs(
+            service_name, account_id=account_id, limit=3, agent_id=aid
+        )
+        try:
+            summary_text = describer.weekly_summary(
+                service_name=service_name,
+                agent_id=aid,
+                this_week=this_week,
+                last_week=lw_for_trends,
+                registration=registration,
+                outputs=outputs,
+            )
+            database.save_insight(
+                account_id=account_id,
+                service_name=service_name,
+                agent_id=aid,
+                kind="weekly_summary",
+                data={"summary": summary_text},
+            )
+        except describer.APIKeyMissingError:
+            summary_unavailable = True
+        except Exception as e:  # noqa: BLE001 — never 500 the page over Claude
+            print(f"[Oversee] Weekly summary for '{service_name}/{aid}' failed: {e}")
+            summary_unavailable = True
+
+    return WeeklySummary(
+        runs=this_week["runs"],
+        errors=this_week["errors"],
+        success_rate=this_week["success_rate"],
+        avg_duration_ms=this_week["avg_duration_ms"],
+        tools_used=this_week["tools_used"],
+        operations=this_week["operations"],
+        cost_estimate=None,
+        trends=trends,
+        summary=summary_text,
+        summary_unavailable=summary_unavailable,
+        generated_at=generated_at,
+    )
+
+
+@app.get("/agents/{service_name}/capabilities", response_model=Capabilities)
+async def capabilities_endpoint(
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
+) -> Capabilities:
+    """Three-bucket capability map (reads_from / writes_to / can_do).
+    Cached per agent for 24 hours."""
+    account_id = getattr(request.state, "account_id", None)
+    aid = agent_id or "main"
+
+    cached = database.get_insight(
+        account_id=account_id,
+        service_name=service_name,
+        agent_id=aid,
+        kind="capabilities",
+        max_age_seconds=_CAPABILITIES_TTL_SECONDS,
+    )
+    if cached:
+        data = cached["data"]
+        return Capabilities(
+            reads_from=data.get("reads_from", []) or [],
+            writes_to=data.get("writes_to", []) or [],
+            can_do=data.get("can_do", []) or [],
+            generated_at=cached["generated_at"],
+        )
+
+    # Recompute. We use a 14-day window for the tool/op mining — wider
+    # than weekly so we don't miss capabilities that fire infrequently.
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    window = database.get_window_aggregate(
+        service_name=service_name,
+        agent_id=aid,
+        start_time_ns=now_ns - 14 * _NS_PER_DAY,
+        end_time_ns=now_ns,
+        account_id=account_id,
+    )
+    registration = database.get_latest_registration(
+        service_name, account_id=account_id, agent_id=aid
+    )
+
+    try:
+        caps = describer.capabilities(
+            service_name=service_name,
+            agent_id=aid,
+            registration=registration,
+            tools_used=window["tools_used"],
+            operations=window["operations"],
+        )
+    except describer.APIKeyMissingError:
+        return Capabilities(unavailable=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Oversee] Capabilities for '{service_name}/{aid}' failed: {e}")
+        return Capabilities(unavailable=True)
+
+    database.save_insight(
+        account_id=account_id,
+        service_name=service_name,
+        agent_id=aid,
+        kind="capabilities",
+        data=caps,
+    )
+    return Capabilities(
+        reads_from=caps["reads_from"],
+        writes_to=caps["writes_to"],
+        can_do=caps["can_do"],
+        generated_at=None,
+    )
 
 
 # ---------------------------------------------------------------------------

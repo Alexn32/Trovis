@@ -136,6 +136,23 @@ export const api = {
         agentId,
       ),
     ),
+  // Weekly summary: stats + Claude-generated paragraph. The
+  // paragraph is cached server-side for 1 hour; the stats are
+  // always fresh. `summary_unavailable: true` when ANTHROPIC_API_KEY
+  // is missing — the stats still come through.
+  getWeeklySummary: (name, agentId) =>
+    request(
+      _withAgent(`/agents/${encodeURIComponent(name)}/weekly`, agentId),
+    ),
+  // Capability map. Three lists (reads_from / writes_to / can_do).
+  // Cached for 24 hours.
+  getAgentCapabilities: (name, agentId) =>
+    request(
+      _withAgent(
+        `/agents/${encodeURIComponent(name)}/capabilities`,
+        agentId,
+      ),
+    ),
   // Operator-set human-readable label for one sub-agent. Empty
   // displayName clears the override. Returns no body (204) on success.
   setDisplayName(name, agentId, displayName) {

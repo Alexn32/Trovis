@@ -1352,6 +1352,131 @@ a:hover {
   white-space: nowrap;
 }
 
+/* ---------- This week + Capabilities sections ---------- */
+
+.weekly-loading {
+  padding: 14px 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.weekly-summary-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+  max-width: 920px;
+}
+.weekly-summary-text.empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.weekly-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 720px) {
+  .weekly-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.weekly-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+}
+
+.weekly-stat-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.weekly-stat-value {
+  color: var(--text-primary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.weekly-trend {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 500;
+}
+.weekly-trend.good {
+  color: var(--success);
+}
+.weekly-trend.bad {
+  color: var(--error);
+}
+.weekly-trend.flat {
+  color: var(--text-dim);
+}
+
+.capabilities-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 720px) {
+  .capabilities-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.capability-column {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.capability-column-label {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.capability-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.capability-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.capability-pill {
+  padding: 4px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .detail-stats {
   display: grid;
   grid-template-columns: repeat(5, 1fr);

@@ -85,6 +85,14 @@ export default function AgentDetail({ serviceName, agentId, onBack }) {
             registration={registration}
             agentId={agentId}
           />
+          <WeeklySection
+            serviceName={serviceName}
+            agentId={agentId}
+          />
+          <CapabilitiesSection
+            serviceName={serviceName}
+            agentId={agentId}
+          />
           <DetailStats summary={summary} />
           <ActivityChart spans={spans} />
           {registration && (
@@ -866,6 +874,230 @@ function AskAboutAgent({ summary, agentId }) {
         </button>
       </form>
     </section>
+  )
+}
+
+// =====================================================================
+// SECTION: This week — weekly stats + plain-English summary
+// =====================================================================
+
+function WeeklySection({ serviceName, agentId }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    api
+      .getWeeklySummary(serviceName, agentId)
+      .then((res) => {
+        if (cancelled) return
+        setData(res)
+        setLoading(false)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setError(e.message || 'Could not load weekly summary')
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [serviceName, agentId])
+
+  return (
+    <section className="section-block weekly-section">
+      <div className="section-block-header">
+        <h3 className="section-label">This week</h3>
+      </div>
+
+      {loading && <div className="weekly-loading">Loading weekly summary…</div>}
+      {error && !loading && (
+        <div className="callout callout-error">{error}</div>
+      )}
+      {!loading && !error && data && (
+        <>
+          {data.summary_unavailable ? (
+            <div className="callout callout-info">
+              Weekly summary unavailable — the backend doesn't have an
+              Anthropic API key configured. Stats below are still live.
+            </div>
+          ) : data.summary ? (
+            <p className="weekly-summary-text">{data.summary}</p>
+          ) : data.runs === 0 ? (
+            <p className="weekly-summary-text empty">
+              No activity in the last 7 days. Once spans start flowing,
+              a plain-English summary will appear here.
+            </p>
+          ) : (
+            <p className="weekly-summary-text empty">
+              Generating summary…
+            </p>
+          )}
+
+          <div className="weekly-stats">
+            <WeeklyStat
+              label="Runs"
+              value={data.runs.toLocaleString()}
+              deltaPct={data.trends.runs_delta_pct}
+              betterDirection="up"
+            />
+            <WeeklyStat
+              label="Success rate"
+              value={`${data.success_rate.toFixed(1)}%`}
+              deltaPct={data.trends.success_rate_delta_pct}
+              betterDirection="up"
+            />
+            <WeeklyStat
+              label="Avg response"
+              value={formatDuration(data.avg_duration_ms)}
+              deltaPct={data.trends.avg_duration_delta_pct}
+              betterDirection="down"
+            />
+            <WeeklyStat
+              label="Errors"
+              value={data.errors.toLocaleString()}
+              deltaPct={data.trends.errors_delta_pct}
+              betterDirection="down"
+            />
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+// One stat box with optional trend arrow. `betterDirection` controls
+// the color — for Errors and Avg response, smaller is better, so a
+// negative delta gets the green arrow.
+function WeeklyStat({ label, value, deltaPct, betterDirection }) {
+  let trendNode = null
+  if (deltaPct !== null && deltaPct !== undefined) {
+    const isUp = deltaPct > 0
+    const isDown = deltaPct < 0
+    const better =
+      (betterDirection === 'up' && isUp) ||
+      (betterDirection === 'down' && isDown)
+    const worse =
+      (betterDirection === 'up' && isDown) ||
+      (betterDirection === 'down' && isUp)
+    const cls = better ? 'good' : worse ? 'bad' : 'flat'
+    const arrow = isUp ? '↑' : isDown ? '↓' : '•'
+    // Round to whole percent for display; show one decimal only if
+    // the absolute value is below 10 (e.g. 4.2% reads better than 4%).
+    const mag = Math.abs(deltaPct)
+    const text =
+      mag === 0
+        ? 'no change'
+        : mag < 10
+          ? `${mag.toFixed(1)}%`
+          : `${Math.round(mag)}%`
+    trendNode = (
+      <span className={`weekly-trend ${cls}`}>
+        {arrow} {text}
+      </span>
+    )
+  } else {
+    trendNode = <span className="weekly-trend flat">—</span>
+  }
+  return (
+    <div className="weekly-stat">
+      <span className="weekly-stat-label">{label}</span>
+      <span className="weekly-stat-value">{value}</span>
+      {trendNode}
+    </div>
+  )
+}
+
+// =====================================================================
+// SECTION: What it touches — capability map
+// =====================================================================
+
+function CapabilitiesSection({ serviceName, agentId }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    api
+      .getAgentCapabilities(serviceName, agentId)
+      .then((res) => {
+        if (cancelled) return
+        setData(res)
+        setLoading(false)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setError(e.message || 'Could not load capabilities')
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [serviceName, agentId])
+
+  const allEmpty =
+    data &&
+    (data.reads_from?.length ?? 0) === 0 &&
+    (data.writes_to?.length ?? 0) === 0 &&
+    (data.can_do?.length ?? 0) === 0
+
+  return (
+    <section className="section-block capabilities-section">
+      <div className="section-block-header">
+        <h3 className="section-label">What it touches</h3>
+      </div>
+
+      {loading && (
+        <div className="weekly-loading">Loading capability map…</div>
+      )}
+      {error && !loading && (
+        <div className="callout callout-error">{error}</div>
+      )}
+      {!loading && !error && data?.unavailable && (
+        <div className="callout callout-info">
+          Capability map unavailable — the backend doesn't have an
+          Anthropic API key configured.
+        </div>
+      )}
+      {!loading && !error && data && !data.unavailable && allEmpty && (
+        <div className="callout callout-info">
+          Not enough signal yet to infer this agent's capabilities. The
+          map fills in once it sends a registration or uses some tools.
+        </div>
+      )}
+      {!loading && !error && data && !data.unavailable && !allEmpty && (
+        <div className="capabilities-grid">
+          <CapabilityColumn label="Reads from" items={data.reads_from || []} />
+          <CapabilityColumn label="Writes to" items={data.writes_to || []} />
+          <CapabilityColumn label="Can do" items={data.can_do || []} />
+        </div>
+      )}
+    </section>
+  )
+}
+
+function CapabilityColumn({ label, items }) {
+  return (
+    <div className="capability-column">
+      <h4 className="capability-column-label">{label}</h4>
+      {items.length === 0 ? (
+        <span className="capability-empty">—</span>
+      ) : (
+        <ul className="capability-list">
+          {items.map((item, i) => (
+            <li key={i} className="capability-pill">
+              {item}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 
