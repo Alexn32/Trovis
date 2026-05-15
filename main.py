@@ -704,7 +704,40 @@ async def weekly_summary_endpoint(
     agent_id: str | None = Query(default=None),
 ) -> WeeklySummary:
     """Weekly stats + Claude-generated plain-English summary. Stats
-    are always fresh; the summary text is cached for 1 hour."""
+    are always fresh; the summary text is cached for 1 hour.
+
+    Wrapped in a defensive try/except so any unexpected DB or
+    serialization error logs a full traceback (visible in Railway
+    logs) and returns a graceful unavailable state instead of a
+    bare 500. We never want the AgentDetail page to break because
+    of a weekly-summary bug.
+    """
+    try:
+        return _weekly_summary_impl(service_name, request, agent_id)
+    except Exception as e:  # noqa: BLE001
+        import traceback as _tb
+
+        print(
+            f"[Oversee] /weekly failed for '{service_name}/"
+            f"{agent_id or 'main'}': {type(e).__name__}: {e}"
+        )
+        _tb.print_exc()
+        # Empty-but-valid response so the frontend renders the
+        # "unavailable" callout rather than "Failed to fetch".
+        return WeeklySummary(
+            runs=0,
+            errors=0,
+            success_rate=0.0,
+            avg_duration_ms=0.0,
+            summary_unavailable=True,
+        )
+
+
+def _weekly_summary_impl(
+    service_name: str,
+    request: Request,
+    agent_id: str | None,
+) -> WeeklySummary:
     account_id = getattr(request.state, "account_id", None)
     aid = agent_id or "main"
 
@@ -814,8 +847,26 @@ async def capabilities_endpoint(
     request: Request,
     agent_id: str | None = Query(default=None),
 ) -> Capabilities:
-    """Three-bucket capability map (reads_from / writes_to / can_do).
-    Cached per agent for 24 hours."""
+    """Three-bucket capability map. Defensive try/except — see
+    weekly_summary_endpoint for rationale."""
+    try:
+        return _capabilities_impl(service_name, request, agent_id)
+    except Exception as e:  # noqa: BLE001
+        import traceback as _tb
+
+        print(
+            f"[Oversee] /capabilities failed for '{service_name}/"
+            f"{agent_id or 'main'}': {type(e).__name__}: {e}"
+        )
+        _tb.print_exc()
+        return Capabilities(unavailable=True)
+
+
+def _capabilities_impl(
+    service_name: str,
+    request: Request,
+    agent_id: str | None,
+) -> Capabilities:
     account_id = getattr(request.state, "account_id", None)
     aid = agent_id or "main"
 

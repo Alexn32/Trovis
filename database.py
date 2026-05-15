@@ -1658,6 +1658,12 @@ def get_window_aggregate(
     # Tool names live inside the attributes JSON blob. Cheap LIKE filter
     # to narrow candidate rows, then parse in Python to extract the
     # actual values.
+    #
+    # IMPORTANT: bind the LIKE pattern as a parameter. psycopg2 treats
+    # every literal `%` in the SQL string as a format marker when
+    # `params` is provided — an inline `LIKE '%foo%'` against Postgres
+    # crashes with `IndexError: tuple index out of range` even though
+    # SQLite (which uses `?` binding) is unaffected.
     tools_sql = f"""
         SELECT attributes
         FROM spans
@@ -1665,16 +1671,28 @@ def get_window_aggregate(
           AND COALESCE(agent_id, 'main') = {PH}
           AND start_time_unix >= {PH}
           AND start_time_unix <  {PH}
-          AND attributes LIKE '%"oversee.tool.name":%'
+          AND attributes LIKE {PH}
           {account_filter}
     """
+    # The tools query needs the pattern arg slotted BEFORE the
+    # optional account_id (placeholder order: service, agent,
+    # start, end, pattern, [account_id]).
+    tools_args: list[Any] = [
+        service_name,
+        agent_id or "main",
+        start_time_ns,
+        end_time_ns,
+        '%"oversee.tool.name":%',
+    ]
+    if account_id is not None:
+        tools_args.append(account_id)
 
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(agg_sql, tuple(base_args))
         agg = cur.fetchone()
         cur.execute(ops_sql, tuple(base_args))
         ops_rows = cur.fetchall()
-        cur.execute(tools_sql, tuple(base_args))
+        cur.execute(tools_sql, tuple(tools_args))
         tools_rows = cur.fetchall()
 
     runs = (agg["runs"] if agg else 0) or 0
