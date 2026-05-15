@@ -236,6 +236,21 @@ function DetailHead({ summary, registration, agentId }) {
         <div className="detail-name-raw">{headlineRaw}</div>
       )}
       {saveError && <p className="form-error">{saveError}</p>}
+
+      <OwnerRow
+        serviceName={summary.service_name}
+        agentId={shownAgentId || 'main'}
+        initialOwner={
+          summary.owner_id
+            ? {
+                id: summary.owner_id,
+                name: summary.owner_name,
+                role: summary.owner_role,
+              }
+            : null
+        }
+      />
+
       {summary.platform && (
         <div className="agent-platform">{summary.platform}</div>
       )}
@@ -275,6 +290,227 @@ function DetailHead({ summary, registration, agentId }) {
         </div>
       )}
     </header>
+  )
+}
+
+// Owner row — shown right under the agent name. When unassigned, shows
+// an "Assign owner" link that opens a dropdown of team members (lazily
+// fetched on first open). When assigned, shows "Owner: <name> · <role>"
+// with a small chevron that re-opens the dropdown to reassign or
+// remove. Includes an inline "Add new team member…" form at the bottom
+// of the dropdown that creates and assigns in one go.
+function OwnerRow({ serviceName, agentId, initialOwner }) {
+  const [owner, setOwner] = useState(initialOwner)
+  const [open, setOpen] = useState(false)
+  const [members, setMembers] = useState(null) // null = not loaded yet
+  const [loadingMembers, setLoadingMembers] = useState(false)
+  const [error, setError] = useState(null)
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newEmail, setNewEmail] = useState('')
+  const [newRole, setNewRole] = useState('')
+  const [adding, setAdding] = useState(false)
+
+  async function ensureMembersLoaded() {
+    if (members !== null || loadingMembers) return
+    setLoadingMembers(true)
+    setError(null)
+    try {
+      setMembers(await api.getTeamMembers())
+    } catch (e) {
+      setError(e.message || 'Could not load team')
+    } finally {
+      setLoadingMembers(false)
+    }
+  }
+
+  function toggle() {
+    setOpen((prev) => {
+      if (!prev) ensureMembersLoaded()
+      return !prev
+    })
+    setShowAddForm(false)
+  }
+
+  async function assign(member) {
+    setError(null)
+    try {
+      await api.setAgentOwner(serviceName, {
+        agent_id: agentId,
+        team_member_id: member.id,
+      })
+      setOwner({ id: member.id, name: member.name, role: member.role })
+      setOpen(false)
+    } catch (e) {
+      setError(e.message || 'Could not assign owner')
+    }
+  }
+
+  async function clearOwner() {
+    setError(null)
+    try {
+      await api.removeAgentOwner(serviceName, agentId)
+      setOwner(null)
+      setOpen(false)
+    } catch (e) {
+      setError(e.message || 'Could not remove owner')
+    }
+  }
+
+  async function submitNewMember(e) {
+    e.preventDefault()
+    const name = newName.trim()
+    if (!name) return
+    setAdding(true)
+    setError(null)
+    try {
+      const created = await api.createTeamMember({
+        name,
+        email: newEmail.trim() || null,
+        role: newRole.trim() || null,
+      })
+      // Locally append + assign in one go.
+      setMembers((prev) => [...(prev || []), created])
+      await assign(created)
+      setNewName('')
+      setNewEmail('')
+      setNewRole('')
+      setShowAddForm(false)
+    } catch (e) {
+      setError(e.message || 'Could not add team member')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  return (
+    <div className="owner-row">
+      {owner ? (
+        <div className="owner-label">
+          <span className="owner-label-text">
+            Owner: <strong>{owner.name}</strong>
+            {owner.role && <span className="owner-role"> · {owner.role}</span>}
+          </span>
+          <button
+            type="button"
+            className="btn-link-inline"
+            onClick={toggle}
+            aria-expanded={open}
+          >
+            {open ? 'Cancel' : 'Change'}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="owner-assign-link"
+          onClick={toggle}
+          aria-expanded={open}
+        >
+          Assign owner
+        </button>
+      )}
+
+      {open && (
+        <div className="owner-dropdown">
+          {loadingMembers && (
+            <div className="owner-dropdown-empty">Loading team…</div>
+          )}
+          {!loadingMembers && members && members.length === 0 && !showAddForm && (
+            <div className="owner-dropdown-empty">
+              No team members yet.
+            </div>
+          )}
+          {!loadingMembers && members && members.length > 0 && (
+            <ul className="owner-dropdown-list">
+              {members.map((m) => (
+                <li key={m.id}>
+                  <button
+                    type="button"
+                    className={`owner-dropdown-item ${owner?.id === m.id ? 'selected' : ''}`}
+                    onClick={() => assign(m)}
+                  >
+                    <span>{m.name}</span>
+                    {m.role && (
+                      <span className="owner-dropdown-role">{m.role}</span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {!showAddForm ? (
+            <div className="owner-dropdown-actions">
+              {owner && (
+                <button
+                  type="button"
+                  className="btn-link-inline"
+                  onClick={clearOwner}
+                >
+                  Remove owner
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn-link-inline"
+                onClick={() => setShowAddForm(true)}
+              >
+                + Add new team member…
+              </button>
+            </div>
+          ) : (
+            <form className="owner-dropdown-form" onSubmit={submitNewMember}>
+              <input
+                type="text"
+                className="text-input"
+                placeholder="Name *"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                autoFocus
+                required
+                disabled={adding}
+              />
+              <input
+                type="email"
+                className="text-input"
+                placeholder="Email (optional)"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                disabled={adding}
+              />
+              <input
+                type="text"
+                className="text-input"
+                placeholder="Role (e.g. Sales, Content)"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value)}
+                disabled={adding}
+              />
+              <div className="owner-dropdown-form-actions">
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-sm"
+                  disabled={adding || !newName.trim()}
+                >
+                  {adding ? 'Adding…' : 'Add & assign'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-link btn-sm"
+                  onClick={() => setShowAddForm(false)}
+                  disabled={adding}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+
+          {error && <p className="form-error">{error}</p>}
+        </div>
+      )}
+    </div>
   )
 }
 

@@ -35,6 +35,7 @@ from models import (
     AgentDescription,
     AgentGroup,
     AgentOutput,
+    AgentOwnerSet,
     AgentRegistration,
     AgentSummary,
     AskRequest,
@@ -48,6 +49,8 @@ from models import (
     SignupRequest,
     SignupResponse,
     SpanRecord,
+    TeamMember,
+    TeamMemberCreate,
 )
 
 VERSION = "0.1.0"
@@ -519,6 +522,85 @@ async def set_agent_display_name(
         display_name=body.display_name,
         account_id=account_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent ownership (human owner per sub-agent)
+# ---------------------------------------------------------------------------
+
+
+@app.put("/agents/{service_name}/owner", status_code=204)
+async def set_owner(
+    service_name: str,
+    request: Request,
+    body: AgentOwnerSet,
+) -> None:
+    """Assign a team member as the human owner of one sub-agent.
+    Re-assigns when an owner already exists. 204 No Content on success."""
+    account_id = getattr(request.state, "account_id", None)
+    database.set_agent_owner(
+        account_id=account_id,
+        service_name=service_name,
+        agent_id=body.agent_id or "main",
+        team_member_id=body.team_member_id,
+    )
+
+
+@app.delete("/agents/{service_name}/owner", status_code=204)
+async def clear_owner(
+    service_name: str,
+    request: Request,
+    agent_id: str = Query(default="main"),
+) -> None:
+    """Remove the owner assignment for one sub-agent. 204 even when
+    nothing was assigned — idempotent."""
+    account_id = getattr(request.state, "account_id", None)
+    database.remove_agent_owner(
+        account_id=account_id,
+        service_name=service_name,
+        agent_id=agent_id or "main",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Team members
+# ---------------------------------------------------------------------------
+
+
+@app.get("/team", response_model=list[TeamMember])
+async def list_team(request: Request) -> list[TeamMember]:
+    account_id = getattr(request.state, "account_id", None)
+    return [
+        TeamMember(**m)
+        for m in database.get_team_members(account_id=account_id)
+    ]
+
+
+@app.post("/team", response_model=TeamMember, status_code=201)
+async def add_team_member(
+    request: Request, body: TeamMemberCreate
+) -> TeamMember:
+    account_id = getattr(request.state, "account_id", None)
+    try:
+        m = database.create_team_member(
+            account_id=account_id,
+            name=body.name,
+            email=body.email,
+            role=body.role,
+        )
+    except database.TeamMemberEmailExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return TeamMember(**m)
+
+
+@app.delete("/team/{member_id}", status_code=204)
+async def remove_team_member(member_id: int, request: Request) -> None:
+    """Delete a team member and clear any agent assignments that
+    pointed to them. 204 even when no row was deleted — idempotent."""
+    account_id = getattr(request.state, "account_id", None)
+    database.delete_team_member(account_id=account_id, member_id=member_id)
 
 
 @app.get("/agents/{service_name}/registration", response_model=AgentRegistration)

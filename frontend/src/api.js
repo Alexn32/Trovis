@@ -151,6 +151,31 @@ export const api = {
     )
   },
 
+  // --- team + ownership ---
+  getTeamMembers: () => request('/team'),
+  createTeamMember: (data) =>
+    request('/team', { method: 'POST', body: JSON.stringify(data) }),
+  deleteTeamMember: (id) =>
+    request(`/team/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Assign a team member as the human owner of one sub-agent. The data
+  // payload is `{ agent_id, team_member_id }`. Returns null (204).
+  setAgentOwner: (serviceName, data) =>
+    request(`/agents/${encodeURIComponent(serviceName)}/owner`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        agent_id: data.agent_id || 'main',
+        team_member_id: data.team_member_id,
+      }),
+    }),
+  removeAgentOwner: (serviceName, agentId) =>
+    request(
+      _withAgent(
+        `/agents/${encodeURIComponent(serviceName)}/owner`,
+        agentId || 'main',
+      ),
+      { method: 'DELETE' },
+    ),
+
   // --- ask ---
   // messages is the full chat thread; backend is stateless. Returns
   // { answer: string }.

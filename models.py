@@ -48,6 +48,9 @@ class AgentSummary(BaseModel):
     # identifying signal is present.
     platform: str | None = None
     display_name: str | None = None
+    owner_id: int | None = None
+    owner_name: str | None = None
+    owner_role: str | None = None
 
 
 class AgentInstance(BaseModel):
@@ -56,7 +59,8 @@ class AgentInstance(BaseModel):
     shape is consistent for both shapes.
 
     Each sub-agent carries its own description (generated from its own
-    registration / telemetry) and its own display_name override.
+    registration / telemetry), its own display_name override, and its
+    own optional human owner.
     """
 
     agent_id: str
@@ -68,6 +72,9 @@ class AgentInstance(BaseModel):
     has_registration: bool = False
     description: str | None = None
     display_name: str | None = None
+    owner_id: int | None = None
+    owner_name: str | None = None
+    owner_role: str | None = None
 
 
 class AgentGroup(BaseModel):
@@ -77,9 +84,9 @@ class AgentGroup(BaseModel):
     set `oversee.agent.id`); the frontend collapses that case into a
     flat card.
 
-    Group-level `description` / `display_name` default to the values
-    from the `'main'` sub-agent when present (else the first agent
-    listed), so the Fleet card has something sensible to show.
+    Group-level `description` / `display_name` / `owner_*` default to
+    the values from the `'main'` sub-agent when present (else the first
+    agent listed), so the Fleet card has something sensible to show.
     """
 
     service_name: str
@@ -94,6 +101,8 @@ class AgentGroup(BaseModel):
     has_registration: bool = False
     platform: str | None = None
     display_name: str | None = None
+    owner_name: str | None = None
+    owner_role: str | None = None
 
 
 class DisplayNameRequest(BaseModel):
@@ -105,6 +114,37 @@ class DisplayNameRequest(BaseModel):
 
     agent_id: str = "main"
     display_name: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Team members + agent ownership
+# ---------------------------------------------------------------------------
+
+
+class TeamMember(BaseModel):
+    """A human team member managed by the operator. One row per
+    (account, email) when email is set."""
+
+    id: int
+    name: str
+    email: str | None = None
+    role: str | None = None
+    created_at: str
+
+
+class TeamMemberCreate(BaseModel):
+    """Body for POST /team."""
+
+    name: str
+    email: str | None = None
+    role: str | None = None
+
+
+class AgentOwnerSet(BaseModel):
+    """Body for PUT /agents/{service_name}/owner."""
+
+    agent_id: str = "main"
+    team_member_id: int
 
 
 class AgentDescription(BaseModel):

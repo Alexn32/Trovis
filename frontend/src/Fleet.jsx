@@ -259,6 +259,14 @@ function AgentCard({ group, onSelect }) {
       </div>
 
       {group.platform && <div className="agent-platform">{group.platform}</div>}
+      {group.owner_name && (
+        <div className="owner-tag">
+          Owner: <strong>{group.owner_name}</strong>
+          {group.owner_role && (
+            <span className="owner-tag-role"> · {group.owner_role}</span>
+          )}
+        </div>
+      )}
 
       <p className={`agent-description ${group.description ? '' : 'empty'}`}>
         {group.description ||
@@ -357,6 +365,14 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent }) {
         {group.platform && (
           <div className="agent-platform">{group.platform}</div>
         )}
+        {group.owner_name && (
+          <div className="owner-tag">
+            Owner: <strong>{group.owner_name}</strong>
+            {group.owner_role && (
+              <span className="owner-tag-role"> · {group.owner_role}</span>
+            )}
+          </div>
+        )}
 
         <p
           className={`agent-description ${group.description ? '' : 'empty'}`}
@@ -448,6 +464,9 @@ function SubAgentRow({ subAgent, onSelect }) {
             </>
           ) : (
             <span className="mono">{subAgent.agent_id}</span>
+          )}
+          {subAgent.owner_name && (
+            <span className="subagent-owner">→ {subAgent.owner_name}</span>
           )}
         </span>
         <span className="subagent-stat">
