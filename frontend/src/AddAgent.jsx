@@ -113,7 +113,10 @@ TogetherAiInstrumentor().instrument()`,
   },
 }
 
-// Framework-level instrumentors (used for CrewAI / LangChain / OpenAI Agents).
+// Framework-level instrumentors (CrewAI / LangChain). OpenAI Agents SDK
+// gets its own dedicated onboarding page (OpenAIAgentsInstructions),
+// since the oversee-agents package handles setup in two lines and
+// captures agent identity automatically.
 const FRAMEWORK_INSTRUMENTORS = {
   crewai: {
     label: 'CrewAI',
@@ -132,15 +135,6 @@ CrewAIInstrumentor().instrument()`,
     importLines:
 `from openinference.instrumentation.langchain import LangChainInstrumentor
 LangChainInstrumentor().instrument()`,
-    runFile: 'your_agent.py',
-  },
-  'openai-agents': {
-    label: 'OpenAI Agents SDK',
-    title: 'Connect OpenAI Agents SDK',
-    pkg: 'openinference-instrumentation-openai-agents',
-    importLines:
-`from openinference.instrumentation.openai_agents import OpenAIAgentsInstrumentor
-OpenAIAgentsInstrumentor().instrument()`,
     runFile: 'your_agent.py',
   },
 }
@@ -699,6 +693,106 @@ function OpenClawInstructions() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Instructions page — OpenAI Agents SDK (oversee-agents pip package)
+// ---------------------------------------------------------------------------
+//
+// Two-line install via the dedicated SDK we ship at oversee-agents/. The
+// page pre-fills the operator's endpoint + API key the same way the
+// OpenClaw page does so they can paste the full setup snippet without
+// chasing values from elsewhere.
+
+function OpenAIAgentsInstructions({ agentName, endpoint }) {
+  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  const installCmd = 'pip install oversee-agents'
+  // The setup snippet uses our `fill()` substitution for AGENT_NAME +
+  // OVERSEE_ENDPOINT. The API key is substituted separately because
+  // it's not in the standard placeholder set — we fall back to a
+  // visible `ov_sk_…` placeholder when the user is logged out so the
+  // snippet still reads cleanly.
+  const setupCode = fill(
+`from agents import Agent, Runner
+from oversee import init
+
+init(api_key="OVERSEE_API_KEY", agent_name="AGENT_NAME")
+
+# Your existing code — no changes needed
+agent = Agent(name="Support", instructions="You handle customer tickets…")
+result = await Runner.run(agent, "Help me with my order")`,
+    agentName,
+    resolvedEndpoint,
+  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+
+  return (
+    <>
+      <h2 className="instructions-title">Connect OpenAI Agents SDK</h2>
+      <p className="instructions-subtitle">
+        Two-line setup with the <code>oversee-agents</code> package.
+        Your existing <code>Agent</code> and <code>Runner</code> code
+        stays unchanged.
+      </p>
+
+      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <NumberedStep n={1} title="Install the SDK">
+        <CodeBlock code={installCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Initialize at startup">
+        <CodeBlock code={setupCode} />
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Run your agent as you normally would">
+        <p>
+          Every <code>Agent()</code> you construct registers itself with
+          Oversee on first creation. The agent's <code>name</code> and{' '}
+          <code>instructions</code> become its identity — Oversee uses
+          them to auto-generate a plain-English description on the
+          dashboard.
+        </p>
+      </NumberedStep>
+
+      <Callout variant="info">
+        <strong>What gets captured by default:</strong> agent identity
+        (name + system prompt), every LLM call (model, duration, tokens),
+        every tool call, handoffs, guardrails, run completion. Message
+        content is <em>not</em> captured unless you pass{' '}
+        <code>capture_outputs=True</code> to <code>init()</code>.
+      </Callout>
+
+      <h3 className="section-title section-title-spaced">Environment variables</h3>
+      <p>
+        All <code>init()</code> args fall back to env vars — handy for
+        containers and CI:
+      </p>
+      <ul>
+        <li>
+          <code>OVERSEE_API_KEY</code> — your Oversee API key
+        </li>
+        <li>
+          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          the Oversee cloud)
+        </li>
+        <li>
+          <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
+        </li>
+        <li>
+          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>true</code> for content capture
+        </li>
+      </ul>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
 function PrefillBlock({ label, value, placeholder }) {
   const [copied, setCopied] = useState(false)
   async function copy() {
@@ -1007,7 +1101,10 @@ function InstructionsView({ platform, provider, agentName, endpoint }) {
   if (platform === 'openclaw') {
     return <OpenClawInstructions agentName={agentName} endpoint={endpoint} />
   }
-  if (platform === 'crewai' || platform === 'langchain' || platform === 'openai-agents') {
+  if (platform === 'openai-agents') {
+    return <OpenAIAgentsInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  if (platform === 'crewai' || platform === 'langchain') {
     return <FrameworkInstructions frameworkId={platform} agentName={agentName} endpoint={endpoint} />
   }
   if (platform === 'claude-cowork') {

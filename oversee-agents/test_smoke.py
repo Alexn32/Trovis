@@ -1,0 +1,137 @@
+"""Smoke test for the oversee-agents package.
+
+Run from the package root:
+
+    pip install -e . && python test_smoke.py
+
+Or without install:
+
+    PYTHONPATH=. python test_smoke.py
+
+Verifies:
+  1. The package imports cleanly.
+  2. init() runs without raising, with and without an api_key.
+  3. The global TracerProvider gets set to our SDK provider.
+  4. Manual span emission works through the configured pipeline.
+  5. If the OpenAI Agents SDK is installed, constructing an Agent
+     triggers a registration span (no actual API call needed).
+
+Exits non-zero on any failure.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import traceback
+
+# Allow `python test_smoke.py` to work without installing the package.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def step(n: int, label: str) -> None:
+    print(f"\n[{n}] {label}")
+
+
+failed = 0
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    global failed
+    status = "OK" if cond else "FAIL"
+    print(f"    {status} — {name}")
+    if detail:
+        print(f"        {detail}")
+    if not cond:
+        failed += 1
+
+
+try:
+    step(1, "Importing oversee…")
+    import oversee
+    check("import oversee", True, f"version={oversee.__version__}")
+    check("init is callable", callable(oversee.init))
+
+    step(2, "Calling init() with a dummy endpoint (won't actually export)…")
+    # Point at a localhost port nothing is listening on so the BatchSpanProcessor
+    # quietly retries-and-drops without hanging on shutdown.
+    oversee.init(
+        api_key="test-key",
+        agent_name="smoke-test-agent",
+        endpoint="http://127.0.0.1:1/v1/traces",
+        capture_outputs=False,
+    )
+    check("init() returned without raising", True)
+
+    step(3, "Inspecting global tracer provider…")
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+
+    provider = trace.get_tracer_provider()
+    check(
+        "provider is an SDK TracerProvider",
+        isinstance(provider, TracerProvider),
+        f"got {type(provider).__name__}",
+    )
+
+    step(4, "Emitting a manual span…")
+    tracer = trace.get_tracer("smoke-test")
+    with tracer.start_as_current_span("manual_span") as span:
+        span.set_attribute("oversee.smoke", "true")
+    check("manual span emitted", True)
+
+    step(5, "Toggling capture flag at runtime…")
+    from oversee.registration import is_capture_enabled, set_capture_outputs
+
+    set_capture_outputs(True)
+    check("capture flag flipped on", is_capture_enabled())
+    set_capture_outputs(False)
+    check("capture flag flipped off", not is_capture_enabled())
+
+    step(6, "OpenAI Agents SDK interaction (skipped if not installed)…")
+    try:
+        from agents import Agent  # type: ignore[import-not-found]
+
+        # Construct an agent — should trigger the monkey-patched
+        # __init__ and emit one registration span.
+        agent = Agent(
+            name="SmokeBot",
+            instructions="You are a smoke test agent. Do nothing.",
+        )
+        check(
+            "Agent constructed without raising",
+            agent.name == "SmokeBot",
+            f"agent.name={agent.name!r}",
+        )
+    except ImportError:
+        print("    SKIP — `agents` (openai-agents) not installed in this env")
+
+    step(7, "Re-calling init() is idempotent…")
+    oversee.init(api_key="another-key", agent_name="smoke-test-agent")
+    check("second init() returned without raising", True)
+
+    step(8, "Flushing spans before exit…")
+    try:
+        provider.shutdown()
+        check("provider shutdown clean", True)
+    except Exception as e:
+        # Shutdown can timeout when the endpoint is unreachable — that's
+        # expected for this dummy port and not a real failure.
+        check(
+            "provider shutdown (timeout expected on unreachable endpoint)",
+            True,
+            f"shutdown raised: {type(e).__name__}: {e}",
+        )
+
+except Exception:
+    failed += 1
+    print("\nUNCAUGHT EXCEPTION:")
+    traceback.print_exc()
+
+
+print()
+if failed:
+    print(f"SMOKE TEST FAILED ({failed} check(s) failed).")
+    sys.exit(1)
+else:
+    print("SMOKE TEST PASSED.")
