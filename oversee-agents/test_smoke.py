@@ -110,7 +110,100 @@ try:
     oversee.init(api_key="another-key", agent_name="smoke-test-agent")
     check("second init() returned without raising", True)
 
-    step(8, "Flushing spans before exit…")
+    step(8, "Anthropic instrumentation (skipped if anthropic not installed)…")
+    try:
+        import anthropic  # noqa: F401
+        from anthropic.resources.beta.agents import Agents
+        from anthropic.resources.beta.sessions import Sessions
+        from oversee.anthropic import (
+            _is_patched,
+            _reset_for_tests,
+            setup_anthropic,
+            monitor,
+            track_session,
+            _SESSION_TO_AGENT,
+        )
+
+        # init(platform="auto") in step 2 already ran setup_anthropic().
+        # Reset so we can verify the patcher actually mutates the
+        # methods (otherwise the snapshot below captures the already-
+        # patched version).
+        _reset_for_tests()
+        original_agents_create = Agents.create
+        original_sessions_create = Sessions.create
+
+        ok = setup_anthropic()
+        check(
+            "setup_anthropic() returned True (at least one patch landed)",
+            ok,
+        )
+        check("module reports patched", _is_patched())
+        check(
+            "Agents.create was replaced",
+            Agents.create is not original_agents_create,
+        )
+        check(
+            "Sessions.create was replaced",
+            Sessions.create is not original_sessions_create,
+        )
+
+        # track_session round-trip — registers then cleans up.
+        from oversee.anthropic import _SESSION_TO_AGENT as _MAP
+        with track_session("sess_smoke", agent_name="smoke-bot"):
+            check(
+                "track_session sets the mapping",
+                _MAP.get("sess_smoke") == "smoke-bot",
+            )
+        check(
+            "track_session clears the mapping on exit",
+            "sess_smoke" not in _MAP,
+        )
+
+        # monitor() must not crash on a non-real client.
+        class _FakeBeta:
+            class agents:  # noqa: N801
+                @staticmethod
+                def create(**kwargs):
+                    return type("A", (), {"id": "a_1", "name": "Fake"})()
+
+            class sessions:  # noqa: N801
+                @staticmethod
+                def create(agent=None, **kwargs):
+                    return type("S", (), {"id": "s_1"})()
+
+                @staticmethod
+                def stream(session_id):
+                    return iter([])
+
+        class _FakeClient:
+            beta = _FakeBeta()
+
+        monitored = monitor(_FakeClient())
+        check("monitor() returned the client", monitored is not None)
+
+        # Undo the patches so subsequent re-imports of the SDK keep
+        # working in this Python process.
+        _reset_for_tests()
+        check(
+            "_reset_for_tests restored Agents.create",
+            Agents.create is original_agents_create,
+        )
+
+    except ImportError:
+        print("    SKIP — `anthropic` not installed in this env")
+
+    step(9, "Re-init with platform='anthropic' only…")
+    # platform-explicit re-init shouldn't crash even on an already-
+    # initialized SDK. (Note: _INITIALIZED is true from step 2 so the
+    # internal early-return path fires; this exercises that path.)
+    oversee.init(
+        api_key="another-key",
+        agent_name="smoke-test-agent",
+        platform="anthropic",
+    )
+    check("platform='anthropic' init() returned without raising", True)
+
+    step(10, "Flushing spans before exit…")
     try:
         provider.shutdown()
         check("provider shutdown clean", True)

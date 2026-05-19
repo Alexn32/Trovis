@@ -25,11 +25,29 @@ dependencies = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",
-    "openai-agents-opentelemetry>=0.2.0",
+    "requests>=2.28.0",
 ]
 
+# Per-platform extras so users only install what they need:
+#   pip install oversee-agents[openai]      → OpenAI Agents SDK support
+#   pip install oversee-agents[anthropic]   → Claude Managed Agents support
+#   pip install oversee-agents[all]         → both
 [project.optional-dependencies]
-dev = ["openai-agents>=0.0.1"]
+openai = [
+    "openai-agents-opentelemetry>=0.2.0",
+]
+anthropic = [
+    "anthropic>=0.50.0",
+]
+all = [
+    "openai-agents-opentelemetry>=0.2.0",
+    "anthropic>=0.50.0",
+]
+dev = [
+    "openai-agents>=0.0.1",
+    "openai-agents-opentelemetry>=0.2.0",
+    "anthropic>=0.50.0",
+]
 
 [project.urls]
 Homepage = "https://oversee.dev"
