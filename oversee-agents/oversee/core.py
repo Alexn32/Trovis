@@ -50,8 +50,9 @@ def init(
     agent_name: Optional[str] = None,
     endpoint: Optional[str] = None,
     capture_outputs: bool = False,
+    platform: str = "auto",
 ) -> None:
-    """Connect this process's OpenAI Agents to Oversee.
+    """Connect this process's agents to Oversee.
 
     Call once at startup, before constructing any Agent. Idempotent —
     re-calling updates the capture flag but doesn't rebuild the OTEL
@@ -69,6 +70,14 @@ def init(
             response / tool-result content (truncated to 10 000 chars).
             Off by default for privacy. Falls back to
             OVERSEE_CAPTURE_OUTPUTS env var (case-insensitive "true").
+        platform: Which SDK(s) to hook into. One of:
+            - "auto" (default) — detects installed SDKs and hooks
+              whatever's available. Safe to use even when only one of
+              `openai-agents` or `anthropic` is installed.
+            - "openai" — only the OpenAI Agents SDK.
+            - "anthropic" — only the Anthropic Claude Managed Agents SDK.
+            - "all" — both, regardless of what's installed (will warn
+              for the missing one).
     """
     global _INITIALIZED, _CAPTURE_PROCESSOR
 
@@ -120,12 +129,29 @@ def init(
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
 
-    # 2. Wire the OpenAI Agents SDK's tracing into our OTEL pipeline.
-    _CAPTURE_PROCESSOR = CaptureProcessor()
-    _wire_agents_tracing(_CAPTURE_PROCESSOR)
+    # 2. Wire each platform's tracing into the OTEL pipeline.
+    # `platform` resolution: "auto" detects installed SDKs; explicit
+    # values opt in regardless of detection. "all" tries both and
+    # warns about whichever isn't installed.
+    do_openai = platform in ("openai", "all") or (
+        platform == "auto" and _has_openai_agents()
+    )
+    do_anthropic = platform in ("anthropic", "all") or (
+        platform == "auto" and _has_anthropic()
+    )
 
-    # 3. Catch each Agent's identity on construction.
-    patch_agent_for_registration()
+    if do_openai:
+        _CAPTURE_PROCESSOR = CaptureProcessor()
+        _wire_agents_tracing(_CAPTURE_PROCESSOR)
+        # Catch each Agent's identity on construction.
+        patch_agent_for_registration()
+
+    if do_anthropic:
+        # Import lazily — the anthropic SDK is an optional dep and we
+        # don't want importing oversee to fail when it isn't installed.
+        from oversee.anthropic import setup_anthropic
+
+        setup_anthropic()
 
     _INITIALIZED = True
 
@@ -135,6 +161,32 @@ def init(
     )
     if resolved_capture:
         print("[Oversee] Output capture: enabled")
+    if do_openai and do_anthropic:
+        print("[Oversee] Platforms: openai-agents + anthropic")
+    elif do_anthropic:
+        print("[Oversee] Platform: anthropic")
+    elif do_openai:
+        print("[Oversee] Platform: openai-agents")
+    else:
+        print(
+            "[Oversee] No agent SDK detected — manual spans only. "
+            "Install openai-agents or anthropic to enable per-SDK "
+            "instrumentation."
+        )
+
+
+def _has_openai_agents() -> bool:
+    """Detect the OpenAI Agents SDK without forcing an import."""
+    import importlib.util as _u
+
+    return _u.find_spec("agents") is not None
+
+
+def _has_anthropic() -> bool:
+    """Detect the Anthropic SDK without forcing an import."""
+    import importlib.util as _u
+
+    return _u.find_spec("anthropic") is not None
 
 
 def _wire_agents_tracing(capture_processor: CaptureProcessor) -> None:

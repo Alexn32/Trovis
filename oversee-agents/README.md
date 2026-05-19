@@ -1,14 +1,23 @@
 # oversee-agents
 
-Connect your OpenAI agents to Oversee in two lines of code.
+Connect your AI agents to Oversee in two lines of code. Supports the
+**OpenAI Agents SDK** and **Anthropic Claude Managed Agents** today;
+extras pick which dependencies to install.
 
 ## Install
 
 ```bash
-pip install oversee-agents
+# OpenAI Agents SDK
+pip install oversee-agents[openai]
+
+# Anthropic Claude Managed Agents
+pip install oversee-agents[anthropic]
+
+# Both
+pip install oversee-agents[all]
 ```
 
-## Usage
+## OpenAI Agents SDK
 
 ```python
 from agents import Agent, Runner
@@ -20,6 +29,61 @@ init(api_key="ov_sk_your_key", agent_name="my-agent")
 agent = Agent(name="Support", instructions="You handle customer tickets...")
 result = await Runner.run(agent, "Help me with my order")
 # Agent appears in your Oversee dashboard automatically
+```
+
+## Claude Managed Agents
+
+```python
+import anthropic
+from oversee import init
+
+init(api_key="ov_sk_your_key", platform="anthropic")
+
+# Your existing code — no changes needed
+client = anthropic.Anthropic()
+agent = client.beta.agents.create(
+    name="Coding Assistant",
+    model={"id": "claude-opus-4-7"},
+    system="You are a helpful coding assistant.",
+    tools=[{"type": "agent_toolset_20260401"}],
+)
+session = client.beta.sessions.create(agent=agent.id, environment_id=env_id)
+
+# Send a message and stream events — both flow into Oversee automatically.
+client.beta.sessions.events.create(session.id, events=[{
+    "type": "user.message",
+    "content": [{"type": "text", "text": "Hello"}],
+}])
+for event in client.beta.sessions.stream(session.id):
+    ...
+```
+
+`platform="auto"` (the default) detects which SDK(s) are installed and
+hooks into both when present — useful if your codebase mixes platforms.
+
+### Advanced: per-client instrumentation
+
+When monkey-patching at module load is undesirable (multi-tenant
+hosts, different telemetry per client), use `monitor()` to wrap one
+client at a time:
+
+```python
+from oversee import init, monitor
+
+init(api_key="ov_sk_...", platform="anthropic")
+client = monitor(anthropic.Anthropic())
+# Only this client emits Oversee spans.
+```
+
+Or use `track_session()` as a context manager to scope the
+agent-name mapping to a block:
+
+```python
+from oversee import track_session
+
+with track_session(session_id=session.id, agent_name="coding-assistant"):
+    for event in client.beta.sessions.stream(session.id):
+        ...
 ```
 
 ## What gets captured
