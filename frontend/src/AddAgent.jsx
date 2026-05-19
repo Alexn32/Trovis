@@ -17,17 +17,15 @@ import { getApiKey } from './api.js'
 // Constants
 // ---------------------------------------------------------------------------
 
+// Only the three platforms with first-party Oversee integrations
+// are surfaced for now. Generic Python / Node / framework /
+// no-code-product instruction pages still exist in this file — they
+// just aren't reachable from the picker. Re-adding any tile to this
+// array is enough to bring its page back.
 const PLATFORMS = [
-  { id: 'custom-python',  label: 'Custom Python Agent',       subtitle: 'Any Python script calling an LLM API',           needsProvider: true  },
   { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
-  { id: 'crewai',         label: 'CrewAI',                    subtitle: 'Multi-agent orchestration framework',            needsProvider: false },
-  { id: 'langchain',      label: 'LangChain / LangGraph',     subtitle: 'LLM application framework',                      needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
   { id: 'claude-agents',  label: 'Claude Agents',             subtitle: 'beta.agents + beta.sessions API',                needsProvider: false },
-  { id: 'claude-cowork',  label: 'Claude Cowork',             subtitle: 'Anthropic desktop agent — no code needed',       needsProvider: false },
-  { id: 'claude-code',    label: 'Claude Code',               subtitle: 'Anthropic coding agent — no code needed',        needsProvider: false },
-  { id: 'node',           label: 'Node.js / TypeScript Agent', subtitle: 'JavaScript or TypeScript agent',                needsProvider: true  },
-  { id: 'other',          label: 'Other',                     subtitle: 'Any app that supports OpenTelemetry',            needsProvider: true  },
 ]
 
 const PROVIDERS = [
@@ -1215,10 +1213,7 @@ OTEL_TRACES_EXPORTER=otlp`,
 // Dispatcher — picks the right instructions component
 // ---------------------------------------------------------------------------
 
-function InstructionsView({ platform, provider, agentName, endpoint }) {
-  if (platform === 'custom-python') {
-    return <CustomPythonInstructions provider={provider} agentName={agentName} endpoint={endpoint} />
-  }
+function InstructionsView({ platform, agentName, endpoint }) {
   if (platform === 'openclaw') {
     return <OpenClawInstructions agentName={agentName} endpoint={endpoint} />
   }
@@ -1228,19 +1223,10 @@ function InstructionsView({ platform, provider, agentName, endpoint }) {
   if (platform === 'claude-agents') {
     return <AnthropicAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
-  if (platform === 'crewai' || platform === 'langchain') {
-    return <FrameworkInstructions frameworkId={platform} agentName={agentName} endpoint={endpoint} />
-  }
-  if (platform === 'claude-cowork') {
-    return <ClaudeCoworkInstructions endpoint={endpoint} />
-  }
-  if (platform === 'claude-code') {
-    return <ClaudeCodeInstructions endpoint={endpoint} />
-  }
-  if (platform === 'node') {
-    return <NodeInstructions agentName={agentName} endpoint={endpoint} />
-  }
-  return <OtherInstructions agentName={agentName} endpoint={endpoint} />
+  // Unreachable from the picker — the platform list above only
+  // contains the three live integrations. Returning null is safer
+  // than rendering a stale OtherInstructions page.
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,7 +1301,6 @@ export default function AddAgent({ onClose }) {
           )}
           <InstructionsView
             platform={platform}
-            provider={provider}
             agentName={agentName}
             endpoint={endpoint}
           />
