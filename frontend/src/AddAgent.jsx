@@ -23,6 +23,7 @@ const PLATFORMS = [
   { id: 'crewai',         label: 'CrewAI',                    subtitle: 'Multi-agent orchestration framework',            needsProvider: false },
   { id: 'langchain',      label: 'LangChain / LangGraph',     subtitle: 'LLM application framework',                      needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
+  { id: 'anthropic-agents', label: 'Anthropic Claude Managed Agents', subtitle: 'beta.agents + beta.sessions API',          needsProvider: false },
   { id: 'claude-cowork',  label: 'Claude Cowork',             subtitle: 'Anthropic desktop agent — no code needed',       needsProvider: false },
   { id: 'claude-code',    label: 'Claude Code',               subtitle: 'Anthropic coding agent — no code needed',        needsProvider: false },
   { id: 'node',           label: 'Node.js / TypeScript Agent', subtitle: 'JavaScript or TypeScript agent',                needsProvider: true  },
@@ -793,6 +794,126 @@ result = await Runner.run(agent, "Help me with my order")`,
   )
 }
 
+// ---------------------------------------------------------------------------
+// Instructions page — Anthropic Claude Managed Agents (oversee-agents pip package)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the OpenAI Agents SDK page. The oversee-agents package
+// ships a `platform="anthropic"` mode that monkey-patches the
+// anthropic SDK's beta.agents + beta.sessions resources to emit the
+// same Oversee-named OTEL spans as every other agent platform.
+
+function AnthropicAgentsInstructions({ agentName, endpoint }) {
+  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  const installCmd = 'pip install oversee-agents[anthropic]'
+  const setupCode = fill(
+`import anthropic
+from oversee import init
+
+init(api_key="OVERSEE_API_KEY", agent_name="AGENT_NAME", platform="anthropic")
+
+# Your existing code — no changes needed
+client = anthropic.Anthropic()
+agent = client.beta.agents.create(
+    name="Coding Assistant",
+    model={"id": "claude-opus-4-7"},
+    system="You are a helpful coding assistant.",
+    tools=[{"type": "agent_toolset_20260401"}],
+)
+session = client.beta.sessions.create(agent=agent.id, environment_id=env_id)
+
+for event in client.beta.sessions.stream(session.id):
+    ...  # your event handling — spans flow into Oversee automatically`,
+    agentName,
+    resolvedEndpoint,
+  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+
+  return (
+    <>
+      <h2 className="instructions-title">Connect Anthropic Claude Managed Agents</h2>
+      <p className="instructions-subtitle">
+        Two-line setup with the <code>oversee-agents</code> package.
+        Your <code>client.beta.agents.create</code> and{' '}
+        <code>client.beta.sessions.stream</code> calls stay unchanged —
+        Oversee patches the SDK transparently.
+      </p>
+
+      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <NumberedStep n={1} title="Install the SDK">
+        <CodeBlock code={installCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Initialize at startup">
+        <CodeBlock code={setupCode} />
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Run your agent as you normally would">
+        <p>
+          Every <code>client.beta.agents.create(...)</code> call emits an
+          agent_registration span with the agent's <code>name</code>,{' '}
+          <code>system</code> prompt, model, and declared tools. Every
+          event from <code>client.beta.sessions.stream(...)</code> —{' '}
+          <code>user.message</code>, <code>agent.message</code>,{' '}
+          <code>agent.tool_use</code>, <code>session.status_idle</code> —
+          becomes its own span in the dashboard.
+        </p>
+      </NumberedStep>
+
+      <Callout variant="info">
+        <strong>What gets captured by default:</strong> agent identity
+        (name + system prompt + model + tool list), every user message
+        and agent response, every tool use, and run completion. Message
+        content is <em>not</em> captured unless you pass{' '}
+        <code>capture_outputs=True</code> to <code>init()</code>.
+      </Callout>
+
+      <h3 className="section-title section-title-spaced">Advanced: per-client instrumentation</h3>
+      <p>
+        If you don't want class-level monkey-patching (e.g. multi-tenant
+        hosts), wrap a single client instead:
+      </p>
+      <CodeBlock
+        code={`from oversee import init, monitor
+
+init(api_key="${apiKey || 'ov_sk_…'}", platform="anthropic")
+client = monitor(anthropic.Anthropic())
+# Only this client emits Oversee spans.`}
+      />
+
+      <h3 className="section-title section-title-spaced">Environment variables</h3>
+      <p>
+        All <code>init()</code> args fall back to env vars — handy for
+        containers and CI:
+      </p>
+      <ul>
+        <li>
+          <code>OVERSEE_API_KEY</code> — your Oversee API key
+        </li>
+        <li>
+          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          the Oversee cloud)
+        </li>
+        <li>
+          <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
+        </li>
+        <li>
+          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>true</code> for content capture
+        </li>
+      </ul>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
 function PrefillBlock({ label, value, placeholder }) {
   const [copied, setCopied] = useState(false)
   async function copy() {
@@ -1103,6 +1224,9 @@ function InstructionsView({ platform, provider, agentName, endpoint }) {
   }
   if (platform === 'openai-agents') {
     return <OpenAIAgentsInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  if (platform === 'anthropic-agents') {
+    return <AnthropicAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
   if (platform === 'crewai' || platform === 'langchain') {
     return <FrameworkInstructions frameworkId={platform} agentName={agentName} endpoint={endpoint} />
