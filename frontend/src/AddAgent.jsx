@@ -23,7 +23,7 @@ const PLATFORMS = [
   { id: 'crewai',         label: 'CrewAI',                    subtitle: 'Multi-agent orchestration framework',            needsProvider: false },
   { id: 'langchain',      label: 'LangChain / LangGraph',     subtitle: 'LLM application framework',                      needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
-  { id: 'anthropic-agents', label: 'Anthropic Claude Managed Agents', subtitle: 'beta.agents + beta.sessions API',          needsProvider: false },
+  { id: 'claude-agents',  label: 'Claude Agents',             subtitle: 'beta.agents + beta.sessions API',                needsProvider: false },
   { id: 'claude-cowork',  label: 'Claude Cowork',             subtitle: 'Anthropic desktop agent — no code needed',       needsProvider: false },
   { id: 'claude-code',    label: 'Claude Code',               subtitle: 'Anthropic coding agent — no code needed',        needsProvider: false },
   { id: 'node',           label: 'Node.js / TypeScript Agent', subtitle: 'JavaScript or TypeScript agent',                needsProvider: true  },
@@ -831,7 +831,7 @@ for event in client.beta.sessions.stream(session.id):
 
   return (
     <>
-      <h2 className="instructions-title">Connect Anthropic Claude Managed Agents</h2>
+      <h2 className="instructions-title">Connect Claude Agents</h2>
       <p className="instructions-subtitle">
         Two-line setup with the <code>oversee-agents</code> package.
         Your <code>client.beta.agents.create</code> and{' '}
@@ -1225,7 +1225,7 @@ function InstructionsView({ platform, provider, agentName, endpoint }) {
   if (platform === 'openai-agents') {
     return <OpenAIAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
-  if (platform === 'anthropic-agents') {
+  if (platform === 'claude-agents') {
     return <AnthropicAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
   if (platform === 'crewai' || platform === 'langchain') {
