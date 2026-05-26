@@ -1,8 +1,8 @@
 # oversee-agents
 
-Connect your AI agents to Oversee in two lines of code. Supports the
-**OpenAI Agents SDK** and **Anthropic Claude Managed Agents** today;
-extras pick which dependencies to install.
+Connect your AI agents to Oversee in two lines of code. Supports
+three agent platforms today — the OpenAI Agents SDK, Anthropic
+Claude Agents, and Hermes. Extras pick which dependencies install.
 
 ## Install
 
@@ -10,10 +10,13 @@ extras pick which dependencies to install.
 # OpenAI Agents SDK
 pip install oversee-agents[openai]
 
-# Anthropic Claude Managed Agents
+# Anthropic Claude Agents
 pip install oversee-agents[anthropic]
 
-# Both
+# Hermes Agent (no extra deps — Hermes provides the runtime)
+pip install oversee-agents[hermes]
+
+# All Python-SDK platforms
 pip install oversee-agents[all]
 ```
 
@@ -85,6 +88,49 @@ with track_session(session_id=session.id, agent_name="coding-assistant"):
     for event in client.beta.sessions.stream(session.id):
         ...
 ```
+
+## Hermes Agent
+
+Hermes discovers plugins via Python entry points, so installing
+this package is enough — no separate plugin scaffold to copy.
+
+```bash
+pip install oversee-agents[hermes]
+hermes plugins enable oversee
+```
+
+If you'd rather drop the plugin in by hand:
+
+```bash
+cp -r $(python -c "import oversee.hermes_plugin, os; \
+    print(os.path.dirname(oversee.hermes_plugin.__file__))") \
+    ~/.hermes/plugins/oversee
+```
+
+Configure via environment variables (Hermes will prompt for these
+on `plugins enable` thanks to `plugin.yaml`'s `requires_env`):
+
+```bash
+export OVERSEE_API_KEY="ov_sk_your_key"
+export OVERSEE_ENDPOINT="https://your-oversee/v1/traces"  # optional
+```
+
+Or from chat after the first start:
+
+```
+/oversee connect https://your-oversee/v1/traces
+/oversee apikey ov_sk_your_key
+/oversee capture on
+/oversee status
+```
+
+### What gets captured on Hermes
+
+- **Agent identity** — `~/.hermes/SOUL.md`, plus `memory.md` when
+  `capture_outputs` is on. Sent once on gateway start.
+- **Every `post_tool_call` hook** — tool name, parameter keys (not
+  values, unless capture is on), and the tool's result (capture-only).
+- **`/oversee status`** in chat to verify telemetry is flowing.
 
 ## What gets captured
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -43,6 +43,62 @@ logger = logging.getLogger("oversee")
 # up the tracer provider on the first call.
 _INITIALIZED = False
 _CAPTURE_PROCESSOR: Optional[CaptureProcessor] = None
+
+# Shared bag of resolved configuration. Populated by `_setup_otel`,
+# read by platform adapters (notably oversee/hermes.py) that need to
+# know the tracer, endpoint, or capture flag without coupling to
+# init()'s argument resolution.
+_state: dict[str, Any] = {}
+
+
+def _setup_otel(
+    endpoint: str,
+    api_key: Optional[str] = None,
+    agent_name: str = "agent",
+    platform: str = "agent",
+) -> Any:
+    """Construct (or reuse) the global TracerProvider pointed at an
+    Oversee endpoint. Returns the tracer.
+
+    Idempotent: the first caller wins. Subsequent calls return the
+    already-built tracer without rebuilding the pipeline — important
+    because OTEL TracerProviders are global singletons and the
+    BatchSpanProcessor would lose buffered spans on a rebuild. Also
+    means `init()` and `hermes.register()` can both reach for this
+    helper without coordinating.
+
+    Uses the in-package OTLPJsonSpanExporter because the Oversee
+    backend speaks OTLP/JSON. The standard
+    `opentelemetry-exporter-otlp-proto-http` package would send
+    protobuf and 400.
+    """
+    if _state.get("tracer") is not None:
+        return _state["tracer"]
+
+    resource = Resource.create(
+        {
+            "service.name": agent_name,
+            "service.version": __version__,
+            "oversee.sdk.version": __version__,
+            "oversee.sdk.platform": platform,
+        }
+    )
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-Oversee-Api-Key"] = api_key
+
+    exporter = OTLPJsonSpanExporter(endpoint=endpoint, headers=headers)
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+
+    tracer = trace.get_tracer("oversee")
+    _state["tracer"] = tracer
+    _state["endpoint"] = endpoint
+    _state["api_key"] = api_key
+    _state["agent_name"] = agent_name
+    _state["platform"] = platform
+    return tracer
 
 
 def init(
@@ -106,28 +162,16 @@ def init(
         logger.debug("[Oversee] init() called again — capture flag updated only")
         return
 
-    # 1. OpenTelemetry pipeline.
-    resource = Resource.create(
-        {
-            "service.name": resolved_agent_name,
-            "service.version": __version__,
-            "oversee.sdk.version": __version__,
-            "oversee.sdk.platform": "openai-agents",
-        }
-    )
-    headers = {}
-    if resolved_api_key:
-        # The Oversee backend reads this header on every authenticated
-        # request. Plain string — no special encoding needed.
-        headers["X-Oversee-Api-Key"] = resolved_api_key
-
-    exporter = OTLPJsonSpanExporter(
+    # 1. OpenTelemetry pipeline — shared with the Hermes adapter so
+    # both entrypoints produce a consistent resource shape and the
+    # tracer is a singleton.
+    _setup_otel(
         endpoint=resolved_endpoint,
-        headers=headers,
+        api_key=resolved_api_key,
+        agent_name=resolved_agent_name,
+        platform=_platform_label_for_init(platform),
     )
-    provider = TracerProvider(resource=resource)
-    provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
+    _state["capture_outputs"] = resolved_capture
 
     # 2. Wire each platform's tracing into the OTEL pipeline.
     # `platform` resolution: "auto" detects installed SDKs; explicit
@@ -173,6 +217,23 @@ def init(
             "Install openai-agents or anthropic to enable per-SDK "
             "instrumentation."
         )
+
+
+def _platform_label_for_init(platform: str) -> str:
+    """Map init()'s `platform=` arg to the resource attribute label
+    used on every emitted span. "auto" resolves to whatever SDK is
+    actually installed so the dashboard's filter chips read sensibly;
+    "all" is left as-is so the operator's intent is visible."""
+    if platform in ("openai", "anthropic", "all"):
+        return platform
+    # auto
+    if _has_openai_agents() and _has_anthropic():
+        return "all"
+    if _has_anthropic():
+        return "anthropic"
+    if _has_openai_agents():
+        return "openai"
+    return "agent"
 
 
 def _has_openai_agents() -> bool:

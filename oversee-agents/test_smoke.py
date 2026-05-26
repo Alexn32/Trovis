@@ -203,7 +203,66 @@ try:
     )
     check("platform='anthropic' init() returned without raising", True)
 
-    step(10, "Flushing spans before exit…")
+    step(10, "Hermes plugin (entry point + ctx wiring)…")
+    # Hermes plugin doesn't need anthropic or openai-agents installed;
+    # it operates on a `ctx` object the Hermes runtime provides. We
+    # build a fake ctx that records which hook/command names were
+    # registered, then run `register(ctx)` and assert what landed.
+    from oversee.hermes_plugin import register as hermes_register
+
+    class FakeHermesCtx:
+        def __init__(self):
+            self.hooks = []
+            self.commands = []
+            self.cli = []
+
+        def register_hook(self, name, fn):
+            self.hooks.append((name, fn))
+
+        def register_command(self, name, fn, desc):
+            self.commands.append((name, fn, desc))
+
+        def register_cli_command(self, name, desc, group, fn):
+            self.cli.append((name, desc, group, fn))
+
+    ctx = FakeHermesCtx()
+    hermes_register(ctx)
+    check(
+        "register_hook('post_tool_call', …)",
+        any(name == "post_tool_call" for name, _ in ctx.hooks),
+    )
+    check(
+        "register_command('oversee', …)",
+        any(name == "oversee" for name, _, _ in ctx.commands),
+    )
+    check(
+        "register_cli_command('oversee', …)",
+        any(name == "oversee" for name, _, _, _ in ctx.cli),
+    )
+
+    # Drive the /oversee chat command end-to-end.
+    import json as _json
+
+    _, cmd_fn, _ = next(c for c in ctx.commands if c[0] == "oversee")
+    status_resp = _json.loads(cmd_fn("status"))
+    check("/oversee status returns success", status_resp.get("success") is True)
+    help_resp = _json.loads(cmd_fn(""))
+    check(
+        "/oversee (no args) returns help text",
+        "Oversee commands" in help_resp.get("message", ""),
+    )
+    capture_resp = _json.loads(cmd_fn("capture on"))
+    check(
+        "/oversee capture on flips the flag",
+        "enabled" in capture_resp.get("message", ""),
+    )
+
+    # Drive the post_tool_call hook so we exercise the span path.
+    _, hook_fn = next(h for h in ctx.hooks if h[0] == "post_tool_call")
+    hook_fn("search", {"query": "hammocks"}, "5 results")
+    check("post_tool_call hook ran without raising", True)
+
+    step(11, "Flushing spans before exit…")
     try:
         provider.shutdown()
         check("provider shutdown clean", True)
