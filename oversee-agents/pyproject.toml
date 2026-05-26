@@ -31,7 +31,9 @@ dependencies = [
 # Per-platform extras so users only install what they need:
 #   pip install oversee-agents[openai]      → OpenAI Agents SDK support
 #   pip install oversee-agents[anthropic]   → Claude Managed Agents support
-#   pip install oversee-agents[all]         → both
+#   pip install oversee-agents[hermes]      → Hermes Agent plugin (no extra
+#                                              deps — Hermes provides the ctx)
+#   pip install oversee-agents[all]         → every platform's extras
 [project.optional-dependencies]
 openai = [
     "openai-agents-opentelemetry>=0.2.0",
@@ -39,6 +41,7 @@ openai = [
 anthropic = [
     "anthropic>=0.50.0",
 ]
+hermes = []
 all = [
     "openai-agents-opentelemetry>=0.2.0",
     "anthropic>=0.50.0",
@@ -49,9 +52,21 @@ dev = [
     "anthropic>=0.50.0",
 ]
 
+# Hermes discovers plugins via Python entry points. Pointing at
+# `oversee.hermes_plugin` exposes that package's `register` function
+# to Hermes' loader.
+[project.entry-points."hermes_agent.plugins"]
+oversee = "oversee.hermes_plugin"
+
 [project.urls]
 Homepage = "https://oversee.dev"
 Repository = "https://github.com/Alexn32/Oversee"
 
 [tool.setuptools.packages.find]
 include = ["oversee*"]
+
+# Ship plugin.yaml inside the wheel. Without this, the Hermes
+# manifest gets dropped at build time and the plugin loader can't
+# find it post-install.
+[tool.setuptools.package-data]
+"oversee.hermes_plugin" = ["plugin.yaml"]
