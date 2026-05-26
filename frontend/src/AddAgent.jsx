@@ -26,6 +26,7 @@ const PLATFORMS = [
   { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
   { id: 'claude-agents',  label: 'Claude Agents',             subtitle: 'beta.agents + beta.sessions API',                needsProvider: false },
+  { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
 ]
 
 const PROVIDERS = [
@@ -912,6 +913,120 @@ client = monitor(anthropic.Anthropic())
   )
 }
 
+// ---------------------------------------------------------------------------
+// Instructions page — Hermes Agent (oversee-agents pip package, entry point)
+// ---------------------------------------------------------------------------
+//
+// Hermes discovers plugins via Python entry points, so the install
+// is `pip install oversee-agents[hermes]` plus `hermes plugins enable
+// oversee` — no scaffold to copy around. Same span vocabulary as the
+// OpenClaw plugin (and same `/oversee` chat command) so muscle memory
+// transfers cleanly between platforms.
+
+function HermesAgentsInstructions({ agentName, endpoint }) {
+  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  const installCmd = 'pip install oversee-agents[hermes]'
+  const enableCmd = 'hermes plugins enable oversee'
+  // Hermes prompts for these env vars at `plugins enable` time per the
+  // plugin.yaml `requires_env` declaration; we also surface them here
+  // so operators who'd rather set the shell env directly have a clear
+  // recipe with their actual key/endpoint in place.
+  const envExport = fill(
+`export OVERSEE_API_KEY="OVERSEE_API_KEY"
+export OVERSEE_ENDPOINT="OVERSEE_ENDPOINT"
+export OVERSEE_AGENT_NAME="AGENT_NAME"`,
+    agentName,
+    resolvedEndpoint,
+  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+  const chatCmds =
+`/oversee connect ${resolvedEndpoint}
+/oversee apikey ${apiKey || 'ov_sk_…'}
+/oversee capture on
+/oversee status`
+
+  return (
+    <>
+      <h2 className="instructions-title">Connect Hermes Agent</h2>
+      <p className="instructions-subtitle">
+        One <code>pip install</code> + one <code>hermes plugins enable</code>.
+        The plugin is bundled inside <code>oversee-agents</code> and exposed
+        via a Python entry point, so Hermes finds it automatically.
+      </p>
+
+      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <NumberedStep n={1} title="Install the SDK">
+        <CodeBlock code={installCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Enable the Oversee plugin in Hermes">
+        <CodeBlock code={enableCmd} />
+        <p style={{ marginTop: 8 }}>
+          Hermes will prompt you for <code>OVERSEE_API_KEY</code> the
+          first time. You can also set these in your shell ahead of
+          time:
+        </p>
+        <CodeBlock code={envExport} />
+      </NumberedStep>
+
+      <NumberedStep n={3} title="(Optional) Configure from chat">
+        <p>
+          Once Hermes is running, the plugin registers an{' '}
+          <code>/oversee</code> slash command so you can adjust the
+          connection without restarting:
+        </p>
+        <CodeBlock code={chatCmds} />
+      </NumberedStep>
+
+      <Callout variant="info">
+        <strong>What gets captured by default:</strong> agent identity
+        from <code>~/.hermes/SOUL.md</code> (sent once on gateway
+        start), every <code>post_tool_call</code> as a{' '}
+        <code>tool_call</code> span with the tool name and parameter
+        keys. Tool results and <code>memory.md</code> are <em>not</em>{' '}
+        captured unless you flip <code>OVERSEE_CAPTURE_OUTPUTS=true</code>{' '}
+        or run <code>/oversee capture on</code>.
+      </Callout>
+
+      <h3 className="section-title section-title-spaced">Manual install (alternative)</h3>
+      <p>
+        If your Hermes setup doesn't pick up entry-point plugins, drop
+        the plugin directory in by hand:
+      </p>
+      <CodeBlock
+        code={`cp -r $(python -c "import oversee.hermes_plugin, os; print(os.path.dirname(oversee.hermes_plugin.__file__))") ~/.hermes/plugins/oversee`}
+      />
+
+      <h3 className="section-title section-title-spaced">Environment variables</h3>
+      <ul>
+        <li>
+          <code>OVERSEE_API_KEY</code> — your Oversee API key
+        </li>
+        <li>
+          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          the Oversee cloud)
+        </li>
+        <li>
+          <code>OVERSEE_AGENT_NAME</code> — default{' '}
+          <code>service.name</code> (defaults to <code>hermes-agent</code>)
+        </li>
+        <li>
+          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>true</code> to include tool results + memory.md
+        </li>
+      </ul>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
 function PrefillBlock({ label, value, placeholder }) {
   const [copied, setCopied] = useState(false)
   async function copy() {
@@ -1223,9 +1338,12 @@ function InstructionsView({ platform, agentName, endpoint }) {
   if (platform === 'claude-agents') {
     return <AnthropicAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
+  if (platform === 'hermes') {
+    return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
+  }
   // Unreachable from the picker — the platform list above only
-  // contains the three live integrations. Returning null is safer
-  // than rendering a stale OtherInstructions page.
+  // contains the live integrations. Returning null is safer than
+  // rendering a stale OtherInstructions page.
   return null
 }
 
