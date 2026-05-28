@@ -17,6 +17,7 @@ import {
   PencilIcon,
   SendIcon,
   SparkleIcon,
+  TrashIcon,
 } from './Icons.jsx'
 
 // Detail view for one agent. The `agentId` prop is optional — when set,
@@ -101,6 +102,11 @@ export default function AgentDetail({ serviceName, agentId, onBack }) {
           <SpansTable spans={spans} />
           <RecentOutputs outputs={outputs} />
           <AskAboutAgent summary={summary} agentId={agentId} />
+          <DangerZone
+            summary={summary}
+            agentId={agentId}
+            onDeleted={onBack}
+          />
         </>
       )}
     </div>
@@ -1098,6 +1104,110 @@ function CapabilityColumn({ label, items }) {
         </ul>
       )}
     </div>
+  )
+}
+
+// =====================================================================
+// SECTION: Danger zone — hard-delete this agent's data
+// =====================================================================
+//
+// Two-step confirm: clicking "Delete agent" reveals an inline confirm
+// pane with the exact name + a destructive-action warning. The actual
+// DELETE only fires from the inner "Yes, delete" button. On success
+// we call onDeleted (= AgentDetail's onBack prop), which routes the
+// user back to the Fleet view.
+
+function DangerZone({ summary, agentId, onDeleted }) {
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState(null)
+
+  // What we're actually deleting — used in the confirm copy. When
+  // agentId is set we're targeting one sub-agent within an instance;
+  // otherwise the whole service_name and every sub-agent under it.
+  const isSubScoped = Boolean(agentId)
+  const friendlyName =
+    summary.display_name ||
+    (isSubScoped ? `${summary.service_name} / ${agentId}` : summary.service_name)
+
+  async function handleConfirm() {
+    setDeleting(true)
+    setError(null)
+    try {
+      await api.deleteAgent(summary.service_name, agentId)
+      // Bounce back to Fleet. The Fleet view re-fetches /agents on
+      // mount, so the deleted entry won't be there.
+      onDeleted?.()
+    } catch (e) {
+      setError(e.message || 'Could not delete the agent')
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <section className="section-block danger-zone">
+      <div className="section-block-header">
+        <h3 className="section-label">Danger zone</h3>
+      </div>
+
+      {!confirming ? (
+        <div className="danger-row">
+          <div>
+            <p className="danger-headline">Delete this agent</p>
+            <p className="danger-help">
+              Removes all telemetry, descriptions, owner assignment,
+              and any cached insights. This cannot be undone.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => setConfirming(true)}
+          >
+            <TrashIcon size={13} /> Delete agent
+          </button>
+        </div>
+      ) : (
+        <div className="danger-confirm">
+          <p className="danger-confirm-headline">
+            Delete <strong>{friendlyName}</strong>?
+          </p>
+          <p className="danger-help">
+            This removes all telemetry, descriptions, and settings for
+            this {isSubScoped ? 'sub-agent' : 'instance'}. This cannot
+            be undone.
+          </p>
+          {error && <p className="form-error">{error}</p>}
+          <div className="danger-confirm-actions">
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={handleConfirm}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <>
+                  <Spinner /> Deleting…
+                </>
+              ) : (
+                <>Yes, delete</>
+              )}
+            </button>
+            <button
+              type="button"
+              className="btn btn-link"
+              onClick={() => {
+                setConfirming(false)
+                setError(null)
+              }}
+              disabled={deleting}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
   )
 }
 

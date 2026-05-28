@@ -32,6 +32,7 @@ import asker
 import database
 import describer
 from models import (
+    AgentDeleteResponse,
     AgentDescription,
     AgentGroup,
     AgentOutput,
@@ -525,6 +526,41 @@ async def set_agent_display_name(
         agent_id=body.agent_id or "main",
         display_name=body.display_name,
         account_id=account_id,
+    )
+
+
+@app.delete(
+    "/agents/{service_name}",
+    response_model=AgentDeleteResponse,
+)
+async def delete_agent(
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
+) -> AgentDeleteResponse:
+    """Hard-delete an agent. Sweeps every per-agent table — spans,
+    descriptions, registrations, display names, owner assignments,
+    cached insights.
+
+    Without `?agent_id=`, deletes the entire service (every sub-agent).
+    With it, scopes to one sub-agent. The two cases differ only in
+    the WHERE clause; the same helper handles both.
+
+    Returns a per-table row count so the dashboard can show "deleted
+    14 spans, 1 description, 1 registration" if it wants to be
+    explicit. Idempotent: re-running against an empty service
+    returns zeros, not 404.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    summary = database.delete_agent(
+        service_name=service_name,
+        account_id=account_id,
+        agent_id=agent_id,
+    )
+    return AgentDeleteResponse(
+        service_name=service_name,
+        agent_id=agent_id,
+        deleted_rows=summary,
     )
 
 

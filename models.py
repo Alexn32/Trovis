@@ -105,6 +105,18 @@ class AgentGroup(BaseModel):
     owner_role: str | None = None
 
 
+class AgentDeleteResponse(BaseModel):
+    """Response shape for `DELETE /agents/{service_name}`. `agent_id`
+    is None when the whole service was deleted; populated when only a
+    single sub-agent was. `deleted_rows` is a per-table count so the
+    caller can audit what just happened."""
+
+    deleted: bool = True
+    service_name: str
+    agent_id: str | None = None
+    deleted_rows: dict[str, int] = Field(default_factory=dict)
+
+
 class DisplayNameRequest(BaseModel):
     """Body for PUT /agents/{service_name}/display-name. `agent_id`
     scopes the override to one sub-agent — pass 'main' for the default
