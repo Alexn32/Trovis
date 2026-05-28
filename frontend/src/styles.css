@@ -273,6 +273,26 @@ a:hover {
   border-color: var(--border-hover);
 }
 
+/* Destructive action button. Same shape as btn-primary but in the
+   error color so it visually screams "this can't be undone". */
+.btn-danger {
+  background: var(--error);
+  border-color: var(--error);
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.btn-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .btn-ghost {
   background: none;
   border-color: transparent;
@@ -704,12 +724,22 @@ a:hover {
   margin: 0;
 }
 
+/* Sub-agent row container: holds the clickable row + the
+   hover-revealed delete affordance side by side. Hover state
+   on the wrapper reveals the trash button. */
+.subagent-row-wrapper {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
 .subagent-row {
+  flex: 1;
   display: grid;
   grid-template-columns: 18px 1fr auto auto auto;
   gap: 12px;
   align-items: center;
-  width: 100%;
   padding: 8px 10px;
   background: var(--bg-elev);
   border: 1px solid transparent;
@@ -722,6 +752,50 @@ a:hover {
 
 .subagent-row:hover {
   border-color: var(--border-strong);
+}
+
+/* Trash icon — visually muted until the row (or the icon itself)
+   is hovered. Avoid wholesale display:none so screen readers can
+   still reach it. */
+.subagent-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.subagent-row-wrapper:hover .subagent-delete-btn,
+.subagent-delete-btn:focus-visible {
+  opacity: 1;
+}
+
+.subagent-delete-btn:hover {
+  color: var(--error);
+  border-color: var(--border-default);
+  background: var(--bg-surface);
+}
+
+/* Inline confirm replaces the trash icon for the row being
+   confirmed. Always visible — confirmation is explicit. */
+.subagent-delete-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.btn-link-inline.danger {
+  color: var(--error);
+  font-weight: 600;
 }
 
 .subagent-id {
@@ -2464,4 +2538,55 @@ a:hover {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ---------- Danger zone (AgentDetail's delete section) ---------- */
+
+/* Subtle red wash on the section border so the destructive area
+   stands apart from the rest of the page. Inherits the same card
+   spacing as other .section-block instances. */
+.danger-zone {
+  border: 1px solid var(--error);
+  border-opacity: 0.4;
+}
+/* The var --error is a strong color; soften the border with a
+   token-based fallback for browsers that don't honor border-opacity
+   on .section-block defaults. */
+.danger-zone {
+  border-color: color-mix(in oklab, var(--error) 40%, transparent);
+}
+
+.danger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.danger-headline {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+
+.danger-help {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+.danger-confirm-headline {
+  font-size: 14px;
+  color: var(--text-primary);
+  margin: 0 0 8px;
+}
+
+.danger-confirm-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 14px;
+  align-items: center;
 }

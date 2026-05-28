@@ -153,6 +153,15 @@ export const api = {
         agentId,
       ),
     ),
+  // Hard-delete an agent. With agentId set, scopes to one sub-agent;
+  // without, drops the whole service_name. Returns the delete summary.
+  deleteAgent(name, agentId) {
+    return request(
+      _withAgent(`/agents/${encodeURIComponent(name)}`, agentId),
+      { method: 'DELETE' },
+    )
+  },
+
   // Operator-set human-readable label for one sub-agent. Empty
   // displayName clears the override. Returns no body (204) on success.
   setDisplayName(name, agentId, displayName) {

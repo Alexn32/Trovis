@@ -17,6 +17,7 @@ import {
   ChevronRightIcon,
   ClipboardIcon,
   LightbulbIcon,
+  TrashIcon,
 } from './Icons.jsx'
 
 // Fleet view. The /agents response is now nested:
@@ -52,6 +53,27 @@ export default function Fleet({ onSelectAgent, onAddAgent }) {
       cancelled = true
     }
   }, [])
+
+  // Optimistic local update on delete — drops the sub-agent from
+  // its group, and if the group becomes empty (its last sub-agent
+  // is gone) drops the whole group. Avoids a full /agents refetch
+  // for a snappier interaction; the next mount sees the fresh
+  // server state anyway.
+  async function handleDeleteSubAgent(serviceName, agentId) {
+    await api.deleteAgent(serviceName, agentId)
+    setGroups((prev) =>
+      prev
+        .map((g) =>
+          g.service_name === serviceName
+            ? {
+                ...g,
+                agents: g.agents.filter((a) => a.agent_id !== agentId),
+              }
+            : g,
+        )
+        .filter((g) => g.agents.length > 0),
+    )
+  }
 
   // Headline counts are at the instance level so a multi-agent gateway
   // doesn't artificially inflate the "Total agents" stat. We also count
@@ -109,6 +131,7 @@ export default function Fleet({ onSelectAgent, onAddAgent }) {
             error={error}
             onSelectAgent={onSelectAgent}
             onAddAgent={onAddAgent}
+            onDeleteSubAgent={handleDeleteSubAgent}
           />
         </section>
       </div>
@@ -160,7 +183,7 @@ function FleetSummary({ counts }) {
   )
 }
 
-function AgentList({ groups, loading, error, onSelectAgent, onAddAgent }) {
+function AgentList({ groups, loading, error, onSelectAgent, onAddAgent, onDeleteSubAgent }) {
   if (loading) {
     return <div className="state-card">Loading agents…</div>
   }
@@ -201,6 +224,9 @@ function AgentList({ groups, loading, error, onSelectAgent, onAddAgent }) {
             onSelectInstance={() => onSelectAgent(g.service_name)}
             onSelectSubAgent={(agentId) =>
               onSelectAgent(g.service_name, agentId)
+            }
+            onDeleteSubAgent={(agentId) =>
+              onDeleteSubAgent(g.service_name, agentId)
             }
           />
         ),
@@ -311,7 +337,7 @@ function AgentCard({ group, onSelect }) {
 // that agent_id. The outer container is a <div> (not a button) because we
 // can't nest interactive elements; each clickable region is its own
 // <button>.
-function GroupCard({ group, onSelectInstance, onSelectSubAgent }) {
+function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent }) {
   const [expanded, setExpanded] = useState(true)
   const [sparkData, setSparkData] = useState(null)
   const status = statusFor(groupForStatus(group))
@@ -435,6 +461,7 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent }) {
                 key={sa.agent_id}
                 subAgent={sa}
                 onSelect={() => onSelectSubAgent(sa.agent_id)}
+                onDelete={() => onDeleteSubAgent(sa.agent_id)}
               />
             ))}
           </ul>
@@ -444,7 +471,7 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent }) {
   )
 }
 
-function SubAgentRow({ subAgent, onSelect }) {
+function SubAgentRow({ subAgent, onSelect, onDelete }) {
   const compat = {
     span_count: subAgent.span_count,
     error_count: subAgent.error_count,
@@ -452,8 +479,31 @@ function SubAgentRow({ subAgent, onSelect }) {
   }
   const status = statusFor(compat)
   const errRate = errorRatePercent(compat)
+
+  // Inline-confirm pattern matches TeamRow's delete UX — no modal.
+  // Clicking the trash icon flips to a "Yes / Cancel" pair so the
+  // destructive action is two clicks even though the icon is small.
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
+  async function handleConfirm(e) {
+    e.stopPropagation()
+    setDeleting(true)
+    try {
+      await onDelete()
+      // Parent Fleet.handleDeleteSubAgent drops this row from state,
+      // so the unmount runs before any state cleanup here. Safe.
+    } catch (err) {
+      // If the API call fails, snap back to non-confirming so the
+      // operator can retry. The row's still here.
+      console.warn('[Fleet] sub-agent delete failed:', err)
+      setDeleting(false)
+      setConfirming(false)
+    }
+  }
+
   return (
-    <li>
+    <li className="subagent-row-wrapper">
       <button type="button" className="subagent-row" onClick={onSelect}>
         <span className={`status-dot status-${status}`} />
         <span className="subagent-id">
@@ -483,6 +533,42 @@ function SubAgentRow({ subAgent, onSelect }) {
           {relativeTime(subAgent.last_seen)}
         </span>
       </button>
+      {confirming ? (
+        <span className="subagent-delete-confirm">
+          <button
+            type="button"
+            className="btn-link-inline danger"
+            onClick={handleConfirm}
+            disabled={deleting}
+          >
+            {deleting ? 'Deleting…' : 'Yes, delete'}
+          </button>
+          <button
+            type="button"
+            className="btn-link-inline"
+            onClick={(e) => {
+              e.stopPropagation()
+              setConfirming(false)
+            }}
+            disabled={deleting}
+          >
+            Cancel
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          className="subagent-delete-btn"
+          onClick={(e) => {
+            e.stopPropagation()
+            setConfirming(true)
+          }}
+          aria-label={`Delete ${subAgent.agent_id}`}
+          title="Delete sub-agent"
+        >
+          <TrashIcon size={13} />
+        </button>
+      )}
     </li>
   )
 }

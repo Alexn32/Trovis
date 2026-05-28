@@ -1824,6 +1824,77 @@ def get_insight(
 
 
 # ---------------------------------------------------------------------------
+# Agent deletion (full sweep across every per-agent table)
+# ---------------------------------------------------------------------------
+
+
+# Tables that hold per-agent rows keyed on `(service_name, agent_id)`.
+# Ordered so referential constraints (the agent_owners → team_members
+# foreign key) don't trip — agent_owners has the FK, but the join
+# direction (owner row references team_member) means deleting owners
+# is safe at any point. Order is otherwise irrelevant.
+_PER_AGENT_TABLES = (
+    "spans",
+    "descriptions",
+    "agent_registrations",
+    "agent_display_names",
+    "agent_owners",
+    "agent_insights",
+)
+
+
+def delete_agent(
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
+) -> dict[str, int]:
+    """Delete every row Oversee knows about for an agent.
+
+    When `agent_id` is provided, scopes to that sub-agent only
+    (matches via `COALESCE(agent_id, 'main') = ?`). When omitted,
+    drops the whole `service_name` — every sub-agent under it.
+
+    Account-scoped: NULL-account rows (pre-multi-tenant local dev) are
+    only touched when `account_id` is None. Cross-tenant safety
+    matters here more than anywhere else since this is irreversible.
+
+    Returns a `{table: rows_deleted}` summary — useful for logging and
+    for the API response so the caller can audit what just happened.
+    All DELETEs run inside the same `_connect()` context, which
+    auto-commits on success and rolls back on exception — partial
+    deletion is impossible.
+    """
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    agent_clause = (
+        f"AND COALESCE(agent_id, 'main') = {PH}"
+        if agent_id is not None
+        else ""
+    )
+
+    base_args: list[Any] = [service_name]
+    if account_id is not None:
+        base_args.append(account_id)
+    if agent_id is not None:
+        base_args.append(agent_id)
+    args = tuple(base_args)
+
+    summary: dict[str, int] = {}
+    with _connect() as conn, _cursor(conn) as cur:
+        for table in _PER_AGENT_TABLES:
+            sql = (
+                f"DELETE FROM {table} "
+                f"WHERE service_name = {PH} {account_clause} {agent_clause}"
+            )
+            cur.execute(sql, args)
+            summary[table] = cur.rowcount
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Accounts and API keys
 # ---------------------------------------------------------------------------
 
