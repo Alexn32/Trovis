@@ -52,5 +52,9 @@ oversee.db-wal
 .env
 .env.local
 
+# Vercel CLI deploys. Sub-projects have their own .gitignore for this;
+# defend at the root in case someone ever runs `vercel` from here.
+.vercel/
+
 # Claude Code (per-user, not project)
 .claude/
