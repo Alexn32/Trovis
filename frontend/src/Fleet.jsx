@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import {
   bucketSpansForSparkline,
+  formatCost,
   formatDuration,
   relativeTime,
   statusFor,
@@ -98,6 +99,7 @@ export default function Fleet({ onSelectAgent, onAddAgent }) {
   const statuses = groups.map((g) => statusFor(groupForStatus(g)))
   const healthy = statuses.filter((s) => s === 'green').length
   const degraded = statuses.filter((s) => s === 'yellow' || s === 'red').length
+  const fleetCostToday = groups.reduce((a, g) => a + (g.cost_today || 0), 0)
 
   return (
     <div className="view view-wide">
@@ -111,6 +113,7 @@ export default function Fleet({ onSelectAgent, onAddAgent }) {
             spans: totalSpans,
             errors: totalErrors,
             avgMs: weightedAvgMs,
+            costToday: fleetCostToday,
           }}
         />
         <section className="agents-section">
@@ -157,6 +160,23 @@ function isFlatGroup(group) {
   return list.length <= 1 && (list[0]?.agent_id ?? 'main') === 'main'
 }
 
+// Small cost line on a Fleet card. Prefers "today" when there's spend
+// today; otherwise falls back to the 7-day figure so a card that ran
+// yesterday still shows something. Renders nothing when the agent has
+// no cost data at all (keeps cost-free agents visually clean).
+function CardCostLine({ group }) {
+  const today = group.cost_today || 0
+  const week = group.cost_7d || 0
+  if (today <= 0 && week <= 0) return null
+  return (
+    <div className="agent-cost-line">
+      {today > 0
+        ? `${formatCost(today)} today`
+        : `${formatCost(week)} this week`}
+    </div>
+  )
+}
+
 function FleetSummary({ counts }) {
   return (
     <div className="fleet-summary">
@@ -179,6 +199,7 @@ function FleetSummary({ counts }) {
         value={counts.errors.toLocaleString()}
         tone={counts.errors > 0 ? 'error' : undefined}
       />
+      <Stat label="Fleet cost today" value={formatCost(counts.costToday || 0)} />
     </div>
   )
 }
@@ -299,6 +320,8 @@ function AgentCard({ group, onSelect }) {
           'No description yet — auto-generated when telemetry includes registration data.'}
       </p>
 
+      <CardCostLine group={group} />
+
       <div className="agent-card-stats">
         <div className="agent-stat">
           <span className="agent-stat-label">Spans</span>
@@ -406,6 +429,8 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
           {group.description ||
             'No description yet — auto-generated when telemetry includes registration data.'}
         </p>
+
+        <CardCostLine group={group} />
 
         <div className="agent-card-stats">
           <div className="agent-stat">

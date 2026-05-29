@@ -86,6 +86,11 @@ def register(ctx: Any) -> None:
     # a Hermes API that's missing one of these methods doesn't break
     # the others.
     _try(lambda: ctx.register_hook("post_tool_call", _on_tool_call))
+    # Token usage isn't carried on tool calls. If this Hermes build
+    # exposes a post-model-call hook, capture usage from there; if not,
+    # _try() silently no-ops and we simply don't get cost data for
+    # Hermes until the gateway exposes such a hook.
+    _try(lambda: ctx.register_hook("post_model_call", _on_model_call))
     _try(
         lambda: ctx.register_command(
             "oversee",
@@ -157,6 +162,78 @@ def _on_tool_call(tool_name: Any, params: Any, result: Any) -> None:
                 "oversee.tool.result",
                 _truncate(str(result), 10_000),
             )
+
+
+def _on_model_call(*args: Any, **kwargs: Any) -> None:
+    """post_model_call hook (best-effort — only fires if this Hermes
+    build exposes it). Emits a model_call span with the OTEL GenAI
+    usage attributes so the backend can compute cost.
+
+    Hermes' exact signature is unknown, so we accept *args/**kwargs and
+    pull what we recognize: a model name plus a usage object carrying
+    input/output token counts. Anything we can't find is simply
+    omitted — never raises.
+    """
+    from oversee.core import _state
+
+    tracer = _state.get("tracer")
+    if not tracer:
+        return
+    agent_name = _state.get("agent_name", "hermes-agent")
+
+    # Merge positional + keyword sources into one lookup bag. Hermes
+    # might pass a single dict, or (model, usage), or kwargs.
+    bag: dict[str, Any] = {}
+    for a in args:
+        if isinstance(a, dict):
+            bag.update(a)
+    bag.update(kwargs)
+
+    model = bag.get("model") or bag.get("model_name") or bag.get("model_id")
+    usage = bag.get("usage") or bag.get("token_usage") or bag
+
+    def _int(v: Any) -> int | None:
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    inp = _int(
+        _bag_get(usage, "input_tokens", "prompt_tokens", "inputTokens")
+    )
+    out = _int(
+        _bag_get(usage, "output_tokens", "completion_tokens", "outputTokens")
+    )
+    tot = _int(_bag_get(usage, "total_tokens", "totalTokens"))
+    if tot is None and (inp is not None or out is not None):
+        tot = (inp or 0) + (out or 0)
+
+    if tot is None:
+        return  # nothing usable — don't emit an empty model_call span
+
+    with tracer.start_as_current_span("model_call") as span:
+        span.set_attribute("oversee.event.type", "model_call")
+        span.set_attribute("oversee.agent.id", agent_name)
+        if model:
+            span.set_attribute("gen_ai.request.model", str(model))
+        if inp is not None:
+            span.set_attribute("gen_ai.usage.input_tokens", inp)
+        if out is not None:
+            span.set_attribute("gen_ai.usage.output_tokens", out)
+        span.set_attribute("gen_ai.usage.total_tokens", tot)
+
+
+def _bag_get(obj: Any, *keys: str) -> Any:
+    """Read the first present key from a dict or attribute bag."""
+    for k in keys:
+        if isinstance(obj, dict):
+            if k in obj and obj[k] is not None:
+                return obj[k]
+        else:
+            v = getattr(obj, k, None)
+            if v is not None:
+                return v
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ import asker
 import database
 import describer
 from models import (
+    AgentCosts,
     AgentDeleteResponse,
     AgentDescription,
     AgentGroup,
@@ -701,6 +702,28 @@ async def agent_outputs(
             agent_id=agent_id,
         )
     ]
+
+
+@app.get("/agents/{service_name}/costs", response_model=AgentCosts)
+async def agent_costs(
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
+    days: int = Query(default=7, ge=1, le=365),
+) -> AgentCosts:
+    """Token usage + estimated USD cost for an agent over the last
+    `days` days. Returns totals plus per-day and per-model breakdowns.
+    Only spans that carried `gen_ai.usage.*` token counts contribute —
+    everything else has NULL tokens and is ignored."""
+    account_id = getattr(request.state, "account_id", None)
+    return AgentCosts(
+        **database.get_agent_costs(
+            service_name,
+            account_id=account_id,
+            agent_id=agent_id,
+            days=days,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,12 @@ _ORIGINAL_METHODS: dict[str, Any] = {}
 _SESSION_TO_AGENT: dict[str, str] = {}
 _AGENT_ID_TO_NAME: dict[str, str] = {}
 
+# Model tracking, so token-usage spans can carry gen_ai.request.model
+# (the backend needs both usage + model to compute cost). agents.create
+# records agent.id → model; sessions.create resolves session → model.
+_AGENT_ID_TO_MODEL: dict[str, str] = {}
+_SESSION_TO_MODEL: dict[str, str] = {}
+
 # Span-content truncation. Same budget as the OpenClaw plugin.
 _CONTENT_BYTE_LIMIT = 10_000
 
@@ -295,11 +301,12 @@ def _record_agent(agent_obj: Any, kwargs: dict[str, Any]) -> None:
     and emit one agent_registration span."""
     name = _get(agent_obj, "name") or kwargs.get("name") or "main"
     agent_id = _get(agent_obj, "id")
-    if agent_id:
-        _AGENT_ID_TO_NAME[agent_id] = name
-
     system = _get(agent_obj, "system") or kwargs.get("system") or ""
     model_id = _resolve_model(_get(agent_obj, "model") or kwargs.get("model"))
+    if agent_id:
+        _AGENT_ID_TO_NAME[agent_id] = name
+        _AGENT_ID_TO_MODEL[agent_id] = model_id
+
     tools = _get(agent_obj, "tools") or kwargs.get("tools") or []
     tool_types = _serialize_tool_types(tools)
 
@@ -337,6 +344,9 @@ def _record_session(
         return
     agent_name = _AGENT_ID_TO_NAME.get(str(agent_ref), str(agent_ref))
     _SESSION_TO_AGENT[session_id] = agent_name
+    model = _AGENT_ID_TO_MODEL.get(str(agent_ref))
+    if model:
+        _SESSION_TO_MODEL[session_id] = model
 
 
 def _instrumented_iterator(
@@ -395,6 +405,18 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
                         "oversee.response.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
+            # Token usage rides on the agent.message event. Pair it with
+            # the session's model so the backend can compute cost.
+            inp, out, tot = _extract_usage(_get(event, "usage"))
+            if tot is not None:
+                model = _SESSION_TO_MODEL.get(session_id or "")
+                if model:
+                    span.set_attribute("gen_ai.request.model", model)
+                if inp is not None:
+                    span.set_attribute("gen_ai.usage.input_tokens", inp)
+                if out is not None:
+                    span.set_attribute("gen_ai.usage.output_tokens", out)
+                span.set_attribute("gen_ai.usage.total_tokens", tot)
 
     elif event_type == "agent.tool_use":
         with tracer.start_as_current_span("tool_call") as span:
@@ -440,6 +462,27 @@ def _get(obj: Any, key: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
+
+
+def _extract_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
+    """Normalize an Anthropic usage object to (input, output, total)
+    tokens. Anthropic uses input_tokens / output_tokens; total is
+    derived. Returns (None, None, None) when no usage is present."""
+    if usage is None:
+        return (None, None, None)
+
+    def _int(v: Any) -> int | None:
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    inp = _int(_get(usage, "input_tokens"))
+    out = _int(_get(usage, "output_tokens"))
+    tot = _int(_get(usage, "total_tokens"))
+    if tot is None and (inp is not None or out is not None):
+        tot = (inp or 0) + (out or 0)
+    return (inp, out, tot)
 
 
 def _resolve_session_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Optional[str]:
@@ -547,4 +590,6 @@ def _reset_for_tests() -> None:
     _ORIGINAL_METHODS.clear()
     _SESSION_TO_AGENT.clear()
     _AGENT_ID_TO_NAME.clear()
+    _AGENT_ID_TO_MODEL.clear()
+    _SESSION_TO_MODEL.clear()
     _PATCHED = False

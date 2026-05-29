@@ -3,8 +3,10 @@ import { api } from './api.js'
 import {
   bucketSpansByDay,
   errorRatePercent,
+  formatCost,
   formatDuration,
   formatNsTimestamp,
+  formatTokens,
   nsToMs,
   relativeTime,
   statusFor,
@@ -87,6 +89,10 @@ export default function AgentDetail({ serviceName, agentId, onBack }) {
             agentId={agentId}
           />
           <WeeklySection
+            serviceName={serviceName}
+            agentId={agentId}
+          />
+          <CostSection
             serviceName={serviceName}
             agentId={agentId}
           />
@@ -1014,6 +1020,138 @@ function WeeklyStat({ label, value, deltaPct, betterDirection }) {
       <span className="weekly-stat-value">{value}</span>
       {trendNode}
     </div>
+  )
+}
+
+// =====================================================================
+// SECTION: Cost — token usage + estimated USD spend
+// =====================================================================
+
+function CostSection({ serviceName, agentId }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    api
+      .getAgentCosts(serviceName, agentId, 7)
+      .then((res) => {
+        if (cancelled) return
+        setData(res)
+        setLoading(false)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setError(e.message || 'Could not load costs')
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [serviceName, agentId])
+
+  // Derive "today" from the last day bucket (cost_by_day is sorted
+  // ascending by date). "this week" is the whole-window total.
+  const todayCost = (() => {
+    if (!data || !data.cost_by_day.length) return 0
+    const today = new Date().toISOString().slice(0, 10)
+    const last = data.cost_by_day[data.cost_by_day.length - 1]
+    return last.date === today ? last.cost : 0
+  })()
+
+  const hasData = data && data.total_tokens > 0
+  const maxDayCost = data
+    ? Math.max(...data.cost_by_day.map((d) => d.cost), 0.000001)
+    : 1
+
+  return (
+    <section className="section-block cost-section">
+      <div className="section-block-header">
+        <h3 className="section-label">Cost</h3>
+      </div>
+
+      {loading && <div className="weekly-loading">Loading cost data…</div>}
+      {error && !loading && (
+        <div className="callout callout-error">{error}</div>
+      )}
+      {!loading && !error && !hasData && (
+        <div className="callout callout-info">
+          No token usage recorded yet. Cost tracking populates once this
+          agent makes model calls that report token counts.
+        </div>
+      )}
+      {!loading && !error && hasData && (
+        <>
+          <p className="cost-headline">
+            {formatCost(todayCost)} today
+            <span className="cost-headline-sep"> · </span>
+            {formatCost(data.estimated_cost_usd)} this week
+            <span className="cost-headline-sep"> · </span>
+            {formatTokens(data.total_tokens)} tokens
+          </p>
+
+          <div className="cost-stats">
+            <div className="cost-stat">
+              <span className="cost-stat-label">Input tokens</span>
+              <span className="cost-stat-value">
+                {data.total_input_tokens.toLocaleString()}
+              </span>
+            </div>
+            <div className="cost-stat">
+              <span className="cost-stat-label">Output tokens</span>
+              <span className="cost-stat-value">
+                {data.total_output_tokens.toLocaleString()}
+              </span>
+            </div>
+            <div className="cost-stat">
+              <span className="cost-stat-label">7-day cost</span>
+              <span className="cost-stat-value">
+                {formatCost(data.estimated_cost_usd)}
+              </span>
+            </div>
+          </div>
+
+          <h4 className="cost-subhead">Cost by day</h4>
+          <div className="cost-bars">
+            {data.cost_by_day.map((d) => (
+              <div key={d.date} className="cost-bar-col" title={`${d.date}: ${formatCost(d.cost)} · ${d.tokens.toLocaleString()} tokens`}>
+                <div className="cost-bar-track">
+                  <div
+                    className="cost-bar-fill"
+                    style={{
+                      height: `${Math.max(2, (d.cost / maxDayCost) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <span className="cost-bar-label">{d.date.slice(5)}</span>
+              </div>
+            ))}
+          </div>
+
+          {data.cost_by_model.length > 1 && (
+            <>
+              <h4 className="cost-subhead">Cost by model</h4>
+              <ul className="cost-model-list">
+                {data.cost_by_model.map((m) => (
+                  <li key={m.model} className="cost-model-row">
+                    <span className="cost-model-name mono">{m.model}</span>
+                    <span className="cost-model-tokens">
+                      {formatTokens(m.tokens)} tokens
+                    </span>
+                    <span className="cost-model-cost">
+                      {formatCost(m.cost)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </>
+      )}
+    </section>
   )
 }
 

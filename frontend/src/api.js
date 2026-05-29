@@ -153,6 +153,12 @@ export const api = {
         agentId,
       ),
     ),
+  // Token usage + estimated cost over the last `days` days, with
+  // per-day and per-model breakdowns.
+  getAgentCosts: (name, agentId, days = 7) => {
+    const base = `/agents/${encodeURIComponent(name)}/costs?days=${days}`
+    return request(_withAgent(base, agentId))
+  },
   // Hard-delete an agent. With agentId set, scopes to one sub-agent;
   // without, drops the whole service_name. Returns the delete summary.
   deleteAgent(name, agentId) {

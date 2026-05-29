@@ -45,6 +45,24 @@ export function nsToMs(ns) {
   return ns / 1_000_000
 }
 
+// Format a USD cost. Sub-cent values get more precision so a $0.0042
+// agent doesn't read as "$0.00". Larger values round to cents.
+export function formatCost(usd) {
+  const n = Number(usd) || 0
+  if (n === 0) return '$0.00'
+  if (n < 0.01) return `$${n.toFixed(4)}`
+  if (n < 1) return `$${n.toFixed(3)}`
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+// Compact token count: 48200 → "48.2K", 1_500_000 → "1.5M".
+export function formatTokens(n) {
+  const v = Number(n) || 0
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`
+  return String(v)
+}
+
 export function formatNsTimestamp(ns) {
   return new Date(ns / 1_000_000).toLocaleString()
 }
