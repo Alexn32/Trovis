@@ -169,6 +169,10 @@ CREATE TABLE IF NOT EXISTS spans (
     status_message      TEXT      DEFAULT '',
     attributes          TEXT      DEFAULT '{}',
     resource_attributes TEXT      DEFAULT '{}',
+    input_tokens        INTEGER   DEFAULT NULL,
+    output_tokens       INTEGER   DEFAULT NULL,
+    total_tokens        INTEGER   DEFAULT NULL,
+    estimated_cost_usd  REAL      DEFAULT NULL,
     created_at          TIMESTAMP DEFAULT NOW()
 )
 """
@@ -200,6 +204,10 @@ CREATE TABLE IF NOT EXISTS spans (
     status_message      TEXT    DEFAULT '',
     attributes          TEXT    DEFAULT '{}',
     resource_attributes TEXT    DEFAULT '{}',
+    input_tokens        INTEGER DEFAULT NULL,
+    output_tokens       INTEGER DEFAULT NULL,
+    total_tokens        INTEGER DEFAULT NULL,
+    estimated_cost_usd  REAL    DEFAULT NULL,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -284,6 +292,37 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
+
+# Per-model token pricing. Global (not account-scoped) — these are
+# published list prices, the same for everyone. Costs are per 1,000
+# tokens. Seeded at init from _PRICING_SEED below; re-seeding is an
+# UPSERT so price corrections on restart are picked up.
+_PRICING_DDL_PG = """
+CREATE TABLE IF NOT EXISTS model_pricing (
+    model_name       TEXT PRIMARY KEY,
+    input_cost_per_1k  REAL NOT NULL,
+    output_cost_per_1k REAL NOT NULL
+)
+"""
+
+_PRICING_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS model_pricing (
+    model_name       TEXT PRIMARY KEY,
+    input_cost_per_1k  REAL NOT NULL,
+    output_cost_per_1k REAL NOT NULL
+)
+"""
+
+# Current published list prices, normalized to cost-per-1,000-tokens.
+# (The spec quotes per-1M prices; divide by 1000.)
+_PRICING_SEED = [
+    # model_name,         input/1k,  output/1k
+    ("claude-opus-4-6",   0.015,     0.075),    # $15 / $75 per 1M
+    ("claude-sonnet-4-6", 0.003,     0.015),    # $3 / $15 per 1M
+    ("claude-haiku-4-5",  0.0008,    0.004),    # $0.80 / $4 per 1M
+    ("gpt-4o",            0.0025,    0.010),     # $2.50 / $10 per 1M
+    ("gpt-4o-mini",       0.00015,   0.0006),    # $0.15 / $0.60 per 1M
+]
 
 # Human team members an operator manages. Per-account scoping; email
 # is optional but UNIQUE within an account when set (NULLs allowed as
@@ -422,6 +461,9 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_team_member ON agent_owners(team_member_id)",
     "CREATE INDEX IF NOT EXISTS idx_insights_account_id ON agent_insights(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_insights_service_agent_kind ON agent_insights(service_name, agent_id, kind)",
+    # Speeds the cost aggregation, which filters to spans with a
+    # non-null total_tokens within a service + time window.
+    "CREATE INDEX IF NOT EXISTS idx_spans_tokens ON spans(service_name, total_tokens)",
 ]
 
 
@@ -445,6 +487,7 @@ def init_db() -> None:
             _TEAM_DDL_PG,
             _OWNERS_DDL_PG,
             _INSIGHTS_DDL_PG,
+            _PRICING_DDL_PG,
         ]
     else:
         ddls = [
@@ -457,6 +500,7 @@ def init_db() -> None:
             _TEAM_DDL_SQLITE,
             _OWNERS_DDL_SQLITE,
             _INSIGHTS_DDL_SQLITE,
+            _PRICING_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -474,8 +518,41 @@ def init_db() -> None:
         # Same backfill for descriptions — pre-multi-agent rows were
         # generated from main's SOUL.md, so 'main' is the correct tag.
         _try_add_column(cur, "descriptions", "agent_id", "TEXT DEFAULT 'main'")
+        # Token + cost columns on spans. NULL on existing rows (we never
+        # captured tokens before), which the cost aggregates treat as
+        # "no usage data" — they SUM only non-NULL rows.
+        _try_add_column(cur, "spans", "input_tokens", "INTEGER DEFAULT NULL")
+        _try_add_column(cur, "spans", "output_tokens", "INTEGER DEFAULT NULL")
+        _try_add_column(cur, "spans", "total_tokens", "INTEGER DEFAULT NULL")
+        _try_add_column(cur, "spans", "estimated_cost_usd", "REAL DEFAULT NULL")
         for idx in _INDEXES:
             cur.execute(idx)
+        # Seed / refresh model pricing. UPSERT so a price correction in
+        # _PRICING_SEED is picked up on the next restart.
+        _seed_pricing(cur)
+
+
+def _seed_pricing(cur) -> None:
+    """Insert-or-update the published list prices. Runs every init —
+    idempotent via UPSERT on the model_name primary key."""
+    if USE_POSTGRES:
+        sql = """
+            INSERT INTO model_pricing (model_name, input_cost_per_1k, output_cost_per_1k)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (model_name)
+            DO UPDATE SET input_cost_per_1k = EXCLUDED.input_cost_per_1k,
+                          output_cost_per_1k = EXCLUDED.output_cost_per_1k
+        """
+    else:
+        sql = """
+            INSERT INTO model_pricing (model_name, input_cost_per_1k, output_cost_per_1k)
+            VALUES (?, ?, ?)
+            ON CONFLICT (model_name)
+            DO UPDATE SET input_cost_per_1k = excluded.input_cost_per_1k,
+                          output_cost_per_1k = excluded.output_cost_per_1k
+        """
+    for model, in_cost, out_cost in _PRICING_SEED:
+        cur.execute(sql, (model, in_cost, out_cost))
 
 
 def _try_add_column(cur, table: str, column: str, type_decl: str) -> None:
@@ -512,8 +589,10 @@ def shutdown_db() -> None:
 _INSERT_COLUMNS = (
     "trace_id, span_id, parent_span_id, service_name, agent_id, span_name, kind, "
     "start_time_unix, end_time_unix, status_code, status_message, "
-    "attributes, resource_attributes, account_id"
+    "attributes, resource_attributes, account_id, "
+    "input_tokens, output_tokens, total_tokens, estimated_cost_usd"
 )
+_INSERT_COLUMN_COUNT = 18
 
 
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
@@ -531,35 +610,151 @@ def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
     return "main"
 
 
+# ---------------------------------------------------------------------------
+# Token usage + cost estimation
+# ---------------------------------------------------------------------------
+
+
+def _to_int(v: Any) -> int | None:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_tokens(
+    attrs: dict[str, Any] | None,
+) -> tuple[int | None, int | None, int | None]:
+    """Pull (input, output, total) token counts from a span's attributes
+    following the OTEL GenAI semantic conventions
+    (`gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens`).
+
+    Returns (None, None, None) when no usage data is present. Derives
+    `total` from input+output when the SDK only reports the two parts.
+    """
+    if not attrs:
+        return (None, None, None)
+    inp = _to_int(attrs.get("gen_ai.usage.input_tokens"))
+    out = _to_int(attrs.get("gen_ai.usage.output_tokens"))
+    tot = _to_int(attrs.get("gen_ai.usage.total_tokens"))
+    if tot is None and (inp is not None or out is not None):
+        tot = (inp or 0) + (out or 0)
+    return (inp, out, tot)
+
+
+def _normalize_model(model: Any) -> str:
+    """Lowercase, strip a leading `provider/` segment. So
+    'Anthropic/Claude-Opus-4-6' → 'claude-opus-4-6'."""
+    if not model:
+        return ""
+    return str(model).strip().lower().split("/")[-1]
+
+
+def _match_pricing(
+    model: Any, pricing: dict[str, tuple[float, float]]
+) -> tuple[float, float] | None:
+    """Resolve a model id to its (input/1k, output/1k) rate.
+
+    Tries, in order: exact match, normalized match, then a prefix
+    match so date-suffixed ids ('claude-opus-4-6-20260101') resolve
+    to their base price ('claude-opus-4-6'). Returns None for unknown
+    models — those spans get a NULL cost rather than a wrong one.
+    """
+    if not model:
+        return None
+    if model in pricing:
+        return pricing[model]
+    norm = _normalize_model(model)
+    if norm in pricing:
+        return pricing[norm]
+    for key, rate in pricing.items():
+        if norm.startswith(key):
+            return rate
+    return None
+
+
+def _compute_cost(
+    model: Any,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    pricing: dict[str, tuple[float, float]],
+) -> float | None:
+    """Estimated USD cost for one model call. None when the model is
+    unknown (no pricing) — we never guess a price."""
+    rate = _match_pricing(model, pricing)
+    if rate is None:
+        return None
+    in_per_1k, out_per_1k = rate
+    cost = (
+        (input_tokens or 0) / 1000.0 * in_per_1k
+        + (output_tokens or 0) / 1000.0 * out_per_1k
+    )
+    return round(cost, 6)
+
+
+def _load_pricing(cur) -> dict[str, tuple[float, float]]:
+    """Read the whole (small) pricing table into a dict for in-Python
+    cost computation during a bulk insert."""
+    cur.execute(
+        "SELECT model_name, input_cost_per_1k, output_cost_per_1k FROM model_pricing"
+    )
+    return {
+        r["model_name"]: (r["input_cost_per_1k"], r["output_cost_per_1k"])
+        for r in cur.fetchall()
+    }
+
+
 def insert_spans(
     spans: list[dict[str, Any]], account_id: int | None = None,
 ) -> int:
     """Bulk-insert parsed spans. Returns the row count. Tags each row with
-    account_id when provided (None preserves the pre-multi-tenant behavior)."""
+    account_id when provided (None preserves the pre-multi-tenant behavior).
+
+    Token usage (`gen_ai.usage.*`) and the model (`gen_ai.request.model`)
+    are read off each span's attributes; when both are present and the
+    model is in the pricing table, an estimated USD cost is computed and
+    stored. Spans without usage data store NULLs and are ignored by the
+    cost aggregates.
+    """
     if not spans:
         return 0
 
-    rows = [
-        (
-            s["trace_id"],
-            s["span_id"],
-            s.get("parent_span_id") or None,
-            s["service_name"],
-            _agent_id_from_attrs(s.get("attributes")),
-            s["span_name"],
-            s.get("kind", 0),
-            s["start_time_unix"],
-            s["end_time_unix"],
-            s.get("status_code", 0),
-            s.get("status_message", "") or "",
-            json.dumps(s.get("attributes", {})),
-            json.dumps(s.get("resource_attributes", {})),
-            account_id,
-        )
-        for s in spans
-    ]
-
     with _connect() as conn, _cursor(conn) as cur:
+        pricing = _load_pricing(cur)
+
+        rows = []
+        for s in spans:
+            attrs = s.get("attributes") or {}
+            inp, out, tot = _extract_tokens(attrs)
+            model = attrs.get("gen_ai.request.model")
+            cost = (
+                _compute_cost(model, inp, out, pricing)
+                if tot is not None
+                else None
+            )
+            rows.append(
+                (
+                    s["trace_id"],
+                    s["span_id"],
+                    s.get("parent_span_id") or None,
+                    s["service_name"],
+                    _agent_id_from_attrs(attrs),
+                    s["span_name"],
+                    s.get("kind", 0),
+                    s["start_time_unix"],
+                    s["end_time_unix"],
+                    s.get("status_code", 0),
+                    s.get("status_message", "") or "",
+                    json.dumps(s.get("attributes", {})),
+                    json.dumps(s.get("resource_attributes", {})),
+                    account_id,
+                    inp,
+                    out,
+                    tot,
+                    cost,
+                )
+            )
+
         if USE_POSTGRES:
             execute_values(
                 cur,
@@ -567,7 +762,7 @@ def insert_spans(
                 rows,
             )
         else:
-            placeholders = ", ".join(["?"] * 14)
+            placeholders = ", ".join(["?"] * _INSERT_COLUMN_COUNT)
             cur.executemany(
                 f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES ({placeholders})",
                 rows,
@@ -661,6 +856,14 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     # requires every column referenced in a subquery to be in the outer
     # GROUP BY or aggregated — `agent_id` IS in the GROUP BY, so the
     # `COALESCE(spans.agent_id, 'main')` reads are legal there.
+    # Day/week thresholds for the windowed cost columns (nanoseconds).
+    from time import time as _time
+
+    _now_ns = int(_time() * 1_000_000_000)
+    _day_ns = 24 * 60 * 60 * 1_000_000_000
+    today_ns = _now_ns - _day_ns
+    week_ns = _now_ns - 7 * _day_ns
+
     agg_sql = f"""
         SELECT
             service_name,
@@ -670,6 +873,10 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
             MIN(start_time_unix)                             AS first_seen_ns,
             MAX(start_time_unix)                             AS last_seen_ns,
+            SUM(total_tokens)                                AS total_tokens,
+            SUM(estimated_cost_usd)                          AS estimated_cost_usd,
+            SUM(CASE WHEN start_time_unix >= {PH} THEN estimated_cost_usd ELSE 0 END) AS cost_today,
+            SUM(CASE WHEN start_time_unix >= {PH} THEN estimated_cost_usd ELSE 0 END) AS cost_7d,
             (
                 SELECT description
                 FROM descriptions d
@@ -734,14 +941,15 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
         ORDER BY last_seen_ns DESC
     """
     # Argument order matches the {PH} occurrences left-to-right in the SQL:
-    # desc_filter (1) + reg_filter (1) + dn_filter (1) + 3× own_filter
-    # (the three owner subqueries each carry their own account scope) +
-    # sample_acct_filter (1) + span_filter (1) = 8 placeholders.
-    agg_args = (
-        (account_id,) * 8
-        if account_id is not None
-        else ()
-    )
+    # cost_today threshold (1) + cost_7d threshold (1) come first (they're
+    # in the SELECT, always present), THEN the account-scope placeholders
+    # when account_id is set: desc_filter (1) + reg_filter (1) +
+    # dn_filter (1) + 3× own_filter + sample_acct_filter (1) +
+    # span_filter (1) = 8.
+    if account_id is not None:
+        agg_args = (today_ns, week_ns) + (account_id,) * 8
+    else:
+        agg_args = (today_ns, week_ns)
 
     # Top operations are computed per instance (service_name), not per
     # agent — useful at the group level. Per-agent top-ops would inflate
@@ -787,6 +995,12 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 "owner_id": row["owner_id"],
                 "owner_name": row["owner_name"],
                 "owner_role": row["owner_role"],
+                # Token usage + cost. None/0 when this agent never
+                # reported usage data.
+                "total_tokens": int(row["total_tokens"] or 0),
+                "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
+                "cost_today": round(float(row["cost_today"] or 0.0), 6),
+                "cost_7d": round(float(row["cost_7d"] or 0.0), 6),
             }
             if sn not in groups:
                 groups[sn] = {
@@ -812,11 +1026,20 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                     "platform": _detect_platform(
                         row["sample_resource_attributes"]
                     ),
+                    # Cost rollups across all sub-agents in the instance.
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                    "cost_today": 0.0,
+                    "cost_7d": 0.0,
                 }
             g = groups[sn]
             g["agents"].append(agent_record)
             g["total_spans"] += agent_record["span_count"]
             g["total_errors"] += agent_record["error_count"]
+            g["total_tokens"] += agent_record["total_tokens"]
+            g["estimated_cost_usd"] += agent_record["estimated_cost_usd"]
+            g["cost_today"] += agent_record["cost_today"]
+            g["cost_7d"] += agent_record["cost_7d"]
             # Prefer 'main' for the group-level description/display_name/
             # owner when it exists; otherwise leave whatever was seen first.
             if agent_record["agent_id"] == "main":
@@ -854,6 +1077,10 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 else 0.0
             )
             del g["_weighted_sum_ms"]
+            # Tidy float accumulation noise on the cost rollups.
+            g["estimated_cost_usd"] = round(g["estimated_cost_usd"], 6)
+            g["cost_today"] = round(g["cost_today"], 6)
+            g["cost_7d"] = round(g["cost_7d"], 6)
 
     # Sort instances by their most recent span across any agent.
     return sorted(
@@ -957,7 +1184,9 @@ def get_agent_summary(
             SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
             MIN(start_time_unix)                           AS first_seen_ns,
-            MAX(start_time_unix)                           AS last_seen_ns
+            MAX(start_time_unix)                           AS last_seen_ns,
+            SUM(total_tokens)                              AS total_tokens,
+            SUM(estimated_cost_usd)                        AS estimated_cost_usd
         FROM spans
         WHERE service_name = {PH}
           {span_account_filter}
@@ -1081,6 +1310,8 @@ def get_agent_summary(
         "owner_id": owner_row["team_member_id"] if owner_row else None,
         "owner_name": owner_row["owner_name"] if owner_row else None,
         "owner_role": owner_row["owner_role"] if owner_row else None,
+        "total_tokens": int(row["total_tokens"] or 0),
+        "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
     }
 
 
@@ -1719,6 +1950,120 @@ def get_window_aggregate(
         "avg_duration_ms": avg_ms,
         "operations": operations,
         "tools_used": sorted(tool_set),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cost + token aggregation
+# ---------------------------------------------------------------------------
+
+
+def get_agent_costs(
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
+    days: int = 7,
+) -> dict[str, Any]:
+    """Aggregate token usage + estimated cost for an agent over the
+    last `days` days. Returns totals plus per-day and per-model
+    breakdowns.
+
+    Only spans with a non-NULL `total_tokens` contribute — spans that
+    never carried usage data are ignored. The per-day bucketing and
+    per-model grouping happen in Python (model lives in the attributes
+    JSON), which keeps the SQL backend-portable and the row set small
+    (one window of one agent's model calls).
+    """
+    days = max(1, min(365, int(days)))
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    start_ns = now_ns - days * 24 * 60 * 60 * 1_000_000_000
+
+    account_filter = (
+        f"AND account_id = {PH}" if account_id is not None else ""
+    )
+    agent_filter = (
+        f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    )
+    sql = f"""
+        SELECT start_time_unix, input_tokens, output_tokens, total_tokens,
+               estimated_cost_usd, attributes
+        FROM spans
+        WHERE service_name = {PH}
+          AND total_tokens IS NOT NULL
+          AND start_time_unix >= {PH}
+          {account_filter}
+          {agent_filter}
+        ORDER BY start_time_unix ASC
+    """
+    args_list: list[Any] = [service_name, start_ns]
+    if account_id is not None:
+        args_list.append(account_id)
+    if agent_id is not None:
+        args_list.append(agent_id)
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args_list))
+        rows = cur.fetchall()
+
+    total_input = 0
+    total_output = 0
+    total_tokens = 0
+    total_cost = 0.0
+    by_day: dict[str, dict[str, float]] = {}
+    by_model: dict[str, dict[str, float]] = {}
+
+    from datetime import datetime, timezone
+
+    for r in rows:
+        inp = r["input_tokens"] or 0
+        out = r["output_tokens"] or 0
+        tot = r["total_tokens"] or 0
+        cost = r["estimated_cost_usd"] or 0.0
+        total_input += inp
+        total_output += out
+        total_tokens += tot
+        total_cost += cost
+
+        # Day bucket — ISO date (UTC) from the nanosecond start time.
+        day = datetime.fromtimestamp(
+            r["start_time_unix"] / 1_000_000_000, tz=timezone.utc
+        ).strftime("%Y-%m-%d")
+        d = by_day.setdefault(day, {"tokens": 0, "cost": 0.0})
+        d["tokens"] += tot
+        d["cost"] += cost
+
+        # Model bucket — read gen_ai.request.model from attributes JSON.
+        model = "unknown"
+        try:
+            attrs = json.loads(r["attributes"] or "{}")
+            if isinstance(attrs, dict):
+                model = attrs.get("gen_ai.request.model") or "unknown"
+        except (TypeError, ValueError):
+            pass
+        m = by_model.setdefault(model, {"tokens": 0, "cost": 0.0})
+        m["tokens"] += tot
+        m["cost"] += cost
+
+    cost_by_day = [
+        {"date": day, "tokens": v["tokens"], "cost": round(v["cost"], 6)}
+        for day, v in sorted(by_day.items())
+    ]
+    cost_by_model = [
+        {"model": model, "tokens": v["tokens"], "cost": round(v["cost"], 6)}
+        for model, v in sorted(
+            by_model.items(), key=lambda kv: kv[1]["cost"], reverse=True
+        )
+    ]
+
+    return {
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "total_tokens": total_tokens,
+        "estimated_cost_usd": round(total_cost, 6),
+        "cost_by_day": cost_by_day,
+        "cost_by_model": cost_by_model,
     }
 
 

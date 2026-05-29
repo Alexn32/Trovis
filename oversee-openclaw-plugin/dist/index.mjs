@@ -66355,6 +66355,35 @@ function pickAgentId(event, ctx) {
   const direct = typeof ev.context?.agentId === "string" && ev.context.agentId || typeof c.agentId === "string" && c.agentId || typeof ev.agentId === "string" && ev.agentId || "";
   return direct || "main";
 }
+function pickTokenUsage(event) {
+  const ev = event ?? {};
+  const num = (v) => {
+    const n = typeof v === "string" ? Number(v) : v;
+    return typeof n === "number" && Number.isFinite(n) ? n : void 0;
+  };
+  const containers = [];
+  if (ev.usage && typeof ev.usage === "object")
+    containers.push(ev.usage);
+  if (ev.tokens && typeof ev.tokens === "object")
+    containers.push(ev.tokens);
+  containers.push(ev);
+  for (const c of containers) {
+    const input = num(
+      c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens
+    );
+    const output = num(
+      c.output_tokens ?? c.completion_tokens ?? c.outputTokens ?? c.completionTokens
+    );
+    let total = num(c.total_tokens ?? c.totalTokens);
+    if (total === void 0 && (input !== void 0 || output !== void 0)) {
+      total = (input ?? 0) + (output ?? 0);
+    }
+    if (input !== void 0 || output !== void 0 || total !== void 0) {
+      return { input, output, total };
+    }
+  }
+  return {};
+}
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
   const modelSpans = /* @__PURE__ */ new Map();
@@ -66501,6 +66530,10 @@ function wireEvents(api) {
     modelSpans.delete(event.callId);
     entry.span.setAttribute("oversee.model.duration_ms", event.durationMs);
     setIfPresent(entry.span, "oversee.model.outcome", event.outcome);
+    const usage = pickTokenUsage(event);
+    setIfPresent(entry.span, "gen_ai.usage.input_tokens", usage.input);
+    setIfPresent(entry.span, "gen_ai.usage.output_tokens", usage.output);
+    setIfPresent(entry.span, "gen_ai.usage.total_tokens", usage.total);
     if (typeof event.outcome === "string" && event.outcome !== "ok" && event.outcome !== "success") {
       entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome });
     }

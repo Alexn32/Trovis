@@ -164,6 +164,13 @@ interface ModelCallEndedEvent extends BaseEvent {
   model?: string
   durationMs: number
   outcome: string
+  // Token usage may arrive under a number of shapes depending on the
+  // provider adapter — see pickTokenUsage() for the probe order.
+  usage?: unknown
+  tokens?: unknown
+  inputTokens?: unknown
+  outputTokens?: unknown
+  totalTokens?: unknown
 }
 
 // `llm_output` fires after the model returns a response, regardless of
@@ -599,6 +606,61 @@ function pickAgentId(event: unknown, ctx?: unknown): string {
   return direct || "main"
 }
 
+interface TokenUsage {
+  input?: number
+  output?: number
+  total?: number
+}
+
+/**
+ * Best-effort token-usage extraction from a model_call_ended event.
+ * Provider adapters disagree on the shape, so we probe the common
+ * ones and normalize to {input, output, total}. Returns an empty
+ * object when nothing usable is present.
+ *
+ * Shapes probed (in order):
+ *   event.usage.{input_tokens, output_tokens, total_tokens}   (OTEL / Anthropic)
+ *   event.usage.{prompt_tokens, completion_tokens, total_tokens}  (OpenAI)
+ *   event.usage.{inputTokens, outputTokens, totalTokens}      (camelCase)
+ *   event.tokens.{...}  (same keys, alternate container)
+ *   event.{inputTokens, outputTokens, totalTokens}            (flat)
+ */
+function pickTokenUsage(event: unknown): TokenUsage {
+  const ev = (event ?? {}) as Record<string, unknown>
+  const num = (v: unknown): number | undefined => {
+    const n = typeof v === "string" ? Number(v) : v
+    return typeof n === "number" && Number.isFinite(n) ? n : undefined
+  }
+
+  // Candidate containers that might hold the usage object.
+  const containers: Record<string, unknown>[] = []
+  if (ev.usage && typeof ev.usage === "object")
+    containers.push(ev.usage as Record<string, unknown>)
+  if (ev.tokens && typeof ev.tokens === "object")
+    containers.push(ev.tokens as Record<string, unknown>)
+  containers.push(ev) // flat fields on the event itself
+
+  for (const c of containers) {
+    const input = num(
+      c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens,
+    )
+    const output = num(
+      c.output_tokens ??
+        c.completion_tokens ??
+        c.outputTokens ??
+        c.completionTokens,
+    )
+    let total = num(c.total_tokens ?? c.totalTokens)
+    if (total === undefined && (input !== undefined || output !== undefined)) {
+      total = (input ?? 0) + (output ?? 0)
+    }
+    if (input !== undefined || output !== undefined || total !== undefined) {
+      return { input, output, total }
+    }
+  }
+  return {}
+}
+
 // ---------------------------------------------------------------------------
 // Hook wiring
 // ---------------------------------------------------------------------------
@@ -799,6 +861,13 @@ function wireEvents(api: OpenClawApi): void {
 
     entry.span.setAttribute("oversee.model.duration_ms", event.durationMs)
     setIfPresent(entry.span, "oversee.model.outcome", event.outcome)
+    // Token usage → OTEL GenAI semantic conventions. The backend reads
+    // these attribute names to compute cost. Only set what we actually
+    // found; absent fields stay off the span so the backend records NULL.
+    const usage = pickTokenUsage(event)
+    setIfPresent(entry.span, "gen_ai.usage.input_tokens", usage.input)
+    setIfPresent(entry.span, "gen_ai.usage.output_tokens", usage.output)
+    setIfPresent(entry.span, "gen_ai.usage.total_tokens", usage.total)
     if (
       typeof event.outcome === "string" &&
       event.outcome !== "ok" &&

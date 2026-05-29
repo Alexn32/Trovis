@@ -51,6 +51,8 @@ class AgentSummary(BaseModel):
     owner_id: int | None = None
     owner_name: str | None = None
     owner_role: str | None = None
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
 
 
 class AgentInstance(BaseModel):
@@ -75,6 +77,10 @@ class AgentInstance(BaseModel):
     owner_id: int | None = None
     owner_name: str | None = None
     owner_role: str | None = None
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    cost_today: float = 0.0
+    cost_7d: float = 0.0
 
 
 class AgentGroup(BaseModel):
@@ -103,6 +109,35 @@ class AgentGroup(BaseModel):
     display_name: str | None = None
     owner_name: str | None = None
     owner_role: str | None = None
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    cost_today: float = 0.0
+    cost_7d: float = 0.0
+
+
+class CostByDay(BaseModel):
+    date: str
+    tokens: int
+    cost: float
+
+
+class CostByModel(BaseModel):
+    model: str
+    tokens: int
+    cost: float
+
+
+class AgentCosts(BaseModel):
+    """Response for GET /agents/{service_name}/costs. Token totals +
+    estimated USD cost over the requested window, with per-day and
+    per-model breakdowns for the cost chart."""
+
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    cost_by_day: list[CostByDay] = Field(default_factory=list)
+    cost_by_model: list[CostByModel] = Field(default_factory=list)
 
 
 class AgentDeleteResponse(BaseModel):

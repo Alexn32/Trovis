@@ -2540,6 +2540,139 @@ a:hover {
   }
 }
 
+/* ---------- Cost section (AgentDetail) + card cost line ---------- */
+
+.cost-headline {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0 0 16px;
+  font-family: "IBM Plex Mono", monospace;
+  letter-spacing: -0.01em;
+}
+.cost-headline-sep {
+  color: var(--text-dim);
+}
+
+.cost-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+@media (max-width: 720px) {
+  .cost-stats {
+    grid-template-columns: 1fr;
+  }
+}
+.cost-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+}
+.cost-stat-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.cost-stat-value {
+  color: var(--text-primary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.cost-subhead {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin: 0 0 10px;
+}
+
+/* Cost-by-day bars — fixed-height track with a fill scaled to the
+   busiest day in the window. */
+.cost-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 100px;
+  margin-bottom: 20px;
+}
+.cost-bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+}
+.cost-bar-track {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  min-height: 0;
+}
+.cost-bar-fill {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+  min-height: 2px;
+}
+.cost-bar-label {
+  font-size: 9px;
+  color: var(--text-dim);
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.cost-model-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cost-model-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.cost-model-name {
+  color: var(--text-primary);
+}
+.cost-model-tokens {
+  color: var(--text-dim);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+}
+.cost-model-cost {
+  color: var(--text-primary);
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 500;
+}
+
+/* Small cost line on Fleet cards. */
+.agent-cost-line {
+  font-size: 12px;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
 /* ---------- Danger zone (AgentDetail's delete section) ---------- */
 
 /* Subtle red wash on the section border so the destructive area
