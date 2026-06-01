@@ -706,7 +706,7 @@ function OpenClawInstructions() {
 function OpenAIAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
-  const installCmd = 'pip install oversee-agents'
+  const installCmd = 'pip install oversee-agents[openai]'
   // The setup snippet uses our `fill()` substitution for AGENT_NAME +
   // OVERSEE_ENDPOINT. The API key is substituted separately because
   // it's not in the standard placeholder set — we fall back to a
