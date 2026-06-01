@@ -10,8 +10,11 @@ Claude Agents, and Hermes. Extras pick which dependencies install.
 # OpenAI Agents SDK
 pip install oversee-agents[openai]
 
-# Anthropic Claude Agents
+# Anthropic Claude Managed Agents (client.beta.agents API)
 pip install oversee-agents[anthropic]
+
+# Claude Agent SDK (query() + ClaudeSDKClient)
+pip install oversee-agents[claude-agent-sdk]
 
 # Hermes Agent (no extra deps — Hermes provides the runtime)
 pip install oversee-agents[hermes]
@@ -19,6 +22,13 @@ pip install oversee-agents[hermes]
 # All Python-SDK platforms
 pip install oversee-agents[all]
 ```
+
+> **Two different Claude products.** `[anthropic]` instruments the
+> **Managed Agents API** (`client.beta.agents.create()` /
+> `sessions.stream()`). `[claude-agent-sdk]` instruments the **Claude
+> Agent SDK** (`query()` + `ClaudeSDKClient`, the Claude Code engine).
+> They share a name but are wholly different entry points — pick the
+> one your code actually calls.
 
 ## OpenAI Agents SDK
 
@@ -88,6 +98,33 @@ with track_session(session_id=session.id, agent_name="coding-assistant"):
     for event in client.beta.sessions.stream(session.id):
         ...
 ```
+
+## Claude Agent SDK
+
+For the `claude-agent-sdk` package (`query()` + the Claude Code
+engine) — distinct from the Managed Agents API above.
+
+```python
+from claude_agent_sdk import query, ClaudeAgentOptions
+from oversee import init
+
+# Call init() BEFORE importing/using query so the patch is in place.
+init(api_key="ov_sk_your_key", agent_name="my-agent", platform="claude-agent-sdk")
+
+async for message in query(
+    prompt="Refactor the auth module",
+    options=ClaudeAgentOptions(system_prompt="You are a senior engineer."),
+):
+    ...  # your existing handling — spans flow into Oversee automatically
+```
+
+Each run becomes a set of Oversee spans: an `agent_registration`
+(from `options.system_prompt`), `message_received` / `llm_output` /
+`tool_call` per message, and an `agent_run_complete` carrying the
+run's token usage + cost (from the SDK's `ResultMessage`).
+
+`ClaudeSDKClient`'s streaming (`receive_response`) is instrumented the
+same way.
 
 ## Hermes Agent
 

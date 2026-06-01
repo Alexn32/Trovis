@@ -175,20 +175,26 @@ def init(
 
     # 2. Wire each platform's tracing into the OTEL pipeline.
     # `platform` resolution: "auto" detects installed SDKs; explicit
-    # values opt in regardless of detection. "all" tries both and
-    # warns about whichever isn't installed.
+    # values opt in regardless of detection. "all" tries every adapter
+    # and warns about whichever isn't installed.
     do_openai = platform in ("openai", "all") or (
         platform == "auto" and _has_openai_agents()
     )
     do_anthropic = platform in ("anthropic", "all") or (
         platform == "auto" and _has_anthropic()
     )
+    do_claude_sdk = platform in ("claude-agent-sdk", "all") or (
+        platform == "auto" and _has_claude_agent_sdk()
+    )
+
+    active: list[str] = []
 
     if do_openai:
         _CAPTURE_PROCESSOR = CaptureProcessor()
         _wire_agents_tracing(_CAPTURE_PROCESSOR)
         # Catch each Agent's identity on construction.
         patch_agent_for_registration()
+        active.append("openai-agents")
 
     if do_anthropic:
         # Import lazily — the anthropic SDK is an optional dep and we
@@ -196,6 +202,13 @@ def init(
         from oversee.anthropic import setup_anthropic
 
         setup_anthropic()
+        active.append("anthropic")
+
+    if do_claude_sdk:
+        from oversee.claude_agent_sdk import setup_claude_agent_sdk
+
+        setup_claude_agent_sdk()
+        active.append("claude-agent-sdk")
 
     _INITIALIZED = True
 
@@ -205,17 +218,13 @@ def init(
     )
     if resolved_capture:
         print("[Oversee] Output capture: enabled")
-    if do_openai and do_anthropic:
-        print("[Oversee] Platforms: openai-agents + anthropic")
-    elif do_anthropic:
-        print("[Oversee] Platform: anthropic")
-    elif do_openai:
-        print("[Oversee] Platform: openai-agents")
+    if active:
+        print(f"[Oversee] Platforms: {', '.join(active)}")
     else:
         print(
             "[Oversee] No agent SDK detected — manual spans only. "
-            "Install openai-agents or anthropic to enable per-SDK "
-            "instrumentation."
+            "Install openai-agents, anthropic, or claude-agent-sdk to "
+            "enable per-SDK instrumentation."
         )
 
 
@@ -223,16 +232,23 @@ def _platform_label_for_init(platform: str) -> str:
     """Map init()'s `platform=` arg to the resource attribute label
     used on every emitted span. "auto" resolves to whatever SDK is
     actually installed so the dashboard's filter chips read sensibly;
-    "all" is left as-is so the operator's intent is visible."""
-    if platform in ("openai", "anthropic", "all"):
+    explicit values are passed through."""
+    if platform in ("openai", "anthropic", "claude-agent-sdk", "all"):
         return platform
-    # auto
-    if _has_openai_agents() and _has_anthropic():
+    # auto — count installed SDKs.
+    detected = [
+        name
+        for name, present in (
+            ("openai", _has_openai_agents()),
+            ("anthropic", _has_anthropic()),
+            ("claude-agent-sdk", _has_claude_agent_sdk()),
+        )
+        if present
+    ]
+    if len(detected) > 1:
         return "all"
-    if _has_anthropic():
-        return "anthropic"
-    if _has_openai_agents():
-        return "openai"
+    if detected:
+        return detected[0]
     return "agent"
 
 
@@ -248,6 +264,13 @@ def _has_anthropic() -> bool:
     import importlib.util as _u
 
     return _u.find_spec("anthropic") is not None
+
+
+def _has_claude_agent_sdk() -> bool:
+    """Detect the Claude Agent SDK without forcing an import."""
+    import importlib.util as _u
+
+    return _u.find_spec("claude_agent_sdk") is not None
 
 
 def _wire_agents_tracing(capture_processor: CaptureProcessor) -> None:
