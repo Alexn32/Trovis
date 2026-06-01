@@ -262,7 +262,87 @@ try:
     hook_fn("search", {"query": "hammocks"}, "5 results")
     check("post_tool_call hook ran without raising", True)
 
-    step(11, "Flushing spans before exit…")
+    step(11, "Claude Agent SDK adapter (fake message stream)…")
+    # The SDK isn't a hard dep, so we exercise the message-handling
+    # logic directly with stand-in message objects whose class NAMES
+    # match what the adapter dispatches on (type(m).__name__).
+    import asyncio
+
+    from oversee import claude_agent_sdk as cas
+
+    class SystemMessage:
+        def __init__(self, data):
+            self.data = data
+
+    class TextBlock:
+        def __init__(self, text):
+            self.text = text
+
+    class ToolUseBlock:
+        def __init__(self, id, name, input):  # noqa: A002
+            self.id = id
+            self.name = name
+            self.input = input
+
+    class AssistantMessage:
+        def __init__(self, content, model):
+            self.content = content
+            self.model = model
+
+    class UserMessage:
+        def __init__(self, content):
+            self.content = content
+
+    class ResultMessage:
+        def __init__(self, session_id, is_error, usage):
+            self.session_id = session_id
+            self.is_error = is_error
+            self.usage = usage
+
+    async def fake_query_stream():
+        yield SystemMessage({"session_id": "cas_sess_1", "model": "claude-opus-4-6"})
+        yield UserMessage("Help me build a hammock landing page")
+        yield AssistantMessage(
+            [TextBlock("Sure!"), ToolUseBlock("tu_1", "write_file", {"path": "x"})],
+            "claude-opus-4-6",
+        )
+        yield ResultMessage(
+            "cas_sess_1", False, {"input_tokens": 1200, "output_tokens": 800}
+        )
+
+    # The options arg carries the system prompt → registration.
+    call_kwargs = {
+        "options": type(
+            "Opts", (), {"system_prompt": "You are a hammock site builder.", "model": "claude-opus-4-6"}
+        )()
+    }
+
+    async def drain():
+        out = []
+        async for m in cas._instrumented_stream(fake_query_stream(), call_kwargs):
+            out.append(type(m).__name__)
+        return out
+
+    drained = asyncio.run(drain())
+    check(
+        "adapter yielded all 4 messages untouched",
+        drained == ["SystemMessage", "UserMessage", "AssistantMessage", "ResultMessage"],
+        f"got {drained}",
+    )
+
+    # setup/reset round-trip — SDK not installed, so setup returns False
+    # cleanly (no crash). _reset_for_tests is a no-op then.
+    setup_ok = cas.setup_claude_agent_sdk()
+    check(
+        "setup_claude_agent_sdk() returns a bool without raising "
+        "(False when SDK absent)",
+        isinstance(setup_ok, bool),
+        f"returned {setup_ok!r}",
+    )
+    cas._reset_for_tests()
+    check("claude_agent_sdk _reset_for_tests ran", not cas._is_patched())
+
+    step(12, "Flushing spans before exit…")
     try:
         provider.shutdown()
         check("provider shutdown clean", True)

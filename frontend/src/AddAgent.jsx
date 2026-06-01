@@ -25,7 +25,8 @@ import { getApiKey } from './api.js'
 const PLATFORMS = [
   { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
-  { id: 'claude-agents',  label: 'Claude Agents',             subtitle: 'beta.agents + beta.sessions API',                needsProvider: false },
+  { id: 'claude-agent-sdk', label: 'Claude Agent SDK',        subtitle: 'query() + ClaudeSDKClient (Claude Code engine)',  needsProvider: false },
+  { id: 'claude-agents',  label: 'Claude Managed Agents',     subtitle: 'client.beta.agents + beta.sessions API',         needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
 ]
 
@@ -830,7 +831,7 @@ for event in client.beta.sessions.stream(session.id):
 
   return (
     <>
-      <h2 className="instructions-title">Connect Claude Agents</h2>
+      <h2 className="instructions-title">Connect Claude Managed Agents</h2>
       <p className="instructions-subtitle">
         Two-line setup with the <code>oversee-agents</code> package.
         Your <code>client.beta.agents.create</code> and{' '}
@@ -901,6 +902,117 @@ client = monitor(anthropic.Anthropic())
         </li>
         <li>
           <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
+        </li>
+        <li>
+          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>true</code> for content capture
+        </li>
+      </ul>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Instructions page — Claude Agent SDK (oversee-agents, query() patch)
+// ---------------------------------------------------------------------------
+//
+// Distinct from "Claude Managed Agents" above: this is the
+// claude-agent-sdk package (query() + ClaudeSDKClient, the Claude Code
+// engine), NOT the anthropic.beta.agents API. The adapter wraps
+// query() so each run's message stream becomes the usual Oversee spans.
+
+function ClaudeAgentSdkInstructions({ agentName, endpoint }) {
+  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  const installCmd = 'pip install oversee-agents[claude-agent-sdk]'
+  const setupCode = fill(
+`from claude_agent_sdk import query, ClaudeAgentOptions
+from oversee import init
+
+# Call init() BEFORE importing/using query so the patch is in place.
+init(api_key="OVERSEE_API_KEY", agent_name="AGENT_NAME", platform="claude-agent-sdk")
+
+# Your existing code — no changes needed
+async for message in query(
+    prompt="Refactor the auth module",
+    options=ClaudeAgentOptions(system_prompt="You are a senior engineer."),
+):
+    ...  # handle messages as you already do`,
+    agentName,
+    resolvedEndpoint,
+  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+
+  return (
+    <>
+      <h2 className="instructions-title">Connect Claude Agent SDK</h2>
+      <p className="instructions-subtitle">
+        For the <code>claude-agent-sdk</code> package —{' '}
+        <code>query()</code> and <code>ClaudeSDKClient</code>, the Claude
+        Code engine. (Not the <code>beta.agents</code> Managed Agents
+        API — that's the "Claude Managed Agents" tile.)
+      </p>
+
+      <Callout variant="blue">
+        <strong>Which Claude tile?</strong> Use this one if your code
+        calls <code>query(...)</code> or builds a{' '}
+        <code>ClaudeSDKClient</code>. Use "Claude Managed Agents" if it
+        calls <code>client.beta.agents.create(...)</code>.
+      </Callout>
+
+      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <NumberedStep n={1} title="Install the SDK">
+        <CodeBlock code={installCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Initialize before your first query()">
+        <CodeBlock code={setupCode} />
+        <p style={{ marginTop: 8 }}>
+          Order matters: call <code>init()</code> before{' '}
+          <code>from claude_agent_sdk import query</code> elsewhere, so
+          the instrumentation is in place when <code>query</code> is
+          bound.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Run your agent as you normally would">
+        <p>
+          Each run emits an <code>agent_registration</code> (from your{' '}
+          <code>system_prompt</code>), a span per message
+          (<code>message_received</code>, <code>llm_output</code>,{' '}
+          <code>tool_call</code>), and an{' '}
+          <code>agent_run_complete</code> carrying the run's token usage
+          and cost.
+        </p>
+      </NumberedStep>
+
+      <Callout variant="info">
+        <strong>What gets captured by default:</strong> agent identity,
+        message + tool-call metadata, token usage, and estimated cost.
+        Message and response <em>content</em> are captured only when{' '}
+        <code>capture_outputs=True</code> is passed to{' '}
+        <code>init()</code>.
+      </Callout>
+
+      <h3 className="section-title section-title-spaced">Environment variables</h3>
+      <ul>
+        <li>
+          <code>OVERSEE_API_KEY</code> — your Oversee API key
+        </li>
+        <li>
+          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          the Oversee cloud)
+        </li>
+        <li>
+          <code>OVERSEE_AGENT_NAME</code> — default{' '}
+          <code>service.name</code>
         </li>
         <li>
           <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
@@ -1337,6 +1449,9 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'claude-agents') {
     return <AnthropicAgentsInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  if (platform === 'claude-agent-sdk') {
+    return <ClaudeAgentSdkInstructions agentName={agentName} endpoint={endpoint} />
   }
   if (platform === 'hermes') {
     return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
