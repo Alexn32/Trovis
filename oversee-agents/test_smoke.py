@@ -342,7 +342,26 @@ try:
     cas._reset_for_tests()
     check("claude_agent_sdk _reset_for_tests ran", not cas._is_patched())
 
-    step(12, "Flushing spans before exit…")
+    step(12, "Cross-process trace propagation (inject / continue_trace)…")
+    # init() in step 2 set the global W3C propagator. Inject within an
+    # active span → a traceparent; continue_trace re-attaches it on the
+    # "receiving" side and shares the trace_id.
+    with tracer.start_as_current_span("prop_caller") as _caller:
+        caller_trace = _caller.get_span_context().trace_id
+        carrier = oversee.inject()
+    check(
+        "inject() produced a traceparent",
+        isinstance(carrier, dict) and "traceparent" in carrier,
+        f"carrier keys={list(carrier)}",
+    )
+    with oversee.continue_trace(carrier, "prop_receiver") as _recv:
+        check(
+            "continue_trace continues the same trace",
+            _recv.get_span_context().trace_id == caller_trace,
+        )
+    check("inject/extract exported by package", hasattr(oversee, "continue_trace"))
+
+    step(13, "Flushing spans before exit…")
     try:
         provider.shutdown()
         check("provider shutdown clean", True)

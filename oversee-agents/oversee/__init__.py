@@ -18,9 +18,10 @@ These are only available when the `anthropic` extra is installed.
 """
 
 from oversee.core import init
+from oversee.propagation import continue_trace, extract, inject
 from oversee.version import __version__
 
-__all__ = ["init", "__version__"]
+__all__ = ["init", "inject", "extract", "continue_trace", "__version__"]
 
 # Optional Anthropic helpers — re-exported when the anthropic SDK is
 # available so users can do `from oversee import monitor`. We swallow
