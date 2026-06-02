@@ -251,6 +251,45 @@ class OwnedAgent(BaseModel):
     span_count: int = 0
 
 
+class WorkflowNode(BaseModel):
+    """One node in the workflow graph — either an agent or a human team
+    member. `status`/`platform` are populated only for agents;
+    `role`/`member_id` only for humans; `service_name` only for agents (so
+    the frontend can open the right detail view on click). `id` is namespaced
+    ('a:<service_name>' / 'h:<member_id>') so agent and human ids can't
+    collide and the frontend can persist per-node layout against a stable
+    key."""
+
+    id: str
+    type: str  # 'agent' | 'human'
+    name: str
+    status: str | None = None  # agent: 'green'|'yellow'|'red'|'gray'
+    platform: str | None = None  # agent only
+    role: str | None = None  # human only
+    service_name: str | None = None  # agent only — navigation
+    member_id: int | None = None  # human only — navigation
+
+
+class WorkflowEdge(BaseModel):
+    """A directed connection. 'owns' edges (human → agent) come from the
+    agent_owners table; 'data_flow' edges (agent → agent) are operator-drawn
+    in the UI and, for V1, persisted client-side — so the backend currently
+    only emits 'owns'. Future: auto-detect data flow from telemetry."""
+
+    source: str
+    target: str
+    type: str  # 'owns' | 'data_flow'
+    label: str = ""
+
+
+class WorkflowGraph(BaseModel):
+    """Response for GET /workflows — the full org graph of humans, agents,
+    and the ownership links between them."""
+
+    nodes: list[WorkflowNode] = Field(default_factory=list)
+    edges: list[WorkflowEdge] = Field(default_factory=list)
+
+
 class AgentDescription(BaseModel):
     """A single Claude-generated description of an agent.
 

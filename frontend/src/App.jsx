@@ -6,6 +6,7 @@ import Ask from './Ask.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
 import Team from './Team.jsx'
+import Workflows from './Workflows.jsx'
 import { api, clearApiKey, getApiKey } from './api.js'
 import {
   MonitorIcon,
@@ -33,7 +34,7 @@ function AppInner() {
   const initial = getApiKey()
   const [authed, setAuthed] = useState(initial)
   const [restoring, setRestoring] = useState(initial !== null)
-  const [tab, setTab] = useState('fleet') // 'fleet' | 'ask' | 'team'
+  const [tab, setTab] = useState('fleet') // 'fleet' | 'ask' | 'team' | 'workflows'
   // Overlay variants:
   //   {kind: 'detail', serviceName, agentId?} — agentId set when drilling
   //     into a specific sub-agent of a multi-agent instance.
@@ -120,6 +121,16 @@ function AppInner() {
     mainContent = <Ask />
   } else if (tab === 'team') {
     mainContent = <Team onSelectAgent={openDetail} />
+  } else if (tab === 'workflows') {
+    mainContent = (
+      <Workflows
+        onSelectAgent={openDetail}
+        onOpenTeam={() => {
+          setTab('team')
+          setOverlay(null)
+        }}
+      />
+    )
   } else {
     mainContent = (
       <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />
@@ -178,6 +189,15 @@ function Header({ tab, onTabChange, onAddAgent, apiKey, onLogout }) {
             onClick={() => onTabChange('team')}
           >
             Team
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'workflows'}
+            className={`tab ${tab === 'workflows' ? 'tab-active' : ''}`}
+            onClick={() => onTabChange('workflows')}
+          >
+            Workflows
           </button>
         </nav>
       </div>

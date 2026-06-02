@@ -34,6 +34,12 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
   --code-bg: rgba(255, 255, 255, 0.05);
+  /* Workflow graph: agents teal, humans purple, connections gray. */
+  --wf-agent: #2dd4bf;
+  --wf-agent-faint: rgba(45, 212, 191, 0.14);
+  --wf-human: #a78bfa;
+  --wf-human-faint: rgba(167, 139, 250, 0.16);
+  --wf-edge: #8b8b94;
 }
 
 :root[data-theme="light"] {
@@ -61,6 +67,12 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.07);
   --code-bg: rgba(0, 0, 0, 0.05);
+  /* Workflow graph: agents teal, humans purple, connections gray. */
+  --wf-agent: #0d9488;
+  --wf-agent-faint: rgba(13, 148, 136, 0.10);
+  --wf-human: #7c3aed;
+  --wf-human-faint: rgba(124, 58, 237, 0.10);
+  --wf-edge: #9ca3af;
 }
 
 /* ---------- base ---------- */
@@ -2722,4 +2734,213 @@ a:hover {
   gap: 12px;
   margin-top: 14px;
   align-items: center;
+}
+
+/* ---------- Workflows ---------- */
+
+.workflow-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.workflow-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.workflow-subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 4px;
+  max-width: 64ch;
+}
+
+.workflow-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn.btn-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.workflow-hint {
+  background: var(--accent-faint);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.workflow-legend {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wf-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-legend-swatch {
+  width: 13px;
+  height: 13px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.wf-swatch-agent {
+  background: var(--wf-agent-faint);
+  border: 1.5px solid var(--wf-agent);
+}
+
+.wf-swatch-human {
+  background: var(--wf-human-faint);
+  border: 1.5px solid var(--wf-human);
+  border-radius: 50%;
+}
+
+.wf-legend-line {
+  stroke: var(--wf-edge);
+  stroke-width: 2;
+}
+
+.wf-legend-owns {
+  stroke-dasharray: 5 4;
+}
+
+/* Scrollable, grid-dotted canvas — reads as a diagram surface. */
+.workflow-canvas {
+  flex: 1 1 auto;
+  min-height: 56vh;
+  overflow: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background-color: var(--bg-surface);
+  background-image: radial-gradient(var(--border-default) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.workflow-canvas.is-connecting {
+  cursor: crosshair;
+}
+
+.workflow-svg {
+  display: block;
+  touch-action: none;
+}
+
+/* Nodes */
+.wf-node {
+  cursor: grab;
+}
+
+.wf-node:active {
+  cursor: grabbing;
+}
+
+.wf-agent-box {
+  fill: var(--bg-elevated);
+  stroke: var(--wf-agent);
+  stroke-width: 1.5;
+  transition: stroke-width 0.1s ease;
+}
+
+.wf-node-agent:hover .wf-agent-box {
+  stroke-width: 2.25;
+}
+
+.wf-node-agent.is-source .wf-agent-box {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.wf-agent-name {
+  fill: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wf-agent-platform {
+  fill: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.wf-human-circle {
+  fill: var(--wf-human-faint);
+  stroke: var(--wf-human);
+  stroke-width: 1.5;
+  transition: stroke-width 0.1s ease;
+}
+
+.wf-node-human:hover .wf-human-circle {
+  stroke-width: 2.25;
+}
+
+.wf-human-initials {
+  fill: var(--wf-human);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.wf-human-name {
+  fill: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.wf-human-role {
+  fill: var(--text-muted);
+  font-size: 10.5px;
+}
+
+/* Edges */
+.wf-edge {
+  stroke: var(--wf-edge);
+  stroke-width: 1.6;
+  fill: none;
+}
+
+.wf-edge-owns {
+  stroke-dasharray: 5 4;
+}
+
+.wf-edge-flow {
+  stroke-width: 2;
+}
+
+.wf-edge-remove {
+  cursor: pointer;
+}
+
+.wf-edge-remove circle {
+  fill: var(--bg-elevated);
+  stroke: var(--wf-edge);
+  stroke-width: 1;
+}
+
+.wf-edge-remove text {
+  fill: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wf-edge-remove:hover circle {
+  stroke: var(--error);
+}
+
+.wf-edge-remove:hover text {
+  fill: var(--error);
 }
