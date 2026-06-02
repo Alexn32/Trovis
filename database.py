@@ -12,12 +12,16 @@ constant (a literal — no SQL-injection surface).
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 # ---------------------------------------------------------------------------
@@ -106,9 +110,78 @@ def _ns_to_iso(ns: int | None) -> str | None:
     """Convert a nanosecond unix timestamp to an ISO-8601 string (UTC)."""
     if not ns:
         return None
-    from datetime import datetime, timezone
-
     return datetime.fromtimestamp(int(ns) / 1_000_000_000, tz=timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Password hashing + opaque tokens (stdlib only — no bcrypt/passlib dep)
+# ---------------------------------------------------------------------------
+
+# PBKDF2-HMAC-SHA256 work factor. 600k matches the OWASP 2023 floor for this
+# algorithm. `needs_rehash` lets us raise this later without a migration.
+_PBKDF2_ITERS = 600_000
+# Session + invite lifetimes.
+_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
+_INVITE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+
+
+def hash_password(password: str) -> str:
+    """Return a self-describing PBKDF2 hash: pbkdf2_sha256$iters$salt$hash
+    (salt + hash base64url, no padding)."""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERS)
+    b = lambda raw: base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")  # noqa: E731
+    return f"pbkdf2_sha256${_PBKDF2_ITERS}${b(salt)}${b(dk)}"
+
+
+def verify_password(password: str, stored: str | None) -> bool:
+    """Constant-time verify against a stored hash. False on any parse error or
+    when no password is set."""
+    if not stored:
+        return False
+    try:
+        algo, iters_s, salt_b64, hash_b64 = stored.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        iters = int(iters_s)
+
+        def _unb(s: str) -> bytes:
+            return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+        salt = _unb(salt_b64)
+        expected = _unb(hash_b64)
+    except (ValueError, TypeError):
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
+    return hmac.compare_digest(dk, expected)
+
+
+def needs_rehash(stored: str | None) -> bool:
+    """True when a stored hash uses fewer iterations than the current target,
+    so we can transparently upgrade it on the next successful login."""
+    if not stored:
+        return False
+    try:
+        _, iters_s, _, _ = stored.split("$")
+        return int(iters_s) < _PBKDF2_ITERS
+    except (ValueError, TypeError):
+        return True
+
+
+def _new_token() -> tuple[str, str]:
+    """Mint an opaque token: (raw, sha256_hex). The raw value is shown to the
+    client once; only the hash is persisted. High entropy → plain sha256 at
+    rest is correct (and keeps the per-request lookup fast)."""
+    raw = secrets.token_urlsafe(32)
+    return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _hash_token(raw: str) -> str:
+    return hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _detect_platform(resource_attrs_json: str | None) -> str | None:
@@ -292,6 +365,93 @@ CREATE TABLE IF NOT EXISTS api_keys (
     name       TEXT    DEFAULT 'default',
     active     INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+# Real human logins. An account is the ORG/tenant; a user belongs to one org.
+# email is globally unique (one person = one org in v1). password_hash is
+# nullable until set (claimed legacy accounts / pending). role is 'owner' or
+# 'member'. Agents never appear here — they authenticate with api_keys.
+_USERS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL    PRIMARY KEY,
+    account_id    INTEGER   NOT NULL REFERENCES accounts(id),
+    email         TEXT      NOT NULL UNIQUE,
+    password_hash TEXT,
+    name          TEXT,
+    role          TEXT      NOT NULL DEFAULT 'member',
+    created_at    TIMESTAMP DEFAULT NOW(),
+    last_login_at TIMESTAMP
+)
+"""
+
+_USERS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id    INTEGER NOT NULL REFERENCES accounts(id),
+    email         TEXT    NOT NULL UNIQUE,
+    password_hash TEXT,
+    name          TEXT,
+    role          TEXT    NOT NULL DEFAULT 'member',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login_at TIMESTAMP
+)
+"""
+
+# Opaque session tokens for dashboard users. Only the sha256 of the token is
+# stored; the raw token is returned to the client once. account_id is
+# denormalized so the middleware resolves the tenant in one indexed lookup.
+_SESSIONS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id           SERIAL    PRIMARY KEY,
+    token_hash   TEXT      NOT NULL UNIQUE,
+    user_id      INTEGER   NOT NULL REFERENCES users(id),
+    account_id   INTEGER   NOT NULL REFERENCES accounts(id),
+    created_at   TIMESTAMP DEFAULT NOW(),
+    expires_at   TIMESTAMP NOT NULL,
+    last_seen_at TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_SESSIONS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash   TEXT    NOT NULL UNIQUE,
+    user_id      INTEGER NOT NULL REFERENCES users(id),
+    account_id   INTEGER NOT NULL REFERENCES accounts(id),
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at   TIMESTAMP NOT NULL,
+    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+# One-time invite links for adding members to a Business org. Only the token
+# hash is stored. Single-use (accepted_at) + expiry enforced on read.
+_INVITES_DDL_PG = """
+CREATE TABLE IF NOT EXISTS invites (
+    id                 SERIAL    PRIMARY KEY,
+    token_hash         TEXT      NOT NULL UNIQUE,
+    account_id         INTEGER   NOT NULL REFERENCES accounts(id),
+    email              TEXT      NOT NULL,
+    role               TEXT      NOT NULL DEFAULT 'member',
+    invited_by_user_id INTEGER   REFERENCES users(id),
+    created_at         TIMESTAMP DEFAULT NOW(),
+    expires_at         TIMESTAMP NOT NULL,
+    accepted_at        TIMESTAMP
+)
+"""
+
+_INVITES_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS invites (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash         TEXT    NOT NULL UNIQUE,
+    account_id         INTEGER NOT NULL REFERENCES accounts(id),
+    email              TEXT    NOT NULL,
+    role               TEXT    NOT NULL DEFAULT 'member',
+    invited_by_user_id INTEGER REFERENCES users(id),
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at         TIMESTAMP NOT NULL,
+    accepted_at        TIMESTAMP
 )
 """
 
@@ -541,6 +701,12 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_workflows_account_id ON workflows(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_steps_workflow_id ON workflow_steps(workflow_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_steps_order ON workflow_steps(workflow_id, step_order)",
+    "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    "CREATE INDEX IF NOT EXISTS idx_users_account_id ON users(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_invites_token_hash ON invites(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_invites_account_id ON invites(account_id)",
 ]
 
 
@@ -568,6 +734,10 @@ def init_db() -> None:
             # workflows before workflow_steps — the FK references it.
             _WORKFLOWS_DDL_PG,
             _WORKFLOW_STEPS_DDL_PG,
+            # users before sessions/invites — the FKs reference it.
+            _USERS_DDL_PG,
+            _SESSIONS_DDL_PG,
+            _INVITES_DDL_PG,
         ]
     else:
         ddls = [
@@ -583,6 +753,9 @@ def init_db() -> None:
             _PRICING_DDL_SQLITE,
             _WORKFLOWS_DDL_SQLITE,
             _WORKFLOW_STEPS_DDL_SQLITE,
+            _USERS_DDL_SQLITE,
+            _SESSIONS_DDL_SQLITE,
+            _INVITES_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -614,6 +787,10 @@ def init_db() -> None:
         # default on ALTER ADD COLUMN; upsert_pricing sets it explicitly.)
         _try_add_column(cur, "model_pricing", "source", "TEXT DEFAULT 'seed'")
         _try_add_column(cur, "model_pricing", "updated_at", "TIMESTAMP")
+        # Account (org) gains a type + display name. Existing rows default to
+        # 'individual'; name stays NULL until set.
+        _try_add_column(cur, "accounts", "account_type", "TEXT DEFAULT 'individual'")
+        _try_add_column(cur, "accounts", "name", "TEXT")
         for idx in _INDEXES:
             cur.execute(idx)
         # Bootstrap the pricing table with a handful of common models so
@@ -2986,38 +3163,42 @@ class EmailAlreadyExistsError(Exception):
     """Raised when create_account hits the unique constraint on email."""
 
 
-def create_account(email: str) -> dict[str, Any]:
-    """Insert a new account. Raises EmailAlreadyExistsError if the email is
-    taken. Returns {id, email, created_at} for the new row.
+def create_account(
+    email: str,
+    account_type: str = "individual",
+    name: str | None = None,
+) -> dict[str, Any]:
+    """Insert a new account (the org/tenant). Raises EmailAlreadyExistsError
+    if the email is taken. Returns {id, email, account_type, name, created_at}.
 
     The RETURNING clause differs between backends: Postgres has it natively;
     SQLite has it since 3.35 (March 2021) but we use lastrowid + SELECT as a
     safer fallback that works on any 3.x.
     """
-    # Normalize email so comparison is case-insensitive on the application
-    # side. We don't add a lowercase index to the table because that's a
-    # one-way decision; keeping the original casing in storage preserves
-    # the option to change normalization later.
     email = (email or "").strip().lower()
     if not email:
         raise ValueError("email is required")
+    account_type = account_type if account_type in ("individual", "business") else "individual"
+    name = (name or "").strip() or None
+    cols = "(email, account_type, name)"
+    sel = "id, email, account_type, name, created_at"
 
     try:
         with _connect() as conn, _cursor(conn) as cur:
             if USE_POSTGRES:
                 cur.execute(
-                    f"INSERT INTO accounts (email) VALUES ({PH}) RETURNING id, email, created_at",
-                    (email,),
+                    f"INSERT INTO accounts {cols} VALUES ({PH}, {PH}, {PH}) RETURNING {sel}",
+                    (email, account_type, name),
                 )
                 row = cur.fetchone()
             else:
                 cur.execute(
-                    f"INSERT INTO accounts (email) VALUES ({PH})", (email,)
+                    f"INSERT INTO accounts {cols} VALUES ({PH}, {PH}, {PH})",
+                    (email, account_type, name),
                 )
                 new_id = cur.lastrowid
                 cur.execute(
-                    f"SELECT id, email, created_at FROM accounts WHERE id = {PH}",
-                    (new_id,),
+                    f"SELECT {sel} FROM accounts WHERE id = {PH}", (new_id,)
                 )
                 row = cur.fetchone()
     except Exception as e:
@@ -3029,6 +3210,27 @@ def create_account(email: str) -> dict[str, Any]:
     return {
         "id": row["id"],
         "email": row["email"],
+        "account_type": row["account_type"],
+        "name": row["name"],
+        "created_at": _ts_to_str(row["created_at"]),
+    }
+
+
+def get_account(account_id: int) -> dict[str, Any] | None:
+    """Return an org by id: {id, email, name, account_type, created_at}."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id, email, account_type, name, created_at FROM accounts WHERE id = {PH}",
+            (account_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "account_type": row["account_type"],
+        "name": row["name"],
         "created_at": _ts_to_str(row["created_at"]),
     }
 
@@ -3125,6 +3327,362 @@ def has_any_keys() -> bool:
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql)
         return cur.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# Users, sessions, invites (real human auth)
+# ---------------------------------------------------------------------------
+
+
+class UserEmailExistsError(Exception):
+    """Raised when a user email collides with the global UNIQUE constraint."""
+
+
+def has_any_users() -> bool:
+    """True if any user exists. Pairs with has_any_keys() so the local-dev
+    no-auth passthrough closes once either credential type exists."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute("SELECT 1 FROM users LIMIT 1")
+        return cur.fetchone() is not None
+
+
+def _user_public(row: Any) -> dict[str, Any]:
+    """Shape a user row for the API — never includes password_hash."""
+    return {
+        "id": row["id"],
+        "account_id": row["account_id"],
+        "email": row["email"],
+        "name": row["name"],
+        "role": row["role"],
+        "created_at": _ts_to_str(row["created_at"]),
+        "last_login_at": _ts_to_str(row["last_login_at"]),
+    }
+
+
+_USER_COLS = "id, account_id, email, name, role, created_at, last_login_at"
+
+
+def create_user(
+    account_id: int,
+    email: str,
+    name: str | None,
+    role: str = "member",
+    password_hash: str | None = None,
+) -> dict[str, Any]:
+    """Insert a user (login) into an org. Raises UserEmailExistsError on a
+    duplicate email. Returns the public user shape (no password_hash)."""
+    email = (email or "").strip().lower()
+    if not email:
+        raise ValueError("email is required")
+    role = role if role in ("owner", "member") else "member"
+    name = (name or "").strip() or None
+    cols = "(account_id, email, name, role, password_hash)"
+    vals = (account_id, email, name, role, password_hash)
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            if USE_POSTGRES:
+                cur.execute(
+                    f"INSERT INTO users {cols} VALUES ({PH}, {PH}, {PH}, {PH}, {PH}) "
+                    f"RETURNING {_USER_COLS}",
+                    vals,
+                )
+                row = cur.fetchone()
+            else:
+                cur.execute(
+                    f"INSERT INTO users {cols} VALUES ({PH}, {PH}, {PH}, {PH}, {PH})",
+                    vals,
+                )
+                cur.execute(
+                    f"SELECT {_USER_COLS} FROM users WHERE id = {PH}", (cur.lastrowid,)
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        msg = str(e).lower()
+        if "unique" in msg or "duplicate" in msg:
+            raise UserEmailExistsError(email) from e
+        raise
+    return _user_public(row)
+
+
+def get_user_by_email(email: str) -> dict[str, Any] | None:
+    """Look up a user by email INCLUDING password_hash — internal use only
+    (login / claim). Never return this shape from an endpoint."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_USER_COLS}, password_hash FROM users WHERE email = {PH}",
+            (email,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    out = _user_public(row)
+    out["password_hash"] = row["password_hash"]
+    return out
+
+
+def get_user_by_id(user_id: int) -> dict[str, Any] | None:
+    """Public user shape by id (no password_hash)."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"SELECT {_USER_COLS} FROM users WHERE id = {PH}", (user_id,))
+        row = cur.fetchone()
+    return _user_public(row) if row else None
+
+
+def set_user_password(user_id: int, password_hash: str) -> None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE users SET password_hash = {PH} WHERE id = {PH}",
+            (password_hash, user_id),
+        )
+
+
+def touch_user_login(user_id: int) -> None:
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE users SET last_login_at = {now_sql} WHERE id = {PH}", (user_id,)
+        )
+
+
+def get_org_users(account_id: int) -> list[dict[str, Any]]:
+    """All users in an org, owners first then by creation order."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_USER_COLS} FROM users WHERE account_id = {PH} "
+            "ORDER BY CASE WHEN role = 'owner' THEN 0 ELSE 1 END, id ASC",
+            (account_id,),
+        )
+        return [_user_public(r) for r in cur.fetchall()]
+
+
+def count_owners(account_id: int) -> int:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM users WHERE account_id = {PH} AND role = 'owner'",
+            (account_id,),
+        )
+        return int(cur.fetchone()["n"])
+
+
+def delete_user(account_id: int, user_id: int) -> bool:
+    """Remove a user from an org (account-scoped) plus their sessions."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"DELETE FROM sessions WHERE user_id = {PH}", (user_id,))
+        cur.execute(
+            f"DELETE FROM users WHERE id = {PH} AND account_id = {PH}",
+            (user_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def create_session(
+    user_id: int, account_id: int, ttl_seconds: int = _SESSION_TTL_SECONDS
+) -> str:
+    """Mint a session; store only the token hash. Returns the raw token."""
+    raw, token_hash = _new_token()
+    expires_at = (_utcnow() + timedelta(seconds=ttl_seconds)).isoformat()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO sessions (token_hash, user_id, account_id, expires_at) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH})",
+            (token_hash, user_id, account_id, expires_at),
+        )
+    return raw
+
+
+def resolve_session(raw_token: str | None) -> dict[str, Any] | None:
+    """Hot path: resolve a raw bearer token to its user + org. Returns None
+    when unknown or expired. Slides the expiry forward on use."""
+    if not raw_token:
+        return None
+    token_hash = _hash_token(raw_token)
+    now_iso = _utcnow().isoformat()
+    new_expiry = (_utcnow() + timedelta(seconds=_SESSION_TTL_SECONDS)).isoformat()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT s.user_id, s.account_id, u.role, u.email, u.name "
+            "FROM sessions s JOIN users u ON u.id = s.user_id "
+            f"WHERE s.token_hash = {PH} AND s.expires_at > {PH}",
+            (token_hash, now_iso),
+        )
+        row = cur.fetchone()
+        if row is None:
+            # Opportunistically clear an expired/dead row.
+            cur.execute(
+                f"DELETE FROM sessions WHERE token_hash = {PH}", (token_hash,)
+            )
+            return None
+        cur.execute(
+            f"UPDATE sessions SET last_seen_at = {PH}, expires_at = {PH} "
+            f"WHERE token_hash = {PH}",
+            (now_iso, new_expiry, token_hash),
+        )
+        return {
+            "account_id": row["account_id"],
+            "user_id": row["user_id"],
+            "role": row["role"],
+            "email": row["email"],
+            "name": row["name"],
+        }
+
+
+def delete_session(raw_token: str | None) -> None:
+    if not raw_token:
+        return
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM sessions WHERE token_hash = {PH}", (_hash_token(raw_token),)
+        )
+
+
+def delete_sessions_for_user(
+    user_id: int, except_raw_token: str | None = None
+) -> None:
+    """Invalidate all of a user's sessions (used on password change), keeping
+    the caller's current session when provided."""
+    with _connect() as conn, _cursor(conn) as cur:
+        if except_raw_token:
+            cur.execute(
+                f"DELETE FROM sessions WHERE user_id = {PH} AND token_hash != {PH}",
+                (user_id, _hash_token(except_raw_token)),
+            )
+        else:
+            cur.execute(f"DELETE FROM sessions WHERE user_id = {PH}", (user_id,))
+
+
+def create_invite(
+    account_id: int,
+    email: str,
+    role: str,
+    invited_by_user_id: int | None,
+    ttl_seconds: int = _INVITE_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Create a one-time invite. Returns {token (raw), email, role,
+    expires_at} — the raw token is shown once (in the invite link)."""
+    email = (email or "").strip().lower()
+    role = role if role in ("owner", "member") else "member"
+    raw, token_hash = _new_token()
+    expires_at = (_utcnow() + timedelta(seconds=ttl_seconds)).isoformat()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO invites (token_hash, account_id, email, role, "
+            "invited_by_user_id, expires_at) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (token_hash, account_id, email, role, invited_by_user_id, expires_at),
+        )
+    return {"token": raw, "email": email, "role": role, "expires_at": expires_at}
+
+
+def get_invite(raw_token: str | None) -> dict[str, Any] | None:
+    """Resolve a still-valid invite (unaccepted + unexpired). Returns
+    {id, account_id, email, role} or None."""
+    if not raw_token:
+        return None
+    now_iso = _utcnow().isoformat()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, email, role FROM invites "
+            f"WHERE token_hash = {PH} AND accepted_at IS NULL AND expires_at > {PH}",
+            (_hash_token(raw_token), now_iso),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "account_id": row["account_id"],
+        "email": row["email"],
+        "role": row["role"],
+    }
+
+
+def list_invites(account_id: int) -> list[dict[str, Any]]:
+    """Pending (unaccepted, unexpired) invites for an org. Never leaks the
+    token or its hash."""
+    now_iso = _utcnow().isoformat()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, email, role, created_at, expires_at FROM invites "
+            f"WHERE account_id = {PH} AND accepted_at IS NULL AND expires_at > {PH} "
+            "ORDER BY created_at DESC, id DESC",
+            (account_id, now_iso),
+        )
+        return [
+            {
+                "id": r["id"],
+                "email": r["email"],
+                "role": r["role"],
+                "created_at": _ts_to_str(r["created_at"]),
+                "expires_at": _ts_to_str(r["expires_at"]),
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def revoke_invite(account_id: int, invite_id: int) -> bool:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM invites WHERE id = {PH} AND account_id = {PH}",
+            (invite_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def accept_invite(
+    raw_token: str, name: str | None, password_hash: str
+) -> dict[str, Any]:
+    """Redeem an invite: re-validate, create the member user, and stamp the
+    invite accepted — all in one transaction so a token can't be reused via a
+    race. Raises LookupError on an invalid/expired/used token and
+    UserEmailExistsError when the invited email already has a user."""
+    token_hash = _hash_token(raw_token)
+    now_iso = _utcnow().isoformat()
+    name = (name or "").strip() or None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, email, role FROM invites "
+            f"WHERE token_hash = {PH} AND accepted_at IS NULL AND expires_at > {PH}",
+            (token_hash, now_iso),
+        )
+        inv = cur.fetchone()
+        if inv is None:
+            raise LookupError("invite invalid, expired, or already used")
+        account_id = inv["account_id"]
+        email = inv["email"]
+        role = inv["role"] if inv["role"] in ("owner", "member") else "member"
+        cols = "(account_id, email, name, role, password_hash)"
+        vals = (account_id, email, name, role, password_hash)
+        try:
+            if USE_POSTGRES:
+                cur.execute(
+                    f"INSERT INTO users {cols} VALUES ({PH}, {PH}, {PH}, {PH}, {PH}) "
+                    f"RETURNING {_USER_COLS}",
+                    vals,
+                )
+                urow = cur.fetchone()
+            else:
+                cur.execute(
+                    f"INSERT INTO users {cols} VALUES ({PH}, {PH}, {PH}, {PH}, {PH})",
+                    vals,
+                )
+                cur.execute(
+                    f"SELECT {_USER_COLS} FROM users WHERE id = {PH}", (cur.lastrowid,)
+                )
+                urow = cur.fetchone()
+        except Exception as e:
+            msg = str(e).lower()
+            if "unique" in msg or "duplicate" in msg:
+                raise UserEmailExistsError(email) from e
+            raise
+        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+        cur.execute(
+            f"UPDATE invites SET accepted_at = {now_sql} WHERE id = {PH}",
+            (inv["id"],),
+        )
+        return _user_public(urow)
 
 
 # ---------------------------------------------------------------------------

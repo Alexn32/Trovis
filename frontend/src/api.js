@@ -15,6 +15,7 @@
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 const LS_KEY = 'oversee_api_key'
+const LS_TOKEN = 'oversee_session_token'
 
 function _readKeyFromStorage() {
   try {
@@ -57,8 +58,40 @@ export function getApiKey() {
   return API_KEY
 }
 
+// Session token (human dashboard login). Stored alongside the API key; the
+// backend prefers the Bearer session when both are present.
+let SESSION_TOKEN = (() => {
+  try {
+    return localStorage.getItem(LS_TOKEN)
+  } catch {
+    return null
+  }
+})()
+
+export function setSessionToken(token) {
+  SESSION_TOKEN = token || null
+  try {
+    if (SESSION_TOKEN) localStorage.setItem(LS_TOKEN, SESSION_TOKEN)
+    else localStorage.removeItem(LS_TOKEN)
+  } catch {
+    // private mode / quota — in-memory still works this session.
+  }
+}
+
+export function getSessionToken() {
+  return SESSION_TOKEN
+}
+
+export function clearSessionToken() {
+  setSessionToken(null)
+}
+
 async function request(path, options = {}) {
   const headers = { ...(options.headers || {}) }
+  // Prefer the human session; the API key (agent/legacy) rides along too.
+  if (SESSION_TOKEN && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${SESSION_TOKEN}`
+  }
   if (API_KEY) {
     headers['X-Oversee-Api-Key'] = API_KEY
   }
@@ -262,25 +295,36 @@ export const api = {
       },
     ),
 
-  // --- auth ---
-  signup: (email) =>
-    request('/auth/signup', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    }),
-  loginByEmail: (email) =>
-    request('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    }),
-  // Validate the currently-set API key by hitting a protected endpoint.
-  // Returns true on 200, false on 401, throws on any other failure.
-  async validateCurrentKey() {
+  // --- auth (real users + orgs) ---
+  signup: (data) =>
+    request('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),
+  login: (data) =>
+    request('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  logout: () => request('/auth/logout', { method: 'POST' }),
+  me: () => request('/auth/me'),
+  claim: (data) =>
+    request('/auth/claim', { method: 'POST', body: JSON.stringify(data) }),
+  setPassword: (data) =>
+    request('/auth/set-password', { method: 'POST', body: JSON.stringify(data) }),
+  acceptInvite: (data) =>
+    request('/auth/accept-invite', { method: 'POST', body: JSON.stringify(data) }),
+
+  // --- organization (members + invites) ---
+  getOrg: () => request('/org'),
+  getMembers: () => request('/org/members'),
+  createInvite: (data) =>
+    request('/org/invites', { method: 'POST', body: JSON.stringify(data) }),
+  getInvites: () => request('/org/invites'),
+  revokeInvite: (id) => request(`/org/invites/${id}`, { method: 'DELETE' }),
+  deleteMember: (id) => request(`/org/members/${id}`, { method: 'DELETE' }),
+
+  // Validate the current credential (session or API key) via /auth/me.
+  // Returns the {user, org, auth} payload on success, null on 401.
+  async validateSession() {
     try {
-      await request('/agents')
-      return true
+      return await request('/auth/me')
     } catch (e) {
-      if (e.status === 401) return false
+      if (e.status === 401) return null
       throw e
     }
   },
