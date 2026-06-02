@@ -47,6 +47,9 @@ from models import (
     AskResponse,
     AcceptInviteRequest,
     ClaimRequest,
+    Connection,
+    ConnectionCreate,
+    ConnectionStatusUpdate,
     DisplayNameRequest,
     HealthResponse,
     IngestResponse,
@@ -1556,6 +1559,63 @@ async def reveal_api_keys(
         if k["active"]
     ]
     return RevealKeysResponse(keys=keys)
+
+
+# ---------------------------------------------------------------------------
+# Agent-to-agent connections (auto-detected + operator-curated)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/connections", response_model=list[Connection])
+async def list_connections(request: Request) -> list[Connection]:
+    """All agent→agent connection edges for the account."""
+    account_id = getattr(request.state, "account_id", None)
+    return [Connection(**c) for c in database.get_connections(account_id)]
+
+
+@app.post("/connections/detect", response_model=list[Connection])
+async def detect_connections(request: Request) -> list[Connection]:
+    """Re-scan recent shared traces for agent→agent edges, then return the
+    refreshed list. Detection preserves operator confirm/dismiss/manual."""
+    account_id = getattr(request.state, "account_id", None)
+    database.detect_agent_connections(account_id)
+    return [Connection(**c) for c in database.get_connections(account_id)]
+
+
+@app.post("/connections", response_model=Connection, status_code=201)
+async def add_connection(request: Request, body: ConnectionCreate) -> Connection:
+    """Operator-drawn (manual) connection."""
+    account_id = getattr(request.state, "account_id", None)
+    c = database.add_manual_connection(
+        account_id,
+        body.source_service,
+        body.source_agent_id or "main",
+        body.target_service,
+        body.target_agent_id or "main",
+    )
+    return Connection(**c)
+
+
+@app.patch("/connections/{conn_id}", response_model=Connection)
+async def update_connection(
+    conn_id: int, request: Request, body: ConnectionStatusUpdate
+) -> Connection:
+    """Confirm / dismiss / re-detect an edge."""
+    account_id = getattr(request.state, "account_id", None)
+    try:
+        c = database.set_connection_status(account_id, conn_id, body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if c is None:
+        raise HTTPException(status_code=404, detail="connection not found")
+    return Connection(**c)
+
+
+@app.delete("/connections/{conn_id}", status_code=204)
+async def remove_connection(conn_id: int, request: Request) -> None:
+    account_id = getattr(request.state, "account_id", None)
+    if not database.delete_connection(account_id, conn_id):
+        raise HTTPException(status_code=404, detail="connection not found")
 
 
 @app.post("/ask", response_model=AskResponse)

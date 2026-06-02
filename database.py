@@ -368,6 +368,48 @@ CREATE TABLE IF NOT EXISTS api_keys (
 )
 """
 
+# Directed agent→agent connections. Auto-detected from shared traces
+# (parent_span_id crossing an agent boundary) and/or operator-curated.
+# `status` tracks the operator's decision so re-detection refreshes the
+# metrics without clobbering a confirm/dismiss/manual choice.
+_CONNECTIONS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS agent_connections (
+    id              SERIAL    PRIMARY KEY,
+    account_id      INTEGER   NOT NULL,
+    source_service  TEXT      NOT NULL,
+    source_agent_id TEXT      NOT NULL DEFAULT 'main',
+    target_service  TEXT      NOT NULL,
+    target_agent_id TEXT      NOT NULL DEFAULT 'main',
+    status          TEXT      NOT NULL DEFAULT 'detected',
+    call_count      INTEGER   DEFAULT 0,
+    trace_count     INTEGER   DEFAULT 0,
+    first_seen      TIMESTAMP,
+    last_seen       TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    updated_at      TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, source_service, source_agent_id, target_service, target_agent_id)
+)
+"""
+
+_CONNECTIONS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS agent_connections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL,
+    source_service  TEXT    NOT NULL,
+    source_agent_id TEXT    NOT NULL DEFAULT 'main',
+    target_service  TEXT    NOT NULL,
+    target_agent_id TEXT    NOT NULL DEFAULT 'main',
+    status          TEXT    NOT NULL DEFAULT 'detected',
+    call_count      INTEGER DEFAULT 0,
+    trace_count     INTEGER DEFAULT 0,
+    first_seen      TIMESTAMP,
+    last_seen       TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, source_service, source_agent_id, target_service, target_agent_id)
+)
+"""
+
 # Real human logins. An account is the ORG/tenant; a user belongs to one org.
 # email is globally unique (one person = one org in v1). password_hash is
 # nullable until set (claimed legacy accounts / pending). role is 'owner' or
@@ -707,6 +749,9 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_invites_token_hash ON invites(token_hash)",
     "CREATE INDEX IF NOT EXISTS idx_invites_account_id ON invites(account_id)",
+    # Trace-grouping for agent-to-agent connection detection.
+    "CREATE INDEX IF NOT EXISTS idx_spans_account_trace ON spans(account_id, trace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_connections_account_id ON agent_connections(account_id)",
 ]
 
 
@@ -738,6 +783,7 @@ def init_db() -> None:
             _USERS_DDL_PG,
             _SESSIONS_DDL_PG,
             _INVITES_DDL_PG,
+            _CONNECTIONS_DDL_PG,
         ]
     else:
         ddls = [
@@ -756,6 +802,7 @@ def init_db() -> None:
             _USERS_DDL_SQLITE,
             _SESSIONS_DDL_SQLITE,
             _INVITES_DDL_SQLITE,
+            _CONNECTIONS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -3683,6 +3730,242 @@ def accept_invite(
             (inv["id"],),
         )
         return _user_public(urow)
+
+
+# ---------------------------------------------------------------------------
+# Agent-to-agent connections (auto-detected + operator-curated)
+# ---------------------------------------------------------------------------
+
+_CONN_WINDOW_DAYS = 30
+_CONN_STATUSES = {"detected", "confirmed", "dismissed", "manual"}
+
+
+def _connection_row(r: Any) -> dict[str, Any]:
+    return {
+        "id": r["id"],
+        "source_service": r["source_service"],
+        "source_agent_id": r["source_agent_id"],
+        "target_service": r["target_service"],
+        "target_agent_id": r["target_agent_id"],
+        "status": r["status"],
+        "call_count": int(r["call_count"] or 0),
+        "trace_count": int(r["trace_count"] or 0),
+        "first_seen": _ts_to_str(r["first_seen"]),
+        "last_seen": _ts_to_str(r["last_seen"]),
+    }
+
+
+def detect_agent_connections(
+    account_id: int | None, days: int = _CONN_WINDOW_DAYS
+) -> int:
+    """Find directed agent→agent edges from shared traces and upsert them.
+
+    An edge exists when a span's parent lives in a *different* agent within
+    the same trace (parent_agent called child_agent). Metrics (call/trace
+    counts, last_seen) are recomputed over the window each run; the operator
+    `status` is preserved — re-detection never un-confirms or un-dismisses.
+    Returns the number of edges upserted.
+    """
+    window_ns = time.time_ns() - days * 24 * 60 * 60 * 1_000_000_000
+    acct = (
+        f"AND account_id = {PH}" if account_id is not None else "AND account_id IS NULL"
+    )
+    base_args: tuple[Any, ...] = () if account_id is None else (account_id,)
+
+    edges: dict[tuple, dict[str, Any]] = {}
+    with _connect() as conn, _cursor(conn) as cur:
+        # 1. Traces (within the window) that touch more than one agent.
+        cur.execute(
+            f"SELECT trace_id FROM spans WHERE start_time_unix >= {PH} {acct} "
+            "GROUP BY trace_id "
+            "HAVING COUNT(DISTINCT service_name || '/' || COALESCE(agent_id, 'main')) > 1",
+            (window_ns, *base_args),
+        )
+        trace_ids = [r["trace_id"] for r in cur.fetchall() if r["trace_id"]]
+        if not trace_ids:
+            return 0
+
+        # 2. Pull the spans for those traces and link parent→child across agents.
+        chunk = 200
+        for i in range(0, len(trace_ids), chunk):
+            batch = trace_ids[i : i + chunk]
+            ph = ", ".join([PH] * len(batch))
+            cur.execute(
+                "SELECT trace_id, span_id, parent_span_id, service_name, agent_id, "
+                f"start_time_unix FROM spans WHERE trace_id IN ({ph}) {acct}",
+                (*batch, *base_args),
+            )
+            rows = cur.fetchall()
+            by_span = {
+                r["span_id"]: (
+                    r["service_name"],
+                    r["agent_id"] or "main",
+                    r["parent_span_id"],
+                    r["start_time_unix"],
+                    r["trace_id"],
+                )
+                for r in rows
+            }
+            for svc, aid, parent, start, trace in by_span.values():
+                if not parent or parent not in by_span:
+                    continue
+                psvc, paid, _, _, _ = by_span[parent]
+                if (psvc, paid) == (svc, aid):
+                    continue  # same agent — not a crossing
+                key = (psvc, paid, svc, aid)
+                e = edges.setdefault(
+                    key, {"calls": 0, "traces": set(), "first": start, "last": start}
+                )
+                e["calls"] += 1
+                e["traces"].add(trace)
+                e["first"] = min(e["first"], start)
+                e["last"] = max(e["last"], start)
+
+        if not edges:
+            return 0
+
+        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+        touched = 0
+        for (ssvc, said, tsvc, taid), e in edges.items():
+            calls = e["calls"]
+            traces = len(e["traces"])
+            last_iso = _ns_to_iso(e["last"])
+            first_iso = _ns_to_iso(e["first"])
+            where = (
+                f"account_id = {PH} AND source_service = {PH} AND source_agent_id = {PH} "
+                f"AND target_service = {PH} AND target_agent_id = {PH}"
+                if account_id is not None
+                else f"account_id IS NULL AND source_service = {PH} AND source_agent_id = {PH} "
+                f"AND target_service = {PH} AND target_agent_id = {PH}"
+            )
+            key_args = (
+                (account_id, ssvc, said, tsvc, taid)
+                if account_id is not None
+                else (ssvc, said, tsvc, taid)
+            )
+            # Update metrics (preserve status); insert if absent.
+            cur.execute(
+                f"UPDATE agent_connections SET call_count = {PH}, trace_count = {PH}, "
+                f"last_seen = {PH}, updated_at = {now_sql} WHERE {where}",
+                (calls, traces, last_iso, *key_args),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    "INSERT INTO agent_connections (account_id, source_service, "
+                    "source_agent_id, target_service, target_agent_id, status, "
+                    "call_count, trace_count, first_seen, last_seen) "
+                    f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'detected', {PH}, {PH}, {PH}, {PH})",
+                    (account_id, ssvc, said, tsvc, taid, calls, traces, first_iso, last_iso),
+                )
+            touched += 1
+    return touched
+
+
+def get_connections(account_id: int | None) -> list[dict[str, Any]]:
+    """All connection edges for an account (most-recently-active first)."""
+    acct = (
+        f"WHERE account_id = {PH}" if account_id is not None else "WHERE account_id IS NULL"
+    )
+    args: tuple[Any, ...] = (account_id,) if account_id is not None else ()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, source_service, source_agent_id, target_service, "
+            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            f"FROM agent_connections {acct} ORDER BY last_seen DESC NULLS LAST, id DESC"
+            if USE_POSTGRES
+            else "SELECT id, source_service, source_agent_id, target_service, "
+            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            f"FROM agent_connections {acct} ORDER BY last_seen DESC, id DESC",
+            args,
+        )
+        return [_connection_row(r) for r in cur.fetchall()]
+
+
+def add_manual_connection(
+    account_id: int | None,
+    source_service: str,
+    source_agent_id: str,
+    target_service: str,
+    target_agent_id: str,
+) -> dict[str, Any]:
+    """Operator-drawn edge. Upserts to status='manual' (promotes an existing
+    detected edge). Returns the row."""
+    said = source_agent_id or "main"
+    taid = target_agent_id or "main"
+    where = (
+        f"account_id = {PH} AND source_service = {PH} AND source_agent_id = {PH} "
+        f"AND target_service = {PH} AND target_agent_id = {PH}"
+        if account_id is not None
+        else f"account_id IS NULL AND source_service = {PH} AND source_agent_id = {PH} "
+        f"AND target_service = {PH} AND target_agent_id = {PH}"
+    )
+    key_args = (
+        (account_id, source_service, said, target_service, taid)
+        if account_id is not None
+        else (source_service, said, target_service, taid)
+    )
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE agent_connections SET status = 'manual', updated_at = {now_sql} WHERE {where}",
+            key_args,
+        )
+        if cur.rowcount == 0:
+            cur.execute(
+                "INSERT INTO agent_connections (account_id, source_service, "
+                "source_agent_id, target_service, target_agent_id, status) "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'manual')",
+                (account_id, source_service, said, target_service, taid),
+            )
+        cur.execute(
+            "SELECT id, source_service, source_agent_id, target_service, "
+            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            f"FROM agent_connections WHERE {where}",
+            key_args,
+        )
+        return _connection_row(cur.fetchone())
+
+
+def set_connection_status(
+    account_id: int | None, conn_id: int, status: str
+) -> dict[str, Any] | None:
+    """Confirm / dismiss / re-detect an edge. Returns the updated row or None."""
+    if status not in _CONN_STATUSES:
+        raise ValueError(f"invalid status: {status}")
+    acct = (
+        f"AND account_id = {PH}" if account_id is not None else "AND account_id IS NULL"
+    )
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    args = (status, conn_id, account_id) if account_id is not None else (status, conn_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE agent_connections SET status = {PH}, updated_at = {now_sql} "
+            f"WHERE id = {PH} {acct}",
+            args,
+        )
+        if cur.rowcount == 0:
+            return None
+        sel_args = (conn_id, account_id) if account_id is not None else (conn_id,)
+        cur.execute(
+            "SELECT id, source_service, source_agent_id, target_service, "
+            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            f"FROM agent_connections WHERE id = {PH} {acct}",
+            sel_args,
+        )
+        row = cur.fetchone()
+    return _connection_row(row) if row else None
+
+
+def delete_connection(account_id: int | None, conn_id: int) -> bool:
+    acct = (
+        f"AND account_id = {PH}" if account_id is not None else "AND account_id IS NULL"
+    )
+    args = (conn_id, account_id) if account_id is not None else (conn_id,)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM agent_connections WHERE id = {PH} {acct}", args
+        )
+        return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

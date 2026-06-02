@@ -3719,3 +3719,62 @@ a:hover {
 .invite-link-out {
   margin-top: 10px;
 }
+
+/* ---------- Workflow: connected agents ---------- */
+.wf-conn-group { margin-bottom: 10px; }
+.wf-conn-group:last-child { margin-bottom: 0; }
+.wf-conn-dir {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 5px;
+}
+.wf-conn-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.wf-conn-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--wf-agent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-conn-name:hover { text-decoration: underline; }
+.wf-conn-meta { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+.wf-conn-actions { display: inline-flex; gap: 3px; flex-shrink: 0; }
+.wf-conn-act {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.wf-conn-act.confirm:hover { color: var(--success); border-color: var(--success); }
+.wf-conn-act.dismiss:hover { color: var(--error); border-color: var(--error); }
+.wf-conn-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.wf-conn-confirmed { background: var(--success-faint); color: var(--success); }
+.wf-conn-manual { background: var(--accent-faint); color: var(--accent); }

@@ -324,6 +324,18 @@ export const api = {
       body: JSON.stringify({ password }),
     }),
 
+  // --- agent-to-agent connections ---
+  getConnections: () => request('/connections'),
+  detectConnections: () => request('/connections/detect', { method: 'POST' }),
+  addConnection: (data) =>
+    request('/connections', { method: 'POST', body: JSON.stringify(data) }),
+  updateConnection: (id, status) =>
+    request(`/connections/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    }),
+  deleteConnection: (id) => request(`/connections/${id}`, { method: 'DELETE' }),
+
   // Validate the current credential (session or API key) via /auth/me.
   // Returns the {user, org, auth} payload on success, null on 401.
   async validateSession() {

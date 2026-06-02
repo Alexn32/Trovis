@@ -357,6 +357,34 @@ class WorkflowGenerate(BaseModel):
     agent_id: str | None = "main"
 
 
+class Connection(BaseModel):
+    """A directed agent→agent connection. `status` is detected (auto),
+    confirmed/dismissed (operator decision on a detected edge), or manual
+    (operator-drawn). Metrics come from shared-trace detection."""
+
+    id: int
+    source_service: str
+    source_agent_id: str = "main"
+    target_service: str
+    target_agent_id: str = "main"
+    status: str = "detected"
+    call_count: int = 0
+    trace_count: int = 0
+    first_seen: str | None = None
+    last_seen: str | None = None
+
+
+class ConnectionCreate(BaseModel):
+    source_service: str
+    source_agent_id: str = "main"
+    target_service: str
+    target_agent_id: str = "main"
+
+
+class ConnectionStatusUpdate(BaseModel):
+    status: str  # 'confirmed' | 'dismissed' | 'detected' | 'manual'
+
+
 class WorkflowStats(BaseModel):
     """Live telemetry stats for a workflow's source agent (all-time).
     `has_agent` is False when the workflow has no agent to pull from."""

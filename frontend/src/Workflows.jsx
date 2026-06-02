@@ -544,6 +544,9 @@ function WorkflowDetail({
         composition={composition}
         stepCount={steps.length}
         estTotalMs={timing.total}
+        serviceName={workflow.agent_service_name}
+        agentId={workflow.agent_id}
+        onSelectAgent={onSelectAgent}
       />
     </div>
   )
@@ -553,13 +556,20 @@ function WorkflowDetail({
 // Stats rail
 // ---------------------------------------------------------------------------
 
-function StatsRail({ stats, composition, stepCount, estTotalMs }) {
+function StatsRail({ stats, composition, stepCount, estTotalMs, serviceName, agentId, onSelectAgent }) {
   const order = ['trigger', 'agent', 'human', 'decision', 'output']
   const compParts = order
     .filter((t) => composition[t])
     .map((t) => `${composition[t]} ${t}`)
   return (
     <aside className="workflow-stats">
+      {serviceName && (
+        <ConnectionsCard
+          serviceName={serviceName}
+          agentId={agentId || 'main'}
+          onSelectAgent={onSelectAgent}
+        />
+      )}
       <div className="workflow-stats-card">
         <h3 className="workflow-stats-title">Agent activity</h3>
         {stats == null ? (
@@ -605,6 +615,119 @@ function StatRow({ label, value, tone }) {
       <span className="workflow-stat-label">{label}</span>
       <span className={`workflow-stat-value ${tone === 'error' ? 'is-error' : ''}`}>{value}</span>
     </li>
+  )
+}
+
+// Agent-to-agent connections for this workflow's agent, detected from shared
+// traces. Shows who it feeds into / receives from, with confirm/dismiss.
+function ConnectionsCard({ serviceName, agentId, onSelectAgent }) {
+  const [conns, setConns] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    // Refresh detection on open, then read the (curated) list.
+    api
+      .detectConnections()
+      .then((list) => !cancelled && setConns(list))
+      .catch(() =>
+        api.getConnections().then((l) => !cancelled && setConns(l)).catch(() => !cancelled && setConns([])),
+      )
+    return () => {
+      cancelled = true
+    }
+  }, [serviceName, agentId])
+
+  async function setStatus(id, status) {
+    try {
+      const updated = await api.updateConnection(id, status)
+      setConns((prev) => prev.map((c) => (c.id === id ? updated : c)))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (conns === null) {
+    return (
+      <div className="workflow-stats-card">
+        <h3 className="workflow-stats-title">Connected agents</h3>
+        <div className="workflow-stats-loading"><Spinner /></div>
+      </div>
+    )
+  }
+
+  const mine = (c) => c.source_service === serviceName && (c.source_agent_id || 'main') === agentId
+  const theirs = (c) => c.target_service === serviceName && (c.target_agent_id || 'main') === agentId
+  const visible = (c) => c.status !== 'dismissed'
+  const outgoing = conns.filter((c) => mine(c) && visible(c))
+  const incoming = conns.filter((c) => theirs(c) && visible(c))
+
+  if (outgoing.length === 0 && incoming.length === 0) {
+    return (
+      <div className="workflow-stats-card">
+        <h3 className="workflow-stats-title">Connected agents</h3>
+        <p className="workflow-stats-note">
+          No agent-to-agent connections detected. They appear when this agent
+          shares a trace with another (handoffs / calls).
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="workflow-stats-card">
+      <h3 className="workflow-stats-title">Connected agents</h3>
+      {outgoing.length > 0 && (
+        <div className="wf-conn-group">
+          <div className="wf-conn-dir">Feeds into</div>
+          {outgoing.map((c) => (
+            <ConnRow
+              key={c.id}
+              conn={c}
+              label={c.target_service}
+              onOpen={() => onSelectAgent?.(c.target_service)}
+              onConfirm={() => setStatus(c.id, 'confirmed')}
+              onDismiss={() => setStatus(c.id, 'dismissed')}
+            />
+          ))}
+        </div>
+      )}
+      {incoming.length > 0 && (
+        <div className="wf-conn-group">
+          <div className="wf-conn-dir">Receives from</div>
+          {incoming.map((c) => (
+            <ConnRow
+              key={c.id}
+              conn={c}
+              label={c.source_service}
+              onOpen={() => onSelectAgent?.(c.source_service)}
+              onConfirm={() => setStatus(c.id, 'confirmed')}
+              onDismiss={() => setStatus(c.id, 'dismissed')}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ConnRow({ conn, label, onOpen, onConfirm, onDismiss }) {
+  return (
+    <div className="wf-conn-row">
+      <button type="button" className="wf-conn-name" onClick={onOpen} title={`Open ${label}`}>
+        {label}
+      </button>
+      <span className="wf-conn-meta">
+        {conn.call_count} call{conn.call_count === 1 ? '' : 's'}
+      </span>
+      {conn.status === 'detected' ? (
+        <span className="wf-conn-actions">
+          <button type="button" className="wf-conn-act confirm" title="Confirm" onClick={onConfirm}>✓</button>
+          <button type="button" className="wf-conn-act dismiss" title="Dismiss" onClick={onDismiss}>×</button>
+        </span>
+      ) : (
+        <span className={`wf-conn-status wf-conn-${conn.status}`}>{conn.status}</span>
+      )}
+    </div>
   )
 }
 
