@@ -152,3 +152,74 @@ export function ClipboardIcon({ size = 14 }) {
     </svg>
   )
 }
+
+// Robot/agent — used for AGENT workflow steps.
+export function RobotIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <rect x="4" y="8" width="16" height="11" rx="2" />
+      <path d="M12 8V4" />
+      <circle cx="12" cy="3" r="1" />
+      <circle cx="9" cy="13" r="1" />
+      <circle cx="15" cy="13" r="1" />
+      <path d="M9 16h6" />
+      <path d="M2 12v3" />
+      <path d="M22 12v3" />
+    </svg>
+  )
+}
+
+// Person — used for HUMAN workflow steps.
+export function UserIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" />
+    </svg>
+  )
+}
+
+// Clock — used for TRIGGER workflow steps.
+export function ClockIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 16 14" />
+    </svg>
+  )
+}
+
+// Diamond with a question mark — used for DECISION workflow steps.
+export function DiamondIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <path d="M12 2l10 10-10 10L2 12z" />
+      <path d="M10.5 9.5a1.6 1.6 0 0 1 3 .6c0 1.2-1.5 1.5-1.5 2.5" />
+      <line x1="12" y1="15.5" x2="12.01" y2="15.5" />
+    </svg>
+  )
+}
+
+// Check-in-circle — used for OUTPUT workflow steps.
+export function CheckCircleIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="8.5 12 11 14.5 15.5 9.5" />
+    </svg>
+  )
+}
+
+// Six-dot drag handle — used to grab and reorder steps.
+export function GripIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <circle cx="9" cy="6" r="1.4" />
+      <circle cx="15" cy="6" r="1.4" />
+      <circle cx="9" cy="12" r="1.4" />
+      <circle cx="15" cy="12" r="1.4" />
+      <circle cx="9" cy="18" r="1.4" />
+      <circle cx="15" cy="18" r="1.4" />
+    </svg>
+  )
+}

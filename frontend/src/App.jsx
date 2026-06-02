@@ -122,15 +122,7 @@ function AppInner() {
   } else if (tab === 'team') {
     mainContent = <Team onSelectAgent={openDetail} />
   } else if (tab === 'workflows') {
-    mainContent = (
-      <Workflows
-        onSelectAgent={openDetail}
-        onOpenTeam={() => {
-          setTab('team')
-          setOverlay(null)
-        }}
-      />
-    )
+    mainContent = <Workflows onSelectAgent={openDetail} />
   } else {
     mainContent = (
       <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />

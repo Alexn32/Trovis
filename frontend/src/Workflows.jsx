@@ -1,501 +1,892 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, getApiKey } from './api.js'
-import { statusColor } from './utils.js'
+import { api } from './api.js'
+import { Spinner } from './ui.jsx'
+import { relativeTime } from './utils.js'
+import {
+  PlusIcon,
+  PencilIcon,
+  TrashIcon,
+  RobotIcon,
+  UserIcon,
+  ClockIcon,
+  DiamondIcon,
+  CheckCircleIcon,
+  GripIcon,
+} from './Icons.jsx'
 
-// Workflows — an SVG diagram of how work flows through an org's humans and
-// agents. Pure SVG, no chart library. Nodes are draggable; layout +
-// operator-drawn data-flow connections persist to localStorage (V1).
-//
-// Backend (/workflows) supplies agent + human nodes and 'owns' edges
-// (human → their agents, from agent_owners). 'data_flow' edges (agent →
-// agent) are drawn by the operator here and stored client-side until
-// telemetry-based auto-detection lands.
+// Workflows — auto-generated, editable process flows for an agent. A left
+// sidebar lists workflows; the main area renders the selected one as a
+// vertical, Notion/Linear-style sequence of typed step cards (trigger /
+// agent / human / decision / output). Agent steps come from telemetry;
+// human steps are inferred by Claude from time-gaps + identity files.
 
-// --- geometry ---------------------------------------------------------------
-const AGENT_W = 184
-const AGENT_H = 60
-const HUMAN_R = 30
-const COL_HUMAN_X = 110
-const COL_AGENT_X = 420
-const COL_GAP = 250
-const ROW_GAP = 124
-const TOP = 90
-const AGENTS_PER_COL = 6
-const PAD = 60
-
-// --- localStorage (namespaced per account so browsers shared across
-// accounts don't cross-contaminate layouts) -------------------------------
-function lsKey(base) {
-  const k = getApiKey() || 'anon'
-  return `oversee_wf_${base}_${k.slice(-8)}`
+const STEP_META = {
+  trigger: { label: 'Trigger', Icon: ClockIcon, cls: 'wf-step-trigger' },
+  agent: { label: 'Agent', Icon: RobotIcon, cls: 'wf-step-agent' },
+  human: { label: 'Human', Icon: UserIcon, cls: 'wf-step-human' },
+  decision: { label: 'Decision', Icon: DiamondIcon, cls: 'wf-step-decision' },
+  output: { label: 'Output', Icon: CheckCircleIcon, cls: 'wf-step-output' },
 }
-function loadLS(base, fallback) {
-  try {
-    const v = localStorage.getItem(lsKey(base))
-    return v ? JSON.parse(v) : fallback
-  } catch {
-    return fallback
+const INSERTABLE = [
+  ['agent', 'Agent action'],
+  ['human', 'Human action'],
+  ['decision', 'Decision'],
+  ['output', 'Output'],
+]
+
+function fmtDuration(ms) {
+  if (ms == null || Number.isNaN(ms)) return null
+  if (ms < 1000) return `~${ms}ms`
+  if (ms < 60000) return `~${Math.round(ms / 1000)}s`
+  return `~${Math.round(ms / 60000)} min`
+}
+
+export default function Workflows({ onSelectAgent }) {
+  const [workflows, setWorkflows] = useState([])
+  const [loadingList, setLoadingList] = useState(true)
+  const [listError, setListError] = useState(null)
+  const [selectedId, setSelectedId] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [loadingDetail, setLoadingDetail] = useState(false)
+  const [showCreate, setShowCreate] = useState(false)
+  const [notice, setNotice] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  function flash(msg) {
+    setNotice(msg)
+    window.clearTimeout(flash._t)
+    flash._t = window.setTimeout(() => setNotice(null), 3500)
   }
-}
-function saveLS(base, val) {
-  try {
-    localStorage.setItem(lsKey(base), JSON.stringify(val))
-  } catch {
-    // private mode / quota — degrade silently; the chart still works in-session.
+
+  async function reloadList(selectAfter) {
+    try {
+      const list = await api.getWorkflows()
+      setWorkflows(list || [])
+      if (selectAfter != null) setSelectedId(selectAfter)
+      else if (list?.length && selectedId == null) setSelectedId(list[0].id)
+    } catch (e) {
+      setListError(e.message || 'Could not load workflows')
+    } finally {
+      setLoadingList(false)
+    }
   }
-}
-
-// --- small pure helpers -----------------------------------------------------
-function trunc(s, n) {
-  s = String(s || '')
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s
-}
-function initials(name) {
-  const parts = String(name || '').trim().split(/\s+/)
-  if (!parts[0]) return '?'
-  return (parts[0][0] + (parts[1] ? parts[1][0] : '')).toUpperCase()
-}
-function platformLabel(p) {
-  return p ? String(p).replace(/ Agent$/, '') : ''
-}
-
-function autoLayout(nodes) {
-  const pos = {}
-  const humans = nodes.filter((n) => n.type === 'human')
-  const agents = nodes.filter((n) => n.type === 'agent')
-  humans.forEach((n, i) => {
-    pos[n.id] = { x: COL_HUMAN_X, y: TOP + i * ROW_GAP }
-  })
-  agents.forEach((n, i) => {
-    const col = Math.floor(i / AGENTS_PER_COL)
-    const row = i % AGENTS_PER_COL
-    pos[n.id] = { x: COL_AGENT_X + col * COL_GAP, y: TOP + row * ROW_GAP }
-  })
-  return pos
-}
-
-// Half-extents of a node's hit/visual box, for bounds + edge anchoring.
-function halfExtent(node) {
-  return node.type === 'agent'
-    ? { hw: AGENT_W / 2, hh: AGENT_H / 2 }
-    : { hw: HUMAN_R, hh: HUMAN_R }
-}
-
-// Point on a node's border in the direction of `toward` — so arrows touch
-// the edge of the box/circle, not the center.
-function anchor(node, center, toward) {
-  const dx = toward.x - center.x
-  const dy = toward.y - center.y
-  if (dx === 0 && dy === 0) return center
-  if (node.type === 'human') {
-    const len = Math.hypot(dx, dy)
-    return { x: center.x + (dx / len) * HUMAN_R, y: center.y + (dy / len) * HUMAN_R }
-  }
-  const { hw, hh } = halfExtent(node)
-  const scale = 1 / Math.max(Math.abs(dx) / hw, Math.abs(dy) / hh)
-  return { x: center.x + dx * scale, y: center.y + dy * scale }
-}
-
-export default function Workflows({ onSelectAgent, onOpenTeam }) {
-  const [graph, setGraph] = useState({ nodes: [], edges: [] })
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-
-  const [positions, setPositions] = useState({})
-  const [dataFlows, setDataFlows] = useState(() => loadLS('flows', []))
-  const [connectMode, setConnectMode] = useState(false)
-  const [connectSource, setConnectSource] = useState(null)
-
-  const svgRef = useRef(null)
-  const dragRef = useRef(null)
-  const loadedRef = useRef(false)
 
   useEffect(() => {
+    reloadList()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (selectedId == null) {
+      setDetail(null)
+      return
+    }
     let cancelled = false
+    setLoadingDetail(true)
     api
-      .getWorkflows()
-      .then((data) => {
-        if (cancelled) return
-        setGraph({ nodes: data?.nodes || [], edges: data?.edges || [] })
-        setLoading(false)
-      })
-      .catch((e) => {
-        if (cancelled) return
-        setError(e.message || 'Could not load workflows')
-        setLoading(false)
-      })
+      .getWorkflow(selectedId)
+      .then((wf) => !cancelled && setDetail(wf))
+      .catch((e) => !cancelled && flash(e.message || 'Could not load workflow'))
+      .finally(() => !cancelled && setLoadingDetail(false))
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [selectedId])
 
-  // Once nodes arrive, seed positions: saved spots win, missing nodes get
-  // an auto-layout slot. Prune saved positions for nodes that no longer exist.
-  useEffect(() => {
-    if (!graph.nodes.length) return
-    const saved = loadLS('positions', {})
-    const auto = autoLayout(graph.nodes)
-    const next = {}
-    for (const n of graph.nodes) {
-      next[n.id] = saved[n.id] || auto[n.id]
-    }
-    setPositions(next)
-    loadedRef.current = true
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph.nodes])
-
-  // Persist layout + connections after the initial seed.
-  useEffect(() => {
-    if (loadedRef.current && Object.keys(positions).length) saveLS('positions', positions)
-  }, [positions])
-  useEffect(() => {
-    if (loadedRef.current) saveLS('flows', dataFlows)
-  }, [dataFlows])
-
-  const nodeById = useMemo(() => {
-    const m = {}
-    for (const n of graph.nodes) m[n.id] = n
-    return m
-  }, [graph.nodes])
-
-  const agentIds = useMemo(
-    () => new Set(graph.nodes.filter((n) => n.type === 'agent').map((n) => n.id)),
-    [graph.nodes],
-  )
-
-  // Owns edges from the backend + operator data-flow edges (both endpoints
-  // must still exist as agents).
-  const renderEdges = useMemo(() => {
-    const owns = (graph.edges || []).filter(
-      (e) => nodeById[e.source] && nodeById[e.target],
-    )
-    const flows = dataFlows
-      .filter((f) => agentIds.has(f.source) && agentIds.has(f.target))
-      .map((f) => ({ source: f.source, target: f.target, type: 'data_flow', label: '' }))
-    return [...owns, ...flows]
-  }, [graph.edges, dataFlows, nodeById, agentIds])
-
-  // Canvas size from the spread of nodes.
-  const bounds = useMemo(() => {
-    let maxX = 600
-    let maxY = 360
-    for (const n of graph.nodes) {
-      const p = positions[n.id]
-      if (!p) continue
-      const { hw, hh } = halfExtent(n)
-      maxX = Math.max(maxX, p.x + hw)
-      maxY = Math.max(maxY, p.y + hh + (n.type === 'human' ? 26 : 0))
-    }
-    return { w: maxX + PAD, h: maxY + PAD }
-  }, [graph.nodes, positions])
-
-  function toSvg(e) {
-    const rect = svgRef.current.getBoundingClientRect()
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
-  }
-
-  function onNodePointerDown(e, id) {
-    e.stopPropagation()
-    const p = toSvg(e)
-    const pos = positions[id] || { x: p.x, y: p.y }
-    dragRef.current = { id, ox: p.x - pos.x, oy: p.y - pos.y, downX: p.x, downY: p.y, moved: false }
+  async function reloadDetail() {
+    if (selectedId == null) return
     try {
-      svgRef.current.setPointerCapture(e.pointerId)
-    } catch {
-      /* not all environments support capture */
+      setDetail(await api.getWorkflow(selectedId))
+    } catch (e) {
+      flash(e.message || 'Could not refresh')
     }
-  }
-  function onPointerMove(e) {
-    const d = dragRef.current
-    if (!d) return
-    const p = toSvg(e)
-    if (Math.hypot(p.x - d.downX, p.y - d.downY) > 4) d.moved = true
-    setPositions((prev) => ({ ...prev, [d.id]: { x: p.x - d.ox, y: p.y - d.oy } }))
-  }
-  function onPointerUp(e) {
-    const d = dragRef.current
-    if (!d) return
-    dragRef.current = null
-    try {
-      svgRef.current.releasePointerCapture(e.pointerId)
-    } catch {
-      /* ignore */
-    }
-    if (!d.moved) handleNodeClick(d.id)
   }
 
-  function handleNodeClick(id) {
-    const node = nodeById[id]
-    if (!node) return
-    if (connectMode) {
-      if (node.type !== 'agent') return // data flow connects agents only
-      if (!connectSource) {
-        setConnectSource(id)
-      } else if (connectSource === id) {
-        setConnectSource(null)
-      } else {
-        addDataFlow(connectSource, id)
-        setConnectSource(null)
-      }
+  function handleCreated(wf) {
+    setShowCreate(false)
+    setDetail(wf)
+    setSelectedId(wf.id)
+    reloadList(wf.id)
+  }
+
+  // --- workflow-level mutations ---
+  async function renameWorkflow(name) {
+    const wf = await api.updateWorkflow(detail.id, { name })
+    setDetail(wf)
+    reloadList(wf.id)
+  }
+  async function deleteWorkflow() {
+    await api.deleteWorkflow(detail.id)
+    const remaining = workflows.filter((w) => w.id !== detail.id)
+    setWorkflows(remaining)
+    setSelectedId(remaining[0]?.id ?? null)
+  }
+
+  // --- step-level mutations ---
+  async function insertStep(index, type) {
+    setBusy(true)
+    try {
+      const created = await api.addWorkflowStep(detail.id, {
+        step_type: type,
+        label: `New ${type} step`,
+        inferred_from: 'manual',
+      })
+      // addWorkflowStep appends at the end; move it into `index`.
+      const ids = detail.steps.map((s) => s.id)
+      ids.splice(index, 0, created.id)
+      await api.reorderWorkflowSteps(detail.id, ids)
+      await reloadDetail()
+      reloadList(detail.id)
+    } catch (e) {
+      flash(e.message || 'Could not add step')
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function patchStep(stepId, patch) {
+    await api.updateWorkflowStep(detail.id, stepId, patch)
+    // Reload so joined fields (e.g. assigned team member name) are fresh.
+    await reloadDetail()
+  }
+  async function deleteStep(stepId) {
+    await api.deleteWorkflowStep(detail.id, stepId)
+    await reloadDetail()
+    reloadList(detail.id)
+  }
+  async function commitReorder(orderedIds) {
+    // optimistic
+    setDetail((d) => ({
+      ...d,
+      steps: orderedIds.map((id) => d.steps.find((s) => s.id === id)).filter(Boolean),
+    }))
+    try {
+      await api.reorderWorkflowSteps(detail.id, orderedIds)
+      reloadList(detail.id)
+    } catch (e) {
+      flash(e.message || 'Could not reorder')
+      reloadDetail()
+    }
+  }
+
+  // --- footer / regenerate ---
+  async function regenerate() {
+    if (!detail?.agent_service_name) {
+      flash('This workflow has no source agent to regenerate from.')
       return
     }
-    if (node.type === 'agent') {
-      onSelectAgent?.(node.service_name)
-    } else {
-      onOpenTeam?.()
+    if (!window.confirm('Regenerate this workflow from the latest telemetry? The current steps will be replaced.')) return
+    setBusy(true)
+    try {
+      const fresh = await api.generateWorkflow({
+        name: detail.name,
+        agent_service_name: detail.agent_service_name,
+        agent_id: detail.agent_id || 'main',
+      })
+      // Replace in place from the user's view: drop the old, keep the new.
+      await api.deleteWorkflow(detail.id)
+      setDetail(fresh)
+      setSelectedId(fresh.id)
+      reloadList(fresh.id)
+      flash('Regenerated from telemetry.')
+    } catch (e) {
+      flash(e.message || 'Could not regenerate')
+    } finally {
+      setBusy(false)
     }
   }
-
-  function addDataFlow(source, target) {
-    setDataFlows((prev) =>
-      prev.some((f) => f.source === source && f.target === target)
-        ? prev
-        : [...prev, { source, target }],
-    )
-  }
-  function removeDataFlow(source, target) {
-    setDataFlows((prev) => prev.filter((f) => !(f.source === source && f.target === target)))
-  }
-
-  function toggleConnect() {
-    setConnectMode((m) => !m)
-    setConnectSource(null)
-  }
-  function resetLayout() {
-    const auto = autoLayout(graph.nodes)
-    setPositions(auto)
-    saveLS('positions', auto)
+  async function suggestMissing() {
+    if (!detail?.agent_service_name) {
+      flash('This workflow has no source agent to analyze.')
+      return
+    }
+    setBusy(true)
+    try {
+      const probe = await api.generateWorkflow({
+        name: `${detail.name} (suggestions)`,
+        agent_service_name: detail.agent_service_name,
+        agent_id: detail.agent_id || 'main',
+      })
+      const have = new Set(detail.steps.map((s) => `${s.step_type}:${(s.label || '').toLowerCase()}`))
+      const missing = (probe.steps || []).filter(
+        (s) => !have.has(`${s.step_type}:${(s.label || '').toLowerCase()}`),
+      )
+      for (const s of missing) {
+        await api.addWorkflowStep(detail.id, {
+          step_type: s.step_type,
+          label: s.label,
+          description: s.description,
+          operation: s.operation,
+          duration_estimate_ms: s.duration_estimate_ms,
+          agent_service_name: s.agent_service_name,
+          agent_id: s.agent_id,
+          inferred_from: s.inferred_from || 'telemetry',
+        })
+      }
+      await api.deleteWorkflow(probe.id) // discard the throwaway probe
+      await reloadDetail()
+      reloadList(detail.id)
+      flash(missing.length ? `Added ${missing.length} suggested step${missing.length > 1 ? 's' : ''}.` : 'No missing steps found — your workflow looks complete.')
+    } catch (e) {
+      flash(e.message || 'Could not analyze')
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
     <div className="view workflow-view">
-      <header className="workflow-header">
-        <div>
-          <h2 className="section-label">Workflows</h2>
-          <p className="workflow-subtitle">
-            How work flows through your humans and agents. Drag to arrange;
-            connect agents to map how their output feeds the next.
-          </p>
+      <WorkflowSidebar
+        workflows={workflows}
+        loading={loadingList}
+        error={listError}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        onCreate={() => setShowCreate(true)}
+      />
+
+      <div className="workflow-main">
+        {notice && <div className="workflow-toast">{notice}</div>}
+        {selectedId == null && !loadingList && (
+          <div className="workflow-empty-main">
+            <h2>Map an agent's process</h2>
+            <p>
+              Pick or create a workflow on the left. Oversee analyzes an agent's
+              telemetry and identity to draft every step — automated and human —
+              that its work actually involves.
+            </p>
+            <button type="button" className="btn btn-primary" onClick={() => setShowCreate(true)}>
+              <PlusIcon /> New workflow
+            </button>
+          </div>
+        )}
+        {loadingDetail && <div className="state-card">Loading workflow…</div>}
+        {detail && !loadingDetail && (
+          <WorkflowDetail
+            workflow={detail}
+            busy={busy}
+            onRename={renameWorkflow}
+            onDelete={deleteWorkflow}
+            onSelectAgent={onSelectAgent}
+            onInsert={insertStep}
+            onPatchStep={patchStep}
+            onDeleteStep={deleteStep}
+            onReorder={commitReorder}
+            onRegenerate={regenerate}
+            onSuggest={suggestMissing}
+          />
+        )}
+      </div>
+
+      {showCreate && (
+        <CreateWorkflowModal
+          onClose={() => setShowCreate(false)}
+          onCreated={handleCreated}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar
+// ---------------------------------------------------------------------------
+
+function WorkflowSidebar({ workflows, loading, error, selectedId, onSelect, onCreate }) {
+  return (
+    <aside className="workflow-sidebar">
+      <div className="workflow-sidebar-head">
+        <h2 className="section-label">Workflows</h2>
+        <button type="button" className="btn-icon" onClick={onCreate} aria-label="New workflow" title="New workflow">
+          <PlusIcon />
+        </button>
+      </div>
+      {loading && <div className="workflow-side-empty">Loading…</div>}
+      {error && !loading && <div className="workflow-side-empty error">{error}</div>}
+      {!loading && !error && workflows.length === 0 && (
+        <div className="workflow-side-empty">No workflows yet</div>
+      )}
+      <ul className="workflow-list">
+        {workflows.map((w) => (
+          <li key={w.id}>
+            <button
+              type="button"
+              className={`workflow-card ${w.id === selectedId ? 'is-active' : ''}`}
+              onClick={() => onSelect(w.id)}
+            >
+              <span className="workflow-card-name">{w.name}</span>
+              <span className="workflow-card-meta">
+                {w.agent_service_name && (
+                  <span className="workflow-card-agent">{w.agent_service_name}</span>
+                )}
+                <span className="workflow-card-count">{w.step_count} step{w.step_count === 1 ? '' : 's'}</span>
+              </span>
+              {w.updated_at && (
+                <span className="workflow-card-updated">{relativeTime(w.updated_at)}</span>
+              )}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </aside>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Detail (header + step flow + footer)
+// ---------------------------------------------------------------------------
+
+function WorkflowDetail({
+  workflow,
+  busy,
+  onRename,
+  onDelete,
+  onSelectAgent,
+  onInsert,
+  onPatchStep,
+  onDeleteStep,
+  onReorder,
+  onRegenerate,
+  onSuggest,
+}) {
+  const [editingName, setEditingName] = useState(false)
+  const [draftName, setDraftName] = useState(workflow.name)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [showTiming, setShowTiming] = useState(false)
+  const [dragId, setDragId] = useState(null)
+  const [overId, setOverId] = useState(null)
+
+  useEffect(() => {
+    setDraftName(workflow.name)
+    setEditingName(false)
+    setConfirmDelete(false)
+  }, [workflow.id, workflow.name])
+
+  const steps = workflow.steps || []
+
+  const timing = useMemo(() => {
+    let total = 0
+    const byType = {}
+    for (const s of steps) {
+      const ms = s.duration_estimate_ms || 0
+      total += ms
+      byType[s.step_type] = (byType[s.step_type] || 0) + ms
+    }
+    return { total, byType }
+  }, [steps])
+
+  function handleDrop(targetId) {
+    if (dragId == null || dragId === targetId) {
+      setDragId(null)
+      setOverId(null)
+      return
+    }
+    const ids = steps.map((s) => s.id)
+    const from = ids.indexOf(dragId)
+    const to = ids.indexOf(targetId)
+    ids.splice(from, 1)
+    ids.splice(to, 0, dragId)
+    setDragId(null)
+    setOverId(null)
+    onReorder(ids)
+  }
+
+  async function saveName() {
+    const next = draftName.trim()
+    setEditingName(false)
+    if (next && next !== workflow.name) await onRename(next)
+  }
+
+  return (
+    <div className="workflow-detail">
+      <header className="workflow-detail-head">
+        <div className="workflow-detail-title">
+          {editingName ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                saveName()
+              }}
+              className="workflow-name-edit"
+            >
+              <input
+                className="text-input"
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                autoFocus
+                onBlur={saveName}
+              />
+            </form>
+          ) : (
+            <h1 className="workflow-title" onClick={() => setEditingName(true)} title="Click to rename">
+              {workflow.name}
+              <PencilIcon />
+            </h1>
+          )}
+          {workflow.agent_service_name && (
+            <button
+              type="button"
+              className="workflow-agent-tag"
+              onClick={() => onSelectAgent?.(workflow.agent_service_name)}
+            >
+              {workflow.agent_service_name}
+              {workflow.agent_id && workflow.agent_id !== 'main' && (
+                <span className="mono"> · {workflow.agent_id}</span>
+              )}
+            </button>
+          )}
         </div>
-        <div className="workflow-actions">
-          <button
-            type="button"
-            className={`btn btn-secondary ${connectMode ? 'btn-active' : ''}`}
-            onClick={toggleConnect}
-          >
-            {connectMode ? 'Done connecting' : 'Add connection'}
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={resetLayout}>
-            Reset layout
-          </button>
+        <div className="workflow-detail-actions">
+          {confirmDelete ? (
+            <>
+              <span className="workflow-confirm-label">Delete this workflow?</span>
+              <button type="button" className="btn btn-danger btn-sm" onClick={onDelete}>
+                Yes, delete
+              </button>
+              <button type="button" className="btn btn-link btn-sm" onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setConfirmDelete(true)}>
+              <TrashIcon /> Delete
+            </button>
+          )}
         </div>
       </header>
 
-      {connectMode && (
-        <div className="workflow-hint">
-          {connectSource
-            ? 'Now click the target agent (its output flows from the highlighted one).'
-            : 'Click a source agent, then a target agent, to draw a data-flow connection.'}
+      {workflow.description && <p className="workflow-detail-desc">{workflow.description}</p>}
+
+      <div className="workflow-steps">
+        <InsertBetween disabled={busy} onInsert={(type) => onInsert(0, type)} />
+        {steps.map((step, i) => (
+          <div key={step.id}>
+            <StepCard
+              step={step}
+              dragging={dragId === step.id}
+              dragOver={overId === step.id}
+              onDragStart={() => setDragId(step.id)}
+              onDragEnter={() => setOverId(step.id)}
+              onDragEnd={() => {
+                setDragId(null)
+                setOverId(null)
+              }}
+              onDrop={() => handleDrop(step.id)}
+              onPatch={(patch) => onPatchStep(step.id, patch)}
+              onDelete={() => onDeleteStep(step.id)}
+            />
+            <InsertBetween disabled={busy} onInsert={(type) => onInsert(i + 1, type)} />
+          </div>
+        ))}
+        {steps.length === 0 && (
+          <div className="workflow-steps-empty">
+            No steps yet. Use the <strong>+</strong> above to add one, or regenerate
+            from telemetry below.
+          </div>
+        )}
+      </div>
+
+      <footer className="workflow-footer">
+        <p className="workflow-footer-note">
+          Agent steps are generated from telemetry. Human steps are inferred from
+          gaps and identity files. Edit any step to match your actual process.
+        </p>
+        <div className="workflow-footer-actions">
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={onSuggest}>
+            {busy ? <Spinner /> : null} Suggest missing steps
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowTiming((v) => !v)}>
+            Timing analysis
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={onRegenerate}>
+            {busy ? <Spinner /> : null} Regenerate from telemetry
+          </button>
         </div>
-      )}
-
-      <WorkflowLegend />
-
-      {loading && <div className="state-card">Loading workflow…</div>}
-      {error && !loading && (
-        <div className="state-card error">
-          <h2>Couldn't load workflows</h2>
-          <p>{error}</p>
-        </div>
-      )}
-      {!loading && !error && graph.nodes.length === 0 && (
-        <div className="state-card">
-          <h2>Nothing to map yet</h2>
-          <p>
-            Once agents are sending telemetry and you've added team members,
-            they'll appear here. Assign owners from each agent's page to draw
-            the connections.
-          </p>
-        </div>
-      )}
-
-      {!loading && !error && graph.nodes.length > 0 && (
-        <div className={`workflow-canvas ${connectMode ? 'is-connecting' : ''}`}>
-          <svg
-            ref={svgRef}
-            className="workflow-svg"
-            width={bounds.w}
-            height={bounds.h}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerLeave={onPointerUp}
-          >
-            <defs>
-              <marker
-                id="wf-arrow"
-                viewBox="0 0 10 10"
-                refX="9"
-                refY="5"
-                markerWidth="7"
-                markerHeight="7"
-                orient="auto-start-reverse"
-              >
-                <path d="M0,0 L10,5 L0,10 z" style={{ fill: 'var(--wf-edge)' }} />
-              </marker>
-            </defs>
-
-            {renderEdges.map((e) => (
-              <EdgePath
-                key={`${e.type}:${e.source}->${e.target}`}
-                edge={e}
-                nodeById={nodeById}
-                positions={positions}
-                onRemove={e.type === 'data_flow' ? removeDataFlow : null}
-              />
-            ))}
-
-            {graph.nodes.map((n) => {
-              const p = positions[n.id]
-              if (!p) return null
-              const isSource = connectSource === n.id
-              return n.type === 'agent' ? (
-                <AgentNode
-                  key={n.id}
-                  node={n}
-                  pos={p}
-                  highlighted={isSource}
-                  onPointerDown={(e) => onNodePointerDown(e, n.id)}
-                />
-              ) : (
-                <HumanNode
-                  key={n.id}
-                  node={n}
-                  pos={p}
-                  onPointerDown={(e) => onNodePointerDown(e, n.id)}
-                />
-              )
-            })}
-          </svg>
-        </div>
-      )}
+        {showTiming && (
+          <div className="workflow-timing">
+            <strong>Estimated total: {fmtDuration(timing.total) || '—'}</strong>
+            <ul>
+              {Object.entries(timing.byType).map(([type, ms]) => (
+                <li key={type}>
+                  <span className={`wf-type-dot ${STEP_META[type]?.cls}`} /> {STEP_META[type]?.label || type}: {fmtDuration(ms) || '—'}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </footer>
     </div>
   )
 }
 
-function WorkflowLegend() {
-  return (
-    <div className="workflow-legend" aria-hidden="true">
-      <span className="wf-legend-item">
-        <span className="wf-legend-swatch wf-swatch-agent" /> Agent
-      </span>
-      <span className="wf-legend-item">
-        <span className="wf-legend-swatch wf-swatch-human" /> Person
-      </span>
-      <span className="wf-legend-item">
-        <svg width="34" height="10">
-          <line x1="2" y1="5" x2="32" y2="5" className="wf-legend-line wf-legend-owns" />
-        </svg>
-        Owns
-      </span>
-      <span className="wf-legend-item">
-        <svg width="34" height="10">
-          <line x1="2" y1="5" x2="32" y2="5" className="wf-legend-line wf-legend-flow" />
-        </svg>
-        Data flow
-      </span>
-    </div>
-  )
-}
+// ---------------------------------------------------------------------------
+// Step card
+// ---------------------------------------------------------------------------
 
-function EdgePath({ edge, nodeById, positions, onRemove }) {
-  const s = nodeById[edge.source]
-  const t = nodeById[edge.target]
-  const sp = positions[edge.source]
-  const tp = positions[edge.target]
-  if (!s || !t || !sp || !tp) return null
+function StepCard({ step, dragging, dragOver, onDragStart, onDragEnter, onDragEnd, onDrop, onPatch, onDelete }) {
+  const [editing, setEditing] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+  const meta = STEP_META[step.step_type] || STEP_META.agent
+  const Icon = meta.Icon
+  const duration = fmtDuration(step.duration_estimate_ms)
 
-  const a = anchor(s, sp, tp)
-  const b = anchor(t, tp, sp)
-  const mx = (a.x + b.x) / 2
-  const d = `M${a.x},${a.y} C ${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`
-  const cls = edge.type === 'data_flow' ? 'wf-edge wf-edge-flow' : 'wf-edge wf-edge-owns'
-  const midX = (a.x + b.x) / 2
-  const midY = (a.y + b.y) / 2
-
-  return (
-    <g>
-      <path d={d} className={cls} markerEnd="url(#wf-arrow)" fill="none" />
-      {onRemove && (
-        <g
-          className="wf-edge-remove"
-          onClick={(e) => {
-            e.stopPropagation()
-            onRemove(edge.source, edge.target)
-          }}
-        >
-          <title>Remove connection</title>
-          <circle cx={midX} cy={midY} r="8" />
-          <text x={midX} y={midY + 3} textAnchor="middle">
-            ×
-          </text>
-        </g>
-      )}
-    </g>
-  )
-}
-
-function AgentNode({ node, pos, highlighted, onPointerDown }) {
-  const x = pos.x - AGENT_W / 2
-  const y = pos.y - AGENT_H / 2
-  const plat = platformLabel(node.platform)
-  return (
-    <g
-      className={`wf-node wf-node-agent ${highlighted ? 'is-source' : ''}`}
-      onPointerDown={onPointerDown}
-    >
-      <title>{node.name}</title>
-      <rect
-        x={x}
-        y={y}
-        width={AGENT_W}
-        height={AGENT_H}
-        rx="12"
-        className="wf-agent-box"
+  if (editing) {
+    return (
+      <StepEditor
+        step={step}
+        onCancel={() => setEditing(false)}
+        onSave={async (patch) => {
+          await onPatch(patch)
+          setEditing(false)
+        }}
       />
-      <circle cx={x + 16} cy={pos.y - 8} r="5" style={{ fill: statusColor(node.status) }} />
-      <text x={x + 30} y={pos.y - 4} className="wf-agent-name">
-        {trunc(node.name, 20)}
-      </text>
-      {plat && (
-        <text x={x + 30} y={pos.y + 14} className="wf-agent-platform">
-          {trunc(plat, 24)}
-        </text>
-      )}
-    </g>
+    )
+  }
+
+  return (
+    <div
+      className={`wf-step ${meta.cls} ${dragging ? 'is-dragging' : ''} ${dragOver ? 'is-over' : ''}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragEnter={onDragEnter}
+      onDragOver={(e) => e.preventDefault()}
+      onDragEnd={onDragEnd}
+      onDrop={onDrop}
+    >
+      <div className="wf-step-rail">
+        <span className="wf-step-icon">
+          <Icon size={15} />
+        </span>
+      </div>
+      <div className="wf-step-body">
+        <div className="wf-step-top">
+          <span className="wf-step-type">{meta.label}</span>
+          {step.step_type === 'agent' && step.agent_service_name && (
+            <span className="wf-step-pill wf-pill-agent">{step.agent_service_name}</span>
+          )}
+          {step.step_type === 'human' && step.team_member_name && (
+            <span className="wf-step-pill wf-pill-human">{step.team_member_name}</span>
+          )}
+          {step.inferred_from && step.inferred_from !== 'manual' && (
+            <span className="wf-step-inferred">inferred from: {step.inferred_from}</span>
+          )}
+          <span className="wf-step-grip" title="Drag to reorder">
+            <GripIcon size={15} />
+          </span>
+        </div>
+        <div className="wf-step-label">{step.label}</div>
+        {step.description && <div className="wf-step-desc">{step.description}</div>}
+        <div className="wf-step-foot">
+          {step.step_type === 'agent' && step.operation && (
+            <span className="wf-op-pill mono">{step.operation}</span>
+          )}
+          {step.step_type === 'decision' && (
+            <span className="wf-branches">
+              <span className="wf-branch wf-branch-yes">Yes</span>
+              <span className="wf-branch wf-branch-no">No</span>
+            </span>
+          )}
+          {duration && <span className="wf-step-duration">{duration}</span>}
+        </div>
+      </div>
+      <div className="wf-step-actions">
+        <button type="button" className="btn-icon-sm" onClick={() => setEditing(true)} aria-label="Edit step" title="Edit">
+          <PencilIcon />
+        </button>
+        {confirm ? (
+          <button type="button" className="btn-icon-sm danger" onClick={onDelete} title="Confirm delete">
+            ✓
+          </button>
+        ) : (
+          <button type="button" className="btn-icon-sm" onClick={() => setConfirm(true)} aria-label="Delete step" title="Delete">
+            <TrashIcon />
+          </button>
+        )}
+      </div>
+    </div>
   )
 }
 
-function HumanNode({ node, pos, onPointerDown }) {
+// ---------------------------------------------------------------------------
+// Step inline editor
+// ---------------------------------------------------------------------------
+
+function StepEditor({ step, onCancel, onSave }) {
+  const [label, setLabel] = useState(step.label || '')
+  const [description, setDescription] = useState(step.description || '')
+  const [operation, setOperation] = useState(step.operation || '')
+  const [durationMin, setDurationMin] = useState(
+    step.duration_estimate_ms ? Math.round(step.duration_estimate_ms / 1000) : '',
+  )
+  const [teamMemberId, setTeamMemberId] = useState(step.team_member_id || '')
+  const [members, setMembers] = useState(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (step.step_type === 'human' && members === null) {
+      api.getTeamMembers().then(setMembers).catch(() => setMembers([]))
+    }
+  }, [step.step_type, members])
+
+  async function submit(e) {
+    e.preventDefault()
+    setSaving(true)
+    const patch = { label: label.trim() || 'Untitled step', description: description.trim() || null }
+    if (step.step_type === 'agent') patch.operation = operation.trim() || null
+    if (step.step_type === 'agent' || step.step_type === 'human') {
+      patch.duration_estimate_ms = durationMin === '' ? null : Math.round(Number(durationMin) * 1000)
+    }
+    if (step.step_type === 'human') {
+      patch.team_member_id = teamMemberId === '' ? null : Number(teamMemberId)
+    }
+    try {
+      await onSave(patch)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const meta = STEP_META[step.step_type] || STEP_META.agent
   return (
-    <g className="wf-node wf-node-human" onPointerDown={onPointerDown}>
-      <title>{node.name}</title>
-      <circle cx={pos.x} cy={pos.y} r={HUMAN_R} className="wf-human-circle" />
-      <text x={pos.x} y={pos.y + 5} textAnchor="middle" className="wf-human-initials">
-        {initials(node.name)}
-      </text>
-      <text x={pos.x} y={pos.y + HUMAN_R + 16} textAnchor="middle" className="wf-human-name">
-        {trunc(node.name, 18)}
-      </text>
-      {node.role && (
-        <text
-          x={pos.x}
-          y={pos.y + HUMAN_R + 30}
-          textAnchor="middle"
-          className="wf-human-role"
-        >
-          {trunc(node.role, 18)}
-        </text>
+    <form className={`wf-step wf-step-editing ${meta.cls}`} onSubmit={submit}>
+      <div className="wf-step-rail">
+        <span className="wf-step-icon">
+          <meta.Icon size={15} />
+        </span>
+      </div>
+      <div className="wf-step-body wf-edit-body">
+        <label className="wf-edit-field">
+          <span>Title</span>
+          <input className="text-input" value={label} onChange={(e) => setLabel(e.target.value)} autoFocus />
+        </label>
+        <label className="wf-edit-field">
+          <span>Description</span>
+          <textarea className="text-input" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+        </label>
+        {step.step_type === 'agent' && (
+          <label className="wf-edit-field">
+            <span>Operation (tool name)</span>
+            <input className="text-input" value={operation} onChange={(e) => setOperation(e.target.value)} placeholder="e.g. send_email" />
+          </label>
+        )}
+        {(step.step_type === 'agent' || step.step_type === 'human') && (
+          <label className="wf-edit-field">
+            <span>Duration estimate (seconds)</span>
+            <input type="number" min="0" className="text-input" value={durationMin} onChange={(e) => setDurationMin(e.target.value)} />
+          </label>
+        )}
+        {step.step_type === 'human' && (
+          <label className="wf-edit-field">
+            <span>Assign to</span>
+            <select className="text-input" value={teamMemberId} onChange={(e) => setTeamMemberId(e.target.value)}>
+              <option value="">Unassigned</option>
+              {(members || []).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}{m.role ? ` · ${m.role}` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <div className="wf-edit-actions">
+          <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" className="btn btn-link btn-sm" onClick={onCancel} disabled={saving}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </form>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Insert-between control
+// ---------------------------------------------------------------------------
+
+function InsertBetween({ onInsert, disabled }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`wf-insert ${open ? 'is-open' : ''}`}>
+      <button
+        type="button"
+        className="wf-insert-btn"
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Insert step"
+      >
+        <PlusIcon size={13} />
+      </button>
+      {open && (
+        <div className="wf-insert-menu" onMouseLeave={() => setOpen(false)}>
+          {INSERTABLE.map(([type, label]) => (
+            <button
+              key={type}
+              type="button"
+              className="wf-insert-item"
+              onClick={() => {
+                setOpen(false)
+                onInsert(type)
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       )}
-    </g>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Create / generate modal
+// ---------------------------------------------------------------------------
+
+function CreateWorkflowModal({ onClose, onCreated }) {
+  const [name, setName] = useState('')
+  const [agents, setAgents] = useState(null)
+  const [serviceName, setServiceName] = useState('')
+  const [agentId, setAgentId] = useState('main')
+  const [mode, setMode] = useState(null) // 'generate' | 'blank' while busy
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api
+      .listAgents()
+      .then((list) => {
+        setAgents(list || [])
+        if (list?.length) setServiceName(list[0].service_name)
+      })
+      .catch((e) => setError(e.message || 'Could not load agents'))
+  }, [])
+
+  const selectedGroup = useMemo(
+    () => (agents || []).find((g) => g.service_name === serviceName),
+    [agents, serviceName],
+  )
+  const subAgents = (selectedGroup?.agents || []).filter((a) => a.agent_id)
+  const hasSubAgents = subAgents.length > 1 || (subAgents[0] && subAgents[0].agent_id !== 'main')
+
+  const agentLabel =
+    (selectedGroup && (selectedGroup.display_name || selectedGroup.service_name)) || 'this agent'
+
+  async function generate() {
+    setError(null)
+    setMode('generate')
+    try {
+      const wf = await api.generateWorkflow({
+        name: name.trim() || `${agentLabel} workflow`,
+        agent_service_name: serviceName,
+        agent_id: agentId || 'main',
+      })
+      onCreated(wf)
+    } catch (e) {
+      setError(e.message || 'Could not generate workflow')
+      setMode(null)
+    }
+  }
+  async function blank() {
+    setError(null)
+    setMode('blank')
+    try {
+      const wf = await api.createWorkflow({
+        name: name.trim() || 'Untitled workflow',
+        agent_service_name: serviceName || null,
+        agent_id: agentId || 'main',
+      })
+      onCreated(wf)
+    } catch (e) {
+      setError(e.message || 'Could not create workflow')
+      setMode(null)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={mode ? undefined : onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2>New workflow</h2>
+          {!mode && (
+            <button type="button" className="close-btn" onClick={onClose} aria-label="Close">
+              ×
+            </button>
+          )}
+        </div>
+
+        {mode === 'generate' ? (
+          <div className="modal-loading">
+            <Spinner />
+            <p>Analyzing {agentLabel}'s telemetry…</p>
+            <p className="modal-loading-sub">Reading tool calls, sequences, and time-gaps to draft the steps.</p>
+          </div>
+        ) : (
+          <div className="modal-body">
+            <label className="wf-edit-field">
+              <span>Name</span>
+              <input
+                className="text-input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={`${agentLabel} workflow`}
+                autoFocus
+              />
+            </label>
+
+            <label className="wf-edit-field">
+              <span>Which agent is this workflow for?</span>
+              {agents === null ? (
+                <div className="workflow-side-empty">Loading agents…</div>
+              ) : agents.length === 0 ? (
+                <div className="workflow-side-empty">No agents reporting telemetry yet.</div>
+              ) : (
+                <select
+                  className="text-input"
+                  value={serviceName}
+                  onChange={(e) => {
+                    setServiceName(e.target.value)
+                    setAgentId('main')
+                  }}
+                >
+                  {agents.map((g) => (
+                    <option key={g.service_name} value={g.service_name}>
+                      {g.display_name || g.service_name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </label>
+
+            {hasSubAgents && (
+              <label className="wf-edit-field">
+                <span>Sub-agent</span>
+                <select className="text-input" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+                  {subAgents.map((a) => (
+                    <option key={a.agent_id} value={a.agent_id}>
+                      {a.agent_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {error && <p className="form-error">{error}</p>}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={generate}
+                disabled={!serviceName || mode != null}
+              >
+                Generate workflow
+              </button>
+              <button type="button" className="btn btn-link" onClick={blank} disabled={mode != null}>
+                or start blank
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }

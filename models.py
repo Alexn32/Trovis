@@ -251,43 +251,110 @@ class OwnedAgent(BaseModel):
     span_count: int = 0
 
 
-class WorkflowNode(BaseModel):
-    """One node in the workflow graph — either an agent or a human team
-    member. `status`/`platform` are populated only for agents;
-    `role`/`member_id` only for humans; `service_name` only for agents (so
-    the frontend can open the right detail view on click). `id` is namespaced
-    ('a:<service_name>' / 'h:<member_id>') so agent and human ids can't
-    collide and the frontend can persist per-node layout against a stable
-    key."""
+class WorkflowStep(BaseModel):
+    """One step in a workflow's process. `step_type` is one of
+    trigger|agent|human|decision|output. `operation` is the tool name for
+    agent steps; `team_member_id` the assignee for human steps;
+    `inferred_from` records how an auto-generated step was derived
+    (telemetry|identity|gap_analysis|manual). `config` holds extra per-step
+    data (e.g. decision branch labels) as a JSON object."""
 
-    id: str
-    type: str  # 'agent' | 'human'
+    id: int
+    workflow_id: int | None = None
+    step_order: int
+    step_type: str
+    label: str
+    description: str | None = None
+    agent_service_name: str | None = None
+    agent_id: str | None = None
+    team_member_id: int | None = None
+    team_member_name: str | None = None
+    operation: str | None = None
+    duration_estimate_ms: int | None = None
+    inferred_from: str | None = None
+    config: dict[str, Any] | None = None
+
+
+class Workflow(BaseModel):
+    """A named, ordered process flow for an agent. `steps` is populated on
+    the detail endpoint; the list endpoint leaves it empty and sets
+    `step_count` instead."""
+
+    id: int
+    account_id: int | None = None
     name: str
-    status: str | None = None  # agent: 'green'|'yellow'|'red'|'gray'
-    platform: str | None = None  # agent only
-    role: str | None = None  # human only
-    service_name: str | None = None  # agent only — navigation
-    member_id: int | None = None  # human only — navigation
+    description: str | None = None
+    agent_service_name: str | None = None
+    agent_id: str | None = "main"
+    steps: list[WorkflowStep] = Field(default_factory=list)
+    step_count: int = 0
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
-class WorkflowEdge(BaseModel):
-    """A directed connection. 'owns' edges (human → agent) come from the
-    agent_owners table; 'data_flow' edges (agent → agent) are operator-drawn
-    in the UI and, for V1, persisted client-side — so the backend currently
-    only emits 'owns'. Future: auto-detect data flow from telemetry."""
+class WorkflowCreate(BaseModel):
+    """Body for POST /workflows."""
 
-    source: str
-    target: str
-    type: str  # 'owns' | 'data_flow'
-    label: str = ""
+    name: str
+    agent_service_name: str | None = None
+    agent_id: str | None = "main"
+    description: str | None = None
 
 
-class WorkflowGraph(BaseModel):
-    """Response for GET /workflows — the full org graph of humans, agents,
-    and the ownership links between them."""
+class WorkflowUpdate(BaseModel):
+    """Body for PUT /workflows/{id}. Only provided fields change."""
 
-    nodes: list[WorkflowNode] = Field(default_factory=list)
-    edges: list[WorkflowEdge] = Field(default_factory=list)
+    name: str | None = None
+    description: str | None = None
+
+
+class WorkflowStepCreate(BaseModel):
+    """Body for POST /workflows/{id}/steps. Only step_type + label are
+    required; everything else is optional."""
+
+    step_type: str
+    label: str
+    description: str | None = None
+    operation: str | None = None
+    duration_estimate_ms: int | None = None
+    agent_service_name: str | None = None
+    agent_id: str | None = None
+    team_member_id: int | None = None
+    inferred_from: str | None = "manual"
+    config: dict[str, Any] | None = None
+    step_order: int | None = None
+
+
+class WorkflowStepUpdate(BaseModel):
+    """Body for PUT /workflows/{id}/steps/{step_id}. All fields optional —
+    only those present are patched."""
+
+    step_type: str | None = None
+    label: str | None = None
+    description: str | None = None
+    operation: str | None = None
+    duration_estimate_ms: int | None = None
+    agent_service_name: str | None = None
+    agent_id: str | None = None
+    team_member_id: int | None = None
+    inferred_from: str | None = None
+    config: dict[str, Any] | None = None
+    step_order: int | None = None
+
+
+class WorkflowReorder(BaseModel):
+    """Body for POST /workflows/{id}/steps/reorder."""
+
+    step_ids: list[int] = Field(default_factory=list)
+
+
+class WorkflowGenerate(BaseModel):
+    """Body for POST /workflows/generate — auto-build a workflow from one
+    agent's telemetry + identity."""
+
+    name: str
+    agent_service_name: str
+    agent_id: str | None = "main"
 
 
 class AgentDescription(BaseModel):
