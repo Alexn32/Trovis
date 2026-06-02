@@ -45,14 +45,23 @@ from models import (
     AgentSummary,
     AskRequest,
     AskResponse,
+    AcceptInviteRequest,
+    ClaimRequest,
     DisplayNameRequest,
     HealthResponse,
     IngestResponse,
+    InviteCreate,
+    InviteCreateResponse,
+    InvitePublic,
     LoginRequest,
     LoginResponse,
+    MeResponse,
     NewKeyResponse,
+    OrgPublic,
+    SetPasswordRequest,
     SignupRequest,
     SignupResponse,
+    UserPublic,
     Capabilities,
     OwnedAgent,
     SpanRecord,
@@ -73,10 +82,17 @@ from models import (
 
 VERSION = "0.1.0"
 
-# Endpoints that are always reachable without an API key. /health for
-# uptime probes; /auth/signup and /auth/login because the user can't have
-# a key yet when calling them.
-_OPEN_PATHS = {"/health", "/auth/signup", "/auth/login"}
+# Endpoints reachable without an existing credential. /health for uptime
+# probes; signup/login because the user has no session yet; claim and
+# accept-invite self-authenticate via a key/token in the request body. Keep
+# this set MINIMAL — everything else stays behind the auth gate.
+_OPEN_PATHS = {
+    "/health",
+    "/auth/signup",
+    "/auth/login",
+    "/auth/claim",
+    "/auth/accept-invite",
+}
 
 
 logger = logging.getLogger("oversee")
@@ -135,41 +151,74 @@ app = FastAPI(title="Oversee", version=VERSION, lifespan=lifespan)
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Multi-tenant API-key gate.
+    """Resolve the tenant + (optional) user for each request.
 
-    - /health, /auth/signup, /auth/login, and all OPTIONS preflights bypass.
-    - If the database has no active API keys (fresh install / local dev),
-      every request passes through with `request.state.account_id = None`
-      so existing handlers behave as before.
-    - Otherwise, X-Oversee-Api-Key is required and must match an active
-      key. The looked-up account_id is attached to request.state for
-      handlers to scope their queries.
+    Two credential types coexist:
+      - Humans send `Authorization: Bearer <session-token>` (dashboard).
+      - Agents send `X-Oversee-Api-Key` (telemetry ingest, legacy dashboard).
+    Either resolves `request.state.account_id` (the org/tenant); a session
+    additionally sets `request.state.user` ({id,email,role}). Open paths and
+    OPTIONS bypass. With no credential and an empty DB (no keys AND no users),
+    we pass through (local dev); otherwise 401.
     """
+    request.state.account_id = None
+    request.state.user = None
+    request.state.auth = None
+
     path = request.url.path
     if path in _OPEN_PATHS or request.method == "OPTIONS":
-        request.state.account_id = None
         return await call_next(request)
 
+    # 1. Bearer session — dashboard users.
+    authz = request.headers.get("Authorization")
+    if authz and authz.lower().startswith("bearer "):
+        sess = database.resolve_session(authz[7:].strip())
+        if not sess:
+            return JSONResponse(
+                status_code=401, content={"error": "Invalid or expired session"}
+            )
+        request.state.account_id = sess["account_id"]
+        request.state.user = {
+            "id": sess["user_id"],
+            "email": sess["email"],
+            "name": sess["name"],
+            "role": sess["role"],
+        }
+        request.state.auth = "session"
+        return await call_next(request)
+
+    # 2. API key — agents + legacy dashboard. No user → no member-mgmt power.
     header_key = request.headers.get("X-Oversee-Api-Key")
     if header_key:
         result = database.validate_api_key(header_key)
         if not result:
             return JSONResponse(
-                status_code=401,
-                content={"error": "Invalid or missing API key"},
+                status_code=401, content={"error": "Invalid or missing API key"}
             )
         request.state.account_id = result["account_id"]
+        request.state.auth = "api_key"
         return await call_next(request)
 
-    # No key provided. Only allowed if no keys exist anywhere — that's
+    # 3. No credential. Only allowed when the DB has neither keys nor users —
     # the pre-signup / local-dev mode.
-    if database.has_any_keys():
+    if database.has_any_keys() or database.has_any_users():
         return JSONResponse(
-            status_code=401,
-            content={"error": "Invalid or missing API key"},
+            status_code=401, content={"error": "Authentication required"}
         )
-    request.state.account_id = None
     return await call_next(request)
+
+
+def _require_owner(request: Request) -> int:
+    """Return the account_id, asserting the caller is a session-authenticated
+    owner. API-key auth has no user, so it can't manage members."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(
+            status_code=403, detail="sign in as an owner to manage your organization"
+        )
+    if user.get("role") != "owner":
+        raise HTTPException(status_code=403, detail="owner role required")
+    return getattr(request.state, "account_id", None)
 
 
 app.add_middleware(
@@ -1240,54 +1289,250 @@ def _capabilities_impl(
 
 
 # ---------------------------------------------------------------------------
-# Auth endpoints — multi-tenant v1
+# Auth endpoints — real users + Individual/Business orgs
 # ---------------------------------------------------------------------------
 #
-# /auth/signup and /auth/login are intentionally simple: email is the only
-# identifier and there is no password. The API key IS the credential. This
-# is enough for v1 demo / early users; proper email verification + password
-# reset is a later concern.
+# Humans log in with email+password → a session token (Bearer). Agents keep
+# using org API keys for telemetry. An account == an organization (tenant).
+
+_MIN_PASSWORD_LEN = 10
+_GENERIC_LOGIN_ERROR = "invalid email or password"
+
+
+def _validate_password(pw: str) -> None:
+    if not pw or len(pw) < _MIN_PASSWORD_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"password must be at least {_MIN_PASSWORD_LEN} characters",
+        )
+
+
+def _bearer_token(request: Request) -> str | None:
+    authz = request.headers.get("Authorization") or ""
+    return authz[7:].strip() if authz.lower().startswith("bearer ") else None
 
 
 @app.post("/auth/signup", response_model=SignupResponse, status_code=201)
 async def signup(body: SignupRequest) -> SignupResponse:
-    """Create an account and mint its first API key."""
+    """Create a new organization + its owner login, mint an initial org API
+    key (for agents), and start a session."""
+    if body.account_type not in ("individual", "business"):
+        raise HTTPException(status_code=400, detail="invalid account_type")
+    _validate_password(body.password)
     try:
-        account = database.create_account(body.email)
-    except database.EmailAlreadyExistsError:
-        raise HTTPException(
-            status_code=409,
-            detail=f"an account with email '{body.email}' already exists",
+        account = database.create_account(
+            body.email, account_type=body.account_type, name=body.org_name
         )
+    except database.EmailAlreadyExistsError:
+        raise HTTPException(status_code=409, detail="email already registered")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    try:
+        user = database.create_user(
+            account_id=account["id"],
+            email=body.email,
+            name=body.name,
+            role="owner",
+            password_hash=database.hash_password(body.password),
+        )
+    except database.UserEmailExistsError:
+        raise HTTPException(status_code=409, detail="email already registered")
+
     api_key = database.generate_api_key(account["id"])
+    token = database.create_session(user["id"], account["id"])
     return SignupResponse(
-        email=account["email"],
+        token=token,
+        user=UserPublic(**user),
+        org=OrgPublic(**account),
         api_key=api_key,
-        message="Save your API key — you'll need it to connect agents and access your dashboard.",
+        message="Welcome to Oversee. Use the API key to connect agents.",
     )
 
 
 @app.post("/auth/login", response_model=LoginResponse)
 async def login(body: LoginRequest) -> LoginResponse:
-    """Look up an account by email and return its active API keys.
+    """Email + password → session token. Returns a single generic error for
+    unknown email / no-password / wrong password to avoid enumeration."""
+    user = database.get_user_by_email(body.email)
+    if user is None or not database.verify_password(
+        body.password, user.get("password_hash")
+    ):
+        raise HTTPException(status_code=401, detail=_GENERIC_LOGIN_ERROR)
 
-    No password in v1 — knowing the email is sufficient. This is a
-    deliberate v1 simplification; proper auth comes later.
-    """
-    account = database.get_account_by_email(body.email)
-    if account is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no account found for '{body.email}'",
-        )
-    keys = database.get_api_keys_for_account(account["id"])
-    return LoginResponse(
-        email=account["email"],
-        api_keys=[k["key"] for k in keys if k["active"]],
+    # Transparent hash upgrade if the work factor was bumped.
+    if database.needs_rehash(user.get("password_hash")):
+        database.set_user_password(user["id"], database.hash_password(body.password))
+    database.touch_user_login(user["id"])
+    org = database.get_account(user["account_id"])
+    token = database.create_session(user["id"], user["account_id"])
+    public = {k: v for k, v in user.items() if k != "password_hash"}
+    return LoginResponse(token=token, user=UserPublic(**public), org=OrgPublic(**org))
+
+
+@app.post("/auth/logout", status_code=204)
+async def logout(request: Request) -> None:
+    """Invalidate the caller's session token."""
+    database.delete_session(_bearer_token(request))
+
+
+@app.get("/auth/me", response_model=MeResponse)
+async def me(request: Request) -> MeResponse:
+    """Current identity. `user` is None for API-key (agent/legacy) auth."""
+    account_id = getattr(request.state, "account_id", None)
+    auth = getattr(request.state, "auth", None) or "session"
+    state_user = getattr(request.state, "user", None)
+    org = database.get_account(account_id) if account_id is not None else None
+    user = None
+    if state_user:
+        full = database.get_user_by_id(state_user["id"])
+        if full:
+            user = UserPublic(**full)
+    return MeResponse(
+        user=user,
+        org=OrgPublic(**org) if org else None,
+        auth=auth,
     )
+
+
+@app.post("/auth/claim", response_model=LoginResponse, status_code=201)
+async def claim_account(body: ClaimRequest) -> LoginResponse:
+    """One-time migration for a legacy passwordless account: prove ownership
+    with a valid org API key, then create the owner login. Only works while
+    the org has zero users (otherwise it would let any key-holder mint a new
+    owner — takeover)."""
+    _validate_password(body.password)
+    result = database.validate_api_key(body.api_key)
+    if not result:
+        raise HTTPException(status_code=401, detail="invalid API key")
+    account_id = result["account_id"]
+    if database.get_org_users(account_id):
+        raise HTTPException(
+            status_code=409,
+            detail="this account has already been claimed — sign in instead",
+        )
+    try:
+        user = database.create_user(
+            account_id=account_id,
+            email=body.email,
+            name=body.name,
+            role="owner",
+            password_hash=database.hash_password(body.password),
+        )
+    except database.UserEmailExistsError:
+        raise HTTPException(status_code=409, detail="email already registered")
+    org = database.get_account(account_id)
+    token = database.create_session(user["id"], account_id)
+    return LoginResponse(token=token, user=UserPublic(**user), org=OrgPublic(**org))
+
+
+@app.post("/auth/set-password", status_code=204)
+async def set_password(request: Request, body: SetPasswordRequest) -> None:
+    """Set/change the logged-in user's password. Requires the current
+    password when one is already set. Rotates the user's other sessions."""
+    state_user = getattr(request.state, "user", None)
+    if not state_user:
+        raise HTTPException(status_code=401, detail="sign in to set a password")
+    _validate_password(body.new_password)
+    full = database.get_user_by_email(state_user["email"])
+    if full and full.get("password_hash"):
+        if not database.verify_password(
+            body.current_password or "", full["password_hash"]
+        ):
+            raise HTTPException(status_code=403, detail="current password is incorrect")
+    database.set_user_password(state_user["id"], database.hash_password(body.new_password))
+    # Invalidate other sessions; keep the caller's current one.
+    database.delete_sessions_for_user(state_user["id"], except_raw_token=_bearer_token(request))
+
+
+@app.post("/auth/accept-invite", response_model=LoginResponse, status_code=201)
+async def accept_invite(body: AcceptInviteRequest) -> LoginResponse:
+    """Redeem a one-time invite link → create the member login + a session."""
+    _validate_password(body.password)
+    try:
+        user = database.accept_invite(
+            body.token, body.name, database.hash_password(body.password)
+        )
+    except LookupError:
+        raise HTTPException(status_code=400, detail="invite is invalid, expired, or already used")
+    except database.UserEmailExistsError:
+        raise HTTPException(status_code=409, detail="email already registered — sign in instead")
+    org = database.get_account(user["account_id"])
+    token = database.create_session(user["id"], user["account_id"])
+    return LoginResponse(token=token, user=UserPublic(**user), org=OrgPublic(**org))
+
+
+# ---------------------------------------------------------------------------
+# Organization endpoints (members + invites)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/org", response_model=OrgPublic)
+async def get_org(request: Request) -> OrgPublic:
+    account_id = getattr(request.state, "account_id", None)
+    org = database.get_account(account_id) if account_id is not None else None
+    if org is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    return OrgPublic(**org)
+
+
+@app.get("/org/members", response_model=list[UserPublic])
+async def list_members(request: Request) -> list[UserPublic]:
+    """All users in the caller's org (owner + members can view)."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    return [UserPublic(**u) for u in database.get_org_users(account_id)]
+
+
+@app.post("/org/invites", response_model=InviteCreateResponse, status_code=201)
+async def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
+    """Owner-only: mint a one-time invite link for a Business org."""
+    account_id = _require_owner(request)
+    org = database.get_account(account_id)
+    if not org or org.get("account_type") != "business":
+        raise HTTPException(
+            status_code=400, detail="only Business organizations can add members"
+        )
+    role = body.role if body.role in ("owner", "member") else "member"
+    inviter = getattr(request.state, "user", None)
+    inv = database.create_invite(
+        account_id, body.email, role, inviter["id"] if inviter else None
+    )
+    base = (os.environ.get("OVERSEE_APP_URL") or str(request.base_url)).rstrip("/")
+    return InviteCreateResponse(
+        invite_url=f"{base}/accept-invite?token={inv['token']}",
+        email=inv["email"],
+        role=inv["role"],
+        expires_at=inv["expires_at"],
+    )
+
+
+@app.get("/org/invites", response_model=list[InvitePublic])
+async def list_org_invites(request: Request) -> list[InvitePublic]:
+    """Owner-only: pending invites for the org."""
+    account_id = _require_owner(request)
+    return [InvitePublic(**i) for i in database.list_invites(account_id)]
+
+
+@app.delete("/org/invites/{invite_id}", status_code=204)
+async def revoke_org_invite(invite_id: int, request: Request) -> None:
+    account_id = _require_owner(request)
+    if not database.revoke_invite(account_id, invite_id):
+        raise HTTPException(status_code=404, detail="invite not found")
+
+
+@app.delete("/org/members/{user_id}", status_code=204)
+async def remove_member(user_id: int, request: Request) -> None:
+    """Owner-only: remove a member from the org. Refuses to remove the last
+    owner. Account-scoped so an owner can't touch another org's users."""
+    account_id = _require_owner(request)
+    target = database.get_user_by_id(user_id)
+    if target is None or target["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="member not found")
+    if target["role"] == "owner" and database.count_owners(account_id) <= 1:
+        raise HTTPException(status_code=409, detail="cannot remove the last owner")
+    database.delete_user(account_id, user_id)
 
 
 @app.post("/ask", response_model=AskResponse)

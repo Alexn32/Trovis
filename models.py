@@ -405,27 +405,106 @@ class AgentRegistration(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Auth — multi-tenant v1
+# Auth — real users + Individual/Business orgs
 # ---------------------------------------------------------------------------
+
+
+class UserPublic(BaseModel):
+    """A user (login) — never carries the password hash."""
+
+    id: int
+    account_id: int
+    email: str
+    name: str | None = None
+    role: str = "member"  # 'owner' | 'member'
+    created_at: str | None = None
+    last_login_at: str | None = None
+
+
+class OrgPublic(BaseModel):
+    """An account (organization/tenant)."""
+
+    id: int
+    email: str
+    name: str | None = None
+    account_type: str = "individual"  # 'individual' | 'business'
+    created_at: str | None = None
 
 
 class SignupRequest(BaseModel):
     email: str
+    password: str
+    name: str | None = None
+    account_type: str = "individual"  # 'individual' | 'business'
+    org_name: str | None = None
 
 
 class SignupResponse(BaseModel):
-    email: str
-    api_key: str
-    message: str
+    token: str
+    user: UserPublic
+    org: OrgPublic
+    api_key: str  # initial org key for connecting agents
+    message: str = ""
 
 
 class LoginRequest(BaseModel):
     email: str
+    password: str
 
 
 class LoginResponse(BaseModel):
+    token: str
+    user: UserPublic
+    org: OrgPublic
+
+
+class MeResponse(BaseModel):
+    """GET /auth/me. `user` is None for API-key (agent/legacy) auth."""
+
+    user: UserPublic | None = None
+    org: OrgPublic | None = None
+    auth: str = "session"  # 'session' | 'api_key'
+
+
+class ClaimRequest(BaseModel):
+    """One-time migration: prove org ownership with an existing API key, then
+    set the owner login. Only works when the org has no users yet."""
+
+    api_key: str
     email: str
-    api_keys: list[str] = Field(default_factory=list)
+    password: str
+    name: str | None = None
+
+
+class SetPasswordRequest(BaseModel):
+    new_password: str
+    current_password: str | None = None
+
+
+class InviteCreate(BaseModel):
+    email: str
+    role: str = "member"
+
+
+class InviteCreateResponse(BaseModel):
+    invite_url: str
+    email: str
+    role: str
+    expires_at: str | None = None
+
+
+class InvitePublic(BaseModel):
+    id: int
+    email: str
+    role: str
+    created_at: str | None = None
+    expires_at: str | None = None
+
+
+class AcceptInviteRequest(BaseModel):
+    token: str
+    name: str | None = None
+    password: str
 
 
 class NewKeyResponse(BaseModel):

@@ -1,0 +1,296 @@
+import { useEffect, useState } from 'react'
+import { api } from './api.js'
+import { Spinner } from './ui.jsx'
+import { relativeTime } from './utils.js'
+import { ArrowLeftIcon, TrashIcon } from './Icons.jsx'
+
+// Organization + account settings. Reachable from the account-badge dropdown.
+//   - Everyone: org info + change-password.
+//   - Business owners: members list, invite links, remove members.
+
+export default function Settings({ me, onClose, onUpdated }) {
+  const user = me?.user
+  const org = me?.org
+  const isOwner = user?.role === 'owner'
+  const isBusiness = org?.account_type === 'business'
+
+  return (
+    <div className="view settings-view">
+      <header className="settings-header">
+        <button type="button" className="back-btn" onClick={onClose}>
+          <ArrowLeftIcon /> Back
+        </button>
+        <h2 className="section-label">Settings</h2>
+      </header>
+
+      <section className="settings-card">
+        <h3 className="settings-card-title">Organization</h3>
+        <div className="settings-rows">
+          <Row label="Name" value={org?.name || org?.email || '—'} />
+          <Row
+            label="Type"
+            value={<span className="org-type-badge">{org?.account_type}</span>}
+          />
+          <Row label="Owner email" value={org?.email} />
+        </div>
+      </section>
+
+      {user && <PasswordCard onUpdated={onUpdated} />}
+
+      {isBusiness && user && (
+        <MembersCard isOwner={isOwner} currentUserId={user.id} />
+      )}
+
+      {!isBusiness && user && (
+        <section className="settings-card">
+          <h3 className="settings-card-title">Team members</h3>
+          <p className="settings-note">
+            Individual accounts are just you. Upgrade to a Business account to
+            invite teammates with their own logins into the same workspace.
+          </p>
+        </section>
+      )}
+    </div>
+  )
+}
+
+function Row({ label, value }) {
+  return (
+    <div className="settings-row">
+      <span className="settings-row-label">{label}</span>
+      <span className="settings-row-value">{value}</span>
+    </div>
+  )
+}
+
+function PasswordCard({ onUpdated }) {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const [done, setDone] = useState(false)
+
+  async function submit(e) {
+    e.preventDefault()
+    if (next.length < 10) {
+      setError('New password must be at least 10 characters.')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    setDone(false)
+    try {
+      await api.setPassword({ current_password: current || null, new_password: next })
+      setCurrent('')
+      setNext('')
+      setDone(true)
+      onUpdated?.()
+    } catch (err) {
+      setError(err.message || 'Could not update password')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">Password</h3>
+      <form className="settings-form" onSubmit={submit}>
+        <label className="field-label">Current password</label>
+        <input
+          className="text-input"
+          type="password"
+          value={current}
+          onChange={(e) => setCurrent(e.target.value)}
+          placeholder="Leave blank if you haven't set one"
+        />
+        <label className="field-label">New password</label>
+        <input
+          className="text-input"
+          type="password"
+          value={next}
+          onChange={(e) => setNext(e.target.value)}
+          placeholder="At least 10 characters"
+        />
+        {error && <p className="form-error">{error}</p>}
+        {done && <p className="settings-success">Password updated.</p>}
+        <div>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={saving || !next}>
+            {saving ? <><Spinner /> Saving…</> : 'Update password'}
+          </button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function MembersCard({ isOwner, currentUserId }) {
+  const [members, setMembers] = useState([])
+  const [invites, setInvites] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  async function reload() {
+    try {
+      const [m, inv] = await Promise.all([
+        api.getMembers(),
+        isOwner ? api.getInvites() : Promise.resolve([]),
+      ])
+      setMembers(m || [])
+      setInvites(inv || [])
+    } catch (e) {
+      setError(e.message || 'Could not load members')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    reload()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function removeMember(id) {
+    try {
+      await api.deleteMember(id)
+      reload()
+    } catch (e) {
+      setError(e.message || 'Could not remove member')
+    }
+  }
+  async function revoke(id) {
+    try {
+      await api.revokeInvite(id)
+      reload()
+    } catch (e) {
+      setError(e.message || 'Could not revoke invite')
+    }
+  }
+
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">Members</h3>
+      {error && <p className="form-error">{error}</p>}
+      {loading ? (
+        <div className="settings-note"><Spinner /> Loading…</div>
+      ) : (
+        <>
+          <ul className="member-list">
+            {members.map((m) => (
+              <li key={m.id} className="member-row">
+                <span className="member-avatar">
+                  {(m.name || m.email).slice(0, 1).toUpperCase()}
+                </span>
+                <span className="member-main">
+                  <span className="member-name">{m.name || m.email}</span>
+                  <span className="member-email">{m.email}</span>
+                </span>
+                <span className={`role-badge role-${m.role}`}>{m.role}</span>
+                {isOwner && m.id !== currentUserId && (
+                  <button
+                    type="button"
+                    className="btn-icon-sm"
+                    title="Remove member"
+                    onClick={() => removeMember(m.id)}
+                  >
+                    <TrashIcon />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          {isOwner && <InviteForm onInvited={reload} />}
+
+          {isOwner && invites.length > 0 && (
+            <div className="invite-pending">
+              <h4 className="settings-subtitle">Pending invites</h4>
+              <ul className="member-list">
+                {invites.map((i) => (
+                  <li key={i.id} className="member-row">
+                    <span className="member-main">
+                      <span className="member-name">{i.email}</span>
+                      <span className="member-email">
+                        invited {relativeTime(i.created_at)} · {i.role}
+                      </span>
+                    </span>
+                    <button type="button" className="btn btn-link btn-sm" onClick={() => revoke(i.id)}>
+                      Revoke
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+function InviteForm({ onInvited }) {
+  const [email, setEmail] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
+  const [link, setLink] = useState(null)
+  const [copied, setCopied] = useState(false)
+
+  async function submit(e) {
+    e.preventDefault()
+    if (!email.trim()) return
+    setSubmitting(true)
+    setError(null)
+    setLink(null)
+    try {
+      const res = await api.createInvite({ email: email.trim(), role: 'member' })
+      setLink(res.invite_url)
+      setEmail('')
+      onInvited?.()
+    } catch (err) {
+      setError(err.message || 'Could not create invite')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  return (
+    <div className="invite-form-wrap">
+      <form className="invite-form" onSubmit={submit}>
+        <input
+          className="text-input"
+          type="email"
+          placeholder="teammate@company.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <button type="submit" className="btn btn-secondary btn-sm" disabled={submitting || !email.trim()}>
+          {submitting ? <><Spinner /> …</> : 'Invite'}
+        </button>
+      </form>
+      {error && <p className="form-error">{error}</p>}
+      {link && (
+        <div className="invite-link-out">
+          <p className="settings-note">
+            Share this one-time link with your teammate — it expires in 7 days:
+          </p>
+          <div className="key-display">
+            <code className="key-text">{link}</code>
+            <button type="button" className="copy-btn-inline" onClick={copy}>
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

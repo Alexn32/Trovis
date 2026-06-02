@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
@@ -7,7 +7,14 @@ import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
 import Team from './Team.jsx'
 import Workflows from './Workflows.jsx'
-import { api, clearApiKey, getApiKey } from './api.js'
+import Settings from './Settings.jsx'
+import {
+  api,
+  clearApiKey,
+  getApiKey,
+  clearSessionToken,
+  getSessionToken,
+} from './api.js'
 import {
   MonitorIcon,
   MoonIcon,
@@ -16,11 +23,23 @@ import {
 } from './Icons.jsx'
 
 // Top-level shell.
-//   - ThemeProvider wraps everything and writes data-theme to <html>.
-//   - Auth gate: null key → Login; otherwise the dashboard.
-//   - The dashboard has three views (Fleet / Ask / AgentDetail / AddAgent)
-//     tracked in local state. Fleet and Ask are tab-selectable; AgentDetail
-//     and AddAgent are pushed on top of whichever tab is active.
+//   - ThemeProvider wraps everything; writes data-theme to <html>.
+//   - Auth gate: no valid credential → Login; otherwise the dashboard.
+//   - `me` ({user, org, auth}) is the resolved identity. Humans hold a
+//     session token; agents/legacy hold an API key (user is null then).
+
+// One-time read of an /accept-invite?token=… deep link.
+function readInviteToken() {
+  try {
+    const u = new URL(window.location.href)
+    if (u.pathname.replace(/\/+$/, '').endsWith('/accept-invite')) {
+      return u.searchParams.get('token')
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
 
 export default function App() {
   return (
@@ -31,27 +50,29 @@ export default function App() {
 }
 
 function AppInner() {
-  const initial = getApiKey()
-  const [authed, setAuthed] = useState(initial)
-  const [restoring, setRestoring] = useState(initial !== null)
+  const inviteToken = useRef(readInviteToken()).current
+  const hadCredential = getSessionToken() || getApiKey()
+  const [me, setMe] = useState(null)
+  const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken)
   const [tab, setTab] = useState('fleet') // 'fleet' | 'ask' | 'team' | 'workflows'
-  // Overlay variants:
-  //   {kind: 'detail', serviceName, agentId?} — agentId set when drilling
-  //     into a specific sub-agent of a multi-agent instance.
-  //   {kind: 'add'}
+  // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'}
   const [overlay, setOverlay] = useState(null)
 
-  // Validate saved key on first mount.
+  // Validate the saved credential on first mount (skip when landing on an
+  // invite link — the visitor should see the accept form first).
   useEffect(() => {
-    if (!initial) return
+    if (!hadCredential || inviteToken) return
     let cancelled = false
     api
-      .validateCurrentKey()
-      .then((ok) => {
+      .validateSession()
+      .then((payload) => {
         if (cancelled) return
-        if (!ok) {
+        if (!payload) {
+          clearSessionToken()
           clearApiKey()
-          setAuthed(null)
+          setMe(null)
+        } else {
+          setMe(payload)
         }
         setRestoring(false)
       })
@@ -64,9 +85,25 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  function logout() {
+  function handleAuthed(payload) {
+    // Clear an invite/deep-link URL so a refresh doesn't re-trigger it.
+    try {
+      if (inviteToken) window.history.replaceState({}, '', '/')
+    } catch {
+      /* ignore */
+    }
+    setMe(payload)
+  }
+
+  async function logout() {
+    try {
+      await api.logout()
+    } catch {
+      /* best-effort */
+    }
+    clearSessionToken()
     clearApiKey()
-    setAuthed(null)
+    setMe(null)
     setTab('fleet')
     setOverlay(null)
   }
@@ -74,13 +111,19 @@ function AppInner() {
   function openDetail(serviceName, agentId) {
     setOverlay({ kind: 'detail', serviceName, agentId })
   }
-
   function openAddAgent() {
     setOverlay({ kind: 'add' })
   }
-
+  function openSettings() {
+    setOverlay({ kind: 'settings' })
+  }
   function closeOverlay() {
     setOverlay(null)
+  }
+
+  async function refreshMe() {
+    const payload = await api.validateSession()
+    if (payload) setMe(payload)
   }
 
   if (restoring) {
@@ -101,11 +144,16 @@ function AppInner() {
     )
   }
 
-  if (!authed) {
-    return <Login onAuthed={(key) => setAuthed(key)} />
+  if (!me) {
+    return (
+      <Login
+        onAuthed={handleAuthed}
+        initialMode={inviteToken ? 'accept-invite' : 'choose'}
+        inviteToken={inviteToken}
+      />
+    )
   }
 
-  // Decide what to render in the main area. Overlays win over the tab.
   let mainContent
   if (overlay?.kind === 'detail') {
     mainContent = (
@@ -117,6 +165,8 @@ function AppInner() {
     )
   } else if (overlay?.kind === 'add') {
     mainContent = <AddAgent onClose={closeOverlay} />
+  } else if (overlay?.kind === 'settings') {
+    mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} />
   } else if (tab === 'ask') {
     mainContent = <Ask />
   } else if (tab === 'team') {
@@ -124,9 +174,7 @@ function AppInner() {
   } else if (tab === 'workflows') {
     mainContent = <Workflows onSelectAgent={openDetail} />
   } else {
-    mainContent = (
-      <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />
-    )
+    mainContent = <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />
   }
 
   return (
@@ -138,15 +186,22 @@ function AppInner() {
           setOverlay(null)
         }}
         onAddAgent={openAddAgent}
-        apiKey={authed}
+        me={me}
         onLogout={logout}
+        onOpenSettings={openSettings}
       />
       <main className="app-main">{mainContent}</main>
     </div>
   )
 }
 
-function Header({ tab, onTabChange, onAddAgent, apiKey, onLogout }) {
+function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) {
+  const tabs = [
+    ['fleet', 'Fleet'],
+    ['ask', 'Ask'],
+    ['team', 'Team'],
+    ['workflows', 'Workflows'],
+  ]
   return (
     <header className="app-header">
       <div className="app-header-left">
@@ -155,42 +210,18 @@ function Header({ tab, onTabChange, onAddAgent, apiKey, onLogout }) {
           Oversee
         </div>
         <nav className="tabs" role="tablist" aria-label="Views">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'fleet'}
-            className={`tab ${tab === 'fleet' ? 'tab-active' : ''}`}
-            onClick={() => onTabChange('fleet')}
-          >
-            Fleet
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'ask'}
-            className={`tab ${tab === 'ask' ? 'tab-active' : ''}`}
-            onClick={() => onTabChange('ask')}
-          >
-            Ask
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'team'}
-            className={`tab ${tab === 'team' ? 'tab-active' : ''}`}
-            onClick={() => onTabChange('team')}
-          >
-            Team
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'workflows'}
-            className={`tab ${tab === 'workflows' ? 'tab-active' : ''}`}
-            onClick={() => onTabChange('workflows')}
-          >
-            Workflows
-          </button>
+          {tabs.map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              className={`tab ${tab === id ? 'tab-active' : ''}`}
+              onClick={() => onTabChange(id)}
+            >
+              {label}
+            </button>
+          ))}
         </nav>
       </div>
       <div className="app-header-right">
@@ -198,7 +229,7 @@ function Header({ tab, onTabChange, onAddAgent, apiKey, onLogout }) {
         <button type="button" className="btn btn-primary" onClick={onAddAgent}>
           <PlusIcon /> Add Agent
         </button>
-        <AccountBadge apiKey={apiKey} onLogout={onLogout} />
+        <AccountBadge me={me} onLogout={onLogout} onOpenSettings={onOpenSettings} />
       </div>
     </header>
   )
@@ -222,16 +253,75 @@ function ThemeToggle() {
   )
 }
 
-function AccountBadge({ apiKey, onLogout }) {
-  const tail = apiKey ? apiKey.slice(-4) : '----'
+function AccountBadge({ me, onLogout, onOpenSettings }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    function onDoc(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  const user = me?.user
+  const org = me?.org
+  const label = user ? user.name || user.email : 'Connected'
+  const initials = (user?.name || user?.email || '?')
+    .split(/[\s@]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s) => s[0].toUpperCase())
+    .join('')
+
   return (
-    <div className="account-badge">
-      <span className="account-dot" />
-      <span>Connected</span>
-      <code className="account-tail">…{tail}</code>
-      <button type="button" className="account-logout" onClick={onLogout}>
-        Log out
+    <div className="account-menu" ref={ref}>
+      <button
+        type="button"
+        className="account-badge-btn"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <span className="account-avatar">{user ? initials : '•'}</span>
+        <span className="account-badge-label">{label}</span>
       </button>
+      {open && (
+        <div className="account-dropdown" role="menu">
+          <div className="account-dropdown-head">
+            {user ? (
+              <>
+                <div className="account-dropdown-name">{user.name || user.email}</div>
+                <div className="account-dropdown-sub">{user.email}</div>
+              </>
+            ) : (
+              <div className="account-dropdown-name">API-key session</div>
+            )}
+            {org && (
+              <div className="account-dropdown-org">
+                {org.name || org.email}
+                <span className="account-org-type">{org.account_type}</span>
+              </div>
+            )}
+          </div>
+          {user && (
+            <button
+              type="button"
+              className="account-dropdown-item"
+              onClick={() => {
+                setOpen(false)
+                onOpenSettings()
+              }}
+            >
+              Settings
+            </button>
+          )}
+          <button type="button" className="account-dropdown-item" onClick={onLogout}>
+            Log out
+          </button>
+        </div>
+      )}
     </div>
   )
 }
