@@ -188,6 +188,8 @@ export const api = {
   // from telemetry + identity and operator-editable.
   getWorkflows: () => request('/workflows'),
   getWorkflow: (id) => request(`/workflows/${id}`),
+  // Live telemetry stats for a workflow's source agent.
+  getWorkflowStats: (id) => request(`/workflows/${id}/stats`),
   createWorkflow: (data) =>
     request('/workflows', { method: 'POST', body: JSON.stringify(data) }),
   updateWorkflow: (id, data) =>

@@ -64,6 +64,7 @@ from models import (
     WorkflowCreate,
     WorkflowGenerate,
     WorkflowReorder,
+    WorkflowStats,
     WorkflowStep,
     WorkflowStepCreate,
     WorkflowStepUpdate,
@@ -699,6 +700,17 @@ async def get_workflow(workflow_id: int, request: Request) -> Workflow:
     if wf is None:
         raise HTTPException(status_code=404, detail="workflow not found")
     return Workflow(**wf)
+
+
+@app.get("/workflows/{workflow_id}/stats", response_model=WorkflowStats)
+async def workflow_stats(workflow_id: int, request: Request) -> WorkflowStats:
+    """Live telemetry stats for the workflow's source agent (runs, errors,
+    success rate, avg duration, last run, tokens, cost)."""
+    account_id = getattr(request.state, "account_id", None)
+    stats = database.get_workflow_stats(workflow_id, account_id=account_id)
+    if stats is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    return WorkflowStats(**stats)
 
 
 @app.put("/workflows/{workflow_id}", response_model=Workflow)

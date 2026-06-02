@@ -2498,6 +2498,83 @@ def _replace_workflow_steps(
         _touch_workflow(cur, workflow_id)
 
 
+def get_workflow_stats(
+    workflow_id: int, account_id: int | None
+) -> dict[str, Any] | None:
+    """Live telemetry stats for a workflow's source agent — runs (distinct
+    traces), errors, success rate, avg duration, last run, tokens, cost.
+    All-time, scoped to the workflow's (service_name, agent_id) and account.
+    Returns None when the workflow isn't owned; `has_agent=False` when the
+    workflow has no source agent to pull stats from."""
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    empty = {
+        "has_agent": False,
+        "runs": 0,
+        "spans": 0,
+        "errors": 0,
+        "success_rate": 0.0,
+        "avg_duration_ms": 0.0,
+        "last_run": None,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0,
+    }
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT agent_service_name, agent_id FROM workflows WHERE id = {PH} {account_clause}",
+            (workflow_id,) if account_id is None else (workflow_id, account_id),
+        )
+        wf = cur.fetchone()
+        if wf is None:
+            return None
+        service_name = wf["agent_service_name"]
+        agent_id = wf["agent_id"] or "main"
+        if not service_name:
+            return empty
+
+        span_acct = (
+            f"AND account_id = {PH}"
+            if account_id is not None
+            else "AND account_id IS NULL"
+        )
+        sql = f"""
+            SELECT
+                COUNT(DISTINCT trace_id)                         AS runs,
+                COUNT(*)                                         AS spans,
+                SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
+                AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
+                MAX(start_time_unix)                             AS last_run_ns,
+                SUM(total_tokens)                                AS total_tokens,
+                SUM(estimated_cost_usd)                          AS est_cost
+            FROM spans
+            WHERE service_name = {PH}
+              AND COALESCE(agent_id, 'main') = {PH}
+              {span_acct}
+        """
+        args: tuple[Any, ...] = (service_name, agent_id)
+        if account_id is not None:
+            args = (*args, account_id)
+        cur.execute(sql, args)
+        row = cur.fetchone()
+
+    spans = int(row["spans"] or 0)
+    errors = int(row["errors"] or 0)
+    return {
+        "has_agent": True,
+        "runs": int(row["runs"] or 0),
+        "spans": spans,
+        "errors": errors,
+        "success_rate": round((spans - errors) / spans * 100, 1) if spans else 0.0,
+        "avg_duration_ms": round(float(row["avg_duration_ms"] or 0.0), 1),
+        "last_run": _ns_to_iso(row["last_run_ns"]),
+        "total_tokens": int(row["total_tokens"] or 0),
+        "estimated_cost_usd": round(float(row["est_cost"] or 0.0), 6),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Per-agent windowed aggregates (for weekly summaries)
 # ---------------------------------------------------------------------------
