@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
-import { relativeTime } from './utils.js'
+import { relativeTime, formatCost, formatTokens, formatDuration } from './utils.js'
 import {
   PlusIcon,
   PencilIcon,
@@ -354,12 +354,27 @@ function WorkflowDetail({
   const [showTiming, setShowTiming] = useState(false)
   const [dragId, setDragId] = useState(null)
   const [overId, setOverId] = useState(null)
+  const [stats, setStats] = useState(null)
 
   useEffect(() => {
     setDraftName(workflow.name)
     setEditingName(false)
     setConfirmDelete(false)
   }, [workflow.id, workflow.name])
+
+  // Live agent telemetry for the stats rail. Re-fetches when the workflow
+  // changes (incl. after a regenerate, which mints a new id).
+  useEffect(() => {
+    let cancelled = false
+    setStats(null)
+    api
+      .getWorkflowStats(workflow.id)
+      .then((s) => !cancelled && setStats(s))
+      .catch(() => !cancelled && setStats(null))
+    return () => {
+      cancelled = true
+    }
+  }, [workflow.id])
 
   const steps = workflow.steps || []
 
@@ -372,6 +387,13 @@ function WorkflowDetail({
       byType[s.step_type] = (byType[s.step_type] || 0) + ms
     }
     return { total, byType }
+  }, [steps])
+
+  // Composition for the "This workflow" stats block.
+  const composition = useMemo(() => {
+    const counts = {}
+    for (const s of steps) counts[s.step_type] = (counts[s.step_type] || 0) + 1
+    return counts
   }, [steps])
 
   function handleDrop(targetId) {
@@ -398,6 +420,7 @@ function WorkflowDetail({
 
   return (
     <div className="workflow-detail">
+      <div className="workflow-detail-content">
       <header className="workflow-detail-head">
         <div className="workflow-detail-title">
           {editingName ? (
@@ -514,7 +537,74 @@ function WorkflowDetail({
           </div>
         )}
       </footer>
+      </div>
+
+      <StatsRail
+        stats={stats}
+        composition={composition}
+        stepCount={steps.length}
+        estTotalMs={timing.total}
+      />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Stats rail
+// ---------------------------------------------------------------------------
+
+function StatsRail({ stats, composition, stepCount, estTotalMs }) {
+  const order = ['trigger', 'agent', 'human', 'decision', 'output']
+  const compParts = order
+    .filter((t) => composition[t])
+    .map((t) => `${composition[t]} ${t}`)
+  return (
+    <aside className="workflow-stats">
+      <div className="workflow-stats-card">
+        <h3 className="workflow-stats-title">Agent activity</h3>
+        {stats == null ? (
+          <div className="workflow-stats-loading">
+            <Spinner />
+          </div>
+        ) : !stats.has_agent ? (
+          <p className="workflow-stats-note">No source agent linked, so there's no live telemetry to show.</p>
+        ) : stats.runs === 0 && stats.spans === 0 ? (
+          <p className="workflow-stats-note">No telemetry yet from this agent.</p>
+        ) : (
+          <ul className="workflow-stat-list">
+            <StatRow label="Total runs" value={stats.runs.toLocaleString()} />
+            <StatRow
+              label="Errors"
+              value={stats.errors.toLocaleString()}
+              tone={stats.errors > 0 ? 'error' : undefined}
+            />
+            <StatRow label="Success rate" value={`${stats.success_rate}%`} />
+            <StatRow label="Avg duration" value={formatDuration(stats.avg_duration_ms)} />
+            <StatRow label="Last run" value={stats.last_run ? relativeTime(stats.last_run) : 'never'} />
+            <StatRow label="Tokens" value={formatTokens(stats.total_tokens)} />
+            <StatRow label="Cost" value={formatCost(stats.estimated_cost_usd)} />
+          </ul>
+        )}
+      </div>
+
+      <div className="workflow-stats-card">
+        <h3 className="workflow-stats-title">This workflow</h3>
+        <ul className="workflow-stat-list">
+          <StatRow label="Steps" value={String(stepCount)} />
+          <StatRow label="Make-up" value={compParts.length ? compParts.join(' · ') : '—'} />
+          <StatRow label="Est. cycle time" value={fmtDuration(estTotalMs) || '—'} />
+        </ul>
+      </div>
+    </aside>
+  )
+}
+
+function StatRow({ label, value, tone }) {
+  return (
+    <li className="workflow-stat-row">
+      <span className="workflow-stat-label">{label}</span>
+      <span className={`workflow-stat-value ${tone === 'error' ? 'is-error' : ''}`}>{value}</span>
+    </li>
   )
 }
 

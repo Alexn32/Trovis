@@ -357,6 +357,21 @@ class WorkflowGenerate(BaseModel):
     agent_id: str | None = "main"
 
 
+class WorkflowStats(BaseModel):
+    """Live telemetry stats for a workflow's source agent (all-time).
+    `has_agent` is False when the workflow has no agent to pull from."""
+
+    has_agent: bool = False
+    runs: int = 0
+    spans: int = 0
+    errors: int = 0
+    success_rate: float = 0.0
+    avg_duration_ms: float = 0.0
+    last_run: str | None = None
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
 class AgentDescription(BaseModel):
     """A single Claude-generated description of an agent.
 
