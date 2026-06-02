@@ -37,6 +37,8 @@ export default function Settings({ me, onClose, onUpdated }) {
 
       {user && <PasswordCard onUpdated={onUpdated} />}
 
+      {isOwner && <ApiKeyCard />}
+
       {isBusiness && user && (
         <MembersCard isOwner={isOwner} currentUserId={user.id} />
       )}
@@ -120,6 +122,100 @@ function PasswordCard({ onUpdated }) {
           </button>
         </div>
       </form>
+    </section>
+  )
+}
+
+function ApiKeyCard() {
+  const [revealing, setRevealing] = useState(false)
+  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
+  const [keys, setKeys] = useState(null)
+  const [copied, setCopied] = useState(null)
+
+  async function reveal(e) {
+    e.preventDefault()
+    setSubmitting(true)
+    setError(null)
+    try {
+      const res = await api.revealApiKeys(password)
+      setKeys(res.keys || [])
+      setPassword('')
+      setRevealing(false)
+    } catch (err) {
+      setError(err.message || 'Could not reveal key')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function copy(key) {
+    try {
+      await navigator.clipboard.writeText(key)
+      setCopied(key)
+      setTimeout(() => setCopied(null), 1500)
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">API key</h3>
+      <p className="settings-note">
+        Use this to connect agents (the <code>api_key</code> in
+        <code> oversee.init()</code>). It's a long-lived credential —
+        revealing it requires your password.
+      </p>
+
+      {keys ? (
+        keys.length === 0 ? (
+          <p className="settings-note" style={{ marginTop: 12 }}>
+            No active API keys on this account.
+          </p>
+        ) : (
+          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {keys.map((k) => (
+              <div className="key-display" key={k.key}>
+                <code className="key-text">{k.key}</code>
+                <button type="button" className="copy-btn-inline" onClick={() => copy(k.key)}>
+                  {copied === k.key ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+            ))}
+            <button type="button" className="btn btn-link btn-sm" onClick={() => setKeys(null)} style={{ alignSelf: 'flex-start' }}>
+              Hide
+            </button>
+          </div>
+        )
+      ) : revealing ? (
+        <form className="settings-form" onSubmit={reveal} style={{ marginTop: 12 }}>
+          <label className="field-label">Confirm your password</label>
+          <input
+            className="text-input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoFocus
+          />
+          {error && <p className="form-error">{error}</p>}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={submitting || !password}>
+              {submitting ? <><Spinner /> Revealing…</> : 'Reveal key'}
+            </button>
+            <button type="button" className="btn btn-link btn-sm" onClick={() => { setRevealing(false); setError(null); setPassword('') }}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div style={{ marginTop: 12 }}>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setRevealing(true)}>
+            Reveal API key
+          </button>
+        </div>
+      )}
     </section>
   )
 }

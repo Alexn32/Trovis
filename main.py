@@ -53,11 +53,14 @@ from models import (
     InviteCreate,
     InviteCreateResponse,
     InvitePublic,
+    ApiKeyInfo,
     LoginRequest,
     LoginResponse,
     MeResponse,
     NewKeyResponse,
     OrgPublic,
+    RevealKeysRequest,
+    RevealKeysResponse,
     SetPasswordRequest,
     SignupRequest,
     SignupResponse,
@@ -1533,6 +1536,26 @@ async def remove_member(user_id: int, request: Request) -> None:
     if target["role"] == "owner" and database.count_owners(account_id) <= 1:
         raise HTTPException(status_code=409, detail="cannot remove the last owner")
     database.delete_user(account_id, user_id)
+
+
+@app.post("/org/api-keys/reveal", response_model=RevealKeysResponse)
+async def reveal_api_keys(
+    request: Request, body: RevealKeysRequest
+) -> RevealKeysResponse:
+    """Re-show the org's API key(s) — owner only, gated by re-entering the
+    caller's password (step-up auth). The key is the org's long-lived agent
+    credential, so we don't expose it from a passive session alone."""
+    account_id = _require_owner(request)
+    state_user = getattr(request.state, "user", None)
+    full = database.get_user_by_email(state_user["email"]) if state_user else None
+    if not full or not database.verify_password(body.password, full.get("password_hash")):
+        raise HTTPException(status_code=403, detail="incorrect password")
+    keys = [
+        ApiKeyInfo(key=k["key"], name=k["name"], created_at=k.get("created_at"))
+        for k in database.get_api_keys_for_account(account_id)
+        if k["active"]
+    ]
+    return RevealKeysResponse(keys=keys)
 
 
 @app.post("/ask", response_model=AskResponse)

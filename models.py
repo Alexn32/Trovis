@@ -515,6 +515,23 @@ class NewKeyResponse(BaseModel):
     name: str = "default"
 
 
+class RevealKeysRequest(BaseModel):
+    """Body for POST /org/api-keys/reveal — step-up re-auth with the caller's
+    password before exposing the org's existing API key(s)."""
+
+    password: str
+
+
+class ApiKeyInfo(BaseModel):
+    key: str
+    name: str = "default"
+    created_at: str | None = None
+
+
+class RevealKeysResponse(BaseModel):
+    keys: list[ApiKeyInfo] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Ask — conversational Q&A over agent telemetry
 # ---------------------------------------------------------------------------

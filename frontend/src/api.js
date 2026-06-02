@@ -317,6 +317,12 @@ export const api = {
   getInvites: () => request('/org/invites'),
   revokeInvite: (id) => request(`/org/invites/${id}`, { method: 'DELETE' }),
   deleteMember: (id) => request(`/org/members/${id}`, { method: 'DELETE' }),
+  // Re-show the org's API key(s) — owner only, requires the caller's password.
+  revealApiKeys: (password) =>
+    request('/org/api-keys/reveal', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
 
   // Validate the current credential (session or API key) via /auth/me.
   // Returns the {user, org, auth} payload on success, null on 401.

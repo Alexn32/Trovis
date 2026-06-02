@@ -346,7 +346,7 @@ function ShowKeyPanel({ email, apiKey, onContinue }) {
     <div className="login-body">
       <p className="login-prompt">
         Account created for <strong>{email}</strong>. Here's your API key for
-        connecting agents — save it, it won't be shown again.
+        connecting agents. You can also reveal it later from Settings.
       </p>
       <div className="key-display">
         <code className="key-text">{apiKey}</code>
