@@ -60,7 +60,14 @@ from models import (
     TeamMemberCreate,
     WeeklySummary,
     WeeklyTrends,
-    WorkflowGraph,
+    Workflow,
+    WorkflowCreate,
+    WorkflowGenerate,
+    WorkflowReorder,
+    WorkflowStep,
+    WorkflowStepCreate,
+    WorkflowStepUpdate,
+    WorkflowUpdate,
 )
 
 VERSION = "0.1.0"
@@ -659,13 +666,146 @@ async def list_team(request: Request) -> list[TeamMember]:
     ]
 
 
-@app.get("/workflows", response_model=WorkflowGraph)
-async def workflows(request: Request) -> WorkflowGraph:
-    """The org workflow graph — agent + human nodes and the ownership
-    edges between them. Powers the Workflows view; operator-drawn data-flow
-    connections are layered in client-side for V1."""
+# ---------------------------------------------------------------------------
+# Workflows — auto-generated, editable process flows (agent + human steps)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/workflows", response_model=list[Workflow])
+async def list_workflows(request: Request) -> list[Workflow]:
+    """All workflows for the account (most recently updated first), each with
+    a step_count. Steps are loaded on the detail endpoint."""
     account_id = getattr(request.state, "account_id", None)
-    return WorkflowGraph(**database.get_workflow_graph(account_id=account_id))
+    return [Workflow(**w) for w in database.get_workflows(account_id=account_id)]
+
+
+@app.post("/workflows", response_model=Workflow, status_code=201)
+async def create_workflow(request: Request, body: WorkflowCreate) -> Workflow:
+    account_id = getattr(request.state, "account_id", None)
+    wf = database.create_workflow(
+        account_id=account_id,
+        name=body.name,
+        description=body.description,
+        agent_service_name=body.agent_service_name,
+        agent_id=body.agent_id or "main",
+    )
+    return Workflow(**database.get_workflow(wf["id"], account_id=account_id))
+
+
+@app.get("/workflows/{workflow_id}", response_model=Workflow)
+async def get_workflow(workflow_id: int, request: Request) -> Workflow:
+    account_id = getattr(request.state, "account_id", None)
+    wf = database.get_workflow(workflow_id, account_id=account_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    return Workflow(**wf)
+
+
+@app.put("/workflows/{workflow_id}", response_model=Workflow)
+async def update_workflow(
+    workflow_id: int, request: Request, body: WorkflowUpdate
+) -> Workflow:
+    account_id = getattr(request.state, "account_id", None)
+    wf = database.update_workflow(
+        workflow_id, account_id=account_id, name=body.name, description=body.description
+    )
+    if wf is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    return Workflow(**wf)
+
+
+@app.delete("/workflows/{workflow_id}", status_code=204)
+async def delete_workflow(workflow_id: int, request: Request) -> None:
+    account_id = getattr(request.state, "account_id", None)
+    if not database.delete_workflow(workflow_id, account_id=account_id):
+        raise HTTPException(status_code=404, detail="workflow not found")
+
+
+@app.post(
+    "/workflows/{workflow_id}/steps",
+    response_model=WorkflowStep,
+    status_code=201,
+)
+async def add_workflow_step(
+    workflow_id: int, request: Request, body: WorkflowStepCreate
+) -> WorkflowStep:
+    account_id = getattr(request.state, "account_id", None)
+    # Ownership gate — only operate on a workflow this account owns.
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    step = database.add_workflow_step(workflow_id, body.model_dump())
+    return WorkflowStep(**step)
+
+
+@app.put(
+    "/workflows/{workflow_id}/steps/{step_id}",
+    response_model=WorkflowStep,
+)
+async def update_workflow_step(
+    workflow_id: int, step_id: int, request: Request, body: WorkflowStepUpdate
+) -> WorkflowStep:
+    account_id = getattr(request.state, "account_id", None)
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    step = database.update_workflow_step(
+        step_id, workflow_id, body.model_dump(exclude_unset=True)
+    )
+    if step is None:
+        raise HTTPException(status_code=404, detail="step not found")
+    return WorkflowStep(**step)
+
+
+@app.delete(
+    "/workflows/{workflow_id}/steps/{step_id}", status_code=204
+)
+async def delete_workflow_step(
+    workflow_id: int, step_id: int, request: Request
+) -> None:
+    account_id = getattr(request.state, "account_id", None)
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if not database.delete_workflow_step(step_id, workflow_id):
+        raise HTTPException(status_code=404, detail="step not found")
+
+
+@app.post("/workflows/{workflow_id}/steps/reorder", response_model=Workflow)
+async def reorder_workflow_steps(
+    workflow_id: int, request: Request, body: WorkflowReorder
+) -> Workflow:
+    account_id = getattr(request.state, "account_id", None)
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    database.reorder_workflow_steps(workflow_id, body.step_ids)
+    return Workflow(**database.get_workflow(workflow_id, account_id=account_id))
+
+
+@app.post("/workflows/generate", response_model=Workflow, status_code=201)
+async def generate_workflow(request: Request, body: WorkflowGenerate) -> Workflow:
+    """Auto-generate a workflow from one agent's telemetry + identity. Creates
+    the workflow and all inferred steps, then returns the full workflow."""
+    account_id = getattr(request.state, "account_id", None)
+    try:
+        steps = describer.generate_workflow(
+            body.agent_service_name,
+            account_id=account_id,
+            agent_id=(body.agent_id or "main"),
+        )
+    except describer.AgentNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"agent '{body.agent_service_name}' not found"
+        )
+    except describer.APIKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    wf = database.create_workflow(
+        account_id=account_id,
+        name=body.name,
+        description=None,
+        agent_service_name=body.agent_service_name,
+        agent_id=(body.agent_id or "main"),
+    )
+    database._replace_workflow_steps(wf["id"], steps)
+    return Workflow(**database.get_workflow(wf["id"], account_id=account_id))
 
 
 @app.post("/team", response_model=TeamMember, status_code=201)

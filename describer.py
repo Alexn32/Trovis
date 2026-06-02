@@ -473,3 +473,228 @@ def capabilities(
         "writes_to": _str_list(parsed.get("writes_to")),
         "can_do": _str_list(parsed.get("can_do")),
     }
+
+
+# ---------------------------------------------------------------------------
+# Workflow generation — infer a step-by-step process from telemetry + identity
+# ---------------------------------------------------------------------------
+
+
+WORKFLOW_SYSTEM_PROMPT = (
+    "You are a process analyst for Oversee, an agent management system. You "
+    "reconstruct the end-to-end process an AI agent participates in — "
+    "including the HUMAN steps around it — from its telemetry and identity "
+    "files. Agent steps come from observed tool calls. Human steps are "
+    "inferred from long time-gaps after outbound operations (Slack/email/"
+    "webhook sends, approval requests) and from identity files that describe "
+    "review, approval, handoff, or escalation. Be concrete: use the actual "
+    "tool names. Return ONLY valid JSON — no markdown, no prose."
+)
+
+_VALID_STEP_TYPES = {"trigger", "agent", "human", "decision", "output"}
+_GAP_THRESHOLD_S = 30.0
+
+
+def _analyze_telemetry(spans: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mine operations (count + avg duration), per-run sequences, and the
+    long time-gaps that hint at human involvement, from a span list."""
+    op_count: dict[str, int] = {}
+    op_dur_ms: dict[str, float] = {}
+    by_trace: dict[str, list[dict[str, Any]]] = {}
+
+    for s in spans:
+        name = s.get("span_name") or "(unnamed)"
+        dur = (s["end_time_unix"] - s["start_time_unix"]) / 1_000_000.0
+        op_count[name] = op_count.get(name, 0) + 1
+        op_dur_ms[name] = op_dur_ms.get(name, 0.0) + dur
+        by_trace.setdefault(s.get("trace_id") or "", []).append(s)
+
+    operations = [
+        {
+            "operation": name,
+            "calls": op_count[name],
+            "avg_ms": round(op_dur_ms[name] / op_count[name], 1),
+        }
+        for name in sorted(op_count, key=lambda n: -op_count[n])
+    ]
+
+    # Representative sequences + gaps, walking each trace in time order.
+    sequences: list[str] = []
+    gaps: list[str] = []
+    for trace_id, tspans in by_trace.items():
+        ordered = sorted(tspans, key=lambda x: x["start_time_unix"])
+        seq = [s.get("span_name") or "(unnamed)" for s in ordered]
+        if len(seq) > 1 and len(sequences) < 5:
+            sequences.append(" → ".join(seq[:12]))
+        for prev, nxt in zip(ordered, ordered[1:]):
+            gap_s = (nxt["start_time_unix"] - prev["end_time_unix"]) / 1_000_000_000.0
+            if gap_s > _GAP_THRESHOLD_S and len(gaps) < 8:
+                gaps.append(
+                    f"after '{prev.get('span_name')}' there was a "
+                    f"{round(gap_s)}s gap before '{nxt.get('span_name')}'"
+                )
+
+    return {"operations": operations, "sequences": sequences, "gaps": gaps}
+
+
+def _build_workflow_prompt(
+    summary: dict[str, Any],
+    registration: dict[str, Any] | None,
+    analysis: dict[str, Any],
+) -> str:
+    reg = registration or {}
+    identity_block = (
+        f"SOUL.md (personality and purpose):\n{(reg.get('soul') or '(none)')[:2000]}\n\n"
+        f"IDENTITY.md (role definition):\n{(reg.get('identity') or '(none)')[:2000]}\n\n"
+        f"AGENTS.md (operating manual):\n{(reg.get('operating_manual') or '(none)')[:2000]}"
+    )
+
+    if analysis["operations"]:
+        ops_lines = "\n".join(
+            f"- {o['operation']}: {o['calls']} call(s), avg {o['avg_ms']:.0f}ms"
+            for o in analysis["operations"]
+        )
+    else:
+        ops_lines = "(no operations observed)"
+    seq_block = (
+        "\nTypical sequence(s) of operations across recent runs:\n"
+        + "\n".join(f"- {s}" for s in analysis["sequences"])
+        if analysis["sequences"]
+        else ""
+    )
+    gaps_block = (
+        "\n".join(f"- {g}" for g in analysis["gaps"])
+        if analysis["gaps"]
+        else "(no notable gaps > 30s observed)"
+    )
+
+    return (
+        f"This agent ({summary['service_name']}) has the following identity and "
+        f"configuration:\n{identity_block}\n\n"
+        f"Its telemetry shows these operations:\n{ops_lines}{seq_block}\n\n"
+        f"Time gaps between consecutive operations:\n{gaps_block}\n\n"
+        "Generate a complete workflow showing every step this agent's process "
+        "involves — both automated AND human steps. Analyze:\n"
+        "1. Tool calls that send to external channels (Slack, email, webhooks) "
+        "followed by gaps — these indicate human review or approval\n"
+        "2. Identity files that mention human approval, review, handoff, or "
+        "escalation processes\n"
+        "3. Operations like wait_for_approval, get_response, check_status that "
+        "imply external input\n"
+        "4. Long gaps (>30s) between fast operations — something external "
+        "happened in between\n"
+        "5. The overall pattern: what triggers this agent, what sequence does "
+        "it follow, where does output go\n\n"
+        "Return ONLY valid JSON, no markdown:\n"
+        "{\n"
+        '  "steps": [\n'
+        "    {\n"
+        '      "step_type": "trigger|agent|human|decision|output",\n'
+        '      "label": "Short title for this step",\n'
+        '      "description": "What happens in this step",\n'
+        '      "operation": "tool_name if agent step, null otherwise",\n'
+        '      "duration_estimate_ms": 2000,\n'
+        '      "inferred_from": "telemetry|identity|gap_analysis"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Be specific. Use actual tool names from the telemetry. Infer human "
+        "steps from gaps and identity files. Mark each step with how you "
+        "inferred it."
+    )
+
+
+def generate_workflow(
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Analyze an agent's telemetry + identity and ask Claude to reconstruct
+    its full process as an ordered list of steps (agent + inferred human).
+
+    Returns a list of step dicts ({step_type, label, description, operation,
+    duration_estimate_ms, inferred_from}). Raises AgentNotFoundError when the
+    agent has no telemetry, APIKeyMissingError when the key is unset.
+    """
+    summary = database.get_agent_summary(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
+    if summary is None:
+        raise AgentNotFoundError(service_name)
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise APIKeyMissingError(
+            "ANTHROPIC_API_KEY is not set. Export it before generating workflows."
+        )
+
+    spans = database.get_agent_spans(
+        service_name, limit=200, account_id=account_id, agent_id=agent_id
+    )
+    registration = database.get_latest_registration(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
+    analysis = _analyze_telemetry(spans)
+    user_prompt = _build_workflow_prompt(summary, registration, analysis)
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=2000,
+        system=WORKFLOW_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    raw = "".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    ).strip()
+
+    # Tolerate ```json fences.
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    import json as _json
+
+    try:
+        parsed = _json.loads(raw)
+    except (TypeError, ValueError):
+        parsed = {}
+
+    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
+    if not isinstance(raw_steps, list):
+        raw_steps = []
+
+    steps: list[dict[str, Any]] = []
+    for s in raw_steps:
+        if not isinstance(s, dict):
+            continue
+        step_type = str(s.get("step_type") or "agent").strip().lower()
+        if step_type not in _VALID_STEP_TYPES:
+            step_type = "agent"
+        label = str(s.get("label") or "").strip()
+        if not label:
+            continue
+        dur = s.get("duration_estimate_ms")
+        try:
+            dur = int(dur) if dur is not None else None
+        except (TypeError, ValueError):
+            dur = None
+        inferred = str(s.get("inferred_from") or "telemetry").strip().lower()
+        if inferred not in {"telemetry", "identity", "gap_analysis", "manual"}:
+            inferred = "telemetry"
+        steps.append(
+            {
+                "step_type": step_type,
+                "label": label[:200],
+                "description": (str(s["description"]) if s.get("description") else None),
+                "operation": (str(s["operation"]) if s.get("operation") else None),
+                "duration_estimate_ms": dur,
+                "inferred_from": inferred,
+                # Carry the agent identity onto agent steps so the UI can pill it.
+                "agent_service_name": service_name if step_type == "agent" else None,
+                "agent_id": (agent_id or "main") if step_type == "agent" else None,
+            }
+        )
+    return steps

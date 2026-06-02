@@ -184,10 +184,36 @@ export const api = {
   },
 
   // --- workflows ---
-  // The org graph: agent + human nodes and the ownership edges between
-  // them. Operator-drawn data-flow connections are layered in client-side
-  // (localStorage) for V1, so the backend only returns 'owns' edges.
+  // Named, ordered process flows (agent + human steps), auto-generated
+  // from telemetry + identity and operator-editable.
   getWorkflows: () => request('/workflows'),
+  getWorkflow: (id) => request(`/workflows/${id}`),
+  createWorkflow: (data) =>
+    request('/workflows', { method: 'POST', body: JSON.stringify(data) }),
+  updateWorkflow: (id, data) =>
+    request(`/workflows/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteWorkflow: (id) => request(`/workflows/${id}`, { method: 'DELETE' }),
+  // Auto-build a workflow from one agent's telemetry. data:
+  // { name, agent_service_name, agent_id }. Returns the full workflow.
+  generateWorkflow: (data) =>
+    request('/workflows/generate', { method: 'POST', body: JSON.stringify(data) }),
+  addWorkflowStep: (workflowId, data) =>
+    request(`/workflows/${workflowId}/steps`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateWorkflowStep: (workflowId, stepId, data) =>
+    request(`/workflows/${workflowId}/steps/${stepId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteWorkflowStep: (workflowId, stepId) =>
+    request(`/workflows/${workflowId}/steps/${stepId}`, { method: 'DELETE' }),
+  reorderWorkflowSteps: (workflowId, stepIds) =>
+    request(`/workflows/${workflowId}/steps/reorder`, {
+      method: 'POST',
+      body: JSON.stringify({ step_ids: stepIds }),
+    }),
 
   // --- team + ownership ---
   getTeamMembers: () => request('/team'),

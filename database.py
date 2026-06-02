@@ -442,6 +442,73 @@ CREATE TABLE IF NOT EXISTS agent_display_names (
 )
 """
 
+# Process workflows: a named, ordered sequence of steps (agent + human)
+# describing how work flows through an agent's process. Auto-generated from
+# telemetry + identity by Claude, then operator-editable. workflow_steps
+# cascades on workflow delete (enforced in code for SQLite — see
+# delete_workflow — since we don't enable the foreign_keys pragma).
+_WORKFLOWS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS workflows (
+    id                 SERIAL    PRIMARY KEY,
+    account_id         INTEGER   NOT NULL,
+    name               TEXT      NOT NULL,
+    description        TEXT,
+    agent_service_name TEXT,
+    agent_id           TEXT      DEFAULT 'main',
+    created_at         TIMESTAMP DEFAULT NOW(),
+    updated_at         TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_WORKFLOWS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS workflows (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id         INTEGER NOT NULL,
+    name               TEXT    NOT NULL,
+    description        TEXT,
+    agent_service_name TEXT,
+    agent_id           TEXT    DEFAULT 'main',
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+_WORKFLOW_STEPS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    id                   SERIAL  PRIMARY KEY,
+    workflow_id          INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    step_order           INTEGER NOT NULL,
+    step_type            TEXT    NOT NULL,
+    label                TEXT    NOT NULL,
+    description          TEXT,
+    agent_service_name   TEXT,
+    agent_id             TEXT,
+    team_member_id       INTEGER,
+    operation            TEXT,
+    duration_estimate_ms INTEGER,
+    inferred_from        TEXT,
+    config               TEXT
+)
+"""
+
+_WORKFLOW_STEPS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id          INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    step_order           INTEGER NOT NULL,
+    step_type            TEXT    NOT NULL,
+    label                TEXT    NOT NULL,
+    description          TEXT,
+    agent_service_name   TEXT,
+    agent_id             TEXT,
+    team_member_id       INTEGER,
+    operation            TEXT,
+    duration_estimate_ms INTEGER,
+    inferred_from        TEXT,
+    config               TEXT
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -471,6 +538,9 @@ _INDEXES = [
     # Speeds the cost aggregation, which filters to spans with a
     # non-null total_tokens within a service + time window.
     "CREATE INDEX IF NOT EXISTS idx_spans_tokens ON spans(service_name, total_tokens)",
+    "CREATE INDEX IF NOT EXISTS idx_workflows_account_id ON workflows(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_steps_workflow_id ON workflow_steps(workflow_id)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_steps_order ON workflow_steps(workflow_id, step_order)",
 ]
 
 
@@ -495,6 +565,9 @@ def init_db() -> None:
             _OWNERS_DDL_PG,
             _INSIGHTS_DDL_PG,
             _PRICING_DDL_PG,
+            # workflows before workflow_steps — the FK references it.
+            _WORKFLOWS_DDL_PG,
+            _WORKFLOW_STEPS_DDL_PG,
         ]
     else:
         ddls = [
@@ -508,6 +581,8 @@ def init_db() -> None:
             _OWNERS_DDL_SQLITE,
             _INSIGHTS_DDL_SQLITE,
             _PRICING_DDL_SQLITE,
+            _WORKFLOWS_DDL_SQLITE,
+            _WORKFLOW_STEPS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -1261,101 +1336,6 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     )
 
 
-def _workflow_status(
-    span_count: int, error_count: int, last_seen_iso: str | None
-) -> str:
-    """Health dot for a workflow agent node. Mirrors the frontend's
-    statusFor(): red on >20% errors, green when seen in the last 5 min
-    (yellow if a bit error-y), yellow within the hour, gray otherwise."""
-    rate = (error_count / span_count * 100) if span_count else 0.0
-    if rate > 20:
-        return "red"
-    if not last_seen_iso:
-        return "gray"
-    try:
-        from datetime import datetime
-
-        dt = datetime.fromisoformat(last_seen_iso)
-        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-        diff = (now - dt).total_seconds()
-    except (ValueError, TypeError):
-        return "gray"
-    if diff <= 300:
-        return "yellow" if rate > 5 else "green"
-    if diff <= 3600 or rate > 5:
-        return "yellow"
-    return "gray"
-
-
-def get_workflow_graph(account_id: int | None = None) -> dict[str, Any]:
-    """Build the workflow graph: a node per agent (service_name) and per
-    team member, plus an 'owns' edge for every human→agent assignment.
-
-    Agent nodes reuse get_agents() so status/platform/display-name stay
-    consistent with the Fleet view. Ownership edges come from each
-    sub-agent's owner_id; multiple sub-agents owned by the same person
-    collapse to a single edge to the instance node. 'data_flow' edges are
-    operator-drawn in the UI (client-side in V1), so none are emitted here.
-    """
-    groups = get_agents(account_id=account_id)
-    members = get_team_members(account_id)
-
-    nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    member_ids = {int(m["id"]) for m in members}
-    owns_seen: set[tuple[int, str]] = set()
-
-    for g in groups:
-        sn = g["service_name"]
-        node_id = f"a:{sn}"
-        nodes.append(
-            {
-                "id": node_id,
-                "type": "agent",
-                "name": g.get("display_name") or sn,
-                "status": _workflow_status(
-                    g["total_spans"], g["total_errors"], g.get("last_seen")
-                ),
-                "platform": g.get("platform"),
-                "role": None,
-                "service_name": sn,
-                "member_id": None,
-            }
-        )
-        for a in g.get("agents", []):
-            oid = a.get("owner_id")
-            if oid is None or int(oid) not in member_ids:
-                continue
-            key = (int(oid), sn)
-            if key in owns_seen:
-                continue
-            owns_seen.add(key)
-            edges.append(
-                {
-                    "source": f"h:{int(oid)}",
-                    "target": node_id,
-                    "type": "owns",
-                    "label": "owns",
-                }
-            )
-
-    for m in members:
-        nodes.append(
-            {
-                "id": f"h:{int(m['id'])}",
-                "type": "human",
-                "name": m["name"],
-                "status": None,
-                "platform": None,
-                "role": m.get("role"),
-                "service_name": None,
-                "member_id": int(m["id"]),
-            }
-        )
-
-    return {"nodes": nodes, "edges": edges}
-
-
 def get_agent_spans(
     service_name: str,
     limit: int = 50,
@@ -2101,6 +2081,421 @@ def get_agent_owner(
         "email": row["email"],
         "role": row["role"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Workflows — named, ordered step sequences (agent + human)
+# ---------------------------------------------------------------------------
+
+# Fields a workflow_steps row carries beyond id/workflow_id/step_order.
+_STEP_FIELDS = (
+    "step_type",
+    "label",
+    "description",
+    "agent_service_name",
+    "agent_id",
+    "team_member_id",
+    "operation",
+    "duration_estimate_ms",
+    "inferred_from",
+    "config",
+)
+
+_VALID_STEP_TYPES = {"trigger", "agent", "human", "decision", "output"}
+
+
+def _row_to_workflow(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "account_id": row["account_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "agent_service_name": row["agent_service_name"],
+        "agent_id": row["agent_id"],
+        "created_at": _ts_to_str(row["created_at"]),
+        "updated_at": _ts_to_str(row["updated_at"]),
+    }
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Read a column that may or may not be present in the row (sqlite3.Row
+    raises IndexError, RealDictRow raises KeyError for absent keys)."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def _row_to_step(row: Any) -> dict[str, Any]:
+    raw_config = row["config"]
+    config: Any = None
+    if raw_config:
+        try:
+            config = json.loads(raw_config)
+        except (TypeError, ValueError):
+            config = None
+    return {
+        "id": row["id"],
+        "workflow_id": row["workflow_id"],
+        "step_order": row["step_order"],
+        "step_type": row["step_type"],
+        "label": row["label"],
+        "description": row["description"],
+        "agent_service_name": row["agent_service_name"],
+        "agent_id": row["agent_id"],
+        "team_member_id": row["team_member_id"],
+        # Only present when the query LEFT JOINed team_members (get_workflow).
+        "team_member_name": _row_get(row, "team_member_name"),
+        "operation": row["operation"],
+        "duration_estimate_ms": row["duration_estimate_ms"],
+        "inferred_from": row["inferred_from"],
+        "config": config,
+    }
+
+
+def _clean_step_values(step: dict[str, Any]) -> dict[str, Any]:
+    """Pull the persistable fields out of an arbitrary step dict, applying
+    light validation/normalization. `config` is JSON-encoded for storage."""
+    step_type = str(step.get("step_type") or "agent").strip().lower()
+    if step_type not in _VALID_STEP_TYPES:
+        step_type = "agent"
+    duration = step.get("duration_estimate_ms")
+    try:
+        duration = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    config = step.get("config")
+    config_json = (
+        json.dumps(config) if isinstance(config, (dict, list)) else None
+    )
+    member_id = step.get("team_member_id")
+    try:
+        member_id = int(member_id) if member_id not in (None, "") else None
+    except (TypeError, ValueError):
+        member_id = None
+    return {
+        "step_type": step_type,
+        "label": str(step.get("label") or "").strip() or "Untitled step",
+        "description": (step.get("description") or None),
+        "agent_service_name": (step.get("agent_service_name") or None),
+        "agent_id": (step.get("agent_id") or None),
+        "team_member_id": member_id,
+        "operation": (step.get("operation") or None),
+        "duration_estimate_ms": duration,
+        "inferred_from": (step.get("inferred_from") or "manual"),
+        "config": config_json,
+    }
+
+
+def _touch_workflow(cur, workflow_id: int) -> None:
+    """Bump a workflow's updated_at. Called after step mutations."""
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    cur.execute(
+        f"UPDATE workflows SET updated_at = {now_sql} WHERE id = {PH}",
+        (workflow_id,),
+    )
+
+
+def create_workflow(
+    account_id: int | None,
+    name: str,
+    description: str | None = None,
+    agent_service_name: str | None = None,
+    agent_id: str | None = "main",
+) -> dict[str, Any]:
+    """Insert a new (empty) workflow and return the row."""
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("name is required")
+    cols = "(account_id, name, description, agent_service_name, agent_id)"
+    vals = (account_id, clean_name, description or None, agent_service_name or None, agent_id or "main")
+    with _connect() as conn, _cursor(conn) as cur:
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO workflows {cols} VALUES (%s, %s, %s, %s, %s) "
+                "RETURNING id, account_id, name, description, agent_service_name, "
+                "agent_id, created_at, updated_at",
+                vals,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                f"INSERT INTO workflows {cols} VALUES (?, ?, ?, ?, ?)", vals
+            )
+            new_id = cur.lastrowid
+            cur.execute(
+                "SELECT id, account_id, name, description, agent_service_name, "
+                "agent_id, created_at, updated_at FROM workflows WHERE id = ?",
+                (new_id,),
+            )
+            row = cur.fetchone()
+    return _row_to_workflow(row)
+
+
+def get_workflows(account_id: int | None) -> list[dict[str, Any]]:
+    """List workflows for an account (most recently updated first), each
+    with a `step_count`. Steps themselves are not loaded here."""
+    account_filter = (
+        f"WHERE w.account_id = {PH}"
+        if account_id is not None
+        else "WHERE w.account_id IS NULL"
+    )
+    sql = f"""
+        SELECT w.id, w.account_id, w.name, w.description, w.agent_service_name,
+               w.agent_id, w.created_at, w.updated_at,
+               (SELECT COUNT(*) FROM workflow_steps s WHERE s.workflow_id = w.id) AS step_count
+        FROM workflows w
+        {account_filter}
+        ORDER BY w.updated_at DESC, w.id DESC
+    """
+    args: tuple[Any, ...] = (account_id,) if account_id is not None else ()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        wf = _row_to_workflow(r)
+        wf["step_count"] = int(r["step_count"] or 0)
+        wf["steps"] = []
+        out.append(wf)
+    return out
+
+
+def get_workflow(
+    workflow_id: int, account_id: int | None
+) -> dict[str, Any] | None:
+    """Fetch one workflow (account-scoped) with all steps ordered by
+    step_order. Returns None when not found / not owned."""
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    wf_args: tuple[Any, ...] = (workflow_id,)
+    if account_id is not None:
+        wf_args = (workflow_id, account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, name, description, agent_service_name, "
+            f"agent_id, created_at, updated_at FROM workflows WHERE id = {PH} {account_clause}",
+            wf_args,
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        wf = _row_to_workflow(row)
+        cur.execute(
+            "SELECT s.id, s.workflow_id, s.step_order, s.step_type, s.label, "
+            "s.description, s.agent_service_name, s.agent_id, s.team_member_id, "
+            "s.operation, s.duration_estimate_ms, s.inferred_from, s.config, "
+            "m.name AS team_member_name "
+            "FROM workflow_steps s "
+            "LEFT JOIN team_members m ON m.id = s.team_member_id "
+            f"WHERE s.workflow_id = {PH} ORDER BY s.step_order ASC, s.id ASC",
+            (workflow_id,),
+        )
+        wf["steps"] = [_row_to_step(s) for s in cur.fetchall()]
+    wf["step_count"] = len(wf["steps"])
+    return wf
+
+
+def update_workflow(
+    workflow_id: int,
+    account_id: int | None,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any] | None:
+    """Update a workflow's name/description (only provided fields). Returns
+    the updated workflow (with steps) or None when not owned."""
+    sets = []
+    args: list[Any] = []
+    if name is not None:
+        sets.append(f"name = {PH}")
+        args.append(name.strip())
+    if description is not None:
+        sets.append(f"description = {PH}")
+        args.append(description or None)
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    sets.append(f"updated_at = {now_sql}")
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    args.append(workflow_id)
+    if account_id is not None:
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE workflows SET {', '.join(sets)} WHERE id = {PH} {account_clause}",
+            tuple(args),
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_workflow(workflow_id, account_id)
+
+
+def delete_workflow(workflow_id: int, account_id: int | None) -> bool:
+    """Delete a workflow and its steps (steps first — SQLite doesn't
+    enforce the cascade). Account-scoped. Returns True when removed."""
+    account_clause = (
+        f"AND account_id = {PH}"
+        if account_id is not None
+        else "AND account_id IS NULL"
+    )
+    with _connect() as conn, _cursor(conn) as cur:
+        # Ownership check first so we don't drop another tenant's steps.
+        cur.execute(
+            f"SELECT 1 FROM workflows WHERE id = {PH} {account_clause}",
+            (workflow_id,) if account_id is None else (workflow_id, account_id),
+        )
+        if cur.fetchone() is None:
+            return False
+        cur.execute(
+            f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
+        )
+        cur.execute(
+            f"DELETE FROM workflows WHERE id = {PH} {account_clause}",
+            (workflow_id,) if account_id is None else (workflow_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def add_workflow_step(
+    workflow_id: int, step_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Append a step to a workflow (step_order = current max + 1 unless an
+    explicit step_order is given). Ownership must be checked by the caller."""
+    clean = _clean_step_values(step_data)
+    with _connect() as conn, _cursor(conn) as cur:
+        order = step_data.get("step_order")
+        if order is None:
+            cur.execute(
+                f"SELECT COALESCE(MAX(step_order), -1) + 1 AS n FROM workflow_steps WHERE workflow_id = {PH}",
+                (workflow_id,),
+            )
+            order = int(cur.fetchone()["n"])
+        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
+        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
+        vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO workflow_steps {cols} VALUES ({ph}) "
+                "RETURNING id, workflow_id, step_order, step_type, label, "
+                "description, agent_service_name, agent_id, team_member_id, "
+                "operation, duration_estimate_ms, inferred_from, config",
+                vals,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
+            new_id = cur.lastrowid
+            cur.execute(
+                "SELECT id, workflow_id, step_order, step_type, label, "
+                "description, agent_service_name, agent_id, team_member_id, "
+                "operation, duration_estimate_ms, inferred_from, config "
+                "FROM workflow_steps WHERE id = ?",
+                (new_id,),
+            )
+            row = cur.fetchone()
+        _touch_workflow(cur, workflow_id)
+    return _row_to_step(row)
+
+
+def update_workflow_step(
+    step_id: int, workflow_id: int, step_data: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Patch a step (only the fields present in step_data), scoped to its
+    workflow. Returns the updated step or None when not found."""
+    sets = []
+    args: list[Any] = []
+    cleaned = _clean_step_values({**step_data}) if step_data else {}
+    for field in _STEP_FIELDS:
+        if field in step_data:
+            sets.append(f"{field} = {PH}")
+            args.append(cleaned[field])
+    if "step_order" in step_data and step_data["step_order"] is not None:
+        sets.append(f"step_order = {PH}")
+        args.append(int(step_data["step_order"]))
+    if not sets:
+        # Nothing to change — just return the current row.
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(
+                "SELECT id, workflow_id, step_order, step_type, label, description, "
+                "agent_service_name, agent_id, team_member_id, operation, "
+                "duration_estimate_ms, inferred_from, config "
+                f"FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+                (step_id, workflow_id),
+            )
+            row = cur.fetchone()
+        return _row_to_step(row) if row else None
+    args.extend([step_id, workflow_id])
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE workflow_steps SET {', '.join(sets)} "
+            f"WHERE id = {PH} AND workflow_id = {PH}",
+            tuple(args),
+        )
+        if cur.rowcount == 0:
+            return None
+        _touch_workflow(cur, workflow_id)
+        cur.execute(
+            "SELECT id, workflow_id, step_order, step_type, label, description, "
+            "agent_service_name, agent_id, team_member_id, operation, "
+            "duration_estimate_ms, inferred_from, config "
+            f"FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+            (step_id, workflow_id),
+        )
+        row = cur.fetchone()
+    return _row_to_step(row) if row else None
+
+
+def delete_workflow_step(step_id: int, workflow_id: int) -> bool:
+    """Delete one step from a workflow. Returns True when removed."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+            (step_id, workflow_id),
+        )
+        removed = cur.rowcount > 0
+        if removed:
+            _touch_workflow(cur, workflow_id)
+    return removed
+
+
+def reorder_workflow_steps(
+    workflow_id: int, step_ids_in_order: list[int]
+) -> None:
+    """Set step_order to match the given id list. Only ids belonging to the
+    workflow are touched; unknown ids are ignored."""
+    with _connect() as conn, _cursor(conn) as cur:
+        for order, sid in enumerate(step_ids_in_order):
+            cur.execute(
+                f"UPDATE workflow_steps SET step_order = {PH} "
+                f"WHERE id = {PH} AND workflow_id = {PH}",
+                (order, int(sid), workflow_id),
+            )
+        _touch_workflow(cur, workflow_id)
+
+
+def _replace_workflow_steps(
+    workflow_id: int, steps: list[dict[str, Any]]
+) -> None:
+    """Drop all steps for a workflow and insert the given list in order.
+    Used by generate / regenerate."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
+        )
+        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
+        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
+        for order, step in enumerate(steps):
+            clean = _clean_step_values(step)
+            cur.execute(
+                f"INSERT INTO workflow_steps {cols} VALUES ({ph})",
+                (workflow_id, order, *(clean[f] for f in _STEP_FIELDS)),
+            )
+        _touch_workflow(cur, workflow_id)
 
 
 # ---------------------------------------------------------------------------
