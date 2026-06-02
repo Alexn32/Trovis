@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -313,13 +315,18 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 )
 """
 
-# Current published list prices, normalized to cost-per-1,000-tokens.
-# (The spec quotes per-1M prices; divide by 1000.)
+# Bootstrap prices, normalized to cost-per-1,000-tokens. Only used on a
+# fresh DB before the first LiteLLM sync (seconds) and as a fallback if the
+# sync is ever permanently unreachable — the daily sync overwrites these
+# with the published rates. Kept in step with LiteLLM so the fallback isn't
+# wrong: e.g. claude-opus-4-6 is $5/$25 per 1M, NOT the older $15/$75 (which
+# is claude-opus-4-1) — confirmed against the live price list.
 _PRICING_SEED = [
     # model_name,         input/1k,  output/1k
-    ("claude-opus-4-6",   0.015,     0.075),    # $15 / $75 per 1M
+    ("claude-opus-4-6",   0.005,     0.025),    # $5 / $25 per 1M
+    ("claude-opus-4-1",   0.015,     0.075),    # $15 / $75 per 1M
     ("claude-sonnet-4-6", 0.003,     0.015),    # $3 / $15 per 1M
-    ("claude-haiku-4-5",  0.0008,    0.004),    # $0.80 / $4 per 1M
+    ("claude-haiku-4-5",  0.001,     0.005),    # $1 / $5 per 1M
     ("gpt-4o",            0.0025,    0.010),     # $2.50 / $10 per 1M
     ("gpt-4o-mini",       0.00015,   0.0006),    # $0.15 / $0.60 per 1M
 ]
@@ -623,6 +630,74 @@ def get_pricing_summary(sample: int = 10) -> dict[str, Any]:
     }
 
 
+def get_pricing_coverage(
+    account_id: int | None = None, days: int = 30
+) -> dict[str, Any]:
+    """Which models that actually showed up in telemetry resolve to a price.
+
+    Looks at token-bearing spans (those carrying `gen_ai.usage.*`) over the
+    last `days`, pulls each distinct `gen_ai.request.model`, and classifies
+    it against the CURRENT pricing table + matcher — so it answers "with
+    today's prices, is this model's cost tracked?" The `unmatched` list is
+    the actionable bit: models burning tokens with no price (NULL cost),
+    worst offenders by token volume first. Scoped to the caller's account.
+    """
+    window_ns = time.time_ns() - days * 24 * 60 * 60 * 1_000_000_000
+    sql = (
+        "SELECT attributes, total_tokens FROM spans "
+        f"WHERE total_tokens IS NOT NULL AND start_time_unix >= {PH}"
+    )
+    params: list[Any] = [window_ns]
+    if account_id is not None:
+        sql += f" AND account_id = {PH}"
+        params.append(account_id)
+
+    seen: dict[str, dict[str, int]] = {}
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(params))
+        for row in cur.fetchall():
+            try:
+                attrs = json.loads(row["attributes"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            model = attrs.get("gen_ai.request.model")
+            if not model:
+                continue
+            agg = seen.setdefault(model, {"spans": 0, "tokens": 0})
+            agg["spans"] += 1
+            agg["tokens"] += int(row["total_tokens"] or 0)
+        pricing = _load_pricing(cur)
+
+    matched, unmatched = [], []
+    for model, agg in seen.items():
+        rate = _match_pricing(model, pricing)
+        if rate is None:
+            unmatched.append(
+                {"model": model, "spans": agg["spans"], "tokens": agg["tokens"]}
+            )
+        else:
+            matched.append(
+                {
+                    "model": model,
+                    "spans": agg["spans"],
+                    "tokens": agg["tokens"],
+                    "input_cost_per_1k": rate[0],
+                    "output_cost_per_1k": rate[1],
+                }
+            )
+    # Worst offenders first: most tokens burned with no price.
+    unmatched.sort(key=lambda m: m["tokens"], reverse=True)
+    matched.sort(key=lambda m: m["tokens"], reverse=True)
+    return {
+        "window_days": days,
+        "models_seen": len(seen),
+        "matched_count": len(matched),
+        "unmatched_count": len(unmatched),
+        "matched": matched,
+        "unmatched": unmatched,
+    }
+
+
 def _try_add_column(cur, table: str, column: str, type_decl: str) -> None:
     """Add a column if it doesn't already exist. Idempotent on both backends.
 
@@ -718,15 +793,36 @@ def _normalize_model(model: Any) -> str:
     return str(model).strip().lower().split("/")[-1]
 
 
+# One trailing date/version token providers append to a base id, e.g.
+# '-20250514', '-2024-08-06', '-v1:0', '-001', '-latest'.
+_DATE_SUFFIX_RE = re.compile(
+    r"[-@:](\d{8}|\d{6}|\d{4}-\d{2}-\d{2}|v\d+(?::\d+)?|\d{3}|latest|preview)$"
+)
+
+
+def _strip_date_suffix(name: str) -> str:
+    """Drop one trailing date/version token: 'claude-opus-4-20250514' →
+    'claude-opus-4'. Last-resort so a dated id an agent emits can still find
+    a base price when the table only carries the undated form."""
+    return _DATE_SUFFIX_RE.sub("", name)
+
+
 def _match_pricing(
     model: Any, pricing: dict[str, tuple[float, float]]
 ) -> tuple[float, float] | None:
     """Resolve a model id to its (input/1k, output/1k) rate.
 
-    Tries, in order: exact match, normalized match, then a prefix
-    match so date-suffixed ids ('claude-opus-4-6-20260101') resolve
-    to their base price ('claude-opus-4-6'). Returns None for unknown
-    models — those spans get a NULL cost rather than a wrong one.
+    Most-specific first:
+      1. exact id as emitted
+      2. normalized (lowercased, provider prefix stripped)
+      3. longest boundary-aware prefix — a dated/variant id
+         ('claude-opus-4-20250514') matches its base key
+         ('claude-opus-4'); we pick the LONGEST matching base, and require a
+         '-' boundary so 'gpt-4' can't masquerade as a match for 'gpt-45'
+      4. date/version-suffix stripped, retried exact
+
+    Returns None for genuinely unknown models — those spans store NULL cost
+    rather than a wrong guess, and surface in /admin/pricing/coverage.
     """
     if not model:
         return None
@@ -735,9 +831,16 @@ def _match_pricing(
     norm = _normalize_model(model)
     if norm in pricing:
         return pricing[norm]
-    for key, rate in pricing.items():
-        if norm.startswith(key):
-            return rate
+    best: str | None = None
+    for key in pricing:
+        if norm == key or norm.startswith(key + "-"):
+            if best is None or len(key) > len(best):
+                best = key
+    if best is not None:
+        return pricing[best]
+    base = _strip_date_suffix(norm)
+    if base != norm and base in pricing:
+        return pricing[base]
     return None
 
 

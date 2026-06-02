@@ -786,6 +786,19 @@ async def get_pricing(request: Request) -> dict[str, Any]:
     return database.get_pricing_summary()
 
 
+@app.get("/admin/pricing/coverage")
+async def get_pricing_coverage(
+    request: Request,
+    days: int = Query(default=30, ge=1, le=365),
+) -> dict[str, Any]:
+    """Which models seen in telemetry actually resolve to a price. The
+    `unmatched` list (models burning tokens with NULL cost, biggest first)
+    is the answer to "is cost being tracked?" — anything there is cost we're
+    silently dropping and should add to the price table."""
+    account_id = getattr(request.state, "account_id", None)
+    return database.get_pricing_coverage(account_id=account_id, days=days)
+
+
 @app.post("/admin/pricing/refresh")
 async def refresh_pricing_now(request: Request) -> dict[str, Any]:
     """Pull the latest model prices from the LiteLLM list immediately,
