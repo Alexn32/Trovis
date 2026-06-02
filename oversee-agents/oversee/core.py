@@ -92,6 +92,27 @@ def _setup_otel(
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
 
+    # Ensure the global text-map propagator is W3C Trace Context (+ baggage)
+    # so oversee.inject()/continue_trace() carry trace context across
+    # agent-to-agent calls. This is OTEL's default, but we set it
+    # explicitly (guarded) so propagation works even if something cleared
+    # or replaced it earlier in the process.
+    try:
+        from opentelemetry.baggage.propagation import W3CBaggagePropagator
+        from opentelemetry.propagate import set_global_textmap
+        from opentelemetry.propagators.composite import CompositePropagator
+        from opentelemetry.trace.propagation.tracecontext import (
+            TraceContextTextMapPropagator,
+        )
+
+        set_global_textmap(
+            CompositePropagator(
+                [TraceContextTextMapPropagator(), W3CBaggagePropagator()]
+            )
+        )
+    except Exception as e:  # noqa: BLE001 — propagation is best-effort
+        logger.debug("[Oversee] could not set global propagator: %s", e)
+
     tracer = trace.get_tracer("oversee")
     _state["tracer"] = tracer
     _state["endpoint"] = endpoint

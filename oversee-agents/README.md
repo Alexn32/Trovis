@@ -169,6 +169,32 @@ Or from chat after the first start:
   values, unless capture is on), and the tool's result (capture-only).
 - **`/oversee status`** in chat to verify telemetry is flowing.
 
+## Connecting agents across processes
+
+When one agent calls another that runs in a **separate process or service**,
+carry the trace context across the call so Oversee can draw the
+agent-to-agent connection on your dashboard. (Agents that hand off *within*
+one process already share a trace automatically.)
+
+Both processes must have called `init()`. On the calling side, attach the
+context to your outbound request; on the receiving side, continue it:
+
+```python
+import httpx, oversee
+
+# --- Agent A (caller), inside a tool call / run ---
+resp = httpx.post(url, headers=oversee.inject(), json=payload)
+
+# --- Agent B (receiver) ---
+with oversee.continue_trace(request.headers):
+    result = await Runner.run(agent_b, payload)
+```
+
+`inject()` writes a W3C `traceparent` header; `continue_trace()` re-attaches
+it so Agent B's spans share Agent A's trace and link back to the calling
+span. Oversee then surfaces "Agent A → Agent B" automatically. There's also
+`oversee.extract(headers)` if you need the raw OpenTelemetry context.
+
 ## What gets captured
 
 - **Agent identity** (name, instructions/system prompt) — sent once when each unique agent is first constructed.
