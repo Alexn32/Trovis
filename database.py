@@ -1261,6 +1261,101 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     )
 
 
+def _workflow_status(
+    span_count: int, error_count: int, last_seen_iso: str | None
+) -> str:
+    """Health dot for a workflow agent node. Mirrors the frontend's
+    statusFor(): red on >20% errors, green when seen in the last 5 min
+    (yellow if a bit error-y), yellow within the hour, gray otherwise."""
+    rate = (error_count / span_count * 100) if span_count else 0.0
+    if rate > 20:
+        return "red"
+    if not last_seen_iso:
+        return "gray"
+    try:
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(last_seen_iso)
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        diff = (now - dt).total_seconds()
+    except (ValueError, TypeError):
+        return "gray"
+    if diff <= 300:
+        return "yellow" if rate > 5 else "green"
+    if diff <= 3600 or rate > 5:
+        return "yellow"
+    return "gray"
+
+
+def get_workflow_graph(account_id: int | None = None) -> dict[str, Any]:
+    """Build the workflow graph: a node per agent (service_name) and per
+    team member, plus an 'owns' edge for every human→agent assignment.
+
+    Agent nodes reuse get_agents() so status/platform/display-name stay
+    consistent with the Fleet view. Ownership edges come from each
+    sub-agent's owner_id; multiple sub-agents owned by the same person
+    collapse to a single edge to the instance node. 'data_flow' edges are
+    operator-drawn in the UI (client-side in V1), so none are emitted here.
+    """
+    groups = get_agents(account_id=account_id)
+    members = get_team_members(account_id)
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    member_ids = {int(m["id"]) for m in members}
+    owns_seen: set[tuple[int, str]] = set()
+
+    for g in groups:
+        sn = g["service_name"]
+        node_id = f"a:{sn}"
+        nodes.append(
+            {
+                "id": node_id,
+                "type": "agent",
+                "name": g.get("display_name") or sn,
+                "status": _workflow_status(
+                    g["total_spans"], g["total_errors"], g.get("last_seen")
+                ),
+                "platform": g.get("platform"),
+                "role": None,
+                "service_name": sn,
+                "member_id": None,
+            }
+        )
+        for a in g.get("agents", []):
+            oid = a.get("owner_id")
+            if oid is None or int(oid) not in member_ids:
+                continue
+            key = (int(oid), sn)
+            if key in owns_seen:
+                continue
+            owns_seen.add(key)
+            edges.append(
+                {
+                    "source": f"h:{int(oid)}",
+                    "target": node_id,
+                    "type": "owns",
+                    "label": "owns",
+                }
+            )
+
+    for m in members:
+        nodes.append(
+            {
+                "id": f"h:{int(m['id'])}",
+                "type": "human",
+                "name": m["name"],
+                "status": None,
+                "platform": None,
+                "role": m.get("role"),
+                "service_name": None,
+                "member_id": int(m["id"]),
+            }
+        )
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def get_agent_spans(
     service_name: str,
     limit: int = 50,

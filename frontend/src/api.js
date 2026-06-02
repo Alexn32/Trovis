@@ -183,6 +183,12 @@ export const api = {
     )
   },
 
+  // --- workflows ---
+  // The org graph: agent + human nodes and the ownership edges between
+  // them. Operator-drawn data-flow connections are layered in client-side
+  // (localStorage) for V1, so the backend only returns 'owns' edges.
+  getWorkflows: () => request('/workflows'),
+
   // --- team + ownership ---
   getTeamMembers: () => request('/team'),
   createTeamMember: (data) =>

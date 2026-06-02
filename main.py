@@ -60,6 +60,7 @@ from models import (
     TeamMemberCreate,
     WeeklySummary,
     WeeklyTrends,
+    WorkflowGraph,
 )
 
 VERSION = "0.1.0"
@@ -656,6 +657,15 @@ async def list_team(request: Request) -> list[TeamMember]:
         TeamMember(**m)
         for m in database.get_team_members(account_id=account_id)
     ]
+
+
+@app.get("/workflows", response_model=WorkflowGraph)
+async def workflows(request: Request) -> WorkflowGraph:
+    """The org workflow graph — agent + human nodes and the ownership
+    edges between them. Powers the Workflows view; operator-drawn data-flow
+    connections are layered in client-side for V1."""
+    account_id = getattr(request.state, "account_id", None)
+    return WorkflowGraph(**database.get_workflow_graph(account_id=account_id))
 
 
 @app.post("/team", response_model=TeamMember, status_code=201)
