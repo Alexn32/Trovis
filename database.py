@@ -525,34 +525,102 @@ def init_db() -> None:
         _try_add_column(cur, "spans", "output_tokens", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "spans", "total_tokens", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "spans", "estimated_cost_usd", "REAL DEFAULT NULL")
+        # Pricing provenance: which source set each rate, and when it was
+        # last refreshed. Lets the admin endpoint report freshness and lets
+        # us tell a seeded fallback price apart from a live LiteLLM one.
+        # (No CURRENT_TIMESTAMP default — SQLite rejects a non-constant
+        # default on ALTER ADD COLUMN; upsert_pricing sets it explicitly.)
+        _try_add_column(cur, "model_pricing", "source", "TEXT DEFAULT 'seed'")
+        _try_add_column(cur, "model_pricing", "updated_at", "TIMESTAMP")
         for idx in _INDEXES:
             cur.execute(idx)
-        # Seed / refresh model pricing. UPSERT so a price correction in
-        # _PRICING_SEED is picked up on the next restart.
+        # Bootstrap the pricing table with a handful of common models so
+        # cost works on a fresh DB before the first LiteLLM refresh lands.
+        # INSERT-only (DO NOTHING) — the daily sync is authoritative and
+        # must never be clobbered back to these hardcoded values on restart.
         _seed_pricing(cur)
 
 
 def _seed_pricing(cur) -> None:
-    """Insert-or-update the published list prices. Runs every init —
-    idempotent via UPSERT on the model_name primary key."""
-    if USE_POSTGRES:
-        sql = """
-            INSERT INTO model_pricing (model_name, input_cost_per_1k, output_cost_per_1k)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (model_name)
-            DO UPDATE SET input_cost_per_1k = EXCLUDED.input_cost_per_1k,
-                          output_cost_per_1k = EXCLUDED.output_cost_per_1k
-        """
-    else:
-        sql = """
-            INSERT INTO model_pricing (model_name, input_cost_per_1k, output_cost_per_1k)
-            VALUES (?, ?, ?)
-            ON CONFLICT (model_name)
-            DO UPDATE SET input_cost_per_1k = excluded.input_cost_per_1k,
-                          output_cost_per_1k = excluded.output_cost_per_1k
-        """
+    """Bootstrap a few common models so cost works on a fresh DB before the
+    first LiteLLM refresh. INSERT-only (DO NOTHING on conflict): the daily
+    sync owns pricing once it runs, so seeding must never overwrite a
+    refreshed rate back to these hardcoded values on a later restart."""
+    ph = "%s" if USE_POSTGRES else "?"
+    sql = f"""
+        INSERT INTO model_pricing (model_name, input_cost_per_1k, output_cost_per_1k, source)
+        VALUES ({ph}, {ph}, {ph}, 'seed')
+        ON CONFLICT (model_name) DO NOTHING
+    """
     for model, in_cost, out_cost in _PRICING_SEED:
         cur.execute(sql, (model, in_cost, out_cost))
+
+
+def upsert_pricing(
+    rows: list[tuple[str, float, float]], source: str = "litellm"
+) -> int:
+    """Bulk INSERT-or-UPDATE model rates from the daily sync. Each row is
+    (model_name, input_cost_per_1k, output_cost_per_1k). Stamps `source`
+    and `updated_at` so the admin endpoint can report freshness. Returns the
+    number of rows written."""
+    if not rows:
+        return 0
+    params = [(m, i, o, source) for (m, i, o) in rows]
+    with _connect() as conn, _cursor(conn) as cur:
+        if USE_POSTGRES:
+            execute_values(
+                cur,
+                "INSERT INTO model_pricing "
+                "(model_name, input_cost_per_1k, output_cost_per_1k, source, updated_at) "
+                "VALUES %s "
+                "ON CONFLICT (model_name) DO UPDATE SET "
+                "input_cost_per_1k = EXCLUDED.input_cost_per_1k, "
+                "output_cost_per_1k = EXCLUDED.output_cost_per_1k, "
+                "source = EXCLUDED.source, "
+                "updated_at = EXCLUDED.updated_at",
+                params,
+                template="(%s, %s, %s, %s, NOW())",
+            )
+        else:
+            cur.executemany(
+                "INSERT INTO model_pricing "
+                "(model_name, input_cost_per_1k, output_cost_per_1k, source, updated_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT (model_name) DO UPDATE SET "
+                "input_cost_per_1k = excluded.input_cost_per_1k, "
+                "output_cost_per_1k = excluded.output_cost_per_1k, "
+                "source = excluded.source, "
+                "updated_at = CURRENT_TIMESTAMP",
+                params,
+            )
+    return len(params)
+
+
+def get_pricing_summary(sample: int = 10) -> dict[str, Any]:
+    """Total model count, per-source breakdown, last refresh time, and a
+    sample of rows — backs the GET /admin/pricing endpoint."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM model_pricing")
+        total = int(cur.fetchone()["n"])
+        cur.execute("SELECT MAX(updated_at) AS last FROM model_pricing")
+        last = cur.fetchone()["last"]
+        cur.execute(
+            "SELECT source, COUNT(*) AS n FROM model_pricing GROUP BY source"
+        )
+        by_source = {
+            (r["source"] or "unknown"): int(r["n"]) for r in cur.fetchall()
+        }
+        cur.execute(
+            f"SELECT model_name, input_cost_per_1k, output_cost_per_1k, source "
+            f"FROM model_pricing ORDER BY model_name LIMIT {int(sample)}"
+        )
+        sample_rows = [dict(r) for r in cur.fetchall()]
+    return {
+        "total_models": total,
+        "last_updated": _ts_to_str(last),
+        "by_source": by_source,
+        "sample": sample_rows,
+    }
 
 
 def _try_add_column(cur, table: str, column: str, type_decl: str) -> None:

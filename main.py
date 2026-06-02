@@ -20,6 +20,8 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,6 +33,7 @@ from fastapi.responses import JSONResponse
 import asker
 import database
 import describer
+import pricing_sync
 from models import (
     AgentCosts,
     AgentDeleteResponse,
@@ -67,11 +70,49 @@ VERSION = "0.1.0"
 _OPEN_PATHS = {"/health", "/auth/signup", "/auth/login"}
 
 
+logger = logging.getLogger("oversee")
+
+# How often to pull fresh model prices from the LiteLLM list. Daily is
+# plenty — published list prices change on the order of weeks.
+_PRICING_REFRESH_INTERVAL_S = 24 * 60 * 60
+
+
+async def _pricing_refresh_loop() -> None:
+    """Refresh model pricing on startup, then once a day. Telemetry-grade
+    resilience: a failed fetch (network blip, GitHub down) is logged and
+    swallowed so it can never take the API down, and the last good prices
+    already in the table keep serving. Cost is frozen at ingest, so a missed
+    refresh only delays accuracy for *new* spans — nothing breaks."""
+    while True:
+        try:
+            summary = await asyncio.to_thread(pricing_sync.refresh_pricing)
+            logger.info("[Oversee] pricing refresh: %s", summary)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[Oversee] pricing refresh failed (keeping existing prices): %s",
+                e,
+            )
+        await asyncio.sleep(_PRICING_REFRESH_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
-    yield
-    database.shutdown_db()
+    refresh_task: asyncio.Task | None = None
+    # OVERSEE_DISABLE_PRICING_SYNC=1 turns off the network pull (offline dev,
+    # tests) — the seeded prices still cover the common models.
+    if os.getenv("OVERSEE_DISABLE_PRICING_SYNC", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        refresh_task = asyncio.create_task(_pricing_refresh_loop())
+    try:
+        yield
+    finally:
+        if refresh_task is not None:
+            refresh_task.cancel()
+        database.shutdown_db()
 
 
 app = FastAPI(title="Oversee", version=VERSION, lifespan=lifespan)
@@ -724,6 +765,39 @@ async def agent_costs(
             days=days,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Model pricing admin
+# ---------------------------------------------------------------------------
+#
+# Pricing is global (same list price for every tenant), so these endpoints
+# aren't account-scoped — but they still sit behind the API-key middleware,
+# so only an authenticated caller can read or trigger a refresh. The daily
+# in-process scheduler keeps the table fresh on its own; these are for
+# on-demand pulls and verification.
+
+
+@app.get("/admin/pricing")
+async def get_pricing(request: Request) -> dict[str, Any]:
+    """Current pricing-table state: model count, per-source breakdown, last
+    refresh time, and a small sample. Handy for confirming the daily sync is
+    landing."""
+    return database.get_pricing_summary()
+
+
+@app.post("/admin/pricing/refresh")
+async def refresh_pricing_now(request: Request) -> dict[str, Any]:
+    """Pull the latest model prices from the LiteLLM list immediately,
+    rather than waiting for the daily cycle. Runs the blocking fetch in a
+    worker thread so the event loop isn't stalled."""
+    try:
+        return await asyncio.to_thread(pricing_sync.refresh_pricing)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Pricing refresh failed: {e}",
+        )
 
 
 # ---------------------------------------------------------------------------
