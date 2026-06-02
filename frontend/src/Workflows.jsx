@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
 import { relativeTime, formatCost, formatTokens, formatDuration } from './utils.js'
+import ConnectionsMap from './ConnectionsMap.jsx'
 import {
   PlusIcon,
   PencilIcon,
@@ -51,6 +52,7 @@ export default function Workflows({ onSelectAgent }) {
   const [showCreate, setShowCreate] = useState(false)
   const [notice, setNotice] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [view, setView] = useState('workflow') // 'workflow' | 'map'
 
   function flash(msg) {
     setNotice(msg)
@@ -239,11 +241,21 @@ export default function Workflows({ onSelectAgent }) {
         workflows={workflows}
         loading={loadingList}
         error={listError}
-        selectedId={selectedId}
-        onSelect={setSelectedId}
+        selectedId={view === 'map' ? null : selectedId}
+        mapActive={view === 'map'}
+        onShowMap={() => setView('map')}
+        onSelect={(id) => {
+          setView('workflow')
+          setSelectedId(id)
+        }}
         onCreate={() => setShowCreate(true)}
       />
 
+      {view === 'map' ? (
+        <div className="workflow-main">
+          <ConnectionsMap onSelectAgent={onSelectAgent} />
+        </div>
+      ) : (
       <div className="workflow-main">
         {notice && <div className="workflow-toast">{notice}</div>}
         {selectedId == null && !loadingList && (
@@ -276,6 +288,7 @@ export default function Workflows({ onSelectAgent }) {
           />
         )}
       </div>
+      )}
 
       {showCreate && (
         <CreateWorkflowModal
@@ -291,7 +304,7 @@ export default function Workflows({ onSelectAgent }) {
 // Sidebar
 // ---------------------------------------------------------------------------
 
-function WorkflowSidebar({ workflows, loading, error, selectedId, onSelect, onCreate }) {
+function WorkflowSidebar({ workflows, loading, error, selectedId, onSelect, onCreate, mapActive, onShowMap }) {
   return (
     <aside className="workflow-sidebar">
       <div className="workflow-sidebar-head">
@@ -300,6 +313,13 @@ function WorkflowSidebar({ workflows, loading, error, selectedId, onSelect, onCr
           <PlusIcon />
         </button>
       </div>
+      <button
+        type="button"
+        className={`workflow-map-btn ${mapActive ? 'is-active' : ''}`}
+        onClick={onShowMap}
+      >
+        <span className="workflow-map-icon">⤳</span> Connections map
+      </button>
       {loading && <div className="workflow-side-empty">Loading…</div>}
       {error && !loading && <div className="workflow-side-empty error">{error}</div>}
       {!loading && !error && workflows.length === 0 && (

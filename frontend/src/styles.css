@@ -3778,3 +3778,88 @@ a:hover {
 }
 .wf-conn-confirmed { background: var(--success-faint); color: var(--success); }
 .wf-conn-manual { background: var(--accent-faint); color: var(--accent); }
+
+/* ---------- Workflows: connections map ---------- */
+.workflow-map-btn {
+  width: 100%;
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.workflow-map-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
+.workflow-map-btn.is-active { border-color: var(--wf-agent); background: var(--wf-agent-faint); color: var(--wf-agent); }
+.workflow-map-icon { font-size: 15px; }
+
+.map-view {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+.map-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.map-subtitle { color: var(--text-secondary); font-size: 13px; margin: 4px 0 0; max-width: 60ch; }
+.map-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.map-legend { display: flex; gap: 18px; align-items: center; font-size: 12px; color: var(--text-secondary); }
+.map-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.map-leg-detected { stroke: var(--wf-edge); stroke-width: 2; stroke-dasharray: 5 4; }
+.map-leg-confirmed { stroke: var(--wf-agent); stroke-width: 2.5; }
+.map-leg-manual { stroke: var(--accent); stroke-width: 2.5; }
+.map-hint {
+  background: var(--accent-faint);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.map-canvas {
+  flex: 1 1 auto;
+  min-height: 50vh;
+  overflow: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background-color: var(--bg-surface);
+  background-image: radial-gradient(var(--border-default) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.map-canvas.is-connecting { cursor: crosshair; }
+.map-svg { display: block; touch-action: none; }
+
+.map-node { cursor: grab; }
+.map-node:active { cursor: grabbing; }
+.map-node-box {
+  fill: var(--bg-elevated);
+  stroke: var(--border-hover);
+  stroke-width: 1.5;
+  transition: stroke 0.1s ease, stroke-width 0.1s ease;
+}
+.map-node:hover .map-node-box { stroke: var(--wf-agent); }
+.map-node.is-source .map-node-box { stroke: var(--accent); stroke-width: 2.5; }
+.map-node-name { fill: var(--text-primary); font-size: 13px; font-weight: 600; }
+.map-node-plat { fill: var(--text-muted); font-size: 10.5px; }
+
+.map-edge { stroke: var(--wf-edge); stroke-width: 1.7; fill: none; }
+.map-edge-detected { stroke: var(--wf-edge); stroke-dasharray: 5 4; }
+.map-edge-confirmed { stroke: var(--wf-agent); stroke-width: 2.2; }
+.map-edge-manual { stroke: var(--accent); stroke-width: 2.2; }
+.map-edge-label { fill: var(--text-secondary); font-size: 11px; font-weight: 600; }
+.map-edge-btn { fill: var(--bg-elevated); stroke: var(--border-hover); stroke-width: 1; cursor: pointer; }
+.map-edge-btn-txt { font-size: 11px; font-weight: 700; cursor: pointer; }
+.map-edge-btn-txt.confirm { fill: var(--success); }
+.map-edge-btn-txt.dismiss { fill: var(--error); }
