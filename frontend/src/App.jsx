@@ -154,12 +154,21 @@ function AppInner() {
     )
   }
 
+  // Individual accounts have no team to manage — agents are implicitly the
+  // user's. Business accounts get the Team tab + per-agent owner assignment.
+  const isBusiness = me?.org?.account_type === 'business'
+  const account = {
+    type: me?.org?.account_type,
+    userName: me?.user?.name || me?.user?.email || null,
+  }
+
   let mainContent
   if (overlay?.kind === 'detail') {
     mainContent = (
       <AgentDetail
         serviceName={overlay.serviceName}
         agentId={overlay.agentId}
+        account={account}
         onBack={closeOverlay}
       />
     )
@@ -169,7 +178,7 @@ function AppInner() {
     mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} />
   } else if (tab === 'ask') {
     mainContent = <Ask />
-  } else if (tab === 'team') {
+  } else if (tab === 'team' && isBusiness) {
     mainContent = <Team onSelectAgent={openDetail} />
   } else if (tab === 'workflows') {
     mainContent = <Workflows onSelectAgent={openDetail} />
@@ -196,10 +205,13 @@ function AppInner() {
 }
 
 function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) {
+  // The Team tab manages multi-person ownership — only meaningful for
+  // Business orgs. Individual accounts own all their agents implicitly.
+  const isBusiness = me?.org?.account_type === 'business'
   const tabs = [
     ['fleet', 'Fleet'],
     ['ask', 'Ask'],
-    ['team', 'Team'],
+    ...(isBusiness ? [['team', 'Team']] : []),
     ['workflows', 'Workflows'],
   ]
   return (
