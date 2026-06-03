@@ -28,7 +28,7 @@ import {
 // sub-agent we're looking at. When omitted, we get the instance
 // aggregate (the only mode pre-multi-agent).
 
-export default function AgentDetail({ serviceName, agentId, onBack }) {
+export default function AgentDetail({ serviceName, agentId, account, onBack }) {
   const [summary, setSummary] = useState(null)
   const [spans, setSpans] = useState([])
   const [registration, setRegistration] = useState(null)
@@ -87,6 +87,7 @@ export default function AgentDetail({ serviceName, agentId, onBack }) {
             summary={summary}
             registration={registration}
             agentId={agentId}
+            account={account}
           />
           <WeeklySection
             serviceName={serviceName}
@@ -119,7 +120,7 @@ export default function AgentDetail({ serviceName, agentId, onBack }) {
   )
 }
 
-function DetailHead({ summary, registration, agentId }) {
+function DetailHead({ summary, registration, agentId, account }) {
   const status = statusFor(summary)
   // Prefer the explicit scoping prop; fall back to the value the backend
   // returned on the summary (set when ?agent_id= was on the request) and
@@ -257,19 +258,30 @@ function DetailHead({ summary, registration, agentId }) {
       )}
       {saveError && <p className="form-error">{saveError}</p>}
 
-      <OwnerRow
-        serviceName={summary.service_name}
-        agentId={shownAgentId || 'main'}
-        initialOwner={
-          summary.owner_id
-            ? {
-                id: summary.owner_id,
-                name: summary.owner_name,
-                role: summary.owner_role,
-              }
-            : null
-        }
-      />
+      {account && account.type !== 'business' ? (
+        // Individual accounts have no team — the agent is implicitly the
+        // user's, so show that plainly instead of an assign-owner UI.
+        <div className="owner-row">
+          <span className="owner-label-text">
+            Owner: <strong>{account.userName || 'You'}</strong>
+            <span className="owner-role"> · you</span>
+          </span>
+        </div>
+      ) : (
+        <OwnerRow
+          serviceName={summary.service_name}
+          agentId={shownAgentId || 'main'}
+          initialOwner={
+            summary.owner_id
+              ? {
+                  id: summary.owner_id,
+                  name: summary.owner_name,
+                  role: summary.owner_role,
+                }
+              : null
+          }
+        />
+      )}
 
       {summary.platform && (
         <div className="agent-platform">{summary.platform}</div>
