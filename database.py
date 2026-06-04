@@ -838,6 +838,10 @@ def init_db() -> None:
         # 'individual'; name stays NULL until set.
         _try_add_column(cur, "accounts", "account_type", "TEXT DEFAULT 'individual'")
         _try_add_column(cur, "accounts", "name", "TEXT")
+        # Connection edges gained "what's transferred" metrics post-launch.
+        _try_add_column(cur, "agent_connections", "via_operations", "TEXT")
+        _try_add_column(cur, "agent_connections", "total_tokens", "INTEGER DEFAULT 0")
+        _try_add_column(cur, "agent_connections", "sample", "TEXT")
         for idx in _INDEXES:
             cur.execute(idx)
         # Bootstrap the pricing table with a handful of common models so
@@ -3741,6 +3745,11 @@ _CONN_STATUSES = {"detected", "confirmed", "dismissed", "manual"}
 
 
 def _connection_row(r: Any) -> dict[str, Any]:
+    via_raw = _row_get(r, "via_operations")
+    try:
+        via = json.loads(via_raw) if via_raw else []
+    except (TypeError, ValueError):
+        via = []
     return {
         "id": r["id"],
         "source_service": r["source_service"],
@@ -3750,6 +3759,9 @@ def _connection_row(r: Any) -> dict[str, Any]:
         "status": r["status"],
         "call_count": int(r["call_count"] or 0),
         "trace_count": int(r["trace_count"] or 0),
+        "total_tokens": int(_row_get(r, "total_tokens") or 0),
+        "via_operations": via if isinstance(via, list) else [],
+        "sample": _row_get(r, "sample"),
         "first_seen": _ts_to_str(r["first_seen"]),
         "last_seen": _ts_to_str(r["last_seen"]),
     }
@@ -3792,34 +3804,55 @@ def detect_agent_connections(
             ph = ", ".join([PH] * len(batch))
             cur.execute(
                 "SELECT trace_id, span_id, parent_span_id, service_name, agent_id, "
+                "span_name, total_tokens, attributes, "
                 f"start_time_unix FROM spans WHERE trace_id IN ({ph}) {acct}",
                 (*batch, *base_args),
             )
             rows = cur.fetchall()
             by_span = {
-                r["span_id"]: (
-                    r["service_name"],
-                    r["agent_id"] or "main",
-                    r["parent_span_id"],
-                    r["start_time_unix"],
-                    r["trace_id"],
-                )
+                r["span_id"]: {
+                    "svc": r["service_name"],
+                    "aid": r["agent_id"] or "main",
+                    "parent": r["parent_span_id"],
+                    "start": r["start_time_unix"],
+                    "trace": r["trace_id"],
+                    "op": r["span_name"],
+                    "tokens": r["total_tokens"] or 0,
+                    "attrs": r["attributes"],
+                }
                 for r in rows
             }
-            for svc, aid, parent, start, trace in by_span.values():
+            for s in by_span.values():
+                parent = s["parent"]
                 if not parent or parent not in by_span:
                     continue
-                psvc, paid, _, _, _ = by_span[parent]
-                if (psvc, paid) == (svc, aid):
+                p = by_span[parent]
+                if (p["svc"], p["aid"]) == (s["svc"], s["aid"]):
                     continue  # same agent — not a crossing
-                key = (psvc, paid, svc, aid)
+                key = (p["svc"], p["aid"], s["svc"], s["aid"])
                 e = edges.setdefault(
-                    key, {"calls": 0, "traces": set(), "first": start, "last": start}
+                    key,
+                    {
+                        "calls": 0,
+                        "traces": set(),
+                        "first": s["start"],
+                        "last": s["start"],
+                        "ops": {},
+                        "tokens": 0,
+                        "sample": None,
+                    },
                 )
                 e["calls"] += 1
-                e["traces"].add(trace)
-                e["first"] = min(e["first"], start)
-                e["last"] = max(e["last"], start)
+                e["traces"].add(s["trace"])
+                e["first"] = min(e["first"], s["start"])
+                e["last"] = max(e["last"], s["start"])
+                # What's transferred: the child operation, token volume, and a
+                # content sample if output-capture was on for that span.
+                if s["op"]:
+                    e["ops"][s["op"]] = e["ops"].get(s["op"], 0) + 1
+                e["tokens"] += int(s["tokens"] or 0)
+                if e["sample"] is None:
+                    e["sample"] = _capture_sample(s["attrs"])
 
         if not edges:
             return 0
@@ -3831,6 +3864,11 @@ def detect_agent_connections(
             traces = len(e["traces"])
             last_iso = _ns_to_iso(e["last"])
             first_iso = _ns_to_iso(e["first"])
+            # Top bridging operations (what's transferred), most-frequent first.
+            ops = sorted(e["ops"].items(), key=lambda kv: -kv[1])[:5]
+            via_json = json.dumps([{"operation": o, "count": c} for o, c in ops])
+            tokens = e["tokens"]
+            sample = e["sample"]
             where = (
                 f"account_id = {PH} AND source_service = {PH} AND source_agent_id = {PH} "
                 f"AND target_service = {PH} AND target_agent_id = {PH}"
@@ -3846,19 +3884,49 @@ def detect_agent_connections(
             # Update metrics (preserve status); insert if absent.
             cur.execute(
                 f"UPDATE agent_connections SET call_count = {PH}, trace_count = {PH}, "
-                f"last_seen = {PH}, updated_at = {now_sql} WHERE {where}",
-                (calls, traces, last_iso, *key_args),
+                f"last_seen = {PH}, via_operations = {PH}, total_tokens = {PH}, "
+                f"sample = {PH}, updated_at = {now_sql} WHERE {where}",
+                (calls, traces, last_iso, via_json, tokens, sample, *key_args),
             )
             if cur.rowcount == 0:
                 cur.execute(
                     "INSERT INTO agent_connections (account_id, source_service, "
                     "source_agent_id, target_service, target_agent_id, status, "
-                    "call_count, trace_count, first_seen, last_seen) "
-                    f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'detected', {PH}, {PH}, {PH}, {PH})",
-                    (account_id, ssvc, said, tsvc, taid, calls, traces, first_iso, last_iso),
+                    "call_count, trace_count, first_seen, last_seen, via_operations, "
+                    "total_tokens, sample) "
+                    f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'detected', {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                    (account_id, ssvc, said, tsvc, taid, calls, traces, first_iso,
+                     last_iso, via_json, tokens, sample),
                 )
             touched += 1
     return touched
+
+
+# Capture-content attribute keys (set by the plugin/SDK when capture is on).
+_CAPTURE_KEYS = (
+    "oversee.message.content",
+    "oversee.response.content",
+    "oversee.tool.result",
+)
+
+
+def _capture_sample(attrs_json: str | None) -> str | None:
+    """Pull a short content sample from a span's attributes — only present
+    when output-capture was enabled for that span. Returns None otherwise."""
+    if not attrs_json:
+        return None
+    try:
+        attrs = json.loads(attrs_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(attrs, dict):
+        return None
+    for k in _CAPTURE_KEYS:
+        v = attrs.get(k)
+        if isinstance(v, str) and v.strip():
+            s = v.strip().replace("\n", " ")
+            return s[:200] + ("…" if len(s) > 200 else "")
+    return None
 
 
 def get_connections(account_id: int | None) -> list[dict[str, Any]]:
@@ -3870,11 +3938,11 @@ def get_connections(account_id: int | None) -> list[dict[str, Any]]:
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             "SELECT id, source_service, source_agent_id, target_service, "
-            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            "target_agent_id, status, call_count, trace_count, total_tokens, via_operations, sample, first_seen, last_seen "
             f"FROM agent_connections {acct} ORDER BY last_seen DESC NULLS LAST, id DESC"
             if USE_POSTGRES
             else "SELECT id, source_service, source_agent_id, target_service, "
-            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            "target_agent_id, status, call_count, trace_count, total_tokens, via_operations, sample, first_seen, last_seen "
             f"FROM agent_connections {acct} ORDER BY last_seen DESC, id DESC",
             args,
         )
@@ -3919,7 +3987,7 @@ def add_manual_connection(
             )
         cur.execute(
             "SELECT id, source_service, source_agent_id, target_service, "
-            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            "target_agent_id, status, call_count, trace_count, total_tokens, via_operations, sample, first_seen, last_seen "
             f"FROM agent_connections WHERE {where}",
             key_args,
         )
@@ -3948,7 +4016,7 @@ def set_connection_status(
         sel_args = (conn_id, account_id) if account_id is not None else (conn_id,)
         cur.execute(
             "SELECT id, source_service, source_agent_id, target_service, "
-            "target_agent_id, status, call_count, trace_count, first_seen, last_seen "
+            "target_agent_id, status, call_count, trace_count, total_tokens, via_operations, sample, first_seen, last_seen "
             f"FROM agent_connections WHERE id = {PH} {acct}",
             sel_args,
         )

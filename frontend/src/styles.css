@@ -3882,7 +3882,52 @@ a:hover {
 .map-node-name { fill: var(--text-primary); font-size: 13px; font-weight: 600; }
 .map-node-plat { fill: var(--text-muted); font-size: 10.5px; }
 
-.map-edge { stroke: var(--wf-edge); stroke-width: 1.7; fill: none; }
+.map-canvas { position: relative; }
+.map-edge-hit { stroke: transparent; stroke-width: 14; cursor: pointer; }
+.map-edge { stroke: var(--wf-edge); stroke-width: 1.7; fill: none; pointer-events: none; }
+.map-edge.is-selected { stroke-width: 3.2; }
+
+/* Edge detail panel */
+.map-edge-detail {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 270px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-hover);
+  border-radius: 11px;
+  box-shadow: var(--shadow-md);
+  padding: 14px;
+  z-index: 5;
+}
+.map-edge-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.map-edge-detail-title { font-weight: 600; font-size: 13.5px; color: var(--text-primary); }
+.map-edge-arrow { color: var(--text-muted); }
+.map-edge-detail-close {
+  background: none; border: none; font-size: 18px; line-height: 1;
+  color: var(--text-muted); padding: 0 2px;
+}
+.map-edge-detail-close:hover { color: var(--text-primary); }
+.map-edge-detail-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.map-edge-detail-meta { font-size: 12px; color: var(--text-secondary); }
+.map-conn-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 7px; border-radius: 999px; }
+.map-conn-detected { background: var(--idle-faint); color: var(--text-muted); }
+.map-conn-confirmed { background: var(--wf-agent-faint); color: var(--wf-agent); }
+.map-conn-manual { background: var(--accent-faint); color: var(--accent); }
+.map-edge-detail-section { margin-top: 12px; }
+.map-edge-detail-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 5px; }
+.map-edge-ops { display: flex; flex-wrap: wrap; gap: 5px; }
+.map-edge-op {
+  font-size: 11px; color: var(--text-secondary); background: var(--code-bg);
+  border: 1px solid var(--border-default); padding: 1px 7px; border-radius: 6px;
+}
+.map-edge-op-count { color: var(--text-dim); margin-left: 4px; }
+.map-edge-sample {
+  font-size: 12px; color: var(--text-secondary); background: var(--bg-surface);
+  border: 1px solid var(--border-default); border-radius: 7px; padding: 8px;
+  max-height: 110px; overflow: auto;
+}
+.map-edge-detail-actions { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
 .map-edge-detected { stroke: var(--wf-edge); stroke-dasharray: 5 4; }
 .map-edge-confirmed { stroke: var(--wf-agent); stroke-width: 2.2; }
 .map-edge-manual { stroke: var(--accent); stroke-width: 2.2; }

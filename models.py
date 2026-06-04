@@ -370,6 +370,11 @@ class Connection(BaseModel):
     status: str = "detected"
     call_count: int = 0
     trace_count: int = 0
+    total_tokens: int = 0
+    # What's transferred: top bridging operations [{operation, count}], and a
+    # content sample when output-capture was on for the boundary span.
+    via_operations: list[dict[str, Any]] = Field(default_factory=list)
+    sample: str | None = None
     first_seen: str | None = None
     last_seen: str | None = None
 

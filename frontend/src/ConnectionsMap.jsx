@@ -106,6 +106,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
   const [positions, setPositions] = useState({})
   const [connectMode, setConnectMode] = useState(false)
   const [connectSource, setConnectSource] = useState(null)
+  const [selectedEdge, setSelectedEdge] = useState(null)
   const svgRef = useRef(null)
   const dragRef = useRef(null)
   const loadedRef = useRef(false)
@@ -353,7 +354,13 @@ export default function ConnectionsMap({ onSelectAgent }) {
               const midY = (a.y + b.y) / 2
               return (
                 <g key={e.id}>
-                  <path d={path} className={`map-edge map-edge-${e.status}`} markerEnd="url(#map-arrow)" fill="none" />
+                  <path
+                    d={path}
+                    className="map-edge-hit"
+                    fill="none"
+                    onClick={() => setSelectedEdge(e.id)}
+                  />
+                  <path d={path} className={`map-edge map-edge-${e.status} ${selectedEdge === e.id ? 'is-selected' : ''}`} markerEnd="url(#map-arrow)" fill="none" />
                   {e.calls > 0 && (
                     <text x={midX} y={midY - 6} textAnchor="middle" className="map-edge-label">{e.calls}</text>
                   )}
@@ -400,6 +407,55 @@ export default function ConnectionsMap({ onSelectAgent }) {
               )
             })}
           </svg>
+
+          {(() => {
+            const c = selectedEdge && connections.find((x) => x.id === selectedEdge)
+            if (!c) return null
+            return (
+              <div className="map-edge-detail">
+                <div className="map-edge-detail-head">
+                  <span className="map-edge-detail-title">
+                    {c.source_service} <span className="map-edge-arrow">→</span> {c.target_service}
+                  </span>
+                  <button type="button" className="map-edge-detail-close" onClick={() => setSelectedEdge(null)}>×</button>
+                </div>
+                <div className="map-edge-detail-row">
+                  <span className={`map-conn-status map-conn-${c.status}`}>{c.status}</span>
+                  <span className="map-edge-detail-meta">
+                    {c.call_count} call{c.call_count === 1 ? '' : 's'} · {c.trace_count} run{c.trace_count === 1 ? '' : 's'}
+                    {c.total_tokens ? ` · ${c.total_tokens.toLocaleString()} tokens` : ''}
+                  </span>
+                </div>
+                {c.via_operations && c.via_operations.length > 0 && (
+                  <div className="map-edge-detail-section">
+                    <div className="map-edge-detail-label">Transferred via</div>
+                    <div className="map-edge-ops">
+                      {c.via_operations.map((o) => (
+                        <span key={o.operation} className="map-edge-op mono">
+                          {o.operation}<span className="map-edge-op-count">×{o.count}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {c.sample && (
+                  <div className="map-edge-detail-section">
+                    <div className="map-edge-detail-label">Sample payload</div>
+                    <div className="map-edge-sample">{c.sample}</div>
+                  </div>
+                )}
+                <div className="map-edge-detail-actions">
+                  {c.status === 'detected' && (
+                    <>
+                      <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setStatus(c.id, 'confirmed'); }}>Confirm</button>
+                      <button type="button" className="btn btn-link btn-sm" onClick={() => { setStatus(c.id, 'dismissed'); setSelectedEdge(null) }}>Dismiss</button>
+                    </>
+                  )}
+                  <button type="button" className="btn btn-link btn-sm" onClick={() => { removeEdge(c.id); setSelectedEdge(null) }}>Delete</button>
+                </div>
+              </div>
+            )
+          })()}
         </div>
       )}
     </div>
