@@ -132,6 +132,10 @@ async def _pricing_refresh_loop() -> None:
         try:
             summary = await asyncio.to_thread(pricing_sync.refresh_pricing)
             logger.info("[Oversee] pricing refresh: %s", summary)
+            # Re-price stored spans so prior cost reflects current rates (e.g.
+            # a newly-added model). Cost is frozen at ingest otherwise.
+            recomputed = await asyncio.to_thread(database.recompute_span_costs)
+            logger.info("[Oversee] cost recompute: %s", recomputed)
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[Oversee] pricing refresh failed (keeping existing prices): %s",
@@ -1231,14 +1235,26 @@ async def get_pricing_coverage(
 async def refresh_pricing_now(request: Request) -> dict[str, Any]:
     """Pull the latest model prices from the LiteLLM list immediately,
     rather than waiting for the daily cycle. Runs the blocking fetch in a
-    worker thread so the event loop isn't stalled."""
+    worker thread so the event loop isn't stalled. Then re-prices stored
+    spans so historical cost reflects the refreshed rates."""
     try:
-        return await asyncio.to_thread(pricing_sync.refresh_pricing)
+        summary = await asyncio.to_thread(pricing_sync.refresh_pricing)
+        recomputed = await asyncio.to_thread(database.recompute_span_costs)
+        return {**summary, "recompute": recomputed}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Pricing refresh failed: {e}",
         )
+
+
+@app.post("/admin/pricing/recompute")
+async def recompute_costs_now(request: Request) -> dict[str, Any]:
+    """Re-price stored spans with the current pricing table (account-scoped),
+    without re-fetching prices. Use after correcting a rate or adding a model
+    so the displayed cost stops being frozen at ingest."""
+    account_id = getattr(request.state, "account_id", None)
+    return await asyncio.to_thread(database.recompute_span_costs, account_id)
 
 
 # ---------------------------------------------------------------------------
