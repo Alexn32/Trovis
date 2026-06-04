@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Dashboard from './Dashboard.jsx'
+import CostPage from './CostPage.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
 import Ask from './Ask.jsx'
@@ -177,11 +178,14 @@ function AppInner() {
     mainContent = <AddAgent onClose={closeOverlay} />
   } else if (overlay?.kind === 'settings') {
     mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} />
+  } else if (overlay?.kind === 'cost') {
+    mainContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
   } else if (tab === 'dashboard') {
     mainContent = (
       <Dashboard
         onOpenAgent={openDetail}
         onGoFleet={() => setTab('fleet')}
+        onOpenCost={() => setOverlay({ kind: 'cost' })}
         userName={account.userName}
       />
     )

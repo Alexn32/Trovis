@@ -313,6 +313,22 @@ export const api = {
   getAttention: () => request('/dashboard/attention'),
   getCost: () => request('/dashboard/cost'),
   getWorkFeed: () => request('/dashboard/work-feed'),
+  // --- dedicated cost page ---
+  getCostOverview: () => request('/cost/overview'),
+  setBudget: (monthlyBudget) =>
+    request('/cost/budget', {
+      method: 'PUT',
+      body: JSON.stringify({ monthly_budget: monthlyBudget }),
+    }),
+  setAgentBudget: (serviceName, agentId, monthlyCap) =>
+    request('/cost/agent-budget', {
+      method: 'PUT',
+      body: JSON.stringify({
+        service_name: serviceName,
+        agent_id: agentId || 'main',
+        monthly_cap: monthlyCap,
+      }),
+    }),
   // Concise fleet Q&A for the floating Ask pill. Returns { answer }.
   askDashboard: (messages) =>
     request('/dashboard/ask', {
