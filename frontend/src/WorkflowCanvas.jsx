@@ -133,6 +133,25 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
     }
   }
 
+  // Re-apply the clean left-to-right auto-layout (x=60 +230/step at y=200;
+  // branch targets bumped to y=80) and persist it so a reload holds.
+  function resetLayout() {
+    if (!wf) return
+    const ordered = [...(wf.steps || [])].sort((a, b) => a.step_order - b.step_order)
+    const branchTargets = new Set(
+      (wf.edges || []).filter((e) => e.is_branch).map((e) => e.to_step_id),
+    )
+    const next = {}
+    ordered.forEach((s, i) => {
+      next[s.id] = { x: 60 + i * 230, y: branchTargets.has(s.id) ? 80 : 200 }
+    })
+    setPositions(next)
+    setSelected(null)
+    Object.entries(next).forEach(([id, p]) => {
+      api.updateStepPosition(workflowId, Number(id), { pos_x: p.x, pos_y: p.y }).catch(() => {})
+    })
+  }
+
   if (error) {
     return (
       <div className="wf2">
@@ -204,6 +223,9 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
             )}
           </div>
           <span className="wf2-proc-meta">· {steps.length} steps</span>
+          <button type="button" className="wf2-reset-btn" onClick={resetLayout}>
+            Reset layout
+          </button>
         </div>
         <div className="wf2-proc-stats">
           <HeadStat label="Runs 24h" value={stats ? stats.total_runs : '—'} />
@@ -295,10 +317,10 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="wf2-node-top">
-                  <span className={`wf2-node-sq type-${s.step_type}`}>
-                    <cfg.Icon size={11} />
+                  <span className={`wf2-node-pill type-${s.step_type}`}>
+                    <cfg.Icon size={10} />
+                    {cfg.label}
                   </span>
-                  <span className="wf2-node-type">{cfg.label}</span>
                   {s.step_type === 'agent' && s.agent_service_name && (
                     <span className="wf2-node-agent">{s.agent_service_name}</span>
                   )}

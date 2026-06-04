@@ -4424,6 +4424,12 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .wf2-proc-name { font-size: 16px; font-weight: 800; color: var(--text-primary); }
 .wf2-proc-parts { display: flex; gap: 6px; flex-wrap: wrap; }
 .wf2-proc-meta { font-size: 11.5px; color: var(--text-muted); }
+.wf2-reset-btn {
+  font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
+  background: var(--bg-elevated); border: 1px solid var(--border-hover);
+  border-radius: 7px; padding: 4px 10px;
+}
+.wf2-reset-btn:hover { border-color: var(--text-primary); color: var(--text-primary); }
 .wf2-proc-stats { display: flex; gap: 22px; margin-left: auto; }
 .wf2-head-stat { display: flex; flex-direction: column; gap: 1px; }
 .wf2-head-stat-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
@@ -4432,7 +4438,12 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .wf2-head-stat-value.tone-warn { color: var(--dash-warn); }
 .wf2-legend { display: flex; gap: 12px; align-items: center; }
 .wf2-legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-muted); }
-.wf2-legend-sq { width: 8px; height: 8px; border-radius: 2px; }
+.wf2-legend-sq { width: 8px; height: 8px; border-radius: 2px; background: var(--text-dim); }
+.wf2-legend-sq.type-trigger { background: var(--node-trigger); }
+.wf2-legend-sq.type-agent { background: var(--node-agent); }
+.wf2-legend-sq.type-human { background: var(--node-human); }
+.wf2-legend-sq.type-decision { background: var(--node-decision); }
+.wf2-legend-sq.type-output { background: var(--node-output); }
 
 .wf2-canvas { position: relative; flex: 1; overflow: auto; min-height: 60vh;
   background-image: radial-gradient(circle, var(--wf2-grid) 0.75px, transparent 0.75px);
@@ -4473,6 +4484,19 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .wf2-node.type-human .wf2-node-type { color: var(--node-human); }
 .wf2-node.type-decision .wf2-node-type { color: var(--node-decision); }
 .wf2-node.type-output .wf2-node-type { color: var(--node-output); }
+/* Filled, color-coded type pill on each node. `color: var(--bg-primary)` flips
+   with the theme so text/icon contrast against the type-colored fill in both
+   light and dark (type colors are dark in light mode, light in dark mode). */
+.wf2-node-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 100px; color: var(--bg-primary); flex-shrink: 0;
+}
+.wf2-node-pill.type-trigger { background: var(--node-trigger); }
+.wf2-node-pill.type-agent { background: var(--node-agent); }
+.wf2-node-pill.type-human { background: var(--node-human); }
+.wf2-node-pill.type-decision { background: var(--node-decision); }
+.wf2-node-pill.type-output { background: var(--node-output); }
 .wf2-node-agent { font-size: 8.5px; font-weight: 600; color: var(--text-muted); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px; }
 .wf2-node-name { font-size: 12px; font-weight: 700; color: var(--text-primary); line-height: 1.25; }
 .wf2-node-stats { display: flex; gap: 8px; font-size: 10px; color: var(--text-muted); }
