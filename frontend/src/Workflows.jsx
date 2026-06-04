@@ -30,7 +30,7 @@ const STEP_META = {
 }
 const INSERTABLE = [
   ['agent', 'Agent action'],
-  ['human', 'Human action'],
+  ['human', 'Human / manual task'],
   ['decision', 'Decision'],
   ['output', 'Output'],
 ]
@@ -522,10 +522,14 @@ function WorkflowDetail({
         ))}
         {steps.length === 0 && (
           <div className="workflow-steps-empty">
-            No steps yet. Use the <strong>+</strong> above to add one, or regenerate
-            from telemetry below.
+            No steps yet — add one below, or regenerate from telemetry.
           </div>
         )}
+        <InsertBetween
+          disabled={busy}
+          label="Add step"
+          onInsert={(type) => onInsert(steps.length, type)}
+        />
       </div>
 
       <footer className="workflow-footer">
@@ -937,19 +941,30 @@ function StepEditor({ step, onCancel, onSave }) {
 // Insert-between control
 // ---------------------------------------------------------------------------
 
-function InsertBetween({ onInsert, disabled }) {
+function InsertBetween({ onInsert, disabled, label }) {
   const [open, setOpen] = useState(false)
   return (
-    <div className={`wf-insert ${open ? 'is-open' : ''}`}>
-      <button
-        type="button"
-        className="wf-insert-btn"
-        disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
-        aria-label="Insert step"
-      >
-        <PlusIcon size={13} />
-      </button>
+    <div className={`wf-insert ${open ? 'is-open' : ''} ${label ? 'wf-insert-labeled' : ''}`}>
+      {label ? (
+        <button
+          type="button"
+          className="wf-add-step-btn"
+          disabled={disabled}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <PlusIcon size={13} /> {label}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="wf-insert-btn"
+          disabled={disabled}
+          onClick={() => setOpen((v) => !v)}
+          aria-label="Insert step"
+        >
+          <PlusIcon size={13} />
+        </button>
+      )}
       {open && (
         <div className="wf-insert-menu" onMouseLeave={() => setOpen(false)}>
           {INSERTABLE.map(([type, label]) => (
