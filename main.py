@@ -2274,12 +2274,12 @@ async def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
     account_id = getattr(request.state, "account_id", None)
     msgs = [m.model_dump() for m in body.messages]
     try:
-        answer = asker.ask_about_fleet(account_id, msgs, concise=True)
+        result = asker.ask_about_fleet(account_id, msgs, concise=True)
     except asker.AskApiKeyMissingError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return AskResponse(answer=answer)
+    return AskResponse(answer=result["answer"], visual=result.get("visual"))
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -2288,12 +2288,12 @@ async def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
     account_id = getattr(request.state, "account_id", None)
     msgs = [m.model_dump() for m in body.messages]
     try:
-        answer = asker.ask_about_fleet(account_id, msgs)
+        result = asker.ask_about_fleet(account_id, msgs)
     except asker.AskApiKeyMissingError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return AskResponse(answer=answer)
+    return AskResponse(answer=result["answer"], visual=result.get("visual"))
 
 
 @app.post("/agents/{service_name}/ask", response_model=AskResponse)

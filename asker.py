@@ -13,6 +13,7 @@ session state.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -59,8 +60,54 @@ SYSTEM_AGENT = (
     "- Keep responses concise — a paragraph or short list, not an essay."
 )
 
+# Catalog of inline visual components the Dashboard Ask pill can render. Claude
+# returns {answer, visual}; the frontend maps visual.type → a React component.
+_VISUAL_CATALOG = """
+
+You can optionally include a visual component with your response. Return your answer as JSON:
+{
+  "answer": "Your text response here (2-4 sentences, plain prose, no markdown)",
+  "visual": null
+}
+
+If the question would benefit from a visual, set "visual" to one of these component types:
+
+1. bar_chart — comparing a numeric value across agents (error rates, costs, spans, durations).
+{"type": "bar_chart", "props": {"title": "Error Rate by Agent", "value_label": "Error rate", "value_suffix": "%", "data": [{"label": "Content Agent", "value": 33.3, "status": "degraded"}, {"label": "QA Checker", "value": 2.1, "status": "healthy"}]}}
+"status" is optional ("degraded" highlights problems, "healthy" is normal). Only include agents relevant to the question.
+
+2. metric_highlight — the answer is a single key number (today's cost, total tasks, fleet size).
+{"type": "metric_highlight", "props": {"label": "Fleet cost today", "value": "$14.82", "detail": "9% below 7-day average", "trend": "down"}}
+"trend" is "up", "down", or "flat".
+
+3. agent_card — the user asks about ONE specific agent.
+{"type": "agent_card", "props": {"name": "Fraud Detector", "status": "healthy", "type": "Python", "owner": "Alex", "description": "Real-time order fraud scoring.", "stats": {"spans": 2103, "error_rate": "0%", "avg_duration": "45ms", "last_seen": "Now", "cost_today": "$1.24"}}}
+
+4. comparison_table — comparing two or more agents side by side.
+{"type": "comparison_table", "props": {"title": "Fraud Detector vs Pricing Engine", "agents": [{"name": "Fraud Detector", "status": "healthy", "spans": 2103, "error_rate": "0%", "avg_duration": "45ms", "cost_today": "$1.24"}, {"name": "Pricing Engine", "status": "healthy", "spans": 1847, "error_rate": "0.2%", "avg_duration": "340ms", "cost_today": "$4.21"}]}}
+
+5. cost_projection — "what if" cost questions ("what if I pause X", "what would I save").
+{"type": "cost_projection", "props": {"title": "Impact of pausing Ad Optimizer", "current_daily": 14.82, "projected_daily": 10.95, "savings_daily": 3.87, "savings_monthly": 116.10, "note": "Also eliminates wasted spend from failed calls."}}
+
+6. fleet_grid — filtering agents ("which agents are idle", "show me healthy agents", "who has errors").
+{"type": "fleet_grid", "props": {"title": "Idle Agents", "agents": [{"name": "Content Agent", "status": "degraded", "last_seen": "20d ago", "spans": 192}]}}
+
+7. timeline — recent events / what happened in a time period.
+{"type": "timeline", "props": {"title": "Today's Activity", "events": [{"time": "9:41 AM", "agent": "Fraud Detector", "event": "Flagged 3 orders", "type": "action"}, {"time": "8:30 AM", "agent": "Shipping Tracker", "event": "2 delivery exceptions", "type": "warning"}]}}
+"type" is "action", "warning", or "info".
+
+8. workflow_summary — a specific workflow or process.
+{"type": "workflow_summary", "props": {"name": "Customer Service", "status": "healthy", "steps": 9, "agents": ["CS Agent", "Shipping Tracker"], "humans": ["Support Manager"], "stats": {"runs_24h": 47, "success_rate": "98%", "avg_cycle": "~8 min", "escalation_rate": "25%"}}}
+
+Rules:
+- Only include "visual" when it genuinely helps. Conversational follow-ups, clarifications, opinions, and simple yes/no answers should have "visual": null.
+- Use real numbers from the fleet data above. Never fabricate stats.
+- The "answer" text MUST be a complete standalone response. The visual is additive. Do not reference the visual ("as shown above") — just state the insight.
+- Always return valid JSON with both "answer" and "visual" keys."""
+
 # Tighter variant for the Dashboard "Ask about your fleet" pill: short,
 # plain-prose answers with no markdown so they read well in a chat bubble.
+# Includes the generative-UI catalog so Claude can attach an inline visual.
 SYSTEM_FLEET_CONCISE = (
     "You are an analyst for Oversee, an agent management system. You have "
     "read access to summaries for every AI agent the user is running. "
@@ -70,6 +117,7 @@ SYSTEM_FLEET_CONCISE = (
     "- If relevant, suggest one concrete action.\n"
     "- If the data doesn't support a confident answer, say so plainly.\n"
     "- Write in plain prose. Never use markdown headers, bullet points, or lists."
+    + _VISUAL_CATALOG
 )
 
 
@@ -78,18 +126,49 @@ SYSTEM_FLEET_CONCISE = (
 # ---------------------------------------------------------------------------
 
 
+def _parse_ask_response(raw_text: str) -> dict[str, Any]:
+    """Parse Claude's fleet reply into {answer, visual}, tolerant of non-JSON.
+
+    The concise/dashboard prompt asks for `{answer, visual}` JSON, but Claude
+    sometimes returns plain prose (or fences it). We strip ``` fences and try
+    json.loads; on any failure we treat the whole text as the answer with no
+    visual. This never raises — a malformed reply degrades to plain text."""
+    text = (raw_text or "").strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (``` or ```json) and any closing fence.
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and "answer" in parsed:
+            answer = parsed.get("answer")
+            visual = parsed.get("visual")
+            if isinstance(answer, str) and answer.strip():
+                # Only pass through a well-formed visual object.
+                if not (isinstance(visual, dict) and visual.get("type")):
+                    visual = None
+                return {"answer": answer.strip(), "visual": visual}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return {"answer": (raw_text or "").strip(), "visual": None}
+
+
 def ask_about_fleet(
     account_id: int | None,
     messages: list[dict[str, str]],
     concise: bool = False,
-) -> str:
-    """Answer a question about the whole fleet. When `concise` is set (the
-    Dashboard Ask pill), use the short plain-prose system prompt."""
+) -> dict[str, Any]:
+    """Answer a question about the whole fleet. Returns {answer, visual} —
+    `visual` is a {type, props} dict (Dashboard pill, concise prompt) or None.
+    When `concise` is set, use the short plain-prose + generative-UI prompt."""
     api_key = _require_api_key()
     agents = database.get_agents(account_id=account_id)
     context = _format_fleet_context(agents)
     system = SYSTEM_FLEET_CONCISE if concise else SYSTEM_FLEET
-    return _call_claude(api_key, system, context, messages)
+    raw = _call_claude(api_key, system, context, messages)
+    return _parse_ask_response(raw)
 
 
 def ask_about_agent(

@@ -686,8 +686,18 @@ class AskRequest(BaseModel):
     messages: list[AskMessage] = Field(default_factory=list)
 
 
+class AskVisual(BaseModel):
+    """An inline generative-UI block returned alongside an Ask answer. `type`
+    maps to a frontend component; `props` are passed straight through."""
+
+    type: str
+    props: dict[str, Any] = Field(default_factory=dict)
+
+
 class AskResponse(BaseModel):
     answer: str
+    # Optional inline visual (Dashboard Ask pill). None for plain-text replies.
+    visual: AskVisual | None = None
 
 
 # ---------------------------------------------------------------------------
