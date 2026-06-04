@@ -53,7 +53,12 @@ from models import (
     ConnectionCreate,
     ConnectionStatusUpdate,
     ConnectionsFromDescription,
+    AgentBudgetUpdate,
+    BudgetUpdate,
     CostAgent,
+    CostAgentRow,
+    CostModelRow,
+    CostOverview,
     CostResponse,
     DisplayNameRequest,
     HealthResponse,
@@ -1857,8 +1862,13 @@ async def remove_connection(conn_id: int, request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _monthly_budget() -> float:
-    """Configurable monthly cost budget for the Cost Intelligence card."""
+def _monthly_budget(account_id: int | None = None) -> float:
+    """The org's monthly cost budget: the per-account value when set, else the
+    OVERSEE_MONTHLY_BUDGET env default."""
+    if account_id is not None:
+        saved = database.get_account_budget(account_id)
+        if saved is not None:
+            return saved
     try:
         return float(os.environ.get("OVERSEE_MONTHLY_BUDGET", "500") or 500)
     except (TypeError, ValueError):
@@ -2143,14 +2153,19 @@ async def dashboard_attention(request: Request) -> list[AttentionItem]:
     return [AttentionItem(**it) for it in items]
 
 
-@app.get("/dashboard/cost", response_model=CostResponse)
-async def dashboard_cost(request: Request) -> CostResponse:
-    """Cost Intelligence: today's spend, month-to-date vs. budget, a 30-day
-    sparkline, and per-agent recent spend + trend. Pure DB, no Claude."""
-    account_id = getattr(request.state, "account_id", None)
-    agents = database.get_agents(account_id=account_id)
-    daily_rows = database.get_fleet_daily_cost(account_id, days=30)
+def _agent_cost_trend(a: dict) -> str:
+    """today (rolling 24h) vs the trailing 7-day daily average."""
+    c_today = a.get("cost_today") or 0.0
+    avg = (a.get("cost_7d") or 0.0) / 7.0
+    if c_today > avg * 1.1:
+        return "up"
+    if c_today < avg * 0.9:
+        return "down"
+    return "flat"
 
+
+def _daily_series(daily_rows: list[dict]) -> tuple[list[float], float, str]:
+    """30-element daily cost series (oldest→newest) + month-to-date + month prefix."""
     from datetime import datetime, timezone, timedelta
 
     today = datetime.now(timezone.utc).date()
@@ -2159,31 +2174,35 @@ async def dashboard_cost(request: Request) -> CostResponse:
         round(by_date.get((today - timedelta(days=i)).strftime("%Y-%m-%d"), 0.0), 6)
         for i in range(29, -1, -1)
     ]
-    today_cost = round(by_date.get(today.strftime("%Y-%m-%d"), 0.0), 6)
     month_prefix = today.strftime("%Y-%m-")
-    month_total = round(
-        sum(r["cost"] for r in daily_rows if r["date"].startswith(month_prefix)), 6
+    mtd = round(sum(r["cost"] for r in daily_rows if r["date"].startswith(month_prefix)), 6)
+    return daily, mtd, month_prefix
+
+
+@app.get("/dashboard/cost", response_model=CostResponse)
+async def dashboard_cost(request: Request) -> CostResponse:
+    """Cost Intelligence card. `today` is the rolling-24h fleet spend (sum of
+    each agent's cost_today) — identical to the Fleet page's "cost today" —
+    and per-agent rows show that same today figure. Month-to-date vs. the org
+    budget; 30-day sparkline. Pure DB, no Claude."""
+    account_id = getattr(request.state, "account_id", None)
+    agents = database.get_agents(account_id=account_id)
+    daily, month_total, _ = _daily_series(
+        database.get_fleet_daily_cost(account_id, days=30)
     )
-    budget = _monthly_budget()
+    # Match the Fleet summary exactly: sum of rolling-24h per-agent cost_today.
+    today_cost = round(sum(a.get("cost_today") or 0.0 for a in agents), 6)
+    budget = _monthly_budget(account_id)
     budget_pct = round(month_total / budget * 100.0, 1) if budget > 0 else 0.0
 
-    cost_agents: list[CostAgent] = []
-    for a in agents:
-        c_today = a.get("cost_today") or 0.0
-        avg = (a.get("cost_7d") or 0.0) / 7.0
-        if c_today > avg * 1.1:
-            trend = "up"
-        elif c_today < avg * 0.9:
-            trend = "down"
-        else:
-            trend = "flat"
-        cost_agents.append(
-            CostAgent(
-                name=a.get("display_name") or a["service_name"],
-                cost=round(a.get("cost_7d") or 0.0, 6),
-                trend=trend,
-            )
+    cost_agents = [
+        CostAgent(
+            name=a.get("display_name") or a["service_name"],
+            cost=round(a.get("cost_today") or 0.0, 6),
+            trend=_agent_cost_trend(a),
         )
+        for a in agents
+    ]
     cost_agents.sort(key=lambda x: x.cost, reverse=True)
 
     return CostResponse(
@@ -2194,6 +2213,84 @@ async def dashboard_cost(request: Request) -> CostResponse:
         agents=cost_agents[:8],
         daily=daily,
     )
+
+
+@app.get("/cost/overview", response_model=CostOverview)
+async def cost_overview(request: Request) -> CostOverview:
+    """The dedicated cost page: today (rolling 24h), month-to-date vs. the org
+    budget, a 30-day trend, per-agent breakdown (today/7d/all-time/MTD + the
+    editable monthly cap + over-cap flag), and an org-wide by-model breakdown."""
+    account_id = getattr(request.state, "account_id", None)
+    agents = database.get_agents(account_id=account_id)
+    daily, month_total, _ = _daily_series(
+        database.get_fleet_daily_cost(account_id, days=30)
+    )
+    breakdown = database.get_cost_breakdown(account_id)
+    mtd_by_service = breakdown.get("by_service_mtd", {})
+    caps = {
+        (b["service_name"], b["agent_id"]): b["monthly_cap_usd"]
+        for b in database.get_agent_budgets(account_id)
+    }
+
+    today_cost = round(sum(a.get("cost_today") or 0.0 for a in agents), 6)
+    budget = _monthly_budget(account_id)
+    budget_pct = round(month_total / budget * 100.0, 1) if budget > 0 else 0.0
+
+    rows: list[CostAgentRow] = []
+    for a in agents:
+        svc = a["service_name"]
+        cap = caps.get((svc, "main"))
+        mtd = round(mtd_by_service.get(svc, 0.0), 6)
+        rows.append(
+            CostAgentRow(
+                service_name=svc,
+                agent_id="main",
+                name=a.get("display_name") or svc,
+                status=_agent_status(a),
+                today=round(a.get("cost_today") or 0.0, 6),
+                cost_7d=round(a.get("cost_7d") or 0.0, 6),
+                total=round(a.get("estimated_cost_usd") or 0.0, 6),
+                mtd=mtd,
+                monthly_cap=cap,
+                over_cap=bool(cap is not None and mtd > cap),
+                trend=_agent_cost_trend(a),
+            )
+        )
+    rows.sort(key=lambda r: r.mtd, reverse=True)
+
+    by_model = [CostModelRow(**m) for m in breakdown.get("by_model", [])]
+    return CostOverview(
+        today=today_cost,
+        month_total=month_total,
+        month_budget=budget,
+        budget_pct=budget_pct,
+        over_budget=bool(budget > 0 and month_total > budget),
+        daily=daily,
+        agents=rows,
+        by_model=by_model,
+    )
+
+
+@app.put("/cost/budget", response_model=CostOverview)
+async def set_cost_budget(request: Request, body: BudgetUpdate) -> CostOverview:
+    """Set (or clear) the org's monthly budget, then return the fresh overview."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="no account to set a budget on")
+    database.set_account_budget(account_id, body.monthly_budget)
+    return await cost_overview(request)
+
+
+@app.put("/cost/agent-budget", response_model=CostOverview)
+async def set_cost_agent_budget(request: Request, body: AgentBudgetUpdate) -> CostOverview:
+    """Set (or clear) a per-agent monthly cap, then return the fresh overview."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="no account to set a cap on")
+    database.set_agent_budget(
+        account_id, body.service_name, body.agent_id or "main", body.monthly_cap
+    )
+    return await cost_overview(request)
 
 
 @app.get("/dashboard/work-feed", response_model=list[WorkFeedItem])

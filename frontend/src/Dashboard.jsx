@@ -46,19 +46,24 @@ function fmtRel(iso) {
   return `${Math.floor(h / 24)}d ago`
 }
 
+// Match utils.formatCost precision so the dashboard's cost matches the Fleet
+// page (e.g. $0.021, not $0.02) for sub-dollar amounts.
 function fmtMoney(n) {
   const v = Number(n) || 0
-  return `$${v.toFixed(2)}`
+  if (v === 0) return '$0.00'
+  if (v < 0.01) return `$${v.toFixed(4)}`
+  if (v < 1) return `$${v.toFixed(3)}`
+  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-export default function Dashboard({ onOpenAgent, onGoFleet, userName }) {
+export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, userName }) {
   return (
     <div className="dash">
       <Greeting userName={userName} />
       <BriefingCard />
       <div className="dash-grid-2">
         <AttentionCard />
-        <CostCard />
+        <CostCard onOpenCost={onOpenCost} />
       </div>
       <WorkFeedCard onGoFleet={onGoFleet} />
       <FleetGrid onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
@@ -240,7 +245,7 @@ function AttentionRow({ item, open, onToggle }) {
 
 // --- 3b. Cost Intelligence -------------------------------------------------
 
-function CostCard() {
+function CostCard({ onOpenCost }) {
   const [c, setC] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -258,9 +263,16 @@ function CostCard() {
 
   const over = (c?.budget_pct || 0) > 85
   return (
-    <div className="dash-card dash-cost">
-      <div className="dash-card-head">
+    <div
+      className={`dash-card dash-cost ${onOpenCost ? 'is-clickable' : ''}`}
+      onClick={onOpenCost ? () => onOpenCost() : undefined}
+      role={onOpenCost ? 'button' : undefined}
+      tabIndex={onOpenCost ? 0 : undefined}
+      onKeyDown={onOpenCost ? (e) => (e.key === 'Enter' || e.key === ' ') && onOpenCost() : undefined}
+    >
+      <div className="dash-card-head spread">
         <span className="dash-section-title">Cost</span>
+        {onOpenCost && <span className="dash-cost-link">Details →</span>}
       </div>
       {loading ? (
         <div className="dash-skel">

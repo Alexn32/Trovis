@@ -783,8 +783,8 @@ class CostAgent(BaseModel):
 
 
 class CostResponse(BaseModel):
-    """Response for GET /dashboard/cost. `daily` is up to 30 floats (oldest
-    → newest) for the sparkline. Budget fields come from OVERSEE_MONTHLY_BUDGET."""
+    """Response for GET /dashboard/cost. `today` matches the Fleet page (rolling
+    24h). `daily` is up to 30 floats (oldest → newest) for the sparkline."""
 
     today: float = 0.0
     month_total: float = 0.0
@@ -792,6 +792,60 @@ class CostResponse(BaseModel):
     budget_pct: float = 0.0
     agents: list[CostAgent] = Field(default_factory=list)
     daily: list[float] = Field(default_factory=list)
+
+
+# --- dedicated cost page (overview + budgets) ---
+
+
+class CostModelRow(BaseModel):
+    model: str
+    tokens: int = 0
+    cost: float = 0.0
+
+
+class CostAgentRow(BaseModel):
+    """Per-agent (per service group) cost row on the cost page. `mtd` is
+    month-to-date spend; `monthly_cap` is the editable per-agent limit (None =
+    unset); `over_cap` is mtd > cap."""
+
+    service_name: str
+    agent_id: str = "main"
+    name: str
+    status: str = "healthy"
+    today: float = 0.0
+    cost_7d: float = 0.0
+    total: float = 0.0
+    mtd: float = 0.0
+    monthly_cap: float | None = None
+    over_cap: bool = False
+    trend: str = "flat"
+
+
+class CostOverview(BaseModel):
+    """Response for GET /cost/overview — the dedicated cost page."""
+
+    today: float = 0.0
+    month_total: float = 0.0
+    month_budget: float = 0.0
+    budget_pct: float = 0.0
+    over_budget: bool = False
+    daily: list[float] = Field(default_factory=list)
+    agents: list[CostAgentRow] = Field(default_factory=list)
+    by_model: list[CostModelRow] = Field(default_factory=list)
+
+
+class BudgetUpdate(BaseModel):
+    """Body for PUT /cost/budget. None clears the budget (env default applies)."""
+
+    monthly_budget: float | None = None
+
+
+class AgentBudgetUpdate(BaseModel):
+    """Body for PUT /cost/agent-budget. `monthly_cap` None clears the cap."""
+
+    service_name: str
+    agent_id: str = "main"
+    monthly_cap: float | None = None
 
 
 class WorkFeedItem(BaseModel):

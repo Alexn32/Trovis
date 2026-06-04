@@ -644,6 +644,32 @@ CREATE TABLE IF NOT EXISTS agent_display_names (
 )
 """
 
+# Per-agent monthly spend caps (the cost page's per-agent "limits"). One row
+# per (account, service_name, agent_id); absence = no cap.
+_AGENT_BUDGETS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS agent_budgets (
+    id               SERIAL    PRIMARY KEY,
+    account_id       INTEGER,
+    service_name     TEXT      NOT NULL,
+    agent_id         TEXT      NOT NULL DEFAULT 'main',
+    monthly_cap_usd  REAL      NOT NULL,
+    updated_at       TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, service_name, agent_id)
+)
+"""
+
+_AGENT_BUDGETS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS agent_budgets (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id       INTEGER,
+    service_name     TEXT    NOT NULL,
+    agent_id         TEXT    NOT NULL DEFAULT 'main',
+    monthly_cap_usd  REAL    NOT NULL,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, service_name, agent_id)
+)
+"""
+
 # Process workflows: a named, ordered sequence of steps (agent + human)
 # describing how work flows through an agent's process. Auto-generated from
 # telemetry + identity by Claude, then operator-editable. workflow_steps
@@ -807,6 +833,7 @@ _INDEXES = [
     # Trace-grouping for agent-to-agent connection detection.
     "CREATE INDEX IF NOT EXISTS idx_spans_account_trace ON spans(account_id, trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_connections_account_id ON agent_connections(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_budgets_account ON agent_budgets(account_id, service_name, agent_id)",
 ]
 
 
@@ -842,6 +869,7 @@ def init_db() -> None:
             _SESSIONS_DDL_PG,
             _INVITES_DDL_PG,
             _CONNECTIONS_DDL_PG,
+            _AGENT_BUDGETS_DDL_PG,
         ]
     else:
         ddls = [
@@ -863,6 +891,7 @@ def init_db() -> None:
             _SESSIONS_DDL_SQLITE,
             _INVITES_DDL_SQLITE,
             _CONNECTIONS_DDL_SQLITE,
+            _AGENT_BUDGETS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -898,6 +927,9 @@ def init_db() -> None:
         # 'individual'; name stays NULL until set.
         _try_add_column(cur, "accounts", "account_type", "TEXT DEFAULT 'individual'")
         _try_add_column(cur, "accounts", "name", "TEXT")
+        # Editable org-wide monthly cost budget (the cost page's "limit"). NULL
+        # until set → falls back to the OVERSEE_MONTHLY_BUDGET env default.
+        _try_add_column(cur, "accounts", "monthly_budget_usd", "REAL")
         # Connection edges gained "what's transferred" metrics post-launch.
         _try_add_column(cur, "agent_connections", "via_operations", "TEXT")
         _try_add_column(cur, "agent_connections", "total_tokens", "INTEGER DEFAULT 0")
@@ -3549,6 +3581,155 @@ def get_fleet_daily_cost(
         {"date": day, "tokens": v["tokens"], "cost": round(v["cost"], 6)}
         for day, v in sorted(by_day.items())
     ]
+
+
+def get_cost_breakdown(account_id: int | None) -> dict[str, Any]:
+    """Month-to-date (calendar month, UTC) cost breakdown for the cost page:
+    org month_total, per-service MTD (for per-agent cap comparison), and an
+    org-wide by-model list. One pass over this month's token-bearing spans."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_ns = int(month_start.timestamp() * 1_000_000_000)
+
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    sql = f"""
+        SELECT service_name, total_tokens, estimated_cost_usd, attributes
+        FROM spans
+        WHERE total_tokens IS NOT NULL
+          AND start_time_unix >= {PH}
+          {account_filter}
+    """
+    args: list[Any] = [start_ns]
+    if account_id is not None:
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        rows = cur.fetchall()
+
+    by_service: dict[str, float] = {}
+    by_model: dict[str, dict[str, float]] = {}
+    month_total = 0.0
+    for r in rows:
+        cost = r["estimated_cost_usd"] or 0.0
+        tok = r["total_tokens"] or 0
+        month_total += cost
+        by_service[r["service_name"]] = by_service.get(r["service_name"], 0.0) + cost
+        model = "unknown"
+        try:
+            attrs = json.loads(r["attributes"] or "{}")
+            if isinstance(attrs, dict):
+                model = attrs.get("gen_ai.request.model") or "unknown"
+        except (TypeError, ValueError):
+            pass
+        m = by_model.setdefault(model, {"tokens": 0, "cost": 0.0})
+        m["tokens"] += tok
+        m["cost"] += cost
+    return {
+        "month_total": round(month_total, 6),
+        "by_service_mtd": {k: round(v, 6) for k, v in by_service.items()},
+        "by_model": sorted(
+            [
+                {"model": k, "tokens": v["tokens"], "cost": round(v["cost"], 6)}
+                for k, v in by_model.items()
+            ],
+            key=lambda x: x["cost"],
+            reverse=True,
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cost budgets (org monthly budget + per-agent monthly caps)
+# ---------------------------------------------------------------------------
+
+
+def get_account_budget(account_id: int | None) -> float | None:
+    """The org's editable monthly budget, or None when unset (use env default)."""
+    if account_id is None:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT monthly_budget_usd FROM accounts WHERE id = {PH}", (account_id,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    v = _row_get(row, "monthly_budget_usd")
+    return float(v) if v is not None else None
+
+
+def set_account_budget(account_id: int | None, usd: float | None) -> None:
+    if account_id is None:
+        return
+    val = None if usd is None else max(0.0, float(usd))
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE accounts SET monthly_budget_usd = {PH} WHERE id = {PH}",
+            (val, account_id),
+        )
+
+
+def get_agent_budgets(account_id: int | None) -> list[dict[str, Any]]:
+    """All per-agent monthly caps for the account."""
+    clause = f"account_id = {PH}" if account_id is not None else "account_id IS NULL"
+    args = (account_id,) if account_id is not None else ()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT service_name, COALESCE(agent_id, 'main') AS agent_id, "
+            f"monthly_cap_usd FROM agent_budgets WHERE {clause}",
+            args,
+        )
+        return [
+            {
+                "service_name": r["service_name"],
+                "agent_id": r["agent_id"],
+                "monthly_cap_usd": float(r["monthly_cap_usd"]),
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def set_agent_budget(
+    account_id: int | None,
+    service_name: str,
+    agent_id: str | None,
+    monthly_cap_usd: float | None,
+) -> None:
+    """Upsert (or, when monthly_cap_usd is None, clear) a per-agent monthly cap."""
+    aid = agent_id or "main"
+    with _connect() as conn, _cursor(conn) as cur:
+        if monthly_cap_usd is None:
+            clause = (
+                f"account_id = {PH}" if account_id is not None else "account_id IS NULL"
+            )
+            args = (service_name, aid) + (
+                (account_id,) if account_id is not None else ()
+            )
+            cur.execute(
+                f"DELETE FROM agent_budgets WHERE service_name = {PH} "
+                f"AND agent_id = {PH} AND {clause}",
+                args,
+            )
+            return
+        cap = max(0.0, float(monthly_cap_usd))
+        if USE_POSTGRES:
+            cur.execute(
+                "INSERT INTO agent_budgets (account_id, service_name, agent_id, monthly_cap_usd) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (account_id, service_name, agent_id) "
+                "DO UPDATE SET monthly_cap_usd = EXCLUDED.monthly_cap_usd, updated_at = NOW()",
+                (account_id, service_name, aid, cap),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO agent_budgets (account_id, service_name, agent_id, monthly_cap_usd) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (account_id, service_name, agent_id) "
+                "DO UPDATE SET monthly_cap_usd = excluded.monthly_cap_usd, updated_at = CURRENT_TIMESTAMP",
+                (account_id, service_name, aid, cap),
+            )
 
 
 # ---------------------------------------------------------------------------

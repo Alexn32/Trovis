@@ -4625,3 +4625,58 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .ask-vis-part.human { color: var(--node-human); background: var(--node-human-bg); }
 .ask-vis-wf-stats { display: flex; flex-wrap: wrap; gap: 16px; }
 .ask-vis-wf-stat { display: flex; flex-direction: column; gap: 1px; }
+
+/* =============================================================================
+   Dedicated cost page (overlay) + clickable dashboard cost card
+   ============================================================================= */
+.dash-cost.is-clickable { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.dash-cost.is-clickable:hover { border-color: var(--border-hover); box-shadow: var(--shadow-sm); }
+.dash-cost-link { font-size: 11px; font-weight: 600; color: var(--text-muted); }
+.dash-cost.is-clickable:hover .dash-cost-link { color: var(--text-primary); }
+
+.costp .wf2-back { margin-bottom: 2px; }
+.costp-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.costp-sum-box {
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+  border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 3px;
+}
+.costp-sum-label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.costp-bignum { font-size: 26px; font-weight: 800; color: var(--text-primary); letter-spacing: -0.02em; }
+.costp-sum-sub { font-size: 11.5px; color: var(--text-muted); }
+.costp-sum-sub.over { color: var(--dash-warn); font-weight: 600; }
+.costp-budget-bar { height: 4px; border-radius: 100px; background: var(--bg-surface); overflow: hidden; margin-top: 6px; }
+.costp-budget-fill { height: 100%; border-radius: 100px; background: var(--text-primary); transition: width 0.3s ease; }
+.costp-budget-fill.over { background: var(--dash-warn); }
+.costp-budget-edit { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.costp-dollar { font-size: 13px; color: var(--text-muted); }
+.costp-budget-input { width: 110px; padding: 6px 8px; }
+
+.costp-chart { width: 100%; height: 90px; display: block; }
+
+.costp-table { display: flex; flex-direction: column; }
+.costp-thead, .costp-row {
+  display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1.3fr;
+  align-items: center; gap: 8px; padding: 9px 18px;
+}
+.costp-table.model .costp-thead, .costp-row.model { grid-template-columns: 2fr 1fr 1fr; }
+.costp-thead {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted); border-bottom: 1px solid var(--border-default);
+}
+.costp-row { border-bottom: 1px solid var(--border-default); font-size: 12.5px; color: var(--text-secondary); }
+.costp-row:last-child { border-bottom: none; }
+.costp-row.over { background: var(--warning-faint); }
+.costp .num { text-align: right; font-variant-numeric: tabular-nums; }
+.costp .strong { font-weight: 700; color: var(--text-primary); }
+.costp-agent { display: flex; align-items: center; gap: 7px; font-weight: 650; color: var(--text-primary); overflow: hidden; }
+.costp-over-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--dash-warn); background: var(--warning-faint); padding: 1px 6px; border-radius: 100px; }
+.costp-cap-cell { display: flex; align-items: center; gap: 3px; justify-content: flex-end; }
+.costp-cap-input { width: 76px; padding: 4px 6px; text-align: right; }
+.costp-model { font-size: 12px; color: var(--text-primary); }
+
+@media (max-width: 760px) {
+  .costp-summary { grid-template-columns: 1fr; }
+  .costp-thead, .costp-row { grid-template-columns: 1.5fr 1fr 1fr 1.2fr; }
+  .costp-thead span:nth-child(3), .costp-row span:nth-child(3),
+  .costp-thead span:nth-child(5), .costp-row span:nth-child(5) { display: none; }
+}
