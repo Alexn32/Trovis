@@ -50,16 +50,38 @@ function fmtRel(iso) {
 
 
 export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, userName }) {
+  // Silently re-sync every data card when the tab regains focus (throttled to
+  // once per 30s). Cards keep their current data on screen while refetching —
+  // no skeleton flash — so this is invisible until fresh numbers arrive. The
+  // AskPill is intentionally excluded so an in-progress conversation survives.
+  const [refreshKey, setRefreshKey] = useState(0)
+  useEffect(() => {
+    let last = Date.now()
+    function maybeRefresh() {
+      if (document.hidden) return
+      if (Date.now() - last > 30000) {
+        last = Date.now()
+        setRefreshKey((k) => k + 1)
+      }
+    }
+    window.addEventListener('focus', maybeRefresh)
+    document.addEventListener('visibilitychange', maybeRefresh)
+    return () => {
+      window.removeEventListener('focus', maybeRefresh)
+      document.removeEventListener('visibilitychange', maybeRefresh)
+    }
+  }, [])
+
   return (
     <div className="dash">
       <Greeting userName={userName} />
-      <BriefingCard />
+      <BriefingCard refreshKey={refreshKey} />
       <div className="dash-grid-2">
-        <AttentionCard />
-        <CostCard onOpenCost={onOpenCost} />
+        <AttentionCard refreshKey={refreshKey} />
+        <CostCard refreshKey={refreshKey} onOpenCost={onOpenCost} />
       </div>
-      <WorkFeedCard onGoFleet={onGoFleet} />
-      <FleetGrid onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
+      <WorkFeedCard refreshKey={refreshKey} onGoFleet={onGoFleet} />
+      <FleetGrid refreshKey={refreshKey} onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
       <AskPill />
     </div>
   )
@@ -90,7 +112,7 @@ function Greeting({ userName }) {
 
 // --- 2. Daily Briefing -----------------------------------------------------
 
-function BriefingCard() {
+function BriefingCard({ refreshKey }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -113,7 +135,7 @@ function BriefingCard() {
     return () => {
       alive = false
     }
-  }, [])
+  }, [refreshKey])
 
   return (
     <div className="dash-card dash-briefing">
@@ -155,7 +177,7 @@ function BriefingCard() {
 
 // --- 3a. Needs Attention ---------------------------------------------------
 
-function AttentionCard() {
+function AttentionCard({ refreshKey }) {
   const [items, setItems] = useState(null)
   const [openIdx, setOpenIdx] = useState(0)
 
@@ -168,7 +190,7 @@ function AttentionCard() {
     return () => {
       alive = false
     }
-  }, [])
+  }, [refreshKey])
 
   const count = items?.length || 0
   return (
@@ -238,7 +260,7 @@ function AttentionRow({ item, open, onToggle }) {
 
 // --- 3b. Cost Intelligence -------------------------------------------------
 
-function CostCard({ onOpenCost }) {
+function CostCard({ onOpenCost, refreshKey }) {
   const [c, setC] = useState(null)
   const [loading, setLoading] = useState(true)
 
@@ -252,7 +274,7 @@ function CostCard({ onOpenCost }) {
     return () => {
       alive = false
     }
-  }, [])
+  }, [refreshKey])
 
   const over = (c?.budget_pct || 0) > 85
   return (
@@ -375,7 +397,7 @@ function TrendArrow({ trend }) {
 
 // --- 4. Work Feed ----------------------------------------------------------
 
-function WorkFeedCard({ onGoFleet }) {
+function WorkFeedCard({ onGoFleet, refreshKey }) {
   const [feed, setFeed] = useState(null)
 
   useEffect(() => {
@@ -387,7 +409,7 @@ function WorkFeedCard({ onGoFleet }) {
     return () => {
       alive = false
     }
-  }, [])
+  }, [refreshKey])
 
   return (
     <section className="dash-section">
@@ -427,7 +449,7 @@ function WorkFeedCard({ onGoFleet }) {
 
 // --- 5. Fleet Status grid --------------------------------------------------
 
-function FleetGrid({ onOpenAgent, onGoFleet }) {
+function FleetGrid({ onOpenAgent, onGoFleet, refreshKey }) {
   const [agents, setAgents] = useState(null)
 
   useEffect(() => {
@@ -439,7 +461,7 @@ function FleetGrid({ onOpenAgent, onGoFleet }) {
     return () => {
       alive = false
     }
-  }, [])
+  }, [refreshKey])
 
   return (
     <section className="dash-section">
