@@ -1,19 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ArrowLeftIcon } from './Icons.jsx'
+import { formatCost as fmtMoney } from './utils.js'
 
 // Dedicated cost page (overlay opened from the dashboard Cost card). Shows
 // today (rolling 24h, matching Fleet), month-to-date vs. an editable org
 // budget, a 30-day trend, a per-agent breakdown with editable monthly caps,
-// and an org-wide by-model breakdown.
-
-function fmtMoney(n) {
-  const v = Number(n) || 0
-  if (v === 0) return '$0.00'
-  if (v < 0.01) return `$${v.toFixed(4)}`
-  if (v < 1) return `$${v.toFixed(3)}`
-  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
+// and an org-wide by-model breakdown. Costs render via the shared formatCost
+// (sub-dollar amounts in cents).
 
 function fmtTokens(n) {
   const v = Number(n) || 0

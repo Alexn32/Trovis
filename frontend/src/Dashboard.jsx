@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { AskVisualRenderer } from './AskVisuals.jsx'
+// Sub-dollar costs render in cents (e.g. "2.6¢"); shared with Fleet so they match.
+import { formatCost as fmtMoney } from './utils.js'
 import {
   SparkleIcon,
   ChevronDownIcon,
@@ -46,15 +48,6 @@ function fmtRel(iso) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-// Match utils.formatCost precision so the dashboard's cost matches the Fleet
-// page (e.g. $0.021, not $0.02) for sub-dollar amounts.
-function fmtMoney(n) {
-  const v = Number(n) || 0
-  if (v === 0) return '$0.00'
-  if (v < 0.01) return `$${v.toFixed(4)}`
-  if (v < 1) return `$${v.toFixed(3)}`
-  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
 
 export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, userName }) {
   return (
