@@ -1,7 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ArrowLeftIcon } from './Icons.jsx'
 import { formatCost as fmtMoney } from './utils.js'
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function agoLabel(ts) {
+  if (!ts) return ''
+  const s = Math.floor((Date.now() - ts) / 1000)
+  if (s < 10) return 'just now'
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  return `${Math.floor(m / 60)}h ago`
+}
 
 // Dedicated cost page (overlay opened from the dashboard Cost card). Shows
 // today (rolling 24h, matching Fleet), month-to-date vs. an editable org
@@ -21,20 +33,36 @@ export default function CostPage({ onBack, onOpenAgent }) {
   const [error, setError] = useState(null)
   const [budgetInput, setBudgetInput] = useState('')
   const [savingBudget, setSavingBudget] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [lastUpdated, setLastUpdated] = useState(null)
+  const [, forceTick] = useState(0) // keeps the "updated X ago" label live
 
-  useEffect(() => {
-    let alive = true
-    api
-      .getCostOverview()
-      .then((d) => {
-        if (!alive) return
-        setData(d)
-        setBudgetInput(d.month_budget ? String(d.month_budget) : '')
-      })
-      .catch((e) => alive && setError(e.message || 'Could not load cost data'))
-    return () => {
-      alive = false
+  const load = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      const d = await api.getCostOverview()
+      setData(d)
+      setBudgetInput(d.month_budget ? String(d.month_budget) : '')
+      setLastUpdated(Date.now())
+      setError(null)
+    } catch (e) {
+      setError(e.message || 'Could not load cost data')
+    } finally {
+      setRefreshing(false)
     }
+  }, [])
+
+  // Initial load + auto-refresh once a day while the page stays open.
+  useEffect(() => {
+    load()
+    const id = setInterval(load, DAY_MS)
+    return () => clearInterval(id)
+  }, [load])
+
+  // Re-render every 30s so the "updated X ago" label stays current.
+  useEffect(() => {
+    const id = setInterval(() => forceTick((t) => t + 1), 30000)
+    return () => clearInterval(id)
   }, [])
 
   async function saveBudget() {
@@ -62,7 +90,9 @@ export default function CostPage({ onBack, onOpenAgent }) {
     }
   }
 
-  if (error) {
+  // Only take over the page with an error before the first successful load —
+  // a failed manual/daily refresh keeps the existing data on screen.
+  if (error && !data) {
     return (
       <div className="dash costp">
         <button type="button" className="wf2-back" onClick={onBack}>
@@ -91,9 +121,24 @@ export default function CostPage({ onBack, onOpenAgent }) {
       <button type="button" className="wf2-back" onClick={onBack}>
         <ArrowLeftIcon size={15} /> Dashboard
       </button>
-      <h1 className="dash-hello" style={{ marginBottom: 4 }}>
-        Cost
-      </h1>
+      <div className="costp-titlerow">
+        <h1 className="dash-hello" style={{ margin: 0 }}>
+          Cost
+        </h1>
+        <div className="costp-refresh">
+          {lastUpdated && (
+            <span className="costp-updated">Updated {agoLabel(lastUpdated)}</span>
+          )}
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={load}
+            disabled={refreshing}
+          >
+            {refreshing ? 'Refreshing…' : '↻ Refresh'}
+          </button>
+        </div>
+      </div>
 
       {/* Summary row */}
       <div className="costp-summary">
