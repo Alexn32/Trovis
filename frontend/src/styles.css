@@ -3284,13 +3284,41 @@ a:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
+  opacity: 0.35;
   transition: opacity 0.15s ease, border-color 0.15s ease;
   z-index: 1;
 }
 .workflow-steps:hover .wf-insert-btn,
 .wf-insert.is-open .wf-insert-btn {
   opacity: 1;
+}
+
+/* Persistent, discoverable "Add step" at the end of the flow. */
+.wf-insert-labeled {
+  height: auto;
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+.wf-insert-labeled::before {
+  content: none;
+}
+.wf-add-step-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px dashed var(--border-hover);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  z-index: 1;
+}
+.wf-add-step-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  border-style: solid;
 }
 .wf-insert-btn:hover {
   border-color: var(--accent);
