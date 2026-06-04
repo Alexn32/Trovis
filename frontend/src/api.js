@@ -230,11 +230,21 @@ export const api = {
   deleteWorkflow: (id) => request(`/workflows/${id}`, { method: 'DELETE' }),
   // Auto-build a workflow from one agent's telemetry. data:
   // { name, agent_service_name, agent_id }. Returns the full workflow.
+  // Single-agent (legacy) OR multi-agent: { method:'agents', agents:[...], human_roles:[...] }.
   generateWorkflow: (data) =>
     request('/workflows/generate', { method: 'POST', body: JSON.stringify(data) }),
-  // AI builder: draft a workflow from a plain-English description.
+  // AI builds a full multi-agent graph (participants + steps + edges + positions).
+  describeWorkflow: (data) =>
+    request('/workflows/describe', { method: 'POST', body: JSON.stringify(data) }),
+  // Legacy: draft a vertical step list from a description.
   createWorkflowFromDescription: (data) =>
     request('/workflows/from-description', { method: 'POST', body: JSON.stringify(data) }),
+  // Drag-to-reposition a node on the canvas.
+  updateStepPosition: (workflowId, stepId, pos) =>
+    request(`/workflows/${workflowId}/steps/${stepId}/position`, {
+      method: 'PUT',
+      body: JSON.stringify(pos),
+    }),
   addWorkflowStep: (workflowId, data) =>
     request(`/workflows/${workflowId}/steps`, {
       method: 'POST',

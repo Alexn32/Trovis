@@ -711,6 +711,59 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
 )
 """
 
+# Multi-agent / multi-human: who participates in a workflow. One row per
+# agent (service_name + agent_id) or human role. Cascades on workflow delete
+# (enforced in code for SQLite — see delete_workflow).
+_WORKFLOW_PARTICIPANTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS workflow_participants (
+    id                 SERIAL  PRIMARY KEY,
+    workflow_id        INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    participant_type   TEXT    NOT NULL,
+    agent_service_name TEXT,
+    agent_id           TEXT,
+    role_name          TEXT,
+    team_member_id     INTEGER
+)
+"""
+
+_WORKFLOW_PARTICIPANTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS workflow_participants (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id        INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    participant_type   TEXT    NOT NULL,
+    agent_service_name TEXT,
+    agent_id           TEXT,
+    role_name          TEXT,
+    team_member_id     INTEGER
+)
+"""
+
+# Directed connections between steps (the workflow graph). is_branch flags a
+# decision-path edge (drawn dashed). Cascades on workflow + step delete.
+_WORKFLOW_EDGES_DDL_PG = """
+CREATE TABLE IF NOT EXISTS workflow_edges (
+    id           SERIAL  PRIMARY KEY,
+    workflow_id  INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    from_step_id INTEGER NOT NULL REFERENCES workflow_steps(id) ON DELETE CASCADE,
+    to_step_id   INTEGER NOT NULL REFERENCES workflow_steps(id) ON DELETE CASCADE,
+    label        TEXT,
+    is_branch    BOOLEAN DEFAULT FALSE,
+    edge_order   INTEGER DEFAULT 0
+)
+"""
+
+_WORKFLOW_EDGES_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS workflow_edges (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id  INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+    from_step_id INTEGER NOT NULL REFERENCES workflow_steps(id) ON DELETE CASCADE,
+    to_step_id   INTEGER NOT NULL REFERENCES workflow_steps(id) ON DELETE CASCADE,
+    label        TEXT,
+    is_branch    INTEGER DEFAULT 0,
+    edge_order   INTEGER DEFAULT 0
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -743,6 +796,8 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_workflows_account_id ON workflows(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_steps_workflow_id ON workflow_steps(workflow_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_steps_order ON workflow_steps(workflow_id, step_order)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_participants_workflow_id ON workflow_participants(workflow_id)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_edges_workflow_id ON workflow_edges(workflow_id)",
     "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
     "CREATE INDEX IF NOT EXISTS idx_users_account_id ON users(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)",
@@ -779,6 +834,9 @@ def init_db() -> None:
             # workflows before workflow_steps — the FK references it.
             _WORKFLOWS_DDL_PG,
             _WORKFLOW_STEPS_DDL_PG,
+            # participants + edges reference workflows/workflow_steps.
+            _WORKFLOW_PARTICIPANTS_DDL_PG,
+            _WORKFLOW_EDGES_DDL_PG,
             # users before sessions/invites — the FKs reference it.
             _USERS_DDL_PG,
             _SESSIONS_DDL_PG,
@@ -799,6 +857,8 @@ def init_db() -> None:
             _PRICING_DDL_SQLITE,
             _WORKFLOWS_DDL_SQLITE,
             _WORKFLOW_STEPS_DDL_SQLITE,
+            _WORKFLOW_PARTICIPANTS_DDL_SQLITE,
+            _WORKFLOW_EDGES_DDL_SQLITE,
             _USERS_DDL_SQLITE,
             _SESSIONS_DDL_SQLITE,
             _INVITES_DDL_SQLITE,
@@ -842,6 +902,16 @@ def init_db() -> None:
         _try_add_column(cur, "agent_connections", "via_operations", "TEXT")
         _try_add_column(cur, "agent_connections", "total_tokens", "INTEGER DEFAULT 0")
         _try_add_column(cur, "agent_connections", "sample", "TEXT")
+        # Workflows redesign: creation method + the source description (for
+        # the 'describe' method). Existing workflows default to 'generate'.
+        _try_add_column(cur, "workflows", "method", "TEXT DEFAULT 'generate'")
+        _try_add_column(cur, "workflows", "source_description", "TEXT")
+        # Spatial canvas: each step gains a position + node size. Existing
+        # steps default to (0,0) and are auto-laid-out client-side.
+        _try_add_column(cur, "workflow_steps", "pos_x", "REAL DEFAULT 0")
+        _try_add_column(cur, "workflow_steps", "pos_y", "REAL DEFAULT 0")
+        _try_add_column(cur, "workflow_steps", "node_width", "REAL DEFAULT 170")
+        _try_add_column(cur, "workflow_steps", "node_height", "REAL DEFAULT 72")
         for idx in _INDEXES:
             cur.execute(idx)
         # Bootstrap the pricing table with a handful of common models so
@@ -2327,6 +2397,10 @@ _STEP_FIELDS = (
     "duration_estimate_ms",
     "inferred_from",
     "config",
+    "pos_x",
+    "pos_y",
+    "node_width",
+    "node_height",
 )
 
 _VALID_STEP_TYPES = {"trigger", "agent", "human", "decision", "output"}
@@ -2340,6 +2414,8 @@ def _row_to_workflow(row: Any) -> dict[str, Any]:
         "description": row["description"],
         "agent_service_name": row["agent_service_name"],
         "agent_id": row["agent_id"],
+        "method": _row_get(row, "method", "generate") or "generate",
+        "source_description": _row_get(row, "source_description"),
         "created_at": _ts_to_str(row["created_at"]),
         "updated_at": _ts_to_str(row["updated_at"]),
     }
@@ -2378,6 +2454,11 @@ def _row_to_step(row: Any) -> dict[str, Any]:
         "duration_estimate_ms": row["duration_estimate_ms"],
         "inferred_from": row["inferred_from"],
         "config": config,
+        # Spatial canvas position + size (default for pre-redesign rows).
+        "pos_x": _row_get(row, "pos_x", 0.0) or 0.0,
+        "pos_y": _row_get(row, "pos_y", 0.0) or 0.0,
+        "node_width": _row_get(row, "node_width", 170.0) or 170.0,
+        "node_height": _row_get(row, "node_height", 72.0) or 72.0,
     }
 
 
@@ -2401,6 +2482,13 @@ def _clean_step_values(step: dict[str, Any]) -> dict[str, Any]:
         member_id = int(member_id) if member_id not in (None, "") else None
     except (TypeError, ValueError):
         member_id = None
+
+    def _num(v: Any, default: float) -> float:
+        try:
+            return float(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+
     return {
         "step_type": step_type,
         "label": str(step.get("label") or "").strip() or "Untitled step",
@@ -2412,6 +2500,10 @@ def _clean_step_values(step: dict[str, Any]) -> dict[str, Any]:
         "duration_estimate_ms": duration,
         "inferred_from": (step.get("inferred_from") or "manual"),
         "config": config_json,
+        "pos_x": _num(step.get("pos_x"), 0.0),
+        "pos_y": _num(step.get("pos_y"), 0.0),
+        "node_width": _num(step.get("node_width"), 170.0),
+        "node_height": _num(step.get("node_height"), 72.0),
     }
 
 
@@ -2430,32 +2522,37 @@ def create_workflow(
     description: str | None = None,
     agent_service_name: str | None = None,
     agent_id: str | None = "main",
+    method: str = "generate",
+    source_description: str | None = None,
 ) -> dict[str, Any]:
     """Insert a new (empty) workflow and return the row."""
     clean_name = (name or "").strip()
     if not clean_name:
         raise ValueError("name is required")
-    cols = "(account_id, name, description, agent_service_name, agent_id)"
-    vals = (account_id, clean_name, description or None, agent_service_name or None, agent_id or "main")
+    cols = (
+        "(account_id, name, description, agent_service_name, agent_id, "
+        "method, source_description)"
+    )
+    vals = (
+        account_id,
+        clean_name,
+        description or None,
+        agent_service_name or None,
+        agent_id or "main",
+        method or "generate",
+        source_description or None,
+    )
+    ph = ", ".join([PH] * len(vals))
     with _connect() as conn, _cursor(conn) as cur:
         if USE_POSTGRES:
             cur.execute(
-                f"INSERT INTO workflows {cols} VALUES (%s, %s, %s, %s, %s) "
-                "RETURNING id, account_id, name, description, agent_service_name, "
-                "agent_id, created_at, updated_at",
-                vals,
+                f"INSERT INTO workflows {cols} VALUES ({ph}) RETURNING *", vals
             )
             row = cur.fetchone()
         else:
-            cur.execute(
-                f"INSERT INTO workflows {cols} VALUES (?, ?, ?, ?, ?)", vals
-            )
+            cur.execute(f"INSERT INTO workflows {cols} VALUES ({ph})", vals)
             new_id = cur.lastrowid
-            cur.execute(
-                "SELECT id, account_id, name, description, agent_service_name, "
-                "agent_id, created_at, updated_at FROM workflows WHERE id = ?",
-                (new_id,),
-            )
+            cur.execute("SELECT * FROM workflows WHERE id = ?", (new_id,))
             row = cur.fetchone()
     return _row_to_workflow(row)
 
@@ -2469,9 +2566,9 @@ def get_workflows(account_id: int | None) -> list[dict[str, Any]]:
         else "WHERE w.account_id IS NULL"
     )
     sql = f"""
-        SELECT w.id, w.account_id, w.name, w.description, w.agent_service_name,
-               w.agent_id, w.created_at, w.updated_at,
-               (SELECT COUNT(*) FROM workflow_steps s WHERE s.workflow_id = w.id) AS step_count
+        SELECT w.*,
+               (SELECT COUNT(*) FROM workflow_steps s WHERE s.workflow_id = w.id) AS step_count,
+               (SELECT COUNT(*) FROM workflow_participants p WHERE p.workflow_id = w.id) AS participant_count
         FROM workflows w
         {account_filter}
         ORDER BY w.updated_at DESC, w.id DESC
@@ -2480,12 +2577,20 @@ def get_workflows(account_id: int | None) -> list[dict[str, Any]]:
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, args)
         rows = cur.fetchall()
-    out = []
-    for r in rows:
-        wf = _row_to_workflow(r)
-        wf["step_count"] = int(r["step_count"] or 0)
-        wf["steps"] = []
-        out.append(wf)
+        out = []
+        for r in rows:
+            wf = _row_to_workflow(r)
+            wf["step_count"] = int(r["step_count"] or 0)
+            wf["participant_count"] = int(_row_get(r, "participant_count", 0) or 0)
+            wf["steps"] = []
+            # Participant pills on the list card (cheap — small N per workflow).
+            cur.execute(
+                "SELECT * FROM workflow_participants "
+                f"WHERE workflow_id = {PH} ORDER BY id ASC",
+                (wf["id"],),
+            )
+            wf["participants"] = [_row_to_participant(p) for p in cur.fetchall()]
+            out.append(wf)
     return out
 
 
@@ -2504,8 +2609,7 @@ def get_workflow(
         wf_args = (workflow_id, account_id)
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, account_id, name, description, agent_service_name, "
-            f"agent_id, created_at, updated_at FROM workflows WHERE id = {PH} {account_clause}",
+            f"SELECT * FROM workflows WHERE id = {PH} {account_clause}",
             wf_args,
         )
         row = cur.fetchone()
@@ -2513,17 +2617,27 @@ def get_workflow(
             return None
         wf = _row_to_workflow(row)
         cur.execute(
-            "SELECT s.id, s.workflow_id, s.step_order, s.step_type, s.label, "
-            "s.description, s.agent_service_name, s.agent_id, s.team_member_id, "
-            "s.operation, s.duration_estimate_ms, s.inferred_from, s.config, "
-            "m.name AS team_member_name "
+            "SELECT s.*, m.name AS team_member_name "
             "FROM workflow_steps s "
             "LEFT JOIN team_members m ON m.id = s.team_member_id "
             f"WHERE s.workflow_id = {PH} ORDER BY s.step_order ASC, s.id ASC",
             (workflow_id,),
         )
         wf["steps"] = [_row_to_step(s) for s in cur.fetchall()]
+        cur.execute(
+            "SELECT * FROM workflow_participants "
+            f"WHERE workflow_id = {PH} ORDER BY id ASC",
+            (workflow_id,),
+        )
+        wf["participants"] = [_row_to_participant(p) for p in cur.fetchall()]
+        cur.execute(
+            "SELECT * FROM workflow_edges "
+            f"WHERE workflow_id = {PH} ORDER BY edge_order ASC, id ASC",
+            (workflow_id,),
+        )
+        wf["edges"] = [_row_to_edge(e) for e in cur.fetchall()]
     wf["step_count"] = len(wf["steps"])
+    wf["participant_count"] = len(wf["participants"])
     return wf
 
 
@@ -2579,6 +2693,15 @@ def delete_workflow(workflow_id: int, account_id: int | None) -> bool:
         )
         if cur.fetchone() is None:
             return False
+        # Children first — SQLite doesn't enforce the FK cascade. Edges
+        # reference steps, so drop edges + participants before steps.
+        cur.execute(
+            f"DELETE FROM workflow_edges WHERE workflow_id = {PH}", (workflow_id,)
+        )
+        cur.execute(
+            f"DELETE FROM workflow_participants WHERE workflow_id = {PH}",
+            (workflow_id,),
+        )
         cur.execute(
             f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
         )
@@ -2608,10 +2731,7 @@ def add_workflow_step(
         vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
         if USE_POSTGRES:
             cur.execute(
-                f"INSERT INTO workflow_steps {cols} VALUES ({ph}) "
-                "RETURNING id, workflow_id, step_order, step_type, label, "
-                "description, agent_service_name, agent_id, team_member_id, "
-                "operation, duration_estimate_ms, inferred_from, config",
+                f"INSERT INTO workflow_steps {cols} VALUES ({ph}) RETURNING *",
                 vals,
             )
             row = cur.fetchone()
@@ -2619,10 +2739,7 @@ def add_workflow_step(
             cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
             new_id = cur.lastrowid
             cur.execute(
-                "SELECT id, workflow_id, step_order, step_type, label, "
-                "description, agent_service_name, agent_id, team_member_id, "
-                "operation, duration_estimate_ms, inferred_from, config "
-                "FROM workflow_steps WHERE id = ?",
+                "SELECT * FROM workflow_steps WHERE id = ?",
                 (new_id,),
             )
             row = cur.fetchone()
@@ -2649,10 +2766,7 @@ def update_workflow_step(
         # Nothing to change — just return the current row.
         with _connect() as conn, _cursor(conn) as cur:
             cur.execute(
-                "SELECT id, workflow_id, step_order, step_type, label, description, "
-                "agent_service_name, agent_id, team_member_id, operation, "
-                "duration_estimate_ms, inferred_from, config "
-                f"FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+                f"SELECT * FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
                 (step_id, workflow_id),
             )
             row = cur.fetchone()
@@ -2668,10 +2782,7 @@ def update_workflow_step(
             return None
         _touch_workflow(cur, workflow_id)
         cur.execute(
-            "SELECT id, workflow_id, step_order, step_type, label, description, "
-            "agent_service_name, agent_id, team_member_id, operation, "
-            "duration_estimate_ms, inferred_from, config "
-            f"FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+            f"SELECT * FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
             (step_id, workflow_id),
         )
         row = cur.fetchone()
@@ -2722,6 +2833,212 @@ def _replace_workflow_steps(
             cur.execute(
                 f"INSERT INTO workflow_steps {cols} VALUES ({ph})",
                 (workflow_id, order, *(clean[f] for f in _STEP_FIELDS)),
+            )
+        _touch_workflow(cur, workflow_id)
+
+
+# ---------------------------------------------------------------------------
+# Workflow graph: participants, edges, positions
+# ---------------------------------------------------------------------------
+
+
+def _row_to_participant(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "workflow_id": row["workflow_id"],
+        "type": row["participant_type"],
+        "agent_service_name": _row_get(row, "agent_service_name"),
+        "agent_id": _row_get(row, "agent_id"),
+        "role_name": _row_get(row, "role_name"),
+        "team_member_id": _row_get(row, "team_member_id"),
+    }
+
+
+def _row_to_edge(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "workflow_id": row["workflow_id"],
+        "from_step_id": row["from_step_id"],
+        "to_step_id": row["to_step_id"],
+        "label": _row_get(row, "label"),
+        "is_branch": bool(_row_get(row, "is_branch", False)),
+        "edge_order": int(_row_get(row, "edge_order", 0) or 0),
+    }
+
+
+def add_workflow_participant(
+    workflow_id: int,
+    participant_type: str,
+    agent_service_name: str | None = None,
+    agent_id: str | None = None,
+    role_name: str | None = None,
+    team_member_id: int | None = None,
+) -> None:
+    """Add one participant (agent or human role) to a workflow."""
+    ptype = "human" if str(participant_type).strip().lower() == "human" else "agent"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO workflow_participants (workflow_id, participant_type, "
+            f"agent_service_name, agent_id, role_name, team_member_id) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (
+                workflow_id,
+                ptype,
+                agent_service_name or None,
+                (agent_id or "main") if ptype == "agent" else None,
+                role_name or None,
+                team_member_id,
+            ),
+        )
+
+
+def get_workflow_participants(workflow_id: int) -> list[dict[str, Any]]:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT * FROM workflow_participants "
+            f"WHERE workflow_id = {PH} ORDER BY id ASC",
+            (workflow_id,),
+        )
+        return [_row_to_participant(r) for r in cur.fetchall()]
+
+
+def delete_workflow_participants(workflow_id: int) -> None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM workflow_participants WHERE workflow_id = {PH}",
+            (workflow_id,),
+        )
+
+
+def add_workflow_edge(
+    workflow_id: int,
+    from_step_id: int,
+    to_step_id: int,
+    label: str | None = None,
+    is_branch: bool = False,
+    edge_order: int = 0,
+) -> None:
+    branch_val = bool(is_branch) if USE_POSTGRES else (1 if is_branch else 0)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO workflow_edges (workflow_id, from_step_id, to_step_id, "
+            f"label, is_branch, edge_order) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (workflow_id, from_step_id, to_step_id, label or None, branch_val, int(edge_order or 0)),
+        )
+
+
+def get_workflow_edges(workflow_id: int) -> list[dict[str, Any]]:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT * FROM workflow_edges "
+            f"WHERE workflow_id = {PH} ORDER BY edge_order ASC, id ASC",
+            (workflow_id,),
+        )
+        return [_row_to_edge(r) for r in cur.fetchall()]
+
+
+def delete_workflow_edges(workflow_id: int) -> None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM workflow_edges WHERE workflow_id = {PH}", (workflow_id,)
+        )
+
+
+def update_step_position(
+    step_id: int, workflow_id: int, pos_x: float, pos_y: float
+) -> dict[str, Any] | None:
+    """Persist a node's canvas position (drag-to-reposition). Returns the
+    updated step or None when not found / not owned by the workflow."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE workflow_steps SET pos_x = {PH}, pos_y = {PH} "
+            f"WHERE id = {PH} AND workflow_id = {PH}",
+            (float(pos_x), float(pos_y), step_id, workflow_id),
+        )
+        if cur.rowcount == 0:
+            return None
+        _touch_workflow(cur, workflow_id)
+        cur.execute(
+            f"SELECT * FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+            (step_id, workflow_id),
+        )
+        row = cur.fetchone()
+    return _row_to_step(row) if row else None
+
+
+def _replace_workflow_graph(
+    workflow_id: int,
+    participants: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> None:
+    """Atomically replace a workflow's participants, steps, and edges in one
+    transaction. `edges` reference steps by their index in the `steps` list
+    (`from_index` / `to_index`); those map to the new DB ids after insert.
+    Used by the AI describe / multi-agent generate flows."""
+    branch_true = True if USE_POSTGRES else 1
+    branch_false = False if USE_POSTGRES else 0
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"DELETE FROM workflow_edges WHERE workflow_id = {PH}", (workflow_id,))
+        cur.execute(
+            f"DELETE FROM workflow_participants WHERE workflow_id = {PH}", (workflow_id,)
+        )
+        cur.execute(f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,))
+
+        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
+        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
+        index_to_id: dict[int, int] = {}
+        for order, step in enumerate(steps):
+            clean = _clean_step_values(step)
+            vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
+            if USE_POSTGRES:
+                cur.execute(
+                    f"INSERT INTO workflow_steps {cols} VALUES ({ph}) RETURNING id", vals
+                )
+                index_to_id[order] = cur.fetchone()["id"]
+            else:
+                cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
+                index_to_id[order] = cur.lastrowid
+
+        for eo, e in enumerate(edges or []):
+            try:
+                fi = int(e.get("from_index"))
+                ti = int(e.get("to_index"))
+            except (TypeError, ValueError):
+                continue
+            if fi not in index_to_id or ti not in index_to_id or fi == ti:
+                continue
+            cur.execute(
+                "INSERT INTO workflow_edges (workflow_id, from_step_id, to_step_id, "
+                f"label, is_branch, edge_order) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                (
+                    workflow_id,
+                    index_to_id[fi],
+                    index_to_id[ti],
+                    (e.get("label") or None),
+                    branch_true if e.get("is_branch") else branch_false,
+                    eo,
+                ),
+            )
+
+        for p in participants or []:
+            ptype = (
+                "human"
+                if str(p.get("type") or p.get("participant_type") or "agent").strip().lower() == "human"
+                else "agent"
+            )
+            cur.execute(
+                "INSERT INTO workflow_participants (workflow_id, participant_type, "
+                f"agent_service_name, agent_id, role_name, team_member_id) "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                (
+                    workflow_id,
+                    ptype,
+                    (p.get("agent_service_name") or p.get("service_name") or None),
+                    ((p.get("agent_id") or "main") if ptype == "agent" else None),
+                    (p.get("role_name") or None),
+                    p.get("team_member_id"),
+                ),
             )
         _touch_workflow(cur, workflow_id)
 
@@ -2801,6 +3118,120 @@ def get_workflow_stats(
         "total_tokens": int(row["total_tokens"] or 0),
         "estimated_cost_usd": round(float(row["est_cost"] or 0.0), 6),
     }
+
+
+def get_workflow_step_stats(
+    workflow_id: int, account_id: int | None
+) -> dict[str, Any] | None:
+    """Per-step + per-workflow telemetry over the last 24h for the multi-agent
+    canvas. Per-step runs/avg_duration/success are real (spans matched by the
+    step's agent + operation). Workflow rollup (total_runs, success_rate,
+    avg_cycle_ms) is real; escalation_rate + avg_human_wait_ms are returned
+    None (no per-run edge-path telemetry to derive them). Returns None when
+    the workflow isn't owned."""
+    wf = get_workflow(workflow_id, account_id)
+    if wf is None:
+        return None
+
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    start_ns = now_ns - 24 * 60 * 60 * 1_000_000_000
+
+    steps = wf["steps"]
+    services = sorted(
+        {s["agent_service_name"] for s in steps if s["step_type"] == "agent" and s["agent_service_name"]}
+        | {
+            p["agent_service_name"]
+            for p in wf.get("participants", [])
+            if p["type"] == "agent" and p["agent_service_name"]
+        }
+    )
+
+    result: dict[str, Any] = {
+        "per_step": {},
+        "total_runs": 0,
+        "success_rate": 0.0,
+        "avg_cycle_ms": 0.0,
+        "escalation_rate": None,
+        "avg_human_wait_ms": None,
+    }
+    if not services:
+        return result
+
+    span_acct = (
+        f"AND account_id = {PH}" if account_id is not None else "AND account_id IS NULL"
+    )
+    placeholders = ", ".join([PH] * len(services))
+    grouped: dict[tuple, dict[str, Any]] = {}
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT service_name, COALESCE(agent_id, 'main') AS agent_id, span_name,
+                   COUNT(DISTINCT trace_id) AS runs,
+                   COUNT(*) AS spans,
+                   SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
+                   AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_dur
+            FROM spans
+            WHERE service_name IN ({placeholders})
+              AND start_time_unix >= {PH}
+              {span_acct}
+            GROUP BY service_name, COALESCE(agent_id, 'main'), span_name
+            """,
+            tuple([*services, start_ns] + ([account_id] if account_id is not None else [])),
+        )
+        for r in cur.fetchall():
+            grouped[(r["service_name"], r["agent_id"], r["span_name"])] = {
+                "runs": int(r["runs"] or 0),
+                "spans": int(r["spans"] or 0),
+                "errors": int(r["errors"] or 0),
+                "avg_dur": float(r["avg_dur"] or 0.0),
+            }
+
+        # Workflow rollup: distinct traces + average per-trace cycle time.
+        cur.execute(
+            f"""
+            SELECT COUNT(DISTINCT trace_id) AS runs,
+                   AVG(cycle) AS avg_cycle
+            FROM (
+                SELECT trace_id,
+                       (MAX(end_time_unix) - MIN(start_time_unix)) / 1000000.0 AS cycle
+                FROM spans
+                WHERE service_name IN ({placeholders})
+                  AND start_time_unix >= {PH}
+                  {span_acct}
+                GROUP BY trace_id
+            ) t
+            """,
+            tuple([*services, start_ns] + ([account_id] if account_id is not None else [])),
+        )
+        roll = cur.fetchone()
+
+    tot_spans = 0
+    tot_errors = 0
+    for s in steps:
+        if s["step_type"] != "agent" or not s["agent_service_name"] or not s["operation"]:
+            continue
+        key = (s["agent_service_name"], s["agent_id"] or "main", s["operation"])
+        g = grouped.get(key)
+        if not g:
+            continue
+        sp = g["spans"]
+        er = g["errors"]
+        tot_spans += sp
+        tot_errors += er
+        result["per_step"][str(s["id"])] = {
+            "runs": g["runs"],
+            "avg_duration_ms": round(g["avg_dur"], 1),
+            "success_rate": round((sp - er) / sp * 100, 1) if sp else 0.0,
+        }
+
+    result["total_runs"] = int(roll["runs"] or 0) if roll else 0
+    result["avg_cycle_ms"] = round(float(roll["avg_cycle"] or 0.0), 1) if roll else 0.0
+    result["success_rate"] = (
+        round((tot_spans - tot_errors) / tot_spans * 100, 1) if tot_spans else 0.0
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
