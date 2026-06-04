@@ -645,3 +645,66 @@ class SpanRecord(BaseModel):
 class IngestResponse(BaseModel):
     status: str
     spans_received: int
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — daily briefing, needs-attention, cost intelligence, work feed
+# ---------------------------------------------------------------------------
+
+
+class BriefingResponse(BaseModel):
+    """Response for GET /dashboard/briefing. `summary` is the Claude-written
+    2-3 sentence briefing (may be a non-AI fallback line). Counts are total
+    spans (tasks); `tasks_delta` is a signed percentage string like '+12%'."""
+
+    summary: str = ""
+    tasks_yesterday: int = 0
+    tasks_last_week: int = 0
+    tasks_delta: str = "0%"
+    generated_at: str | None = None
+
+
+class AttentionItem(BaseModel):
+    """One needs-attention row. `severity` is 'critical' | 'warning' | 'info';
+    `agent` is the service_name (or display name). Enrichment fields are
+    Claude-written and may be empty when the key is unset."""
+
+    severity: str
+    agent: str
+    title: str = ""
+    detail: str = ""
+    recommendation: str = ""
+    impact: str = ""
+    last_seen: str | None = None
+
+
+class CostAgent(BaseModel):
+    """Per-agent cost row in the Cost Intelligence card. `trend` is
+    'up' | 'down' | 'flat' (today vs. the trailing daily average)."""
+
+    name: str
+    cost: float = 0.0
+    trend: str = "flat"
+
+
+class CostResponse(BaseModel):
+    """Response for GET /dashboard/cost. `daily` is up to 30 floats (oldest
+    → newest) for the sparkline. Budget fields come from OVERSEE_MONTHLY_BUDGET."""
+
+    today: float = 0.0
+    month_total: float = 0.0
+    month_budget: float = 0.0
+    budget_pct: float = 0.0
+    agents: list[CostAgent] = Field(default_factory=list)
+    daily: list[float] = Field(default_factory=list)
+
+
+class WorkFeedItem(BaseModel):
+    """One Work Feed row — a plain-English summary of what an agent recently
+    did. `time` is the ISO timestamp of the agent's latest span; `tasks` is
+    its span count in the window."""
+
+    time: str | None = None
+    agent: str
+    summary: str = ""
+    tasks: int = 0

@@ -3034,6 +3034,93 @@ def get_agent_costs(
 
 
 # ---------------------------------------------------------------------------
+# Fleet-wide dashboard aggregates
+# ---------------------------------------------------------------------------
+
+
+def count_fleet_spans(
+    account_id: int | None,
+    since_ns: int,
+    until_ns: int | None = None,
+) -> int:
+    """Count spans (tasks) across the whole fleet within a time window.
+
+    Filters `since_ns <= start_time_unix < until_ns` (the upper bound is
+    optional). Account-scoped when account_id is provided; counts all rows
+    otherwise (local-dev / pre-auth behavior). Powers the briefing's
+    today / last-7d / prior-7d task counts.
+    """
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    until_filter = f"AND start_time_unix < {PH}" if until_ns is not None else ""
+    sql = f"""
+        SELECT COUNT(*) AS n
+        FROM spans
+        WHERE start_time_unix >= {PH}
+          {until_filter}
+          {account_filter}
+    """
+    args: list[Any] = [since_ns]
+    if until_ns is not None:
+        args.append(until_ns)
+    if account_id is not None:
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+    return int(row["n"]) if row else 0
+
+
+def get_fleet_daily_cost(
+    account_id: int | None,
+    days: int = 30,
+) -> list[dict[str, Any]]:
+    """Org-wide daily rollup of estimated cost + tokens over the last
+    `days` days. Buckets by UTC date in Python (keeps the SQL portable),
+    returning [{date, tokens, cost}] sorted ascending. Days with no
+    usage are omitted — the caller fills gaps for the sparkline.
+
+    Only spans carrying usage data (`total_tokens IS NOT NULL`) count,
+    matching `get_agent_costs`.
+    """
+    days = max(1, min(365, int(days)))
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    start_ns = now_ns - days * 24 * 60 * 60 * 1_000_000_000
+
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    sql = f"""
+        SELECT start_time_unix, total_tokens, estimated_cost_usd
+        FROM spans
+        WHERE total_tokens IS NOT NULL
+          AND start_time_unix >= {PH}
+          {account_filter}
+        ORDER BY start_time_unix ASC
+    """
+    args: list[Any] = [start_ns]
+    if account_id is not None:
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        rows = cur.fetchall()
+
+    from datetime import datetime, timezone
+
+    by_day: dict[str, dict[str, float]] = {}
+    for r in rows:
+        day = datetime.fromtimestamp(
+            r["start_time_unix"] / 1_000_000_000, tz=timezone.utc
+        ).strftime("%Y-%m-%d")
+        d = by_day.setdefault(day, {"tokens": 0, "cost": 0.0})
+        d["tokens"] += r["total_tokens"] or 0
+        d["cost"] += r["estimated_cost_usd"] or 0.0
+    return [
+        {"date": day, "tokens": v["tokens"], "cost": round(v["cost"], 6)}
+        for day, v in sorted(by_day.items())
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Insights cache (weekly summaries, capability maps)
 # ---------------------------------------------------------------------------
 

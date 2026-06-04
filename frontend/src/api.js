@@ -298,6 +298,18 @@ export const api = {
       },
     ),
 
+  // --- dashboard (daily briefing) ---
+  getBriefing: () => request('/dashboard/briefing'),
+  getAttention: () => request('/dashboard/attention'),
+  getCost: () => request('/dashboard/cost'),
+  getWorkFeed: () => request('/dashboard/work-feed'),
+  // Concise fleet Q&A for the floating Ask pill. Returns { answer }.
+  askDashboard: (messages) =>
+    request('/dashboard/ask', {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    }),
+
   // --- auth (real users + orgs) ---
   signup: (data) =>
     request('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),

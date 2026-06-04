@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
+import Dashboard from './Dashboard.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
 import Ask from './Ask.jsx'
@@ -54,7 +55,7 @@ function AppInner() {
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
   const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken)
-  const [tab, setTab] = useState('fleet') // 'fleet' | 'ask' | 'team' | 'workflows'
+  const [tab, setTab] = useState('dashboard') // 'dashboard' | 'fleet' | 'ask' | 'team' | 'workflows'
   // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'}
   const [overlay, setOverlay] = useState(null)
 
@@ -176,6 +177,14 @@ function AppInner() {
     mainContent = <AddAgent onClose={closeOverlay} />
   } else if (overlay?.kind === 'settings') {
     mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} />
+  } else if (tab === 'dashboard') {
+    mainContent = (
+      <Dashboard
+        onOpenAgent={openDetail}
+        onGoFleet={() => setTab('fleet')}
+        userName={account.userName}
+      />
+    )
   } else if (tab === 'ask') {
     mainContent = <Ask />
   } else if (tab === 'team' && isBusiness) {
@@ -209,6 +218,7 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
   // Business orgs. Individual accounts own all their agents implicitly.
   const isBusiness = me?.org?.account_type === 'business'
   const tabs = [
+    ['dashboard', 'Dashboard'],
     ['fleet', 'Fleet'],
     ['ask', 'Ask'],
     ...(isBusiness ? [['team', 'Team']] : []),

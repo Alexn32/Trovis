@@ -59,6 +59,19 @@ SYSTEM_AGENT = (
     "- Keep responses concise — a paragraph or short list, not an essay."
 )
 
+# Tighter variant for the Dashboard "Ask about your fleet" pill: short,
+# plain-prose answers with no markdown so they read well in a chat bubble.
+SYSTEM_FLEET_CONCISE = (
+    "You are an analyst for Oversee, an agent management system. You have "
+    "read access to summaries for every AI agent the user is running. "
+    "Answer the user's question using only the telemetry data provided below.\n"
+    "- Be concise: 2-4 sentences max unless they explicitly ask for detail.\n"
+    "- Use specific numbers from the data, and refer to agents by name.\n"
+    "- If relevant, suggest one concrete action.\n"
+    "- If the data doesn't support a confident answer, say so plainly.\n"
+    "- Write in plain prose. Never use markdown headers, bullet points, or lists."
+)
+
 
 # ---------------------------------------------------------------------------
 # Public entry points
@@ -66,13 +79,17 @@ SYSTEM_AGENT = (
 
 
 def ask_about_fleet(
-    account_id: int | None, messages: list[dict[str, str]]
+    account_id: int | None,
+    messages: list[dict[str, str]],
+    concise: bool = False,
 ) -> str:
-    """Answer a question about the whole fleet."""
+    """Answer a question about the whole fleet. When `concise` is set (the
+    Dashboard Ask pill), use the short plain-prose system prompt."""
     api_key = _require_api_key()
     agents = database.get_agents(account_id=account_id)
     context = _format_fleet_context(agents)
-    return _call_claude(api_key, SYSTEM_FLEET, context, messages)
+    system = SYSTEM_FLEET_CONCISE if concise else SYSTEM_FLEET
+    return _call_claude(api_key, system, context, messages)
 
 
 def ask_about_agent(
