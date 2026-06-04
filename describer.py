@@ -957,3 +957,220 @@ def work_feed_summary(agent_label: str, activity: dict[str, Any]) -> str:
     if isinstance(parsed, dict):
         return str(parsed.get("summary") or "").strip()
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Workflow graph builder — full multi-agent graph (participants + steps + edges
+# + positions) from a description or from multi-agent telemetry.
+# ---------------------------------------------------------------------------
+
+
+WORKFLOW_GRAPH_SYSTEM_PROMPT = (
+    "You build a workflow graph: an ordered set of typed steps (trigger, agent, "
+    "human, decision, output) connected by directed edges, laid out left-to-right "
+    "for a canvas. Match agent steps to the provided agent names. Mark review/"
+    "approval/handoff/escalation steps as human. Every workflow starts with a "
+    "trigger and ends with an output. Return ONLY valid JSON, no markdown."
+)
+
+_WORKFLOW_LAYOUT_RULES = (
+    "Layout rules: flow left to right. Start at x=60 and add 230 for each sequential "
+    "step, all at y=200. Decision branches: the escalation/yes path goes to y=80 and "
+    "the default/no path stays at y=200; converge back to y=200 when paths rejoin. "
+    "Use node_width=170 and node_height=72."
+)
+
+
+def _workflow_graph_shape() -> str:
+    return (
+        "{\n"
+        '  "participants": [\n'
+        '    {"type": "agent", "service_name": "...", "agent_id": "main"},\n'
+        '    {"type": "human", "role_name": "Support Manager"}\n'
+        "  ],\n"
+        '  "steps": [\n'
+        '    {"step_type": "trigger|agent|human|decision|output", "label": "Short name (3-5 words)", '
+        '"description": "one sentence", "operation": "tool name for agent steps else null", '
+        '"agent_service_name": "only for agent steps", "agent_id": "only for agent steps", '
+        '"role_name": "only for human steps", "pos_x": 60, "pos_y": 200}\n'
+        "  ],\n"
+        '  "edges": [\n'
+        '    {"from_index": 0, "to_index": 1, "label": null, "is_branch": false}\n'
+        "  ]\n"
+        "}"
+    )
+
+
+def workflow_graph_from_description(
+    description: str, agents_context: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Build a full workflow graph from a plain-English description. Returns
+    {participants, steps, edges}. Raises APIKeyMissingError when unset."""
+    lines = []
+    for a in agents_context or []:
+        nm = a.get("display_name") or a.get("service_name")
+        desc = (a.get("description") or "").strip()
+        lines.append(
+            f"- {a.get('service_name')} ({nm}): {desc[:200]}"
+            if desc
+            else f"- {a.get('service_name')} ({nm})"
+        )
+    agent_list = "\n".join(lines) if lines else "(no agents reporting telemetry yet)"
+    user_prompt = (
+        f"Available agents in this organization:\n{agent_list}\n\n"
+        f'The user described this workflow:\n"{(description or "").strip()}"\n\n'
+        f"Return a JSON object with this exact structure:\n{_workflow_graph_shape()}\n\n"
+        f"{_WORKFLOW_LAYOUT_RULES}\n"
+        "Match agent names to the available agents list. If the description mentions a role "
+        "like 'manager' or 'lead', create a human step. Return ONLY the JSON."
+    )
+    parsed = _claude_json(WORKFLOW_GRAPH_SYSTEM_PROMPT, user_prompt, max_tokens=3000)
+    known = {a.get("service_name") for a in (agents_context or [])}
+    return _parse_workflow_graph(parsed, known, default_inferred="manual")
+
+
+def workflow_graph_from_agents(
+    agents_context: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Build a multi-agent workflow graph from the telemetry + identity of
+    several agents in ONE Claude call. Returns {participants, steps, edges}."""
+    blocks = []
+    for a in agents_context or []:
+        nm = a.get("display_name") or a.get("service_name")
+        ops = ", ".join(a.get("top_operations") or [])
+        desc = (a.get("description") or "").strip()
+        reg = (a.get("registration_excerpt") or "").strip()
+        b = [f"## {a.get('service_name')} / {a.get('agent_id', 'main')} ({nm})"]
+        if desc:
+            b.append(f"description: {desc[:300]}")
+        if ops:
+            b.append(f"top operations: {ops}")
+        if reg:
+            b.append(f"identity: {reg[:400]}")
+        blocks.append("\n".join(b))
+    body = "\n\n".join(blocks) if blocks else "(no telemetry)"
+    user_prompt = (
+        "Reconstruct how these agents work together as ONE workflow, including the human "
+        "steps (review/approval/handoff) implied by their identity files.\n\n"
+        f"Agents:\n{body}\n\n"
+        f"Return a JSON object with this exact structure:\n{_workflow_graph_shape()}\n\n"
+        f"{_WORKFLOW_LAYOUT_RULES}\n"
+        "Use ONLY these agent names for agent steps. Return ONLY the JSON."
+    )
+    parsed = _claude_json(WORKFLOW_GRAPH_SYSTEM_PROMPT, user_prompt, max_tokens=3000)
+    known = {a.get("service_name") for a in (agents_context or [])}
+    return _parse_workflow_graph(parsed, known, default_inferred="telemetry")
+
+
+def _parse_workflow_graph(
+    parsed: Any, known_agents: set, default_inferred: str = "manual"
+) -> dict[str, Any]:
+    """Validate + normalize a Claude workflow graph into {participants, steps,
+    edges}. Steps carry positions (fallback sequential), agent assignments are
+    filtered to known agents, human roles go into config.role_name, and edges
+    reference steps by index."""
+
+    def _num(v: Any, default: float) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
+    if not isinstance(raw_steps, list):
+        raw_steps = []
+
+    only_agent = next(iter(known_agents)) if len(known_agents) == 1 else None
+    steps: list[dict[str, Any]] = []
+    participants: list[dict[str, Any]] = []
+    seen_agents: set = set()
+    seen_roles: set = set()
+
+    def add_agent(svc, aid):
+        aid = aid or "main"
+        if svc and svc in known_agents and (svc, aid) not in seen_agents:
+            seen_agents.add((svc, aid))
+            participants.append({"type": "agent", "agent_service_name": svc, "agent_id": aid})
+
+    def add_human(role):
+        r = (role or "").strip()
+        if r and r.lower() not in seen_roles:
+            seen_roles.add(r.lower())
+            participants.append({"type": "human", "role_name": r})
+
+    # Participants explicitly listed by Claude.
+    raw_parts = parsed.get("participants") if isinstance(parsed, dict) else None
+    if isinstance(raw_parts, list):
+        for p in raw_parts:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("type") or "").strip().lower() == "human":
+                add_human(p.get("role_name"))
+            else:
+                add_agent(p.get("service_name") or p.get("agent_service_name"), p.get("agent_id"))
+
+    for s in raw_steps[:40]:
+        if not isinstance(s, dict):
+            continue
+        st = str(s.get("step_type") or "agent").strip().lower()
+        if st not in _VALID_STEP_TYPES:
+            st = "agent"
+        label = str(s.get("label") or "").strip()
+        if not label:
+            continue
+        asn = None
+        aid = None
+        role = None
+        config = None
+        if st == "agent":
+            asn = s.get("agent_service_name")
+            if asn not in known_agents:
+                asn = only_agent
+            aid = (s.get("agent_id") or "main") if asn else None
+            if asn:
+                add_agent(asn, aid)
+        elif st == "human":
+            role = (s.get("role_name") or "").strip() or None
+            if role:
+                add_human(role)
+                config = {"role_name": role}
+        steps.append(
+            {
+                "step_type": st,
+                "label": label[:200],
+                "description": (str(s["description"]) if s.get("description") else None),
+                "operation": (str(s["operation"]) if s.get("operation") else None),
+                "agent_service_name": asn,
+                "agent_id": aid,
+                "inferred_from": default_inferred,
+                "config": config,
+                "pos_x": _num(s.get("pos_x"), 60.0 + len(steps) * 230.0),
+                "pos_y": _num(s.get("pos_y"), 200.0),
+                "node_width": _num(s.get("node_width"), 170.0),
+                "node_height": _num(s.get("node_height"), 72.0),
+            }
+        )
+
+    n = len(steps)
+    raw_edges = parsed.get("edges") if isinstance(parsed, dict) else None
+    edges: list[dict[str, Any]] = []
+    if isinstance(raw_edges, list):
+        for e in raw_edges:
+            if not isinstance(e, dict):
+                continue
+            try:
+                fi = int(e.get("from_index"))
+                ti = int(e.get("to_index"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= fi < n and 0 <= ti < n and fi != ti:
+                edges.append(
+                    {
+                        "from_index": fi,
+                        "to_index": ti,
+                        "label": (str(e["label"]) if e.get("label") else None),
+                        "is_branch": bool(e.get("is_branch")),
+                    }
+                )
+
+    return {"participants": participants, "steps": steps, "edges": edges}

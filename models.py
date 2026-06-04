@@ -273,12 +273,44 @@ class WorkflowStep(BaseModel):
     duration_estimate_ms: int | None = None
     inferred_from: str | None = None
     config: dict[str, Any] | None = None
+    # Spatial canvas position + node size (0,0 / defaults for pre-redesign rows).
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    node_width: float = 170.0
+    node_height: float = 72.0
+
+
+class WorkflowParticipant(BaseModel):
+    """An agent or human role that participates in a multi-agent workflow.
+    `type` is 'agent' | 'human'."""
+
+    id: int | None = None
+    workflow_id: int | None = None
+    type: str
+    agent_service_name: str | None = None
+    agent_id: str | None = None
+    role_name: str | None = None
+    team_member_id: int | None = None
+
+
+class WorkflowEdge(BaseModel):
+    """A directed connection between two steps (the workflow graph).
+    `is_branch` marks a decision-path edge (drawn dashed)."""
+
+    id: int | None = None
+    workflow_id: int | None = None
+    from_step_id: int
+    to_step_id: int
+    label: str | None = None
+    is_branch: bool = False
+    edge_order: int = 0
 
 
 class Workflow(BaseModel):
-    """A named, ordered process flow for an agent. `steps` is populated on
-    the detail endpoint; the list endpoint leaves it empty and sets
-    `step_count` instead."""
+    """A named process flow. Multi-agent: `participants` lists the agents +
+    human roles; `steps` are positioned nodes and `edges` connect them.
+    `steps`/`edges` are populated on the detail endpoint; the list endpoint
+    leaves them empty and sets `step_count`/`participant_count`."""
 
     id: int
     account_id: int | None = None
@@ -286,8 +318,15 @@ class Workflow(BaseModel):
     description: str | None = None
     agent_service_name: str | None = None
     agent_id: str | None = "main"
+    method: str = "generate"
+    source_description: str | None = None
+    participants: list[WorkflowParticipant] = Field(default_factory=list)
     steps: list[WorkflowStep] = Field(default_factory=list)
+    edges: list[WorkflowEdge] = Field(default_factory=list)
     step_count: int = 0
+    participant_count: int = 0
+    # Derived in the list endpoint from participant-agent health.
+    status: str = "healthy"
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -348,13 +387,42 @@ class WorkflowReorder(BaseModel):
     step_ids: list[int] = Field(default_factory=list)
 
 
+class WorkflowAgentRef(BaseModel):
+    """One agent in a multi-agent generate request."""
+
+    service_name: str
+    agent_id: str | None = "main"
+
+
 class WorkflowGenerate(BaseModel):
-    """Body for POST /workflows/generate — auto-build a workflow from one
-    agent's telemetry + identity."""
+    """Body for POST /workflows/generate. Single-agent (legacy):
+    `agent_service_name` + `agent_id`. Multi-agent: `method="agents"` with
+    `agents[]` + optional `human_roles[]` → Claude infers a multi-agent graph.
+    `agent_service_name` is optional now (back-compat keeps it required-ish via
+    validation in the endpoint)."""
 
     name: str
-    agent_service_name: str
+    agent_service_name: str | None = None
     agent_id: str | None = "main"
+    method: str | None = None
+    agents: list[WorkflowAgentRef] = Field(default_factory=list)
+    human_roles: list[str] = Field(default_factory=list)
+
+
+class WorkflowDescribe(BaseModel):
+    """Body for POST /workflows/describe — AI builds the full multi-agent
+    graph (participants, steps, edges, positions) from a plain-English
+    description."""
+
+    name: str
+    description: str
+
+
+class StepPosition(BaseModel):
+    """Body for PUT /workflows/{id}/steps/{step_id}/position."""
+
+    pos_x: float
+    pos_y: float
 
 
 class Connection(BaseModel):
@@ -407,9 +475,20 @@ class ConnectionsFromDescription(BaseModel):
     description: str
 
 
+class WorkflowStepStat(BaseModel):
+    """Per-step live telemetry (last 24h), keyed by step id in `per_step`."""
+
+    runs: int = 0
+    avg_duration_ms: float = 0.0
+    success_rate: float = 0.0
+
+
 class WorkflowStats(BaseModel):
-    """Live telemetry stats for a workflow's source agent (all-time).
-    `has_agent` is False when the workflow has no agent to pull from."""
+    """Live telemetry stats for a workflow (last 24h for the multi-agent
+    overlay; legacy single-agent all-time fields kept for back-compat).
+    `per_step` maps step id (str) → per-step stats. `escalation_rate` and
+    `avg_human_wait_ms` are best-effort and null when not derivable from
+    span data."""
 
     has_agent: bool = False
     runs: int = 0
@@ -420,6 +499,12 @@ class WorkflowStats(BaseModel):
     last_run: str | None = None
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    # Multi-agent canvas overlay (24h).
+    per_step: dict[str, WorkflowStepStat] = Field(default_factory=dict)
+    total_runs: int = 0
+    avg_cycle_ms: float = 0.0
+    escalation_rate: float | None = None
+    avg_human_wait_ms: float | None = None
 
 
 class AgentDescription(BaseModel):
