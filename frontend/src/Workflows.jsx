@@ -798,7 +798,10 @@ function StepCard({ step, dragging, dragOver, onDragStart, onDragEnter, onDragEn
         <div className="wf-step-top">
           <span className="wf-step-type">{meta.label}</span>
           {step.step_type === 'agent' && step.agent_service_name && (
-            <span className="wf-step-pill wf-pill-agent">{step.agent_service_name}</span>
+            <span className="wf-step-pill wf-pill-agent">
+              {step.agent_service_name}
+              {step.agent_id && step.agent_id !== 'main' ? ` · ${step.agent_id}` : ''}
+            </span>
           )}
           {step.step_type === 'human' && step.team_member_name && (
             <span className="wf-step-pill wf-pill-human">{step.team_member_name}</span>
@@ -856,6 +859,9 @@ function StepEditor({ step, onCancel, onSave }) {
   )
   const [teamMemberId, setTeamMemberId] = useState(step.team_member_id || '')
   const [members, setMembers] = useState(null)
+  const [agentService, setAgentService] = useState(step.agent_service_name || '')
+  const [agentId, setAgentId] = useState(step.agent_id || 'main')
+  const [agents, setAgents] = useState(null)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -864,11 +870,33 @@ function StepEditor({ step, onCancel, onSave }) {
     }
   }, [step.step_type, members])
 
+  useEffect(() => {
+    if (step.step_type === 'agent' && agents === null) {
+      api.listAgents().then((l) => setAgents(l || [])).catch(() => setAgents([]))
+    }
+  }, [step.step_type, agents])
+
+  const selectedGroup = (agents || []).find((g) => g.service_name === agentService)
+  const subAgents = (selectedGroup?.agents || []).filter((a) => a.agent_id)
+  const hasSubAgents = subAgents.length > 1 || (subAgents[0] && subAgents[0].agent_id !== 'main')
+
+  function pickAgent(svc) {
+    setAgentService(svc)
+    const grp = (agents || []).find((g) => g.service_name === svc)
+    const subs = (grp?.agents || []).filter((a) => a.agent_id)
+    const hasMain = subs.some((a) => a.agent_id === 'main')
+    setAgentId(hasMain || subs.length === 0 ? 'main' : subs[0].agent_id)
+  }
+
   async function submit(e) {
     e.preventDefault()
     setSaving(true)
     const patch = { label: label.trim() || 'Untitled step', description: description.trim() || null }
-    if (step.step_type === 'agent') patch.operation = operation.trim() || null
+    if (step.step_type === 'agent') {
+      patch.operation = operation.trim() || null
+      patch.agent_service_name = agentService || null
+      patch.agent_id = agentService ? (agentId || 'main') : null
+    }
     if (step.step_type === 'agent' || step.step_type === 'human') {
       patch.duration_estimate_ms = durationMin === '' ? null : Math.round(Number(durationMin) * 1000)
     }
@@ -899,6 +927,35 @@ function StepEditor({ step, onCancel, onSave }) {
           <span>Description</span>
           <textarea className="text-input" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
         </label>
+        {step.step_type === 'agent' && (
+          <label className="wf-edit-field">
+            <span>Agent</span>
+            {agents === null ? (
+              <div className="workflow-side-empty">Loading agents…</div>
+            ) : (
+              <select className="text-input" value={agentService} onChange={(e) => pickAgent(e.target.value)}>
+                <option value="">Unassigned</option>
+                {agents.map((g) => (
+                  <option key={g.service_name} value={g.service_name}>
+                    {g.display_name || g.service_name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+        )}
+        {step.step_type === 'agent' && agentService && hasSubAgents && (
+          <label className="wf-edit-field">
+            <span>Sub-agent</span>
+            <select className="text-input" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+              {subAgents.map((a) => (
+                <option key={a.agent_id} value={a.agent_id}>
+                  {a.display_name || a.agent_id}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {step.step_type === 'agent' && (
           <label className="wf-edit-field">
             <span>Operation (tool name)</span>
