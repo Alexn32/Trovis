@@ -50,8 +50,14 @@ export function nsToMs(ns) {
 export function formatCost(usd) {
   const n = Number(usd) || 0
   if (n === 0) return '$0.00'
-  if (n < 0.01) return `$${n.toFixed(4)}`
-  if (n < 1) return `$${n.toFixed(3)}`
+  // Sub-dollar amounts read far clearer in cents ("2.6¢") than as tiny dollar
+  // fractions ("$0.026", easily misread as 26 cents). Dollars kick in at $1.
+  if (n < 1) {
+    const cents = n * 100
+    if (cents < 0.1) return '<0.1¢'
+    if (cents < 10) return `${cents.toFixed(1)}¢`
+    return `${Math.round(cents)}¢`
+  }
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
