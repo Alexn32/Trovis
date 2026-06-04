@@ -406,8 +406,12 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
             # Token usage rides on the agent.message event. Pair it with
-            # the session's model so the backend can compute cost.
-            inp, out, tot = _extract_usage(_get(event, "usage"))
+            # the session's model so the backend can compute cost. Cached
+            # input tokens (creation/read) are billed at different rates than
+            # plain input, so we surface them separately for accurate cost.
+            inp, out, tot, cache_create, cache_read = _extract_usage(
+                _get(event, "usage")
+            )
             if tot is not None:
                 model = _SESSION_TO_MODEL.get(session_id or "")
                 if model:
@@ -417,6 +421,14 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
                 if out is not None:
                     span.set_attribute("gen_ai.usage.output_tokens", out)
                 span.set_attribute("gen_ai.usage.total_tokens", tot)
+                if cache_create is not None:
+                    span.set_attribute(
+                        "gen_ai.usage.cache_creation_input_tokens", cache_create
+                    )
+                if cache_read is not None:
+                    span.set_attribute(
+                        "gen_ai.usage.cache_read_input_tokens", cache_read
+                    )
 
     elif event_type == "agent.tool_use":
         with tracer.start_as_current_span("tool_call") as span:
@@ -464,12 +476,16 @@ def _get(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-def _extract_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
-    """Normalize an Anthropic usage object to (input, output, total)
-    tokens. Anthropic uses input_tokens / output_tokens; total is
-    derived. Returns (None, None, None) when no usage is present."""
+def _extract_usage(
+    usage: Any,
+) -> tuple[int | None, int | None, int | None, int | None, int | None]:
+    """Normalize an Anthropic usage object to (input, output, total,
+    cache_creation, cache_read) tokens. Anthropic reports input_tokens /
+    output_tokens plus cache_creation_input_tokens / cache_read_input_tokens
+    (these are NOT included in input_tokens). `total` includes all four so
+    it reflects every billed token. Returns all-None when no usage present."""
     if usage is None:
-        return (None, None, None)
+        return (None, None, None, None, None)
 
     def _int(v: Any) -> int | None:
         try:
@@ -480,9 +496,13 @@ def _extract_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
     inp = _int(_get(usage, "input_tokens"))
     out = _int(_get(usage, "output_tokens"))
     tot = _int(_get(usage, "total_tokens"))
-    if tot is None and (inp is not None or out is not None):
-        tot = (inp or 0) + (out or 0)
-    return (inp, out, tot)
+    cache_create = _int(_get(usage, "cache_creation_input_tokens"))
+    cache_read = _int(_get(usage, "cache_read_input_tokens"))
+    if tot is None and (
+        inp is not None or out is not None or cache_create is not None or cache_read is not None
+    ):
+        tot = (inp or 0) + (out or 0) + (cache_create or 0) + (cache_read or 0)
+    return (inp, out, tot, cache_create, cache_read)
 
 
 def _resolve_session_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Optional[str]:

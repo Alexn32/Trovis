@@ -610,6 +610,8 @@ interface TokenUsage {
   input?: number
   output?: number
   total?: number
+  cacheCreation?: number
+  cacheRead?: number
 }
 
 /**
@@ -650,12 +652,30 @@ function pickTokenUsage(event: unknown): TokenUsage {
         c.outputTokens ??
         c.completionTokens,
     )
+    // Anthropic prompt-caching tokens — billed separately (creation 1.25x,
+    // read 0.1x of base input) and NOT included in input_tokens.
+    const cacheCreation = num(
+      c.cache_creation_input_tokens ?? c.cacheCreationInputTokens,
+    )
+    const cacheRead = num(c.cache_read_input_tokens ?? c.cacheReadInputTokens)
     let total = num(c.total_tokens ?? c.totalTokens)
-    if (total === undefined && (input !== undefined || output !== undefined)) {
-      total = (input ?? 0) + (output ?? 0)
+    if (
+      total === undefined &&
+      (input !== undefined ||
+        output !== undefined ||
+        cacheCreation !== undefined ||
+        cacheRead !== undefined)
+    ) {
+      total = (input ?? 0) + (output ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0)
     }
-    if (input !== undefined || output !== undefined || total !== undefined) {
-      return { input, output, total }
+    if (
+      input !== undefined ||
+      output !== undefined ||
+      total !== undefined ||
+      cacheCreation !== undefined ||
+      cacheRead !== undefined
+    ) {
+      return { input, output, total, cacheCreation, cacheRead }
     }
   }
   return {}
@@ -868,6 +888,16 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(entry.span, "gen_ai.usage.input_tokens", usage.input)
     setIfPresent(entry.span, "gen_ai.usage.output_tokens", usage.output)
     setIfPresent(entry.span, "gen_ai.usage.total_tokens", usage.total)
+    setIfPresent(
+      entry.span,
+      "gen_ai.usage.cache_creation_input_tokens",
+      usage.cacheCreation,
+    )
+    setIfPresent(
+      entry.span,
+      "gen_ai.usage.cache_read_input_tokens",
+      usage.cacheRead,
+    )
     if (
       typeof event.outcome === "string" &&
       event.outcome !== "ok" &&

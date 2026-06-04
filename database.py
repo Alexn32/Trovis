@@ -247,6 +247,8 @@ CREATE TABLE IF NOT EXISTS spans (
     input_tokens        INTEGER   DEFAULT NULL,
     output_tokens       INTEGER   DEFAULT NULL,
     total_tokens        INTEGER   DEFAULT NULL,
+    cache_creation_input_tokens INTEGER DEFAULT NULL,
+    cache_read_input_tokens     INTEGER DEFAULT NULL,
     estimated_cost_usd  REAL      DEFAULT NULL,
     created_at          TIMESTAMP DEFAULT NOW()
 )
@@ -282,6 +284,8 @@ CREATE TABLE IF NOT EXISTS spans (
     input_tokens        INTEGER DEFAULT NULL,
     output_tokens       INTEGER DEFAULT NULL,
     total_tokens        INTEGER DEFAULT NULL,
+    cache_creation_input_tokens INTEGER DEFAULT NULL,
+    cache_read_input_tokens     INTEGER DEFAULT NULL,
     estimated_cost_usd  REAL    DEFAULT NULL,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -524,14 +528,31 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 # wrong: e.g. claude-opus-4-6 is $5/$25 per 1M, NOT the older $15/$75 (which
 # is claude-opus-4-1) — confirmed against the live price list.
 _PRICING_SEED = [
-    # model_name,         input/1k,  output/1k
+    # model_name,         input/1k,  output/1k   — Anthropic published list
+    # prices (platform.claude.com/docs/.../pricing). Opus 4.5–4.8 share
+    # $5/$25 per 1M; Opus 4/4.1 are the older $15/$75. Cache tokens are
+    # priced as multiples of the base input rate (see _CACHE_* below).
+    ("claude-opus-4-8",   0.005,     0.025),    # $5 / $25 per 1M
+    ("claude-opus-4-7",   0.005,     0.025),    # $5 / $25 per 1M
     ("claude-opus-4-6",   0.005,     0.025),    # $5 / $25 per 1M
+    ("claude-opus-4-5",   0.005,     0.025),    # $5 / $25 per 1M
     ("claude-opus-4-1",   0.015,     0.075),    # $15 / $75 per 1M
+    ("claude-opus-4",     0.015,     0.075),    # $15 / $75 per 1M (deprecated)
     ("claude-sonnet-4-6", 0.003,     0.015),    # $3 / $15 per 1M
+    ("claude-sonnet-4-5", 0.003,     0.015),    # $3 / $15 per 1M
+    ("claude-sonnet-4",   0.003,     0.015),    # $3 / $15 per 1M (deprecated)
     ("claude-haiku-4-5",  0.001,     0.005),    # $1 / $5 per 1M
+    ("claude-haiku-3-5",  0.0008,    0.004),    # $0.80 / $4 per 1M
     ("gpt-4o",            0.0025,    0.010),     # $2.50 / $10 per 1M
     ("gpt-4o-mini",       0.00015,   0.0006),    # $0.15 / $0.60 per 1M
 ]
+
+# Prompt-caching cost multipliers, relative to a model's base input rate
+# (Anthropic): 5-minute cache write = 1.25x, 1-hour write = 2x, cache read
+# (hit) = 0.1x. We price cache-creation tokens at the 5-minute rate (the
+# default TTL) — a 1-hour cache is billed slightly higher than we estimate.
+_CACHE_WRITE_MULT = 1.25
+_CACHE_READ_MULT = 0.10
 
 # Human team members an operator manages. Per-account scoping; email
 # is optional but UNIQUE within an account when set (NULLs allowed as
@@ -916,6 +937,10 @@ def init_db() -> None:
         _try_add_column(cur, "spans", "output_tokens", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "spans", "total_tokens", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "spans", "estimated_cost_usd", "REAL DEFAULT NULL")
+        # Prompt-caching token counts (billed at cache multipliers of input).
+        # NULL on pre-cache-era rows → treated as 0 (no cache cost recoverable).
+        _try_add_column(cur, "spans", "cache_creation_input_tokens", "INTEGER DEFAULT NULL")
+        _try_add_column(cur, "spans", "cache_read_input_tokens", "INTEGER DEFAULT NULL")
         # Pricing provenance: which source set each rate, and when it was
         # last refreshed. Lets the admin endpoint report freshness and lets
         # us tell a seeded fallback price apart from a live LiteLLM one.
@@ -954,15 +979,22 @@ def init_db() -> None:
 
 
 def _seed_pricing(cur) -> None:
-    """Bootstrap a few common models so cost works on a fresh DB before the
-    first LiteLLM refresh. INSERT-only (DO NOTHING on conflict): the daily
-    sync owns pricing once it runs, so seeding must never overwrite a
-    refreshed rate back to these hardcoded values on a later restart."""
+    """Seed the authoritative Anthropic/OpenAI list prices on every startup.
+
+    Inserts any missing model and corrects rows we previously seeded — but the
+    `WHERE source = 'seed'` guard means a fresher rate written by the daily
+    LiteLLM sync is never clobbered. This guarantees newly-released models
+    (e.g. claude-opus-4-7) get a price after a deploy even if the sync hasn't
+    run or doesn't list them yet, while keeping the sync authoritative."""
     ph = "%s" if USE_POSTGRES else "?"
+    excluded = "EXCLUDED" if USE_POSTGRES else "excluded"
     sql = f"""
         INSERT INTO model_pricing (model_name, input_cost_per_1k, output_cost_per_1k, source)
         VALUES ({ph}, {ph}, {ph}, 'seed')
-        ON CONFLICT (model_name) DO NOTHING
+        ON CONFLICT (model_name) DO UPDATE SET
+            input_cost_per_1k = {excluded}.input_cost_per_1k,
+            output_cost_per_1k = {excluded}.output_cost_per_1k
+        WHERE model_pricing.source = 'seed'
     """
     for model, in_cost, out_cost in _PRICING_SEED:
         cur.execute(sql, (model, in_cost, out_cost))
@@ -1006,6 +1038,53 @@ def upsert_pricing(
                 params,
             )
     return len(params)
+
+
+def recompute_span_costs(account_id: int | None = None) -> dict[str, Any]:
+    """Re-price stored token-bearing spans using the CURRENT pricing table +
+    cache multipliers, and write back any changed `estimated_cost_usd`.
+
+    Use after pricing changes (new model added, rate corrected) so historical
+    cost reflects today's prices instead of staying frozen at ingest. Cache
+    cost is recovered only for spans that captured cache tokens; older spans
+    (NULL cache columns) re-price on input/output alone. Account-scoped when
+    `account_id` is given, else the whole table. Returns {scanned, updated}."""
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    sql = (
+        "SELECT id, attributes, input_tokens, output_tokens, "
+        "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd "
+        f"FROM spans WHERE total_tokens IS NOT NULL {account_filter}"
+    )
+    args: tuple[Any, ...] = (account_id,) if account_id is not None else ()
+    updated = 0
+    with _connect() as conn, _cursor(conn) as cur:
+        pricing = _load_pricing(cur)
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+        changes: list[tuple[Any, Any]] = []
+        for r in rows:
+            try:
+                attrs = json.loads(r["attributes"] or "{}")
+            except (TypeError, ValueError):
+                attrs = {}
+            model = attrs.get("gen_ai.request.model") if isinstance(attrs, dict) else None
+            new_cost = _compute_cost(
+                model,
+                r["input_tokens"],
+                r["output_tokens"],
+                pricing,
+                cache_creation=_row_get(r, "cache_creation_input_tokens") or 0,
+                cache_read=_row_get(r, "cache_read_input_tokens") or 0,
+            )
+            if new_cost != r["estimated_cost_usd"]:
+                changes.append((new_cost, r["id"]))
+        for new_cost, sid in changes:
+            cur.execute(
+                f"UPDATE spans SET estimated_cost_usd = {PH} WHERE id = {PH}",
+                (new_cost, sid),
+            )
+        updated = len(changes)
+    return {"scanned": len(rows), "updated": updated}
 
 
 def get_pricing_summary(sample: int = 10) -> dict[str, Any]:
@@ -1138,9 +1217,10 @@ _INSERT_COLUMNS = (
     "trace_id, span_id, parent_span_id, service_name, agent_id, span_name, kind, "
     "start_time_unix, end_time_unix, status_code, status_message, "
     "attributes, resource_attributes, account_id, "
-    "input_tokens, output_tokens, total_tokens, estimated_cost_usd"
+    "input_tokens, output_tokens, total_tokens, "
+    "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd"
 )
-_INSERT_COLUMN_COUNT = 18
+_INSERT_COLUMN_COUNT = 20
 
 
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
@@ -1188,6 +1268,19 @@ def _extract_tokens(
     if tot is None and (inp is not None or out is not None):
         tot = (inp or 0) + (out or 0)
     return (inp, out, tot)
+
+
+def _extract_cache_tokens(
+    attrs: dict[str, Any] | None,
+) -> tuple[int | None, int | None]:
+    """Pull (cache_creation, cache_read) input-token counts from a span's
+    attributes. Anthropic bills these separately from input_tokens
+    (creation at 1.25x, read at 0.1x of the base input rate)."""
+    if not attrs:
+        return (None, None)
+    cc = _to_int(attrs.get("gen_ai.usage.cache_creation_input_tokens"))
+    cr = _to_int(attrs.get("gen_ai.usage.cache_read_input_tokens"))
+    return (cc, cr)
 
 
 def _normalize_model(model: Any) -> str:
@@ -1254,9 +1347,13 @@ def _compute_cost(
     input_tokens: int | None,
     output_tokens: int | None,
     pricing: dict[str, tuple[float, float]],
+    cache_creation: int | None = 0,
+    cache_read: int | None = 0,
 ) -> float | None:
     """Estimated USD cost for one model call. None when the model is
-    unknown (no pricing) — we never guess a price."""
+    unknown (no pricing) — we never guess a price. Cached input tokens are
+    billed as multiples of the base input rate: cache-creation at 1.25x,
+    cache-read at 0.1x (Anthropic prompt caching)."""
     rate = _match_pricing(model, pricing)
     if rate is None:
         return None
@@ -1264,6 +1361,8 @@ def _compute_cost(
     cost = (
         (input_tokens or 0) / 1000.0 * in_per_1k
         + (output_tokens or 0) / 1000.0 * out_per_1k
+        + (cache_creation or 0) / 1000.0 * in_per_1k * _CACHE_WRITE_MULT
+        + (cache_read or 0) / 1000.0 * in_per_1k * _CACHE_READ_MULT
     )
     return round(cost, 6)
 
@@ -1302,10 +1401,15 @@ def insert_spans(
         for s in spans:
             attrs = s.get("attributes") or {}
             inp, out, tot = _extract_tokens(attrs)
+            cc, cr = _extract_cache_tokens(attrs)
             model = attrs.get("gen_ai.request.model")
+            has_usage = tot is not None or cc is not None or cr is not None
+            # total_tokens counts every billed token, cache included.
+            if has_usage:
+                tot = (tot or 0) + (cc or 0) + (cr or 0)
             cost = (
-                _compute_cost(model, inp, out, pricing)
-                if tot is not None
+                _compute_cost(model, inp, out, pricing, cache_creation=cc, cache_read=cr)
+                if has_usage
                 else None
             )
             rows.append(
@@ -1327,6 +1431,8 @@ def insert_spans(
                     inp,
                     out,
                     tot,
+                    cc,
+                    cr,
                     cost,
                 )
             )

@@ -269,7 +269,11 @@ def _emit_result(
             span.set_status(StatusCode.ERROR)
 
         # Token usage → cost. The model came off the AssistantMessages.
-        inp, out, tot = _extract_usage(_get(message, "usage"))
+        # Cached input tokens are billed at different rates than plain input,
+        # so surface them separately for accurate cost.
+        inp, out, tot, cache_create, cache_read = _extract_usage(
+            _get(message, "usage")
+        )
         if tot is not None:
             model = state.get("last_model")
             if model:
@@ -279,6 +283,14 @@ def _emit_result(
             if out is not None:
                 span.set_attribute("gen_ai.usage.output_tokens", out)
             span.set_attribute("gen_ai.usage.total_tokens", tot)
+            if cache_create is not None:
+                span.set_attribute(
+                    "gen_ai.usage.cache_creation_input_tokens", cache_create
+                )
+            if cache_read is not None:
+                span.set_attribute(
+                    "gen_ai.usage.cache_read_input_tokens", cache_read
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -358,13 +370,16 @@ def _get(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-def _extract_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
-    """Normalize a Claude Agent SDK usage payload to (input, output,
-    total). ResultMessage.usage is a dict with input_tokens /
-    output_tokens (plus cache_* fields we ignore for cost — cached
-    tokens are billed differently; v1 counts the headline figures)."""
+def _extract_usage(
+    usage: Any,
+) -> tuple[int | None, int | None, int | None, int | None, int | None]:
+    """Normalize a Claude Agent SDK usage payload to (input, output, total,
+    cache_creation, cache_read). ResultMessage.usage is a dict with
+    input_tokens / output_tokens plus cache_creation_input_tokens /
+    cache_read_input_tokens (billed at cache multipliers, and NOT included in
+    input_tokens). `total` counts all four billed token kinds."""
     if usage is None:
-        return (None, None, None)
+        return (None, None, None, None, None)
 
     def _int(v: Any) -> int | None:
         try:
@@ -375,9 +390,13 @@ def _extract_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
     inp = _int(_get(usage, "input_tokens"))
     out = _int(_get(usage, "output_tokens"))
     tot = _int(_get(usage, "total_tokens"))
-    if tot is None and (inp is not None or out is not None):
-        tot = (inp or 0) + (out or 0)
-    return (inp, out, tot)
+    cache_create = _int(_get(usage, "cache_creation_input_tokens"))
+    cache_read = _int(_get(usage, "cache_read_input_tokens"))
+    if tot is None and (
+        inp is not None or out is not None or cache_create is not None or cache_read is not None
+    ):
+        tot = (inp or 0) + (out or 0) + (cache_create or 0) + (cache_read or 0)
+    return (inp, out, tot, cache_create, cache_read)
 
 
 def _extract_text(content: Any) -> str:
