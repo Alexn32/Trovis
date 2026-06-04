@@ -3856,6 +3856,9 @@ a:hover {
   font-size: 13px;
   color: var(--text-primary);
 }
+.map-describe { display: flex; gap: 8px; align-items: center; }
+.map-describe .text-input { flex: 1 1 auto; }
+.map-describe .btn { flex-shrink: 0; }
 .map-canvas {
   flex: 1 1 auto;
   min-height: 50vh;

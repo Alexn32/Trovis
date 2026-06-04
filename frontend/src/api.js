@@ -232,6 +232,9 @@ export const api = {
   // { name, agent_service_name, agent_id }. Returns the full workflow.
   generateWorkflow: (data) =>
     request('/workflows/generate', { method: 'POST', body: JSON.stringify(data) }),
+  // AI builder: draft a workflow from a plain-English description.
+  createWorkflowFromDescription: (data) =>
+    request('/workflows/from-description', { method: 'POST', body: JSON.stringify(data) }),
   addWorkflowStep: (workflowId, data) =>
     request(`/workflows/${workflowId}/steps`, {
       method: 'POST',
@@ -327,6 +330,12 @@ export const api = {
   // --- agent-to-agent connections ---
   getConnections: () => request('/connections'),
   detectConnections: () => request('/connections/detect', { method: 'POST' }),
+  // AI builder: propose agent→agent connections from a description.
+  proposeConnections: (description) =>
+    request('/connections/from-description', {
+      method: 'POST',
+      body: JSON.stringify({ description }),
+    }),
   addConnection: (data) =>
     request('/connections', { method: 'POST', body: JSON.stringify(data) }),
   updateConnection: (id, status) =>

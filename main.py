@@ -50,6 +50,7 @@ from models import (
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
+    ConnectionsFromDescription,
     DisplayNameRequest,
     HealthResponse,
     IngestResponse,
@@ -78,6 +79,7 @@ from models import (
     Workflow,
     WorkflowCreate,
     WorkflowGenerate,
+    WorkflowFromDescription,
     WorkflowReorder,
     WorkflowStats,
     WorkflowStep,
@@ -875,6 +877,29 @@ async def generate_workflow(request: Request, body: WorkflowGenerate) -> Workflo
     return Workflow(**database.get_workflow(wf["id"], account_id=account_id))
 
 
+@app.post("/workflows/from-description", response_model=Workflow, status_code=201)
+async def workflow_from_description(
+    request: Request, body: WorkflowFromDescription
+) -> Workflow:
+    """Draft a workflow from a plain-English description (AI builder). Steps
+    can reference the account's known agents."""
+    account_id = getattr(request.state, "account_id", None)
+    known = [g["service_name"] for g in database.get_agents(account_id=account_id)]
+    try:
+        steps = describer.workflow_from_description(body.description, known_agents=known)
+    except describer.APIKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    wf = database.create_workflow(
+        account_id=account_id,
+        name=body.name,
+        description=body.description,
+        agent_service_name=body.agent_service_name,
+        agent_id=(body.agent_id or "main"),
+    )
+    database._replace_workflow_steps(wf["id"], steps)
+    return Workflow(**database.get_workflow(wf["id"], account_id=account_id))
+
+
 @app.post("/team", response_model=TeamMember, status_code=201)
 async def add_team_member(
     request: Request, body: TeamMemberCreate
@@ -1579,6 +1604,25 @@ async def detect_connections(request: Request) -> list[Connection]:
     refreshed list. Detection preserves operator confirm/dismiss/manual."""
     account_id = getattr(request.state, "account_id", None)
     database.detect_agent_connections(account_id)
+    return [Connection(**c) for c in database.get_connections(account_id)]
+
+
+@app.post("/connections/from-description", response_model=list[Connection])
+async def connections_from_description(
+    request: Request, body: ConnectionsFromDescription
+) -> list[Connection]:
+    """AI builder: propose agent→agent connections from a description, create
+    them (manual), and return the full edge list."""
+    account_id = getattr(request.state, "account_id", None)
+    known = [g["service_name"] for g in database.get_agents(account_id=account_id)]
+    try:
+        pairs = describer.connections_from_description(body.description, known)
+    except describer.APIKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    for p in pairs:
+        database.add_manual_connection(
+            account_id, p["source"], "main", p["target"], "main"
+        )
     return [Connection(**c) for c in database.get_connections(account_id)]
 
 

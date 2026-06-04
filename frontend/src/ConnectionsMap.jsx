@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
+import { Spinner } from './ui.jsx'
 import { statusFor, statusColor } from './utils.js'
 
 // Multi-agent connections map. A directional system diagram: agent nodes +
@@ -107,6 +108,8 @@ export default function ConnectionsMap({ onSelectAgent }) {
   const [connectMode, setConnectMode] = useState(false)
   const [connectSource, setConnectSource] = useState(null)
   const [selectedEdge, setSelectedEdge] = useState(null)
+  const [describeOpen, setDescribeOpen] = useState(false)
+  const [describeText, setDescribeText] = useState('')
   const svgRef = useRef(null)
   const dragRef = useRef(null)
   const loadedRef = useRef(false)
@@ -269,6 +272,19 @@ export default function ConnectionsMap({ onSelectAgent }) {
     await load(true)
     setBusy(false)
   }
+  async function describeConnections() {
+    if (!describeText.trim()) return
+    setBusy(true)
+    try {
+      setConnections((await api.proposeConnections(describeText.trim())) || [])
+      setDescribeText('')
+      setDescribeOpen(false)
+    } catch (e) {
+      setError(e.message || 'Could not propose connections')
+    } finally {
+      setBusy(false)
+    }
+  }
   function resetLayout() {
     const auto = autoLayout(nodeIds, edges)
     setPositions(auto)
@@ -299,11 +315,33 @@ export default function ConnectionsMap({ onSelectAgent }) {
           <button type="button" className="btn btn-secondary btn-sm" onClick={resetLayout}>
             Reset layout
           </button>
+          <button
+            type="button"
+            className={`btn btn-secondary btn-sm ${describeOpen ? 'btn-active' : ''}`}
+            onClick={() => setDescribeOpen((v) => !v)}
+          >
+            Describe
+          </button>
           <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={rescan}>
             Rescan
           </button>
         </div>
       </div>
+
+      {describeOpen && (
+        <div className="map-describe">
+          <input
+            className="text-input"
+            value={describeText}
+            onChange={(e) => setDescribeText(e.target.value)}
+            placeholder="Describe the data flow, e.g. 'the research agent feeds the writer, which feeds the publisher'"
+            onKeyDown={(e) => e.key === 'Enter' && describeConnections()}
+          />
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy || !describeText.trim()} onClick={describeConnections}>
+            {busy ? <Spinner /> : 'Suggest'}
+          </button>
+        </div>
+      )}
 
       <div className="map-legend" aria-hidden="true">
         <span className="map-legend-item"><svg width="30" height="8"><line x1="2" y1="4" x2="28" y2="4" className="map-leg-detected" /></svg>Detected</span>

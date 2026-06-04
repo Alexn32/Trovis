@@ -698,3 +698,142 @@ def generate_workflow(
             }
         )
     return steps
+
+
+# ---------------------------------------------------------------------------
+# AI builder — create workflows & connections from a plain-English description
+# ---------------------------------------------------------------------------
+
+
+def _claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 2000) -> Any:
+    """Call Claude and parse a JSON object from the reply, tolerating ``` fences.
+    Returns {} on parse failure. Raises APIKeyMissingError when unset."""
+    import json as _json
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise APIKeyMissingError("ANTHROPIC_API_KEY is not set.")
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    raw = "".join(
+        b.text for b in response.content if getattr(b, "type", None) == "text"
+    ).strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    try:
+        return _json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+
+
+WORKFLOW_DESC_SYSTEM_PROMPT = (
+    "You are a process analyst for Oversee. Turn a plain-English description "
+    "of how work flows into an ordered list of workflow steps — both "
+    "automated (agent) and human steps. Reference the provided agent names "
+    "when relevant. Mark review/approval/handoff steps as 'human'. Return "
+    "ONLY valid JSON, no markdown."
+)
+
+
+def workflow_from_description(
+    description: str, known_agents: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """Draft workflow steps from a natural-language description. Raises
+    APIKeyMissingError when the key is unset."""
+    agents_line = (
+        "Known agents you can reference: " + ", ".join(known_agents)
+        if known_agents
+        else "No known agents — describe steps generically."
+    )
+    user_prompt = (
+        f"{agents_line}\n\n"
+        f"Process description:\n{(description or '').strip()}\n\n"
+        "Produce the workflow as JSON, ordered logically (a trigger first and "
+        "an output last when sensible):\n"
+        "{\n"
+        '  "steps": [\n'
+        '    {"step_type": "trigger|agent|human|decision|output", '
+        '"label": "short title", "description": "what happens", '
+        '"operation": "tool name if an agent step, else null", '
+        '"duration_estimate_ms": 2000}\n'
+        "  ]\n"
+        "}\n"
+        "Return ONLY the JSON."
+    )
+    parsed = _claude_json(WORKFLOW_DESC_SYSTEM_PROMPT, user_prompt)
+    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
+    if not isinstance(raw_steps, list):
+        raw_steps = []
+
+    steps: list[dict[str, Any]] = []
+    for s in raw_steps:
+        if not isinstance(s, dict):
+            continue
+        step_type = str(s.get("step_type") or "agent").strip().lower()
+        if step_type not in _VALID_STEP_TYPES:
+            step_type = "agent"
+        label = str(s.get("label") or "").strip()
+        if not label:
+            continue
+        dur = s.get("duration_estimate_ms")
+        try:
+            dur = int(dur) if dur is not None else None
+        except (TypeError, ValueError):
+            dur = None
+        steps.append(
+            {
+                "step_type": step_type,
+                "label": label[:200],
+                "description": (str(s["description"]) if s.get("description") else None),
+                "operation": (str(s["operation"]) if s.get("operation") else None),
+                "duration_estimate_ms": dur,
+                "inferred_from": "manual",  # operator-described, not telemetry
+            }
+        )
+    return steps
+
+
+CONNECTIONS_DESC_SYSTEM_PROMPT = (
+    "You map a described data flow to directed agent-to-agent connections. "
+    "Only use agent names from the provided list. Return ONLY valid JSON."
+)
+
+
+def connections_from_description(
+    description: str, known_agents: list[str]
+) -> list[dict[str, str]]:
+    """Propose directed (source → target) connections among known agents from
+    a description. Filters to real agent names; dedupes. Raises
+    APIKeyMissingError when the key is unset."""
+    if not known_agents:
+        return []
+    user_prompt = (
+        f"Agents (use ONLY these names): {', '.join(known_agents)}\n\n"
+        f"Description:\n{(description or '').strip()}\n\n"
+        'Return directed connections as JSON: '
+        '{"connections": [{"source": "<agent>", "target": "<agent>"}]}. '
+        "source feeds into target. Use ONLY names from the list. Return ONLY JSON."
+    )
+    parsed = _claude_json(CONNECTIONS_DESC_SYSTEM_PROMPT, user_prompt, max_tokens=800)
+    raw = parsed.get("connections") if isinstance(parsed, dict) else None
+    if not isinstance(raw, list):
+        raw = []
+    known = set(known_agents)
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        s, t = c.get("source"), c.get("target")
+        if s in known and t in known and s != t and (s, t) not in seen:
+            seen.add((s, t))
+            out.append({"source": s, "target": t})
+    return out

@@ -995,8 +995,10 @@ function CreateWorkflowModal({ onClose, onCreated }) {
   const [agents, setAgents] = useState(null)
   const [serviceName, setServiceName] = useState('')
   const [agentId, setAgentId] = useState('main')
-  const [mode, setMode] = useState(null) // 'generate' | 'blank' while busy
+  const [mode, setMode] = useState(null) // 'generate' | 'blank' | 'describe' while busy
   const [error, setError] = useState(null)
+  const [tab, setTab] = useState('agent') // 'agent' | 'describe'
+  const [description, setDescription] = useState('')
 
   useEffect(() => {
     api
@@ -1048,6 +1050,21 @@ function CreateWorkflowModal({ onClose, onCreated }) {
       setMode(null)
     }
   }
+  async function fromDescription() {
+    setError(null)
+    setMode('describe')
+    try {
+      const wf = await api.createWorkflowFromDescription({
+        name: name.trim() || 'Workflow',
+        description: description.trim(),
+        agent_service_name: serviceName || null,
+      })
+      onCreated(wf)
+    } catch (e) {
+      setError(e.message || 'Could not build workflow')
+      setMode(null)
+    }
+  }
 
   return (
     <div className="modal-backdrop" onClick={mode ? undefined : onClose}>
@@ -1061,77 +1078,128 @@ function CreateWorkflowModal({ onClose, onCreated }) {
           )}
         </div>
 
-        {mode === 'generate' ? (
+        {mode === 'generate' || mode === 'describe' ? (
           <div className="modal-loading">
             <Spinner />
-            <p>Analyzing {agentLabel}'s telemetry…</p>
-            <p className="modal-loading-sub">Reading tool calls, sequences, and time-gaps to draft the steps.</p>
+            <p>{mode === 'generate' ? `Analyzing ${agentLabel}'s telemetry…` : 'Drafting your workflow…'}</p>
+            <p className="modal-loading-sub">
+              {mode === 'generate'
+                ? 'Reading tool calls, sequences, and time-gaps to draft the steps.'
+                : 'Turning your description into steps.'}
+            </p>
           </div>
         ) : (
           <div className="modal-body">
+            <div className="auth-type-toggle">
+              <button
+                type="button"
+                className={`auth-type-option ${tab === 'agent' ? 'is-active' : ''}`}
+                onClick={() => setTab('agent')}
+              >
+                <strong>From an agent</strong>
+                <span>Use its telemetry</span>
+              </button>
+              <button
+                type="button"
+                className={`auth-type-option ${tab === 'describe' ? 'is-active' : ''}`}
+                onClick={() => setTab('describe')}
+              >
+                <strong>Describe it</strong>
+                <span>AI drafts the steps</span>
+              </button>
+            </div>
+
             <label className="wf-edit-field">
               <span>Name</span>
               <input
                 className="text-input"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder={`${agentLabel} workflow`}
+                placeholder={tab === 'agent' ? `${agentLabel} workflow` : 'My workflow'}
                 autoFocus
               />
             </label>
 
-            <label className="wf-edit-field">
-              <span>Which agent is this workflow for?</span>
-              {agents === null ? (
-                <div className="workflow-side-empty">Loading agents…</div>
-              ) : agents.length === 0 ? (
-                <div className="workflow-side-empty">No agents reporting telemetry yet.</div>
-              ) : (
-                <select
-                  className="text-input"
-                  value={serviceName}
-                  onChange={(e) => {
-                    setServiceName(e.target.value)
-                    setAgentId('main')
-                  }}
-                >
-                  {agents.map((g) => (
-                    <option key={g.service_name} value={g.service_name}>
-                      {g.display_name || g.service_name}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </label>
+            {tab === 'agent' ? (
+              <>
+                <label className="wf-edit-field">
+                  <span>Which agent is this workflow for?</span>
+                  {agents === null ? (
+                    <div className="workflow-side-empty">Loading agents…</div>
+                  ) : agents.length === 0 ? (
+                    <div className="workflow-side-empty">No agents reporting telemetry yet.</div>
+                  ) : (
+                    <select
+                      className="text-input"
+                      value={serviceName}
+                      onChange={(e) => {
+                        setServiceName(e.target.value)
+                        setAgentId('main')
+                      }}
+                    >
+                      {agents.map((g) => (
+                        <option key={g.service_name} value={g.service_name}>
+                          {g.display_name || g.service_name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </label>
 
-            {hasSubAgents && (
-              <label className="wf-edit-field">
-                <span>Sub-agent</span>
-                <select className="text-input" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-                  {subAgents.map((a) => (
-                    <option key={a.agent_id} value={a.agent_id}>
-                      {a.agent_id}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                {hasSubAgents && (
+                  <label className="wf-edit-field">
+                    <span>Sub-agent</span>
+                    <select className="text-input" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+                      {subAgents.map((a) => (
+                        <option key={a.agent_id} value={a.agent_id}>
+                          {a.agent_id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {error && <p className="form-error">{error}</p>}
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={generate}
+                    disabled={!serviceName || mode != null}
+                  >
+                    Generate workflow
+                  </button>
+                  <button type="button" className="btn btn-link" onClick={blank} disabled={mode != null}>
+                    or start blank
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label className="wf-edit-field">
+                  <span>Describe the process in plain English</span>
+                  <textarea
+                    className="text-input"
+                    rows={4}
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="e.g. A support ticket comes in, the agent drafts a reply, a teammate approves it, then it's sent to the customer."
+                  />
+                </label>
+                {error && <p className="form-error">{error}</p>}
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={fromDescription}
+                    disabled={!description.trim() || mode != null}
+                  >
+                    Build with AI
+                  </button>
+                </div>
+              </>
             )}
-
-            {error && <p className="form-error">{error}</p>}
-
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={generate}
-                disabled={!serviceName || mode != null}
-              >
-                Generate workflow
-              </button>
-              <button type="button" className="btn btn-link" onClick={blank} disabled={mode != null}>
-                or start blank
-              </button>
-            </div>
           </div>
         )}
       </div>

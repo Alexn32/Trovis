@@ -390,6 +390,23 @@ class ConnectionStatusUpdate(BaseModel):
     status: str  # 'confirmed' | 'dismissed' | 'detected' | 'manual'
 
 
+class WorkflowFromDescription(BaseModel):
+    """Body for POST /workflows/from-description — AI drafts the steps from a
+    plain-English description."""
+
+    name: str
+    description: str
+    agent_service_name: str | None = None
+    agent_id: str | None = "main"
+
+
+class ConnectionsFromDescription(BaseModel):
+    """Body for POST /connections/from-description — AI proposes agent→agent
+    connections from a description."""
+
+    description: str
+
+
 class WorkflowStats(BaseModel):
     """Live telemetry stats for a workflow's source agent (all-time).
     `has_agent` is False when the workflow has no agent to pull from."""
