@@ -837,3 +837,123 @@ def connections_from_description(
             seen.add((s, t))
             out.append({"source": s, "target": t})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — daily briefing, needs-attention enrichment, work-feed summaries
+# ---------------------------------------------------------------------------
+
+
+DASHBOARD_BRIEFING_SYSTEM_PROMPT = (
+    "You are the operations lead writing a short daily briefing for someone who "
+    "manages a fleet of AI agents. Write 2-3 sentences in plain, human prose — "
+    "the way a sharp manager would open a standup. Lead with what matters most: "
+    "notable changes, problems, or wins. Use the specific numbers you're given. "
+    "No bullet points, no headers, no jargon, no markdown. Return ONLY valid JSON."
+)
+
+
+def fleet_briefing(stats: dict[str, Any]) -> dict[str, str]:
+    """Generate a 2-3 sentence daily briefing from a fleet snapshot. Returns
+    {"summary": str} ("" when Claude gives nothing). Raises APIKeyMissingError
+    when ANTHROPIC_API_KEY is unset."""
+    import json as _json
+
+    user_prompt = (
+        "Fleet snapshot (JSON):\n"
+        f"{_json.dumps(stats, default=str)}\n\n"
+        'Return JSON: {"summary": "2-3 sentence briefing"}. Return ONLY the JSON.'
+    )
+    parsed = _claude_json(DASHBOARD_BRIEFING_SYSTEM_PROMPT, user_prompt, max_tokens=400)
+    summary = ""
+    if isinstance(parsed, dict):
+        summary = str(parsed.get("summary") or "").strip()
+    return {"summary": summary}
+
+
+DASHBOARD_ATTENTION_SYSTEM_PROMPT = (
+    "You are an SRE-minded analyst for Oversee. For each flagged agent, write a "
+    "short title, a one-sentence detail explaining the likely problem, a concrete "
+    "recommendation, and a brief impact estimate. Be specific and use the numbers "
+    "provided. Plain prose, no markdown. Return ONLY valid JSON."
+)
+
+
+def attention_items(flagged: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Enrich flagged agents with title/detail/recommendation/impact in ONE
+    Claude call. Returns a list aligned to `flagged` (same order; severity,
+    agent and last_seen are preserved from our own classification, never
+    Claude's). Enrichment fields fall back to "" when Claude omits them.
+    Raises APIKeyMissingError when the key is unset."""
+    if not flagged:
+        return []
+    import json as _json
+
+    payload = [
+        {
+            "agent": f["agent"],
+            "severity": f["severity"],
+            "error_rate_pct": f.get("error_rate_pct"),
+            "span_count": f.get("span_count"),
+            "error_count": f.get("error_count"),
+            "days_since_seen": f.get("days_since_seen"),
+            "description": f.get("description"),
+        }
+        for f in flagged
+    ]
+    user_prompt = (
+        "Flagged agents (JSON):\n"
+        f"{_json.dumps(payload, default=str)}\n\n"
+        'Return JSON: {"items": [{"agent": "<name>", "title": "...", '
+        '"detail": "...", "recommendation": "...", "impact": "..."}]}. '
+        "One object per flagged agent, echoing its exact agent name. Return ONLY JSON."
+    )
+    parsed = _claude_json(DASHBOARD_ATTENTION_SYSTEM_PROMPT, user_prompt, max_tokens=1200)
+    enriched = parsed.get("items") if isinstance(parsed, dict) else None
+    by_agent: dict[str, dict[str, Any]] = {}
+    if isinstance(enriched, list):
+        for e in enriched:
+            if isinstance(e, dict) and e.get("agent"):
+                by_agent[str(e["agent"])] = e
+    out: list[dict[str, Any]] = []
+    for f in flagged:
+        e = by_agent.get(f["agent"], {})
+        out.append(
+            {
+                "severity": f["severity"],
+                "agent": f["agent"],
+                "title": str(e.get("title") or "Needs attention").strip(),
+                "detail": str(e.get("detail") or "").strip(),
+                "recommendation": str(e.get("recommendation") or "").strip(),
+                "impact": str(e.get("impact") or "").strip(),
+                "last_seen": f.get("last_seen"),
+            }
+        )
+    return out
+
+
+DASHBOARD_WORKFEED_SYSTEM_PROMPT = (
+    "You summarize what an AI agent recently did, for a non-technical manager. "
+    "Write ONE or TWO sentences in plain English describing the actual work — "
+    "e.g. 'Triaged 47 support emails and routed 12 to the billing team.' Use the "
+    "operations and any captured content as evidence; never just restate span "
+    "counts or error rates. No markdown, no jargon. Return ONLY valid JSON."
+)
+
+
+def work_feed_summary(agent_label: str, activity: dict[str, Any]) -> str:
+    """One-to-two sentence plain-English summary of an agent's recent work.
+    `activity` carries task_count, top operations and captured content samples.
+    Returns "" when Claude gives nothing. Raises APIKeyMissingError when unset."""
+    import json as _json
+
+    user_prompt = (
+        f"Agent: {agent_label}\n"
+        "Recent activity (JSON):\n"
+        f"{_json.dumps(activity, default=str)}\n\n"
+        'Return JSON: {"summary": "1-2 sentence plain-English summary"}. Return ONLY JSON.'
+    )
+    parsed = _claude_json(DASHBOARD_WORKFEED_SYSTEM_PROMPT, user_prompt, max_tokens=300)
+    if isinstance(parsed, dict):
+        return str(parsed.get("summary") or "").strip()
+    return ""

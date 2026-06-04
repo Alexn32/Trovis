@@ -46,11 +46,15 @@ from models import (
     AskRequest,
     AskResponse,
     AcceptInviteRequest,
+    AttentionItem,
+    BriefingResponse,
     ClaimRequest,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
     ConnectionsFromDescription,
+    CostAgent,
+    CostResponse,
     DisplayNameRequest,
     HealthResponse,
     IngestResponse,
@@ -76,6 +80,7 @@ from models import (
     TeamMemberCreate,
     WeeklySummary,
     WeeklyTrends,
+    WorkFeedItem,
     Workflow,
     WorkflowCreate,
     WorkflowGenerate,
@@ -1066,6 +1071,9 @@ async def refresh_pricing_now(request: Request) -> dict[str, Any]:
 
 _WEEKLY_SUMMARY_TTL_SECONDS = 60 * 60  # 1 hour
 _CAPABILITIES_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+_DASHBOARD_TTL_SECONDS = 60 * 60  # 1 hour — briefing/attention/work-feed
+# Sentinel service_name for account-level (not per-agent) cached insights.
+_DASHBOARD_SENTINEL = "__dashboard__"
 _NS_PER_DAY = 24 * 60 * 60 * 1_000_000_000
 
 
@@ -1660,6 +1668,442 @@ async def remove_connection(conn_id: int, request: Request) -> None:
     account_id = getattr(request.state, "account_id", None)
     if not database.delete_connection(account_id, conn_id):
         raise HTTPException(status_code=404, detail="connection not found")
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — daily briefing, needs-attention, cost intelligence, work feed
+#
+# All read endpoints are account-scoped via request.state.account_id. The
+# cheap parts (counts, costs) recompute every call; the Claude-written parts
+# (briefing summary, attention enrichment, work-feed summaries) cache for an
+# hour via the agent_insights table. Every Claude path degrades gracefully —
+# a missing/erroring key never 500s the dashboard.
+# ---------------------------------------------------------------------------
+
+
+def _monthly_budget() -> float:
+    """Configurable monthly cost budget for the Cost Intelligence card."""
+    try:
+        return float(os.environ.get("OVERSEE_MONTHLY_BUDGET", "500") or 500)
+    except (TypeError, ValueError):
+        return 500.0
+
+
+def _last_seen_age_days(last_seen: str | None) -> float | None:
+    """Age in days of an ISO last_seen timestamp; None when missing/unparseable."""
+    if not last_seen:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        dt = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    except (ValueError, AttributeError):
+        return None
+
+
+def _agent_error_rate(a: dict) -> float:
+    spans = a.get("total_spans") or 0
+    errs = a.get("total_errors") or 0
+    return (errs / spans * 100.0) if spans else 0.0
+
+
+def _agent_status(a: dict) -> str:
+    """healthy | degraded | offline — must match the frontend deriveStatus():
+    offline when no telemetry in 24h, degraded when error rate > 2%."""
+    age = _last_seen_age_days(a.get("last_seen"))
+    if age is None or age > 1.0:
+        return "offline"
+    if _agent_error_rate(a) > 2.0:
+        return "degraded"
+    return "healthy"
+
+
+def _briefing_stats(
+    agents: list[dict], tasks_yesterday: int, tasks_last_week: int, tasks_delta: str
+) -> dict:
+    healthy = degraded = offline = 0
+    top_errors: list[dict] = []
+    cost_today = 0.0
+    for a in agents:
+        st = _agent_status(a)
+        healthy += st == "healthy"
+        degraded += st == "degraded"
+        offline += st == "offline"
+        rate = _agent_error_rate(a)
+        if rate > 2.0 and (a.get("total_spans") or 0) > 0:
+            top_errors.append(
+                {"agent": a["service_name"], "error_rate_pct": round(rate, 1)}
+            )
+        cost_today += a.get("cost_today") or 0.0
+    top_errors.sort(key=lambda x: x["error_rate_pct"], reverse=True)
+    return {
+        "agent_count": len(agents),
+        "healthy": healthy,
+        "degraded": degraded,
+        "offline": offline,
+        "top_error_agents": top_errors[:5],
+        "cost_today_usd": round(cost_today, 4),
+        "tasks_last_24h": tasks_yesterday,
+        "tasks_last_7d": tasks_last_week,
+        "tasks_wow_delta": tasks_delta,
+    }
+
+
+def _briefing_fallback(stats: dict) -> str:
+    """Non-AI briefing line used when Claude is unavailable."""
+    n = stats["agent_count"]
+    if n == 0:
+        return (
+            "No agents are reporting telemetry yet. Connect an agent to start "
+            "seeing activity here."
+        )
+    bits = [f"{n} agent{'s' if n != 1 else ''} reporting"]
+    bits.append(f"{stats['tasks_last_24h']} tasks in the last 24 hours")
+    if stats["degraded"] or stats["offline"]:
+        bits.append(f"{stats['degraded']} degraded and {stats['offline']} offline")
+    return ", ".join(bits) + "."
+
+
+def _flag_attention(agents: list[dict]) -> list[dict]:
+    """Derive needs-attention flags: error rate > 10% critical, > 2% warning,
+    offline > 30 days info. Sorted critical → warning → info, then by error rate."""
+    flagged: list[dict] = []
+    for a in agents:
+        spans = a.get("total_spans") or 0
+        rate = _agent_error_rate(a)
+        age = _last_seen_age_days(a.get("last_seen"))
+        if spans > 0 and rate > 10.0:
+            severity = "critical"
+        elif spans > 0 and rate > 2.0:
+            severity = "warning"
+        elif age is not None and age > 30.0:
+            severity = "info"
+        else:
+            continue
+        flagged.append(
+            {
+                "agent": a["service_name"],
+                "severity": severity,
+                "error_rate_pct": round(rate, 1),
+                "span_count": spans,
+                "error_count": a.get("total_errors") or 0,
+                "days_since_seen": round(age, 1) if age is not None else None,
+                "description": a.get("description"),
+                "last_seen": a.get("last_seen"),
+            }
+        )
+    rank = {"critical": 0, "warning": 1, "info": 2}
+    flagged.sort(key=lambda f: (rank.get(f["severity"], 9), -f["error_rate_pct"]))
+    return flagged
+
+
+def _attention_fallback(flagged: list[dict]) -> list[dict]:
+    """Non-AI attention items used when Claude is unavailable."""
+    out: list[dict] = []
+    for f in flagged:
+        if f["severity"] == "info":
+            title = "Agent has gone quiet"
+            detail = (
+                f"No telemetry from {f['agent']} in {f['days_since_seen']} days."
+            )
+            rec = "Confirm whether this agent is still running or should be retired."
+        else:
+            title = "Elevated error rate"
+            detail = (
+                f"{f['agent']} is failing {f['error_rate_pct']}% of "
+                f"{f['span_count']} tasks."
+            )
+            rec = "Inspect the recent error spans to find the failing operation."
+        out.append(
+            {
+                "severity": f["severity"],
+                "agent": f["agent"],
+                "title": title,
+                "detail": detail,
+                "recommendation": rec,
+                "impact": "",
+                "last_seen": f.get("last_seen"),
+            }
+        )
+    return out
+
+
+def _work_activity(spans: list[dict]) -> dict:
+    """Compact evidence (top operations + a few captured content samples) for
+    the work-feed summary prompt."""
+    ops: dict[str, int] = {}
+    samples: list[str] = []
+    for s in spans:
+        name = s.get("span_name") or ""
+        ops[name] = ops.get(name, 0) + 1
+        attrs = s.get("attributes") or {}
+        for k in (
+            "oversee.tool.result",
+            "oversee.response.content",
+            "oversee.message.content",
+        ):
+            v = attrs.get(k)
+            if v:
+                samples.append(str(v)[:200])
+                break
+    top_ops = sorted(ops.items(), key=lambda kv: kv[1], reverse=True)[:6]
+    return {
+        "task_count": len(spans),
+        "top_operations": [{"operation": k, "count": v} for k, v in top_ops],
+        "samples": samples[:8],
+    }
+
+
+@app.get("/dashboard/briefing", response_model=BriefingResponse)
+async def dashboard_briefing(request: Request) -> BriefingResponse:
+    """AI daily briefing + task counts. Counts are always fresh; the Claude
+    summary is cached for an hour and falls back to a plain line on failure."""
+    account_id = getattr(request.state, "account_id", None)
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    tasks_yesterday = database.count_fleet_spans(account_id, now_ns - _NS_PER_DAY)
+    tasks_last_week = database.count_fleet_spans(account_id, now_ns - 7 * _NS_PER_DAY)
+    tasks_prev_week = database.count_fleet_spans(
+        account_id, now_ns - 14 * _NS_PER_DAY, now_ns - 7 * _NS_PER_DAY
+    )
+    delta = _pct_delta(tasks_last_week, tasks_prev_week)
+    tasks_delta = (
+        "—" if delta is None else f"{'+' if delta >= 0 else ''}{delta:.0f}%"
+    )
+
+    cached = database.get_insight(
+        account_id=account_id,
+        service_name=_DASHBOARD_SENTINEL,
+        agent_id="main",
+        kind="briefing",
+        max_age_seconds=_DASHBOARD_TTL_SECONDS,
+    )
+    if cached and cached["data"].get("summary"):
+        return BriefingResponse(
+            summary=cached["data"]["summary"],
+            tasks_yesterday=tasks_yesterday,
+            tasks_last_week=tasks_last_week,
+            tasks_delta=tasks_delta,
+            generated_at=cached["generated_at"],
+        )
+
+    agents = database.get_agents(account_id=account_id)
+    stats = _briefing_stats(agents, tasks_yesterday, tasks_last_week, tasks_delta)
+    summary = ""
+    try:
+        summary = describer.fleet_briefing(stats).get("summary", "")
+    except describer.APIKeyMissingError:
+        summary = ""
+    except Exception as e:  # noqa: BLE001
+        print(f"[Oversee] /dashboard/briefing claude failed: {type(e).__name__}: {e}")
+        summary = ""
+    if summary:
+        database.save_insight(
+            account_id=account_id,
+            service_name=_DASHBOARD_SENTINEL,
+            agent_id="main",
+            kind="briefing",
+            data={"summary": summary},
+        )
+    else:
+        summary = _briefing_fallback(stats)
+    return BriefingResponse(
+        summary=summary,
+        tasks_yesterday=tasks_yesterday,
+        tasks_last_week=tasks_last_week,
+        tasks_delta=tasks_delta,
+    )
+
+
+@app.get("/dashboard/attention", response_model=list[AttentionItem])
+async def dashboard_attention(request: Request) -> list[AttentionItem]:
+    """Needs-attention rows, derived from fleet health and enriched by Claude
+    (cached an hour, keyed on the current flag set). Empty list when all clear."""
+    account_id = getattr(request.state, "account_id", None)
+    agents = database.get_agents(account_id=account_id)
+    flagged = _flag_attention(agents)
+    if not flagged:
+        return []
+
+    import hashlib
+    import json as _json
+
+    fingerprint = hashlib.sha256(
+        _json.dumps([(f["agent"], f["severity"]) for f in flagged]).encode()
+    ).hexdigest()
+    cached = database.get_insight(
+        account_id=account_id,
+        service_name=_DASHBOARD_SENTINEL,
+        agent_id="main",
+        kind="attention",
+        max_age_seconds=_DASHBOARD_TTL_SECONDS,
+    )
+    if (
+        cached
+        and cached["data"].get("fingerprint") == fingerprint
+        and cached["data"].get("items")
+    ):
+        return [AttentionItem(**it) for it in cached["data"]["items"]]
+
+    try:
+        items = describer.attention_items(flagged)
+        if items:
+            database.save_insight(
+                account_id=account_id,
+                service_name=_DASHBOARD_SENTINEL,
+                agent_id="main",
+                kind="attention",
+                data={"fingerprint": fingerprint, "items": items},
+            )
+    except describer.APIKeyMissingError:
+        items = _attention_fallback(flagged)
+    except Exception as e:  # noqa: BLE001
+        print(f"[Oversee] /dashboard/attention claude failed: {type(e).__name__}: {e}")
+        items = _attention_fallback(flagged)
+    return [AttentionItem(**it) for it in items]
+
+
+@app.get("/dashboard/cost", response_model=CostResponse)
+async def dashboard_cost(request: Request) -> CostResponse:
+    """Cost Intelligence: today's spend, month-to-date vs. budget, a 30-day
+    sparkline, and per-agent recent spend + trend. Pure DB, no Claude."""
+    account_id = getattr(request.state, "account_id", None)
+    agents = database.get_agents(account_id=account_id)
+    daily_rows = database.get_fleet_daily_cost(account_id, days=30)
+
+    from datetime import datetime, timezone, timedelta
+
+    today = datetime.now(timezone.utc).date()
+    by_date = {r["date"]: r["cost"] for r in daily_rows}
+    daily = [
+        round(by_date.get((today - timedelta(days=i)).strftime("%Y-%m-%d"), 0.0), 6)
+        for i in range(29, -1, -1)
+    ]
+    today_cost = round(by_date.get(today.strftime("%Y-%m-%d"), 0.0), 6)
+    month_prefix = today.strftime("%Y-%m-")
+    month_total = round(
+        sum(r["cost"] for r in daily_rows if r["date"].startswith(month_prefix)), 6
+    )
+    budget = _monthly_budget()
+    budget_pct = round(month_total / budget * 100.0, 1) if budget > 0 else 0.0
+
+    cost_agents: list[CostAgent] = []
+    for a in agents:
+        c_today = a.get("cost_today") or 0.0
+        avg = (a.get("cost_7d") or 0.0) / 7.0
+        if c_today > avg * 1.1:
+            trend = "up"
+        elif c_today < avg * 0.9:
+            trend = "down"
+        else:
+            trend = "flat"
+        cost_agents.append(
+            CostAgent(
+                name=a.get("display_name") or a["service_name"],
+                cost=round(a.get("cost_7d") or 0.0, 6),
+                trend=trend,
+            )
+        )
+    cost_agents.sort(key=lambda x: x.cost, reverse=True)
+
+    return CostResponse(
+        today=today_cost,
+        month_total=month_total,
+        month_budget=budget,
+        budget_pct=budget_pct,
+        agents=cost_agents[:8],
+        daily=daily,
+    )
+
+
+@app.get("/dashboard/work-feed", response_model=list[WorkFeedItem])
+async def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
+    """Plain-English feed of what each active agent recently did (last 24h).
+    One Claude summary per agent, cached an hour, with a non-AI fallback."""
+    account_id = getattr(request.state, "account_id", None)
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    cutoff = now_ns - _NS_PER_DAY
+
+    agents = database.get_agents(account_id=account_id)
+    active = [
+        a
+        for a in agents
+        if (_last_seen_age_days(a.get("last_seen")) or 999) <= 1.0
+    ]
+    active.sort(key=lambda a: a.get("last_seen") or "", reverse=True)
+
+    feed: list[WorkFeedItem] = []
+    for a in active[:8]:  # cap Claude calls
+        svc = a["service_name"]
+        label = a.get("display_name") or svc
+        spans = database.get_agent_spans(svc, limit=40, account_id=account_id)
+        recent = [s for s in spans if (s.get("start_time_unix") or 0) >= cutoff]
+        if not recent:
+            continue
+        task_count = len(recent)
+
+        cached = database.get_insight(
+            account_id=account_id,
+            service_name=svc,
+            agent_id="main",
+            kind="work_feed",
+            max_age_seconds=_DASHBOARD_TTL_SECONDS,
+        )
+        summary = cached["data"].get("summary", "") if cached else ""
+        if not summary:
+            try:
+                summary = describer.work_feed_summary(label, _work_activity(recent))
+                if summary:
+                    database.save_insight(
+                        account_id=account_id,
+                        service_name=svc,
+                        agent_id="main",
+                        kind="work_feed",
+                        data={"summary": summary},
+                    )
+            except describer.APIKeyMissingError:
+                summary = ""
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[Oversee] /dashboard/work-feed claude failed for "
+                    f"'{svc}': {type(e).__name__}: {e}"
+                )
+                summary = ""
+        if not summary:
+            ops = a.get("top_operations") or []
+            summary = f"Ran {task_count} tasks" + (
+                f" — mostly {', '.join(ops[:3])}." if ops else "."
+            )
+        feed.append(
+            WorkFeedItem(
+                time=a.get("last_seen"),
+                agent=label,
+                summary=summary,
+                tasks=task_count,
+            )
+        )
+    return feed
+
+
+@app.post("/dashboard/ask", response_model=AskResponse)
+async def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
+    """The floating Ask pill — concise, plain-prose fleet Q&A. Reuses the
+    fleet context builder with a tighter system prompt."""
+    account_id = getattr(request.state, "account_id", None)
+    msgs = [m.model_dump() for m in body.messages]
+    try:
+        answer = asker.ask_about_fleet(account_id, msgs, concise=True)
+    except asker.AskApiKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AskResponse(answer=answer)
 
 
 @app.post("/ask", response_model=AskResponse)
