@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { AskVisualRenderer } from './AskVisuals.jsx'
 import {
   SparkleIcon,
   ChevronDownIcon,
@@ -540,7 +541,7 @@ function AskPill() {
     setPending(true)
     try {
       const r = await api.askDashboard(next)
-      setMessages([...next, { role: 'assistant', content: r.answer }])
+      setMessages([...next, { role: 'assistant', content: r.answer, visual: r.visual || null }])
     } catch (e) {
       const msg = String(e?.message || '')
       setMessages([
@@ -667,6 +668,7 @@ function Bubble({ m }) {
           </span>
           OVERSEE
         </div>
+        {m.visual && <AskVisualRenderer visual={m.visual} />}
         <div className="dash-bubble-text">{m.content}</div>
       </div>
     </div>
