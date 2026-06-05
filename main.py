@@ -115,6 +115,10 @@ _OPEN_PATHS = {
     "/auth/login",
     "/auth/claim",
     "/auth/accept-invite",
+    "/oauth/authorize",         # OAuth consent page (user authenticates there)
+    "/oauth/authorize/submit",  # OAuth consent form submission
+    "/oauth/token",              # OAuth token exchange (ChatGPT server-to-server)
+    "/actions/openapi.json",     # OpenAPI spec (public, no auth)
 }
 
 
@@ -202,9 +206,11 @@ async def auth_middleware(request: Request, call_next):
     # The MCP server does its own Bearer-API-key auth. Bypass auth middleware
     # for all MCP paths: /mcp (streamable HTTP), /sse (SSE stream), /messages
     # (SSE message POST — resolved relative to root by the SSE client).
+    # Action endpoints (/actions/*) use their own OAuth Bearer token.
     if (
         path == "/mcp" or path.startswith("/mcp/")
         or path in ("/sse", "/sse/") or path.startswith("/messages")
+        or path.startswith("/actions/")
     ):
         return await call_next(request)
 
@@ -2503,6 +2509,415 @@ async def ask_agent(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return AskResponse(answer=answer)
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.0 + GPT Actions (ChatGPT agent integration)
+#
+# Flow: ChatGPT redirects user → GET /oauth/authorize (consent page) →
+# user logs in / approves → redirect back to ChatGPT with ?code= → ChatGPT
+# POSTs /oauth/token to exchange code for access_token → ChatGPT calls
+# /actions/* with Bearer access_token.
+# ---------------------------------------------------------------------------
+
+_OVERSEE_APP_URL = os.environ.get("OVERSEE_APP_URL", "https://oversee-pi.vercel.app")
+_OVERSEE_API_URL = os.environ.get("OVERSEE_API_URL", "https://web-production-e6bc4.up.railway.app")
+# OAuth client_id/secret — set in env for production; defaults for dev.
+_OAUTH_CLIENT_ID = os.environ.get("OVERSEE_OAUTH_CLIENT_ID", "oversee-chatgpt")
+_OAUTH_CLIENT_SECRET = os.environ.get("OVERSEE_OAUTH_CLIENT_SECRET", "oversee-dev-secret")
+
+
+from starlette.responses import HTMLResponse, RedirectResponse
+
+
+@app.get("/oauth/authorize", include_in_schema=False)
+async def oauth_authorize(
+    client_id: str = Query(default=""),
+    redirect_uri: str = Query(default=""),
+    response_type: str = Query(default="code"),
+    scope: str = Query(default=""),
+    state: str = Query(default=""),
+):
+    """OAuth consent page. Renders a simple branded login+approve form.
+    On submit, validates credentials, creates an auth code, and redirects
+    back to ChatGPT's callback with ?code=&state=."""
+    # Render a self-contained consent page (no React needed — it's a redirect flow)
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Oversee — Authorize</title>
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f8f9fb; display:flex; justify-content:center; align-items:center;
+         min-height:100vh; }}
+  .card {{ background:#fff; border-radius:16px; border:1px solid #eaedf0;
+           padding:32px; max-width:400px; width:100%; }}
+  .logo {{ display:flex; align-items:center; gap:8px; margin-bottom:20px; }}
+  .dot {{ width:8px; height:8px; border-radius:50%; background:#10b981; }}
+  .brand {{ font-size:16px; font-weight:800; color:#0f172a; letter-spacing:-0.04em; }}
+  h2 {{ font-size:18px; font-weight:700; color:#0f172a; margin-bottom:8px; }}
+  p {{ font-size:13px; color:#64748b; margin-bottom:20px; line-height:1.5; }}
+  .perms {{ background:#f8f9fb; border-radius:8px; padding:12px; margin-bottom:20px;
+            font-size:12px; color:#374151; }}
+  .perms li {{ margin:4px 0; }}
+  label {{ display:block; font-size:13px; font-weight:600; color:#374151; margin-bottom:6px; }}
+  input {{ width:100%; padding:10px 12px; border-radius:8px; border:1.5px solid #e2e5e9;
+          font-size:14px; margin-bottom:12px; }}
+  input:focus {{ outline:none; border-color:#0f172a; }}
+  .btn {{ width:100%; padding:11px; border-radius:8px; border:none; background:#0f172a;
+          color:#fff; font-size:14px; font-weight:600; cursor:pointer; margin-bottom:8px; }}
+  .btn:hover {{ background:#1e293b; }}
+  .btn-cancel {{ background:#fff; color:#64748b; border:1.5px solid #e2e5e9; }}
+  .err {{ color:#dc2626; font-size:12px; margin-bottom:12px; display:none; }}
+</style>
+</head><body>
+<div class="card">
+  <div class="logo"><span class="dot"></span><span class="brand">oversee</span></div>
+  <h2>Authorize ChatGPT</h2>
+  <p>ChatGPT wants to connect to your Oversee account to monitor agent activity.</p>
+  <ul class="perms">
+    <li>Report agent activity and task completions</li>
+    <li>Register agents in your fleet</li>
+    <li>Read agent status</li>
+  </ul>
+  <form method="POST" action="/oauth/authorize/submit">
+    <input type="hidden" name="client_id" value="{client_id}">
+    <input type="hidden" name="redirect_uri" value="{redirect_uri}">
+    <input type="hidden" name="scope" value="{scope}">
+    <input type="hidden" name="state" value="{state}">
+    <label>Email</label>
+    <input type="email" name="email" required placeholder="you@company.com">
+    <label>Password</label>
+    <input type="password" name="password" required placeholder="Your Oversee password">
+    <div class="err" id="err"></div>
+    <button type="submit" class="btn">Authorize</button>
+    <button type="button" class="btn btn-cancel" onclick="window.close()">Cancel</button>
+  </form>
+</div>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+@app.post("/oauth/authorize/submit", include_in_schema=False)
+async def oauth_authorize_submit(request: Request):
+    """Process the consent form: validate credentials, issue a code, redirect."""
+    form = await request.form()
+    email = str(form.get("email", "")).strip().lower()
+    password = str(form.get("password", ""))
+    client_id = str(form.get("client_id", ""))
+    redirect_uri = str(form.get("redirect_uri", ""))
+    scope = str(form.get("scope", ""))
+    state = str(form.get("state", ""))
+
+    # Authenticate the user
+    user_row = database.get_user_by_email(email)
+    if not user_row or not user_row.get("password_hash"):
+        return HTMLResponse("<h3>Invalid email or password.</h3><a href='javascript:history.back()'>Try again</a>", status_code=401)
+    if not database.verify_password(password, user_row["password_hash"]):
+        return HTMLResponse("<h3>Invalid email or password.</h3><a href='javascript:history.back()'>Try again</a>", status_code=401)
+
+    account_id = user_row["account_id"]
+    user_id = user_row["id"]
+
+    # Create the authorization code
+    code = database.create_oauth_code(
+        account_id=account_id,
+        user_id=user_id,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+    )
+
+    # Redirect back to ChatGPT with the code
+    sep = "&" if "?" in redirect_uri else "?"
+    location = f"{redirect_uri}{sep}code={code}"
+    if state:
+        location += f"&state={state}"
+    return RedirectResponse(url=location, status_code=302)
+
+
+@app.post("/oauth/token", include_in_schema=False)
+async def oauth_token(request: Request):
+    """Exchange an authorization code for an access token (ChatGPT server-to-server)."""
+    # Accept both form-encoded and JSON bodies
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        body = await request.json()
+    else:
+        form = await request.form()
+        body = dict(form)
+
+    grant_type = str(body.get("grant_type", ""))
+    code = str(body.get("code", ""))
+    client_id = str(body.get("client_id", ""))
+    client_secret = str(body.get("client_secret", ""))
+    redirect_uri = str(body.get("redirect_uri", ""))
+
+    if grant_type != "authorization_code":
+        raise HTTPException(status_code=400, detail="unsupported_grant_type")
+    if not code:
+        raise HTTPException(status_code=400, detail="missing code")
+
+    result = database.exchange_oauth_code(code, client_id, redirect_uri)
+    if result is None:
+        raise HTTPException(status_code=400, detail="invalid_grant")
+    return result
+
+
+# --- Action endpoints (called by ChatGPT with the OAuth Bearer token) ---
+
+def _resolve_action_account(request: Request) -> int | None:
+    """Extract Bearer token from the request and resolve to account_id via
+    the sessions table (the OAuth flow creates a session token)."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        raw_token = auth[7:].strip()
+        session = database.resolve_session(raw_token)
+        if session:
+            return session["account_id"]
+    return None
+
+
+# Per-account agent name tracking for the ChatGPT action session (same
+# pattern as the MCP tools, but using request-scoped state).
+_action_agents: dict[int, str] = {}
+
+
+@app.post("/actions/connect")
+async def action_connect(request: Request):
+    """Register a ChatGPT agent with Oversee. Call at the start of a conversation."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    body = await request.json()
+    name = str(body.get("agent_name", "ChatGPT Agent")).strip() or "ChatGPT Agent"
+    role = str(body.get("agent_role", "")).strip()
+    instructions = str(body.get("agent_instructions", "")).strip()
+
+    database.save_registration(
+        service_name=name, agent_id="main", soul=instructions,
+        identity=role, operating_manual="", user_context="",
+        memory="", workspace_path="", model="chatgpt",
+        account_id=account_id,
+    )
+    _action_agents[account_id] = name
+    # Create a registration span
+    import time as _time, uuid as _uuid
+    now = int(_time.time() * 1_000_000_000)
+    database.insert_spans([{
+        "trace_id": _uuid.uuid4().hex,
+        "span_id": _uuid.uuid4().hex[:16],
+        "parent_span_id": None,
+        "service_name": name,
+        "span_name": "agent_registration",
+        "kind": 0,
+        "start_time_unix": now,
+        "end_time_unix": now,
+        "status_code": 0,
+        "status_message": "",
+        "attributes": {
+            "oversee.event.type": "agent_registration",
+            "oversee.agent.role": role,
+        },
+        "resource_attributes": {
+            "service.name": name,
+            "oversee.platform": "chatgpt",
+        },
+    }], account_id=account_id)
+    return {"status": "connected", "agent_name": name,
+            "message": f"Connected to Oversee as '{name}'. Activity is now being monitored."}
+
+
+@app.post("/actions/log")
+async def action_log(request: Request):
+    """Log a completed activity or task step."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    body = await request.json()
+    service = _action_agents.get(account_id, "ChatGPT Agent")
+    step = str(body.get("step_name", "activity")).strip() or "activity"
+    desc = str(body.get("description", "")).strip()
+
+    import time as _time, uuid as _uuid
+    now = int(_time.time() * 1_000_000_000)
+    dur = float(body.get("duration_seconds", 0) or 0)
+    dur_ns = int(dur * 1_000_000_000) if dur > 0 else 0
+    database.insert_spans([{
+        "trace_id": _uuid.uuid4().hex,
+        "span_id": _uuid.uuid4().hex[:16],
+        "parent_span_id": None,
+        "service_name": service,
+        "span_name": step,
+        "kind": 0,
+        "start_time_unix": now - dur_ns,
+        "end_time_unix": now,
+        "status_code": 0,
+        "status_message": "",
+        "attributes": {
+            "oversee.event.type": "agent_activity",
+            "oversee.step.name": step,
+            "oversee.step.description": desc,
+            "oversee.tools.used": str(body.get("tools_used", "")),
+            "oversee.output.summary": str(body.get("output_summary", "")),
+        },
+        "resource_attributes": {
+            "service.name": service,
+            "oversee.platform": "chatgpt",
+        },
+    }], account_id=account_id)
+    return {"status": "logged", "step_name": step}
+
+
+@app.post("/actions/complete")
+async def action_complete(request: Request):
+    """Report that a task or conversation is complete."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    body = await request.json()
+    service = _action_agents.get(account_id, "ChatGPT Agent")
+    summary = str(body.get("task_summary", "")).strip()
+    success = body.get("success", True)
+
+    import time as _time, uuid as _uuid
+    now = int(_time.time() * 1_000_000_000)
+    database.insert_spans([{
+        "trace_id": _uuid.uuid4().hex,
+        "span_id": _uuid.uuid4().hex[:16],
+        "parent_span_id": None,
+        "service_name": service,
+        "span_name": "agent_run_complete",
+        "kind": 0,
+        "start_time_unix": now,
+        "end_time_unix": now,
+        "status_code": 0 if success else 2,
+        "status_message": "" if success else "task failed",
+        "attributes": {
+            "oversee.event.type": "agent_run_complete",
+            "oversee.task.summary": summary,
+            "oversee.run.success": success,
+        },
+        "resource_attributes": {
+            "service.name": service,
+            "oversee.platform": "chatgpt",
+        },
+    }], account_id=account_id)
+    return {"status": "completed", "task_summary": summary}
+
+
+@app.get("/actions/status")
+async def action_status(request: Request):
+    """Check monitoring connection status."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    service = _action_agents.get(account_id)
+    return {
+        "status": "active",
+        "agent_name": service,
+        "message": f"Oversee monitoring active{' — reporting as ' + repr(service) if service else ''}.",
+    }
+
+
+@app.get("/actions/openapi.json", include_in_schema=False)
+async def actions_openapi():
+    """Serve the OpenAPI spec for the ChatGPT GPT Action."""
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Oversee Agent Monitoring",
+            "description": "Monitor your AI agents with Oversee. Track activity, log steps, and report completions.",
+            "version": "1.0.0",
+        },
+        "servers": [{"url": _OVERSEE_API_URL}],
+        "paths": {
+            "/actions/connect": {
+                "post": {
+                    "operationId": "connectAgent",
+                    "summary": "Register an agent with Oversee monitoring",
+                    "description": "Call at the start of each conversation to register this agent. Provide the agent's name, role, and instructions.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent_name": {"type": "string", "description": "Name of this agent"},
+                                        "agent_role": {"type": "string", "description": "What this agent does"},
+                                        "agent_instructions": {"type": "string", "description": "The agent's system instructions"},
+                                    },
+                                    "required": ["agent_name"],
+                                },
+                            },
+                        },
+                    },
+                    "responses": {"200": {"description": "Agent connected successfully"}},
+                },
+            },
+            "/actions/log": {
+                "post": {
+                    "operationId": "logActivity",
+                    "summary": "Log a completed activity or task step",
+                    "description": "Call after completing each major step in a workflow. Describe what the agent did.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "step_name": {"type": "string", "description": "Name of the step completed"},
+                                        "description": {"type": "string", "description": "What happened"},
+                                        "duration_seconds": {"type": "number", "description": "How long it took"},
+                                        "tools_used": {"type": "string", "description": "Tools used (comma-separated)"},
+                                        "output_summary": {"type": "string", "description": "Summary of output"},
+                                    },
+                                    "required": ["step_name", "description"],
+                                },
+                            },
+                        },
+                    },
+                    "responses": {"200": {"description": "Activity logged"}},
+                },
+            },
+            "/actions/complete": {
+                "post": {
+                    "operationId": "reportComplete",
+                    "summary": "Report task completion",
+                    "description": "Call when finishing a task or conversation. Summarize what was accomplished.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task_summary": {"type": "string", "description": "Summary of what was accomplished"},
+                                        "steps_completed": {"type": "integer", "description": "Number of steps completed"},
+                                        "success": {"type": "boolean", "description": "Whether the task succeeded"},
+                                    },
+                                    "required": ["task_summary"],
+                                },
+                            },
+                        },
+                    },
+                    "responses": {"200": {"description": "Task completion reported"}},
+                },
+            },
+            "/actions/status": {
+                "get": {
+                    "operationId": "checkStatus",
+                    "summary": "Check monitoring connection status",
+                    "description": "Check if Oversee monitoring is active and which agent is being tracked.",
+                    "responses": {"200": {"description": "Monitoring status"}},
+                },
+            },
+        },
+    }
 
 
 @app.post("/auth/keys", response_model=NewKeyResponse)

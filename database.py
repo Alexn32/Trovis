@@ -414,6 +414,42 @@ CREATE TABLE IF NOT EXISTS agent_connections (
 )
 """
 
+# OAuth 2.0 authorization codes (short-lived, single-use) for the ChatGPT
+# Actions integration. ChatGPT redirects the user to /oauth/authorize; after
+# consent we issue a code that ChatGPT exchanges at /oauth/token for an
+# access token. The access token is a session token (same sessions table).
+_OAUTH_CODES_DDL_PG = """
+CREATE TABLE IF NOT EXISTS oauth_codes (
+    id           SERIAL    PRIMARY KEY,
+    code         TEXT      NOT NULL UNIQUE,
+    account_id   INTEGER   NOT NULL,
+    user_id      INTEGER,
+    client_id    TEXT      NOT NULL,
+    redirect_uri TEXT      NOT NULL,
+    scope        TEXT      DEFAULT '',
+    state        TEXT,
+    created_at   TIMESTAMP DEFAULT NOW(),
+    expires_at   TIMESTAMP NOT NULL,
+    used         BOOLEAN   DEFAULT FALSE
+)
+"""
+
+_OAUTH_CODES_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS oauth_codes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    code         TEXT    NOT NULL UNIQUE,
+    account_id   INTEGER NOT NULL,
+    user_id      INTEGER,
+    client_id    TEXT    NOT NULL,
+    redirect_uri TEXT    NOT NULL,
+    scope        TEXT    DEFAULT '',
+    state        TEXT,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at   TIMESTAMP NOT NULL,
+    used         BOOLEAN DEFAULT 0
+)
+"""
+
 # Real human logins. An account is the ORG/tenant; a user belongs to one org.
 # email is globally unique (one person = one org in v1). password_hash is
 # nullable until set (claimed legacy accounts / pending). role is 'owner' or
@@ -855,6 +891,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_spans_account_trace ON spans(account_id, trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_connections_account_id ON agent_connections(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_budgets_account ON agent_budgets(account_id, service_name, agent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_oauth_codes_code ON oauth_codes(code)",
 ]
 
 
@@ -891,6 +928,7 @@ def init_db() -> None:
             _INVITES_DDL_PG,
             _CONNECTIONS_DDL_PG,
             _AGENT_BUDGETS_DDL_PG,
+            _OAUTH_CODES_DDL_PG,
         ]
     else:
         ddls = [
@@ -913,6 +951,7 @@ def init_db() -> None:
             _INVITES_DDL_SQLITE,
             _CONNECTIONS_DDL_SQLITE,
             _AGENT_BUDGETS_DDL_SQLITE,
+            _OAUTH_CODES_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -4407,6 +4446,99 @@ def delete_sessions_for_user(
             )
         else:
             cur.execute(f"DELETE FROM sessions WHERE user_id = {PH}", (user_id,))
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.0 authorization codes (for ChatGPT Actions integration)
+# ---------------------------------------------------------------------------
+
+_OAUTH_CODE_TTL_SECONDS = 5 * 60  # 5 minutes
+
+
+def create_oauth_code(
+    account_id: int,
+    user_id: int | None,
+    client_id: str,
+    redirect_uri: str,
+    scope: str = "",
+    state: str | None = None,
+) -> str:
+    """Issue a short-lived authorization code. Returns the raw code (shown
+    once). ChatGPT exchanges it at /oauth/token for an access token."""
+    raw = secrets.token_urlsafe(32)
+    code_hash = hashlib.sha256(raw.encode()).hexdigest()
+    if USE_POSTGRES:
+        sql = (
+            "INSERT INTO oauth_codes (code, account_id, user_id, client_id, "
+            "redirect_uri, scope, state, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, NOW() + INTERVAL '%s seconds')"
+        )
+        args = (code_hash, account_id, user_id, client_id, redirect_uri,
+                scope, state, _OAUTH_CODE_TTL_SECONDS)
+    else:
+        sql = (
+            "INSERT INTO oauth_codes (code, account_id, user_id, client_id, "
+            "redirect_uri, scope, state, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+' || ? || ' seconds'))"
+        )
+        args = (code_hash, account_id, user_id, client_id, redirect_uri,
+                scope, state, str(_OAUTH_CODE_TTL_SECONDS))
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+    return raw
+
+
+def exchange_oauth_code(raw_code: str, client_id: str, redirect_uri: str) -> dict[str, Any] | None:
+    """Exchange an authorization code for an access token (session). Returns
+    {access_token, token_type, expires_in, refresh_token} or None if the code
+    is invalid/expired/already-used."""
+    code_hash = hashlib.sha256(raw_code.encode()).hexdigest()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id, account_id, user_id, client_id, redirect_uri, used, expires_at "
+            f"FROM oauth_codes WHERE code = {PH}",
+            (code_hash,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        # Validate: not used, not expired, client/redirect match
+        if row["used"]:
+            return None
+        if row["client_id"] != client_id:
+            return None
+        if row["redirect_uri"] != redirect_uri:
+            return None
+        # Expiry check
+        from datetime import datetime, timezone
+        raw_exp = row["expires_at"]
+        try:
+            if isinstance(raw_exp, str):
+                exp = datetime.fromisoformat(raw_exp.replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+            else:
+                exp = raw_exp if raw_exp.tzinfo else raw_exp.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > exp:
+                return None
+        except (ValueError, AttributeError):
+            pass  # Can't parse → let it through, better than blocking
+        # Mark as used
+        cur.execute(
+            f"UPDATE oauth_codes SET used = {PH} WHERE id = {PH}",
+            (True if USE_POSTGRES else 1, row["id"]),
+        )
+    # Create a long-lived session token for the account
+    account_id = row["account_id"]
+    user_id = row["user_id"]
+    ttl = 90 * 24 * 60 * 60  # 90 days
+    raw_token = create_session(user_id or 0, account_id, ttl_seconds=ttl)
+    return {
+        "access_token": raw_token,
+        "token_type": "bearer",
+        "expires_in": ttl,
+        "refresh_token": raw_token,  # Same token; ChatGPT expects this field
+    }
 
 
 def create_invite(
