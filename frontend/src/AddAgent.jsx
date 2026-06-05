@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api, getApiKey } from './api.js'
+import { getApiKey } from './api.js'
 
 // ============================================================================
 // AddAgent — the three-step onboarding wizard.
@@ -28,10 +28,8 @@ const PLATFORMS = [
   { id: 'claude-agent-sdk', label: 'Claude Agent SDK',        subtitle: 'query() + ClaudeSDKClient (Claude Code engine)',  needsProvider: false },
   { id: 'claude-agents',  label: 'Claude Managed Agents',     subtitle: 'client.beta.agents + beta.sessions API',         needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
-  // ChatGPT tile removed — OpenAI's Custom MCP app registration is pending.
-  // The MCP server + OAuth + GPT Actions backend are built and ready; re-add
-  // once the app is approved on platform.openai.com.
-  // { id: 'chatgpt', label: 'ChatGPT Agents', subtitle: 'Connect via MCP', needsProvider: false },
+  // ChatGPT is intentionally not in the picker: OpenAI's MCP app registration
+  // is pending. The MCP server + OAuth/Actions backend remain live and tested.
 ]
 
 const PROVIDERS = [
@@ -1441,221 +1439,6 @@ OTEL_TRACES_EXPORTER=otlp`,
 }
 
 // ---------------------------------------------------------------------------
-// ChatGPT Agents — MCP-based (Agent Builder + OpenAI Agents SDK)
-// ---------------------------------------------------------------------------
-
-function ChatGPTInstructions({ agentName, endpoint }) {
-  // The MCP endpoint MUST be publicly reachable (ChatGPT's servers call it),
-  // so we always use the production URL — never localhost.
-  // Trailing slash is required — Starlette mounts need it, and ChatGPT's MCP
-  // client doesn't follow 307 redirects from /mcp to /mcp/.
-  const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
-  // ChatGPT Custom MCP uses SSE transport (/sse at root — not under /mcp/ —
-  // so the SSE→/messages/ handoff resolves correctly via urljoin).
-  // Standard MCP clients use Streamable HTTP at /mcp/.
-  const sseUrl = PRODUCTION_HOST + '/sse'
-  const mcpUrl = PRODUCTION_HOST + '/mcp/'
-
-  // API key reveal — no password needed, the user is already authenticated.
-  const [revealKey, setRevealKey] = useState(null)
-  const [revealErr, setRevealErr] = useState(null)
-  const [revealBusy, setRevealBusy] = useState(false)
-  const [keyCopied, setKeyCopied] = useState(false)
-
-  async function doReveal() {
-    setRevealBusy(true)
-    setRevealErr(null)
-    try {
-      const res = await api.getApiKeys()
-      const keys = res.keys || []
-      if (keys.length === 0) {
-        setRevealErr('No API keys found on this account.')
-      } else {
-        setRevealKey(keys[0].key)
-      }
-    } catch (err) {
-      setRevealErr(err.message || 'Could not load key')
-    } finally {
-      setRevealBusy(false)
-    }
-  }
-  async function copyKey() {
-    if (!revealKey) return
-    try {
-      await navigator.clipboard.writeText(revealKey)
-      setKeyCopied(true)
-      setTimeout(() => setKeyCopied(false), 1500)
-    } catch {}
-  }
-
-  const displayKey = revealKey || 'YOUR_API_KEY'
-
-  const monitoringInstructions = `## Monitoring
-You are connected to Oversee for activity monitoring via the search and fetch tools.
-- At the start of each conversation, call search with query "connect:Your Agent Name|Your Role|Your Instructions"
-- After completing each major step, call search with query "log:Step Name|Description of what you did"
-- When finishing a task, call search with query "complete:Summary of what was accomplished"
-- To check status, call search with query "status"`
-
-  const sdkSnippet = `from agents import Agent, HostedMCPTool, Runner
-
-agent = Agent(
-    name="${agentName || 'My Agent'}",
-    tools=[
-        HostedMCPTool(
-            tool_config={
-                "type": "mcp",
-                "server_label": "oversee",
-                "server_url": "${mcpUrl}",
-                "require_approval": "never",
-                "headers": {
-                    "Authorization": "Bearer ${displayKey}"
-                }
-            }
-        )
-    ],
-)`
-
-  // Shared API key reveal widget used in both tabs — no password needed.
-  const keyRevealWidget = (
-    <div className="chatgpt-key-reveal">
-      {!revealKey && (
-        <button type="button" className="btn btn-secondary btn-sm" onClick={doReveal} disabled={revealBusy}>
-          {revealBusy ? 'Loading…' : 'Reveal API key'}
-        </button>
-      )}
-      {revealErr && <p className="form-error">{revealErr}</p>}
-      {revealKey && (
-        <div className="chatgpt-key-display">
-          <code className="key-text">{revealKey}</code>
-          <button type="button" className="copy-btn-inline" onClick={copyKey}>
-            {keyCopied ? '✓ Copied' : 'Copy'}
-          </button>
-          <button type="button" className="btn btn-link btn-sm" onClick={() => setRevealKey(null)}>
-            Hide
-          </button>
-        </div>
-      )}
-    </div>
-  )
-
-  return (
-    <>
-      <p className="step-desc">
-        ChatGPT agents report their own activity through MCP tool calls. Connect
-        via <strong>Agent Builder</strong> (no-code) or the{' '}
-        <strong>OpenAI Agents SDK</strong> (code). The agent then appears in your
-        Oversee fleet like any other agent.
-      </p>
-
-      <Callout variant="warning">
-        <strong>Requires Developer Mode.</strong> ChatGPT only exposes custom MCP
-        tools when Developer Mode is enabled. Go to{' '}
-        <strong>ChatGPT Settings → Developer features</strong> (or Beta features)
-        and turn it on. Available on Plus, Pro, Team, Business, and Enterprise plans.
-      </Callout>
-
-      <Callout variant="info">
-        Unlike the silent OpenClaw / Hermes integrations, ChatGPT agents{' '}
-        <strong>actively report</strong> each step. Add the monitoring instructions
-        to your agent and it handles the rest.
-      </Callout>
-
-      <Tabs
-        tabs={[
-          {
-            label: 'Agent Builder (no-code)',
-            content: (
-              <div className="numbered-steps">
-                <NumberedStep n={1} title="Enable Developer Mode in ChatGPT">
-                  <p className="step-desc">
-                    Go to <strong>ChatGPT Settings → Developer features</strong>{' '}
-                    (or Beta features) and enable <strong>Developer Mode</strong>.
-                    Without this, ChatGPT silently ignores custom MCP tools.
-                  </p>
-                </NumberedStep>
-                <NumberedStep n={2} title="Open your ChatGPT agent and click + Browse apps" />
-                <NumberedStep n={3} title='Select "Custom MCP"' />
-                <NumberedStep n={4} title="Enter the Oversee MCP URL">
-                  <CodeBlock code={sseUrl} />
-                </NumberedStep>
-                <NumberedStep n={5} title="Set up authentication">
-                  <p className="step-desc" style={{ marginBottom: 8 }}>
-                    Under <strong>Authentication</strong>, select{' '}
-                    <strong>Access token / API key</strong>. Under{' '}
-                    <strong>Header scheme</strong>, select <strong>Bearer</strong>.
-                    Then enter your Oversee API key when prompted.
-                  </p>
-                  {keyRevealWidget}
-                </NumberedStep>
-                <NumberedStep n={6} title="Check the risk acknowledgement box and click Create" />
-                <NumberedStep n={7} title="When prompted, paste your API key">
-                  <p className="step-desc">
-                    ChatGPT will show a "Connect" dialog asking for your access
-                    token. Paste the same API key from step 5.
-                  </p>
-                </NumberedStep>
-                <NumberedStep
-                  n={8}
-                  title="Add this to the END of your agent's Instructions"
-                >
-                  <p className="step-desc" style={{ marginBottom: 8 }}>
-                    This tells the agent to report its activity to Oversee.
-                  </p>
-                  <CodeBlock code={monitoringInstructions} />
-                </NumberedStep>
-                <NumberedStep n={9} title="Test it">
-                  <p className="step-desc">
-                    Send your agent a message. It should call{' '}
-                    <code>search</code> with a connect query, then appear in your
-                    Oversee dashboard within seconds.
-                  </p>
-                </NumberedStep>
-              </div>
-            ),
-          },
-          {
-            label: 'OpenAI Agents SDK',
-            content: (
-              <div className="numbered-steps">
-                <NumberedStep n={1} title="Install the SDK">
-                  <CodeBlock code="pip install openai-agents" />
-                </NumberedStep>
-                <NumberedStep n={2} title="Get your Oversee API key">
-                  {keyRevealWidget}
-                </NumberedStep>
-                <NumberedStep n={3} title="Add the Oversee MCP tool to your agent">
-                  <CodeBlock code={sdkSnippet} />
-                </NumberedStep>
-                <NumberedStep
-                  n={4}
-                  title="Add monitoring instructions to the agent's system prompt"
-                >
-                  <p className="step-desc" style={{ marginBottom: 8 }}>
-                    Append to your agent's instructions:
-                  </p>
-                  <CodeBlock code={monitoringInstructions} />
-                </NumberedStep>
-                <NumberedStep n={5} title="Run and verify">
-                  <p className="step-desc">
-                    Start your agent. The first conversation should call{' '}
-                    <code>search</code> with a connect query, then log each step via{' '}
-                    <code>search</code> with a log query.
-                  </p>
-                </NumberedStep>
-              </div>
-            ),
-          },
-        ]}
-      />
-
-      <SuccessCallout />
-    </>
-  )
-}
-
-
-// ---------------------------------------------------------------------------
 // Dispatcher — picks the right instructions component
 // ---------------------------------------------------------------------------
 
@@ -1674,9 +1457,6 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'hermes') {
     return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
-  }
-  if (platform === 'chatgpt') {
-    return <ChatGPTInstructions agentName={agentName} endpoint={endpoint} />
   }
   // Unreachable from the picker — the platform list above only
   // contains the live integrations. Returning null is safer than
