@@ -267,7 +267,8 @@ app.add_middleware(
 
 # Mount the MCP Streamable-HTTP server for ChatGPT agents at /mcp. It runs its
 # own Bearer-API-key auth (see mcp_server.http_app); the session manager is
-# started in the lifespan above.
+# started in the lifespan above. The canonical URL is /mcp/ (trailing slash) —
+# Starlette redirects /mcp → /mcp/ automatically.
 app.mount("/mcp", oversee_mcp_app)
 
 

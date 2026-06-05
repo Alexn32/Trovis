@@ -1445,8 +1445,10 @@ function ChatGPTInstructions({ agentName, endpoint }) {
   const apiKey = getApiKey() || 'YOUR_API_KEY'
   // The MCP endpoint MUST be publicly reachable (ChatGPT's servers call it),
   // so we always use the production URL — never localhost.
+  // Trailing slash is required — Starlette mounts need it, and ChatGPT's MCP
+  // client doesn't follow 307 redirects from /mcp to /mcp/.
   const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
-  const mcpUrl = PRODUCTION_HOST + '/mcp'
+  const mcpUrl = PRODUCTION_HOST + '/mcp/'
 
   const monitoringInstructions = `## Monitoring
 You are connected to Oversee for activity monitoring.
