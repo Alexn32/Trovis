@@ -284,35 +284,56 @@ def oversee_status(ctx: Context = None):
 
 
 # ---------------------------------------------------------------------------
-# ASGI app (Streamable HTTP) + per-request Bearer→account auth wrapper.
-# `streamable_http_app()` lazily creates mcp.session_manager, so call it once at
-# import; main.py runs that session manager in its lifespan and mounts http_app.
+# ASGI apps: Streamable HTTP (/mcp) + SSE (/mcp/sse) transports.
+#
+# ChatGPT's Custom MCP client expects SSE transport (the URL placeholder in
+# ChatGPT's UI literally says "https://example.com/sse"). We expose both so
+# standard MCP clients (Streamable HTTP) and ChatGPT (SSE) work.
+#
+# Both share the same FastMCP instance (same 4 tools). The per-request
+# Bearer→account_id auth wrapper is shared too.
 # ---------------------------------------------------------------------------
 
-_base_app = mcp.streamable_http_app()
+_streamable_app = mcp.streamable_http_app()
+_sse_app = mcp.sse_app()
 
 
-async def http_app(scope, receive, send):
-    """Wrap the MCP ASGI app: resolve the Bearer API key to an account_id and
-    stash it in the contextvar for the duration of the request."""
-    if scope.get("type") != "http":
-        await _base_app(scope, receive, send)
-        return
+def _resolve_auth_from_scope(scope) -> int | None:
+    """Extract the Bearer token from ASGI scope headers and resolve account."""
     authorization = None
     for k, v in scope.get("headers") or []:
         if k == b"authorization":
             authorization = v.decode("latin-1")
             break
-    account_id: int | None = None
     token = _bearer(authorization)
     if token:
         try:
             row = database.validate_api_key(token)
-            account_id = row["account_id"] if row else None
+            return row["account_id"] if row else None
         except Exception:  # noqa: BLE001
-            account_id = None
-    cv_token = _ACCOUNT_CV.set(account_id)
+            pass
+    return None
+
+
+async def http_app(scope, receive, send):
+    """Streamable HTTP transport with per-request auth."""
+    if scope.get("type") != "http":
+        await _streamable_app(scope, receive, send)
+        return
+    cv_token = _ACCOUNT_CV.set(_resolve_auth_from_scope(scope))
     try:
-        await _base_app(scope, receive, send)
+        await _streamable_app(scope, receive, send)
+    finally:
+        _ACCOUNT_CV.reset(cv_token)
+
+
+async def sse_app(scope, receive, send):
+    """SSE transport with per-request auth (for ChatGPT Custom MCP)."""
+    if scope.get("type") != "http":
+        await _sse_app(scope, receive, send)
+        return
+    cv_token = _ACCOUNT_CV.set(_resolve_auth_from_scope(scope))
+    try:
+        await _sse_app(scope, receive, send)
     finally:
         _ACCOUNT_CV.reset(cv_token)
