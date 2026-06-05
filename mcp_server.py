@@ -154,17 +154,35 @@ def _create_span(
 
 # ---------------------------------------------------------------------------
 # MCP tools. ChatGPT Custom MCP requires exactly two tools named "search" and
-# "fetch" that return a specific document-retrieval schema:
-#   search(query) → {results: [{id, title, url}]}
-#   fetch(id)     → {id, title, text, url, metadata}
+# "fetch" that return a specific document-retrieval schema WITH output_schema
+# declared (per OpenAI docs). The tools must be async and use Pydantic models
+# for the return type so FastMCP generates the correct outputSchema.
 #
 # We encode our monitoring operations as "documents": the query string carries
 # the action (connect/log/complete/status) and parameters as a structured
-# prefix, and the results/text carry the response. This satisfies ChatGPT's
-# schema validation while letting the agent's instructions direct how to call.
+# prefix, and the results/text carry the response.
 # ---------------------------------------------------------------------------
 
 import json as _json
+from pydantic import BaseModel, Field
+
+
+class SearchResult(BaseModel):
+    id: str
+    title: str
+    url: str
+
+
+class SearchOutput(BaseModel):
+    results: list[SearchResult] = Field(default_factory=list)
+
+
+class FetchOutput(BaseModel):
+    id: str
+    title: str
+    text: str
+    url: str
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 def _make_search_result(doc_id: str, title: str, text: str = "") -> str:
@@ -186,23 +204,21 @@ def _make_fetch_result(doc_id: str, title: str, text: str, metadata: dict | None
 
 
 @mcp.tool()
-def search(query: str, ctx: Context = None):
-    """Search Oversee monitoring data. Use queries like:
-    - "connect:<agent_name>|<role>|<instructions>" to register an agent
-    - "status" to check monitoring connection
-    - "log:<step_name>|<description>" to record a completed step
-    - "complete:<summary>" to report task finished
+async def search(query: str, ctx: Context = None) -> SearchOutput:
+    """Search Oversee monitoring data. Accepts queries like 'connect:AgentName|Role|Instructions', 'log:StepName|Description', 'complete:Summary', or 'status'.
 
     Args:
-        query: A search query or monitoring command
+        query: A search query string
     """
     account_id = _resolve_account_id(ctx)
+    q = (query or "status").strip()
+
+    def _result(doc_id: str, title: str) -> SearchOutput:
+        return SearchOutput(results=[SearchResult(id=doc_id, title=title, url=f"oversee://{doc_id}")])
+
     if account_id is None:
-        return _make_search_result("error", _NO_AUTH)
+        return _result("error", "Auth required")
 
-    q = (query or "").strip()
-
-    # connect:<name>|<role>|<instructions>
     if q.lower().startswith("connect:"):
         parts = q[8:].split("|", 2)
         name = (parts[0].strip() if parts else "") or "ChatGPT Agent"
@@ -218,13 +234,12 @@ def search(query: str, ctx: Context = None):
         _create_span(name, "agent_registration",
                       {"oversee.event.type": "agent_registration", "oversee.agent.role": role},
                       account_id)
-        return _make_search_result("connected", f"Connected to Oversee as '{name}'")
+        return _result("connected", f"Connected as {name}")
 
-    # log:<step>|<description>
     if q.lower().startswith("log:"):
         service = _current_agent(account_id)
         if not service:
-            return _make_search_result("error", _NO_AGENT)
+            return _result("error", "Call connect first")
         parts = q[4:].split("|", 1)
         step = (parts[0].strip() if parts else "") or "activity"
         desc = parts[1].strip() if len(parts) > 1 else ""
@@ -232,44 +247,40 @@ def search(query: str, ctx: Context = None):
                       {"oversee.event.type": "agent_activity", "oversee.step.name": step,
                        "oversee.step.description": desc},
                       account_id)
-        return _make_search_result("logged", f"Logged: {step}")
+        return _result("logged", f"Logged: {step}")
 
-    # complete:<summary>
     if q.lower().startswith("complete:"):
         service = _current_agent(account_id)
         if not service:
-            return _make_search_result("error", _NO_AGENT)
+            return _result("error", "Call connect first")
         summary = q[9:].strip()
         _create_span(service, "agent_run_complete",
                       {"oversee.event.type": "agent_run_complete",
                        "oversee.task.summary": summary},
                       account_id)
-        return _make_search_result("completed", f"Task complete: {summary}")
+        return _result("completed", f"Task complete: {summary}")
 
-    # Default: status
     service = _current_agent(account_id)
-    if service:
-        return _make_search_result("status", f"Oversee active — reporting as '{service}'")
-    return _make_search_result("status", "Oversee active. Use connect:<name>|<role>|<instructions> to register.")
+    label = f"Active as {service}" if service else "Not connected"
+    return _result("status", label)
 
 
 @mcp.tool()
-def fetch(id: str, ctx: Context = None):
-    """Fetch details for an Oversee monitoring result.
+async def fetch(id: str, ctx: Context = None) -> FetchOutput:
+    """Fetch details for an Oversee monitoring result by ID.
 
     Args:
-        id: The document ID from a search result
+        id: The result ID from a search
     """
     account_id = _resolve_account_id(ctx)
-    if account_id is None:
-        return _make_fetch_result("error", "Auth error", _NO_AUTH)
-    service = _current_agent(account_id)
-    agent_label = service or "Not connected"
-    return _make_fetch_result(
-        id or "status",
-        f"Oversee: {agent_label}",
-        f"Agent '{agent_label}' is monitored by Oversee. Status: active.",
-        {"agent": agent_label, "platform": "chatgpt"},
+    service = _current_agent(account_id) if account_id else None
+    label = service or "Not connected"
+    return FetchOutput(
+        id=id or "status",
+        title=f"Oversee: {label}",
+        text=f"Agent '{label}' monitored by Oversee.",
+        url=f"oversee://{id or 'status'}",
+        metadata={"agent": label, "platform": "chatgpt"},
     )
 
 
