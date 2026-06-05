@@ -1449,30 +1449,25 @@ function ChatGPTInstructions({ agentName, endpoint }) {
   const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
   const mcpUrl = PRODUCTION_HOST + '/mcp/'
 
-  // Password-gated API key reveal (same pattern as Settings.jsx).
-  const [revealState, setRevealState] = useState('hidden') // 'hidden' | 'asking' | 'shown'
-  const [revealPw, setRevealPw] = useState('')
+  // API key reveal — no password needed, the user is already authenticated.
   const [revealKey, setRevealKey] = useState(null)
   const [revealErr, setRevealErr] = useState(null)
   const [revealBusy, setRevealBusy] = useState(false)
   const [keyCopied, setKeyCopied] = useState(false)
 
-  async function doReveal(e) {
-    e.preventDefault()
+  async function doReveal() {
     setRevealBusy(true)
     setRevealErr(null)
     try {
-      const res = await api.revealApiKeys(revealPw)
+      const res = await api.getApiKeys()
       const keys = res.keys || []
       if (keys.length === 0) {
         setRevealErr('No API keys found on this account.')
       } else {
         setRevealKey(keys[0].key)
-        setRevealState('shown')
       }
-      setRevealPw('')
     } catch (err) {
-      setRevealErr(err.message || 'Could not reveal key')
+      setRevealErr(err.message || 'Could not load key')
     } finally {
       setRevealBusy(false)
     }
@@ -1513,40 +1508,22 @@ agent = Agent(
     ],
 )`
 
-  // Shared API key reveal widget used in both tabs.
+  // Shared API key reveal widget used in both tabs — no password needed.
   const keyRevealWidget = (
     <div className="chatgpt-key-reveal">
-      {revealState === 'hidden' && (
-        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setRevealState('asking')}>
-          Reveal API key
+      {!revealKey && (
+        <button type="button" className="btn btn-secondary btn-sm" onClick={doReveal} disabled={revealBusy}>
+          {revealBusy ? 'Loading…' : 'Reveal API key'}
         </button>
       )}
-      {revealState === 'asking' && (
-        <form className="chatgpt-key-form" onSubmit={doReveal}>
-          <input
-            className="text-input"
-            type="password"
-            placeholder="Enter your password"
-            value={revealPw}
-            onChange={(e) => setRevealPw(e.target.value)}
-            autoFocus
-          />
-          <button type="submit" className="btn btn-primary btn-sm" disabled={revealBusy || !revealPw}>
-            {revealBusy ? 'Revealing…' : 'Reveal'}
-          </button>
-          <button type="button" className="btn btn-link btn-sm" onClick={() => { setRevealState('hidden'); setRevealErr(null); setRevealPw('') }}>
-            Cancel
-          </button>
-          {revealErr && <p className="form-error">{revealErr}</p>}
-        </form>
-      )}
-      {revealState === 'shown' && revealKey && (
+      {revealErr && <p className="form-error">{revealErr}</p>}
+      {revealKey && (
         <div className="chatgpt-key-display">
           <code className="key-text">{revealKey}</code>
           <button type="button" className="copy-btn-inline" onClick={copyKey}>
             {keyCopied ? '✓ Copied' : 'Copy'}
           </button>
-          <button type="button" className="btn btn-link btn-sm" onClick={() => { setRevealState('hidden'); setRevealKey(null) }}>
+          <button type="button" className="btn btn-link btn-sm" onClick={() => setRevealKey(null)}>
             Hide
           </button>
         </div>
