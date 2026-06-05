@@ -1447,9 +1447,10 @@ function ChatGPTInstructions({ agentName, endpoint }) {
   // Trailing slash is required — Starlette mounts need it, and ChatGPT's MCP
   // client doesn't follow 307 redirects from /mcp to /mcp/.
   const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
-  // ChatGPT Custom MCP uses SSE transport (/mcp/sse); standard MCP clients
-  // use Streamable HTTP (/mcp/). Both are served by the same FastMCP instance.
-  const sseUrl = PRODUCTION_HOST + '/mcp/sse'
+  // ChatGPT Custom MCP uses SSE transport (/sse at root — not under /mcp/ —
+  // so the SSE→/messages/ handoff resolves correctly via urljoin).
+  // Standard MCP clients use Streamable HTTP at /mcp/.
+  const sseUrl = PRODUCTION_HOST + '/sse'
   const mcpUrl = PRODUCTION_HOST + '/mcp/'
 
   // API key reveal — no password needed, the user is already authenticated.

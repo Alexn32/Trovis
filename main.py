@@ -199,12 +199,13 @@ async def auth_middleware(request: Request, call_next):
     if path in _OPEN_PATHS or request.method == "OPTIONS":
         return await call_next(request)
 
-    # The MCP server is mounted at /mcp and does its own Bearer-API-key auth
-    # (ChatGPT sends the key as `Authorization: Bearer`, which this middleware
-    # would otherwise reject as a bad session token). Let those requests through.
-    # Also bypass /messages (SSE transport's POST endpoint — the SSE client
-    # resolves it relative to the root, not /mcp/).
-    if path == "/mcp" or path.startswith("/mcp/") or path.startswith("/messages"):
+    # The MCP server does its own Bearer-API-key auth. Bypass auth middleware
+    # for all MCP paths: /mcp (streamable HTTP), /sse (SSE stream), /messages
+    # (SSE message POST — resolved relative to root by the SSE client).
+    if (
+        path == "/mcp" or path.startswith("/mcp/")
+        or path in ("/sse", "/sse/") or path.startswith("/messages")
+    ):
         return await call_next(request)
 
     # 1. Bearer session — dashboard users.
@@ -274,7 +275,12 @@ app.add_middleware(
 # This avoids Starlette's 307 redirect (which drops POST bodies).
 
 class _MCPInterceptMiddleware:
-    """ASGI middleware that routes /mcp* to the correct MCP transport."""
+    """ASGI middleware that routes MCP paths to the correct transport.
+
+    Streamable HTTP: /mcp and /mcp/ → oversee_mcp_app at path "/"
+    SSE: /sse, /sse/, /messages/* → oversee_sse_app (mounted at root so the
+         SSE app's internal /sse→/messages/ handoff works without path mangling)
+    """
 
     def __init__(self, app):
         self.app = app
@@ -282,23 +288,19 @@ class _MCPInterceptMiddleware:
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http":
             path = scope.get("path", "")
-            if path.startswith("/mcp"):
-                # Strip /mcp prefix so the inner apps see their own paths
-                inner = path[4:] or "/"
-                # SSE transport: /sse and /messages/ go to the SSE app
-                if inner == "/sse" or inner.startswith("/messages"):
-                    await oversee_sse_app(dict(scope, path=inner), receive, send)
-                    return
-                # Everything else: Streamable HTTP transport
-                if inner in ("", "/"):
-                    inner = "/"
-                await oversee_mcp_app(dict(scope, path=inner), receive, send)
+            # Streamable HTTP transport at /mcp
+            if path == "/mcp" or path == "/mcp/":
+                await oversee_mcp_app(dict(scope, path="/"), receive, send)
                 return
-            # The SSE client resolves the messages endpoint relative to the
-            # root (urljoin("http://host/mcp/sse", "/messages/...") → /messages/),
-            # so we also catch /messages* at the top level.
+            # SSE transport: the SSE app serves /sse (GET, event stream) and
+            # /messages/ (POST, send messages). We mount it at root so the
+            # SSE→messages handoff (which uses absolute paths) works naturally.
+            # Also handle /mcp/sse as an alias.
+            if path in ("/sse", "/sse/") or path == "/mcp/sse":
+                await oversee_sse_app(dict(scope, path="/sse"), receive, send)
+                return
             if path.startswith("/messages"):
-                await oversee_sse_app(dict(scope, path=path), receive, send)
+                await oversee_sse_app(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
