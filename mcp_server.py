@@ -152,63 +152,96 @@ def _create_span(
     )
 
 
+# ---------------------------------------------------------------------------
+# MCP tools. ChatGPT Custom MCP requires tools named "search" and "fetch" —
+# all other names are silently ignored. We pack our 4 logical operations into
+# these 2 names using an "action" parameter:
+#   search(action="connect", ...)  — register this agent with Oversee
+#   search(action="status")        — check connection status
+#   fetch(action="log", ...)       — log a completed step
+#   fetch(action="complete", ...)  — report task completion
+# ---------------------------------------------------------------------------
+
+
 @mcp.tool()
-def oversee_connect(
-    agent_name: str, agent_role: str, agent_instructions: str, ctx: Context = None
+def search(
+    action: str = "status",
+    agent_name: str = "",
+    agent_role: str = "",
+    agent_instructions: str = "",
+    ctx: Context = None,
 ):
-    """Register this agent with Oversee monitoring. Call once at the start of a conversation.
+    """Oversee monitoring — connect or check status. Use action="connect" at the start of a conversation to register this agent. Use action="status" to check your connection.
 
     Args:
-        agent_name: The name of this agent
-        agent_role: What this agent does (e.g. 'Email marketing', 'Customer support')
-        agent_instructions: The full system instructions for this agent
+        action: "connect" to register with Oversee, or "status" to check connection
+        agent_name: (connect only) The name of this agent
+        agent_role: (connect only) What this agent does
+        agent_instructions: (connect only) The system instructions for this agent
     """
     account_id = _resolve_account_id(ctx)
     if account_id is None:
         return _NO_AUTH
-    name = (agent_name or "ChatGPT Agent").strip() or "ChatGPT Agent"
-    database.save_registration(
-        service_name=name,
-        agent_id="main",
-        soul=(agent_instructions or ""),
-        identity=(agent_role or ""),
-        operating_manual="",
-        user_context="",
-        memory="",
-        workspace_path="",
-        model="chatgpt",
-        account_id=account_id,
-    )
-    _set_current_agent(account_id, name)
-    _create_span(
-        name,
-        "agent_registration",
-        {
-            "oversee.event.type": "agent_registration",
-            "oversee.agent.role": agent_role,
-        },
-        account_id,
-    )
-    return f"Connected to Oversee as '{name}'. Your activity is now being monitored."
+    act = (action or "status").strip().lower()
+
+    if act == "connect":
+        name = (agent_name or "ChatGPT Agent").strip() or "ChatGPT Agent"
+        database.save_registration(
+            service_name=name,
+            agent_id="main",
+            soul=(agent_instructions or ""),
+            identity=(agent_role or ""),
+            operating_manual="",
+            user_context="",
+            memory="",
+            workspace_path="",
+            model="chatgpt",
+            account_id=account_id,
+        )
+        _set_current_agent(account_id, name)
+        _create_span(
+            name,
+            "agent_registration",
+            {
+                "oversee.event.type": "agent_registration",
+                "oversee.agent.role": agent_role,
+            },
+            account_id,
+        )
+        return f"Connected to Oversee as '{name}'. Your activity is now being monitored."
+
+    # Default: status
+    service = _current_agent(account_id)
+    if service:
+        return f"Oversee monitoring active — reporting as '{service}'."
+    return "Oversee monitoring active. Call search with action='connect' to register this agent."
 
 
 @mcp.tool()
-def oversee_log_activity(
-    step_name: str,
-    description: str,
+def fetch(
+    action: str = "log",
+    step_name: str = "",
+    description: str = "",
     duration_seconds: float = 0,
     tools_used: str = "",
     output_summary: str = "",
+    task_summary: str = "",
+    steps_completed: int = 0,
+    success: bool = True,
     ctx: Context = None,
 ):
-    """Log a completed activity or task step. Call after completing each major step in your workflow.
+    """Oversee monitoring — log activity or report task completion. Use action="log" after each major step. Use action="complete" when finishing a task.
 
     Args:
-        step_name: Name of the step completed (e.g. 'Drafted email', 'Searched database')
-        description: What happened in this step
-        duration_seconds: How long this step took (optional)
-        tools_used: Comma-separated list of tools used (optional)
-        output_summary: Brief summary of what was produced (optional)
+        action: "log" to record a step, or "complete" to report task done
+        step_name: (log only) Name of the step completed
+        description: (log only) What happened in this step
+        duration_seconds: (log only) How long this step took
+        tools_used: (log only) Comma-separated tools used
+        output_summary: (log only) Brief summary of output
+        task_summary: (complete only) Summary of what was accomplished
+        steps_completed: (complete only) Number of steps completed
+        success: (complete only) Whether the task succeeded
     """
     account_id = _resolve_account_id(ctx)
     if account_id is None:
@@ -216,6 +249,25 @@ def oversee_log_activity(
     service = _current_agent(account_id)
     if not service:
         return _NO_AGENT
+    act = (action or "log").strip().lower()
+
+    if act == "complete":
+        _create_span(
+            service,
+            "agent_run_complete",
+            {
+                "oversee.event.type": "agent_run_complete",
+                "oversee.task.summary": task_summary,
+                "oversee.steps.completed": steps_completed,
+                "oversee.run.success": success,
+                "oversee.output.description": output_summary,
+            },
+            account_id,
+            status_code=0 if success else 2,
+        )
+        return f"Task complete. Summary: {task_summary}"
+
+    # Default: log
     _create_span(
         service,
         (step_name or "activity").strip() or "activity",
@@ -230,57 +282,6 @@ def oversee_log_activity(
         duration_seconds=duration_seconds,
     )
     return f"Logged: {step_name}"
-
-
-@mcp.tool()
-def oversee_report_complete(
-    task_summary: str,
-    steps_completed: int = 0,
-    success: bool = True,
-    output_description: str = "",
-    ctx: Context = None,
-):
-    """Report that a task or conversation is complete. Call when you finish a task.
-
-    Args:
-        task_summary: Summary of what was accomplished
-        steps_completed: Number of steps completed in this task
-        success: Whether the task completed successfully
-        output_description: Description of the final output (optional)
-    """
-    account_id = _resolve_account_id(ctx)
-    if account_id is None:
-        return _NO_AUTH
-    service = _current_agent(account_id)
-    if not service:
-        return _NO_AGENT
-    _create_span(
-        service,
-        "agent_run_complete",
-        {
-            "oversee.event.type": "agent_run_complete",
-            "oversee.task.summary": task_summary,
-            "oversee.steps.completed": steps_completed,
-            "oversee.run.success": success,
-            "oversee.output.description": output_description,
-        },
-        account_id,
-        # A failed run records as an error span so success-rate stats reflect it.
-        status_code=0 if success else 2,
-    )
-    return f"Task complete. Summary: {task_summary}"
-
-
-@mcp.tool()
-def oversee_status(ctx: Context = None):
-    """Check your Oversee monitoring connection status."""
-    account_id = _resolve_account_id(ctx)
-    if account_id is None:
-        return _NO_AUTH
-    service = _current_agent(account_id)
-    if service:
-        return f"Oversee monitoring active — reporting as '{service}'."
-    return "Oversee monitoring active. Call oversee_connect to register this agent."
 
 
 # ---------------------------------------------------------------------------

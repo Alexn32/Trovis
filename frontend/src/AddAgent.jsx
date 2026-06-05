@@ -1488,9 +1488,9 @@ function ChatGPTInstructions({ agentName, endpoint }) {
 
   const monitoringInstructions = `## Monitoring
 You are connected to Oversee for activity monitoring.
-- At the start of each conversation, call oversee_connect with your name, role, and instructions.
-- After completing each major step, call oversee_log_activity with what you did.
-- When finishing a task, call oversee_report_complete with a summary.`
+- At the start of each conversation, call the search tool with action="connect", your name, role, and instructions.
+- After completing each major step, call the fetch tool with action="log" and what you did.
+- When finishing a task, call the fetch tool with action="complete" and a summary.`
 
   const sdkSnippet = `from agents import Agent, HostedMCPTool, Runner
 
@@ -1602,8 +1602,8 @@ agent = Agent(
                 <NumberedStep n={9} title="Test it">
                   <p className="step-desc">
                     Send your agent a message. It should call{' '}
-                    <code>oversee_connect</code>, then appear in your Oversee
-                    dashboard within seconds.
+                    <code>search</code> (with action="connect"), then appear in your
+                    Oversee dashboard within seconds.
                   </p>
                 </NumberedStep>
               </div>
@@ -1634,8 +1634,8 @@ agent = Agent(
                 <NumberedStep n={5} title="Run and verify">
                   <p className="step-desc">
                     Start your agent. The first conversation should call{' '}
-                    <code>oversee_connect</code>, then log each step via{' '}
-                    <code>oversee_log_activity</code>.
+                    <code>search</code> (action="connect"), then log each step via{' '}
+                    <code>fetch</code> (action="log").
                   </p>
                 </NumberedStep>
               </div>
