@@ -28,7 +28,10 @@ const PLATFORMS = [
   { id: 'claude-agent-sdk', label: 'Claude Agent SDK',        subtitle: 'query() + ClaudeSDKClient (Claude Code engine)',  needsProvider: false },
   { id: 'claude-agents',  label: 'Claude Managed Agents',     subtitle: 'client.beta.agents + beta.sessions API',         needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
-  { id: 'chatgpt',        label: 'ChatGPT Agents',            subtitle: 'Connect via MCP — works with Agent Builder + SDK', needsProvider: false },
+  // ChatGPT tile removed — OpenAI's Custom MCP app registration is pending.
+  // The MCP server + OAuth + GPT Actions backend are built and ready; re-add
+  // once the app is approved on platform.openai.com.
+  // { id: 'chatgpt', label: 'ChatGPT Agents', subtitle: 'Connect via MCP', needsProvider: false },
 ]
 
 const PROVIDERS = [
