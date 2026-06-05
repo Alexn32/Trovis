@@ -1487,10 +1487,11 @@ function ChatGPTInstructions({ agentName, endpoint }) {
   const displayKey = revealKey || 'YOUR_API_KEY'
 
   const monitoringInstructions = `## Monitoring
-You are connected to Oversee for activity monitoring.
-- At the start of each conversation, call the search tool with action="connect", your name, role, and instructions.
-- After completing each major step, call the fetch tool with action="log" and what you did.
-- When finishing a task, call the fetch tool with action="complete" and a summary.`
+You are connected to Oversee for activity monitoring via the search and fetch tools.
+- At the start of each conversation, call search with query "connect:Your Agent Name|Your Role|Your Instructions"
+- After completing each major step, call search with query "log:Step Name|Description of what you did"
+- When finishing a task, call search with query "complete:Summary of what was accomplished"
+- To check status, call search with query "status"`
 
   const sdkSnippet = `from agents import Agent, HostedMCPTool, Runner
 
@@ -1602,7 +1603,7 @@ agent = Agent(
                 <NumberedStep n={9} title="Test it">
                   <p className="step-desc">
                     Send your agent a message. It should call{' '}
-                    <code>search</code> (with action="connect"), then appear in your
+                    <code>search</code> with a connect query, then appear in your
                     Oversee dashboard within seconds.
                   </p>
                 </NumberedStep>
@@ -1634,8 +1635,8 @@ agent = Agent(
                 <NumberedStep n={5} title="Run and verify">
                   <p className="step-desc">
                     Start your agent. The first conversation should call{' '}
-                    <code>search</code> (action="connect"), then log each step via{' '}
-                    <code>fetch</code> (action="log").
+                    <code>search</code> with a connect query, then log each step via{' '}
+                    <code>search</code> with a log query.
                   </p>
                 </NumberedStep>
               </div>
