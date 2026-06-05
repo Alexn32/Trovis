@@ -28,6 +28,7 @@ const PLATFORMS = [
   { id: 'claude-agent-sdk', label: 'Claude Agent SDK',        subtitle: 'query() + ClaudeSDKClient (Claude Code engine)',  needsProvider: false },
   { id: 'claude-agents',  label: 'Claude Managed Agents',     subtitle: 'client.beta.agents + beta.sessions API',         needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
+  { id: 'chatgpt',        label: 'ChatGPT Agents',            subtitle: 'Connect via MCP — works with Agent Builder + SDK', needsProvider: false },
 ]
 
 const PROVIDERS = [
@@ -1437,6 +1438,128 @@ OTEL_TRACES_EXPORTER=otlp`,
 }
 
 // ---------------------------------------------------------------------------
+// ChatGPT Agents — MCP-based (Agent Builder + OpenAI Agents SDK)
+// ---------------------------------------------------------------------------
+
+function ChatGPTInstructions({ agentName, endpoint }) {
+  const apiKey = getApiKey() || 'YOUR_API_KEY'
+  // The MCP endpoint lives on the same host as the REST API, at /mcp.
+  const base = (endpoint || '').replace(/\/v1\/traces\/?$/, '') || 'https://web-production-e6bc4.up.railway.app'
+  const mcpUrl = base + '/mcp'
+
+  const monitoringInstructions = `## Monitoring
+You are connected to Oversee for activity monitoring.
+- At the start of each conversation, call oversee_connect with your name, role, and instructions.
+- After completing each major step, call oversee_log_activity with what you did.
+- When finishing a task, call oversee_report_complete with a summary.`
+
+  const sdkSnippet = `from agents import Agent, HostedMCPTool, Runner
+
+agent = Agent(
+    name="${agentName || 'My Agent'}",
+    tools=[
+        HostedMCPTool(
+            tool_config={
+                "type": "mcp",
+                "server_label": "oversee",
+                "server_url": "${mcpUrl}",
+                "require_approval": "never",
+                "headers": {
+                    "Authorization": "Bearer ${apiKey}"
+                }
+            }
+        )
+    ],
+)`
+
+  return (
+    <>
+      <p className="step-desc">
+        ChatGPT agents report their own activity through MCP tool calls. Connect
+        via <strong>Agent Builder</strong> (no-code) or the{' '}
+        <strong>OpenAI Agents SDK</strong> (code). The agent then appears in your
+        Oversee fleet like any other agent.
+      </p>
+
+      <Callout variant="info">
+        Unlike the silent OpenClaw / Hermes integrations, ChatGPT agents{' '}
+        <strong>actively report</strong> each step. Add the monitoring instructions
+        to your agent and it handles the rest.
+      </Callout>
+
+      <Tabs
+        tabs={[
+          {
+            label: 'Agent Builder (no-code)',
+            content: (
+              <div className="numbered-steps">
+                <NumberedStep n={1} title="Open your ChatGPT agent and click + Browse apps" />
+                <NumberedStep n={2} title='Select "Custom MCP"' />
+                <NumberedStep n={3} title="Enter the Oversee MCP URL">
+                  <CodeBlock code={mcpUrl} />
+                </NumberedStep>
+                <NumberedStep n={4} title="If asked for authentication headers, add:">
+                  <CodeBlock code={`Authorization: Bearer ${apiKey}`} />
+                </NumberedStep>
+                <NumberedStep n={5} title='Click "Create app" to connect' />
+                <NumberedStep
+                  n={6}
+                  title="Add this to the END of your agent's Instructions"
+                >
+                  <p className="step-desc" style={{ marginBottom: 8 }}>
+                    This tells the agent to report its activity to Oversee.
+                  </p>
+                  <CodeBlock code={monitoringInstructions} />
+                </NumberedStep>
+                <NumberedStep n={7} title="Test it">
+                  <p className="step-desc">
+                    Send your agent a message. It should call{' '}
+                    <code>oversee_connect</code>, then appear in your Oversee
+                    dashboard within seconds.
+                  </p>
+                </NumberedStep>
+              </div>
+            ),
+          },
+          {
+            label: 'OpenAI Agents SDK',
+            content: (
+              <div className="numbered-steps">
+                <NumberedStep n={1} title="Install the SDK">
+                  <CodeBlock code="pip install openai-agents" />
+                </NumberedStep>
+                <NumberedStep n={2} title="Add the Oversee MCP tool to your agent">
+                  <CodeBlock code={sdkSnippet} />
+                </NumberedStep>
+                <NumberedStep
+                  n={3}
+                  title="Add monitoring instructions to the agent's system prompt"
+                >
+                  <p className="step-desc" style={{ marginBottom: 8 }}>
+                    Append to your agent's instructions:
+                  </p>
+                  <CodeBlock code={monitoringInstructions} />
+                </NumberedStep>
+                <NumberedStep n={4} title="Run and verify">
+                  <p className="step-desc">
+                    Start your agent. The first conversation should call{' '}
+                    <code>oversee_connect</code>, then log each step via{' '}
+                    <code>oversee_log_activity</code>.
+                  </p>
+                </NumberedStep>
+              </div>
+            ),
+          },
+        ]}
+      />
+
+      <SuccessCallout />
+    </>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
 // Dispatcher — picks the right instructions component
 // ---------------------------------------------------------------------------
 
@@ -1455,6 +1578,9 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'hermes') {
     return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  if (platform === 'chatgpt') {
+    return <ChatGPTInstructions agentName={agentName} endpoint={endpoint} />
   }
   // Unreachable from the picker — the platform list above only
   // contains the live integrations. Returning null is safer than
