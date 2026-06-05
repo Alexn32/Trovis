@@ -1789,6 +1789,22 @@ async def remove_member(user_id: int, request: Request) -> None:
     database.delete_user(account_id, user_id)
 
 
+@app.get("/org/api-keys", response_model=RevealKeysResponse)
+async def get_api_keys(request: Request) -> RevealKeysResponse:
+    """Return the org's API key(s) for the currently authenticated user. No
+    password required — the user is already logged in. Used by the AddAgent
+    setup page so the key can be copied into ChatGPT / SDK snippets."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    keys = [
+        ApiKeyInfo(key=k["key"], name=k["name"], created_at=k.get("created_at"))
+        for k in database.get_api_keys_for_account(account_id)
+        if k["active"]
+    ]
+    return RevealKeysResponse(keys=keys)
+
+
 @app.post("/org/api-keys/reveal", response_model=RevealKeysResponse)
 async def reveal_api_keys(
     request: Request, body: RevealKeysRequest

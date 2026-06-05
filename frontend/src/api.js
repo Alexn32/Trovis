@@ -359,6 +359,9 @@ export const api = {
   revokeInvite: (id) => request(`/org/invites/${id}`, { method: 'DELETE' }),
   deleteMember: (id) => request(`/org/members/${id}`, { method: 'DELETE' }),
   // Re-show the org's API key(s) — owner only, requires the caller's password.
+  // No-password key fetch (user is already authenticated).
+  getApiKeys: () => request('/org/api-keys'),
+  // Password-gated reveal (Settings page, step-up auth).
   revealApiKeys: (password) =>
     request('/org/api-keys/reveal', {
       method: 'POST',
