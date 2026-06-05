@@ -34,9 +34,9 @@ import asker
 import database
 import describer
 import pricing_sync
-# MCP server for ChatGPT agents. Importing creates the Streamable-HTTP ASGI app
-# (and lazily the session manager) which we run in the lifespan + mount at /mcp.
-from mcp_server import mcp as oversee_mcp, http_app as oversee_mcp_app
+# MCP server for ChatGPT agents. Two transports: Streamable HTTP (/mcp) for
+# standard MCP clients, SSE (/mcp/sse + /mcp/messages/) for ChatGPT Custom MCP.
+from mcp_server import mcp as oversee_mcp, http_app as oversee_mcp_app, sse_app as oversee_sse_app
 from models import (
     AgentCosts,
     AgentDeleteResponse,
@@ -202,7 +202,9 @@ async def auth_middleware(request: Request, call_next):
     # The MCP server is mounted at /mcp and does its own Bearer-API-key auth
     # (ChatGPT sends the key as `Authorization: Bearer`, which this middleware
     # would otherwise reject as a bad session token). Let those requests through.
-    if path == "/mcp" or path.startswith("/mcp/"):
+    # Also bypass /messages (SSE transport's POST endpoint — the SSE client
+    # resolves it relative to the root, not /mcp/).
+    if path == "/mcp" or path.startswith("/mcp/") or path.startswith("/messages"):
         return await call_next(request)
 
     # 1. Bearer session — dashboard users.
@@ -265,16 +267,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Intercept /mcp and /mcp/ at the ASGI level BEFORE Starlette routing, so both
-# paths hit the MCP app directly (no 307 redirect that drops the POST body).
-# This wraps the whole FastAPI app; non-MCP requests pass through untouched.
-_inner_app = app.router
-
-_original_asgi = app.build_middleware_stack
-
+# Intercept /mcp* at the ASGI level BEFORE Starlette routing. Routes:
+#   /mcp/sse       → SSE transport (GET, event stream) — ChatGPT Custom MCP
+#   /mcp/messages* → SSE transport (POST, send messages) — ChatGPT Custom MCP
+#   /mcp, /mcp/    → Streamable HTTP transport — standard MCP clients
+# This avoids Starlette's 307 redirect (which drops POST bodies).
 
 class _MCPInterceptMiddleware:
-    """ASGI middleware that routes /mcp and /mcp/ to the MCP server."""
+    """ASGI middleware that routes /mcp* to the correct MCP transport."""
 
     def __init__(self, app):
         self.app = app
@@ -282,10 +282,23 @@ class _MCPInterceptMiddleware:
     async def __call__(self, scope, receive, send):
         if scope.get("type") == "http":
             path = scope.get("path", "")
-            if path == "/mcp" or path == "/mcp/" or path.startswith("/mcp/"):
-                # Strip /mcp prefix so the inner MCP app sees "/"
+            if path.startswith("/mcp"):
+                # Strip /mcp prefix so the inner apps see their own paths
                 inner = path[4:] or "/"
+                # SSE transport: /sse and /messages/ go to the SSE app
+                if inner == "/sse" or inner.startswith("/messages"):
+                    await oversee_sse_app(dict(scope, path=inner), receive, send)
+                    return
+                # Everything else: Streamable HTTP transport
+                if inner in ("", "/"):
+                    inner = "/"
                 await oversee_mcp_app(dict(scope, path=inner), receive, send)
+                return
+            # The SSE client resolves the messages endpoint relative to the
+            # root (urljoin("http://host/mcp/sse", "/messages/...") → /messages/),
+            # so we also catch /messages* at the top level.
+            if path.startswith("/messages"):
+                await oversee_sse_app(dict(scope, path=path), receive, send)
                 return
         await self.app(scope, receive, send)
 

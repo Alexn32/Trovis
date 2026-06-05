@@ -1447,6 +1447,9 @@ function ChatGPTInstructions({ agentName, endpoint }) {
   // Trailing slash is required — Starlette mounts need it, and ChatGPT's MCP
   // client doesn't follow 307 redirects from /mcp to /mcp/.
   const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
+  // ChatGPT Custom MCP uses SSE transport (/mcp/sse); standard MCP clients
+  // use Streamable HTTP (/mcp/). Both are served by the same FastMCP instance.
+  const sseUrl = PRODUCTION_HOST + '/mcp/sse'
   const mcpUrl = PRODUCTION_HOST + '/mcp/'
 
   // API key reveal — no password needed, the user is already authenticated.
@@ -1569,7 +1572,7 @@ agent = Agent(
                 <NumberedStep n={2} title="Open your ChatGPT agent and click + Browse apps" />
                 <NumberedStep n={3} title='Select "Custom MCP"' />
                 <NumberedStep n={4} title="Enter the Oversee MCP URL">
-                  <CodeBlock code={mcpUrl} />
+                  <CodeBlock code={sseUrl} />
                 </NumberedStep>
                 <NumberedStep n={5} title="Set up authentication">
                   <p className="step-desc" style={{ marginBottom: 8 }}>
