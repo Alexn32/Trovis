@@ -1,6 +1,6 @@
 {
   "name": "@alexn32/openclaw-plugin",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Oversee Agent Management — automatic telemetry for OpenClaw agents",
   "type": "module",
   "openclaw": {
@@ -15,7 +15,7 @@
     }
   },
   "scripts": {
-    "build": "esbuild index.ts --outfile=dist/index.mjs --platform=node --format=esm --bundle --external:openclaw --external:openclaw/* --external:@sinclair/typebox"
+    "build": "esbuild index.ts --outfile=dist/index.mjs --platform=node --format=esm --bundle --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);' --external:openclaw --external:openclaw/* --external:@sinclair/typebox"
   },
   "peerDependencies": {
     "openclaw": "*"
