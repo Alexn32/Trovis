@@ -34,6 +34,9 @@ import asker
 import database
 import describer
 import pricing_sync
+# MCP server for ChatGPT agents. Importing creates the Streamable-HTTP ASGI app
+# (and lazily the session manager) which we run in the lifespan + mount at /mcp.
+from mcp_server import mcp as oversee_mcp, http_app as oversee_mcp_app
 from models import (
     AgentCosts,
     AgentDeleteResponse,
@@ -157,7 +160,10 @@ async def lifespan(app: FastAPI):
     ):
         refresh_task = asyncio.create_task(_pricing_refresh_loop())
     try:
-        yield
+        # Run the MCP Streamable-HTTP session manager for the app's lifetime so
+        # the /mcp mount can serve ChatGPT agents.
+        async with oversee_mcp.session_manager.run():
+            yield
     finally:
         if refresh_task is not None:
             refresh_task.cancel()
@@ -191,6 +197,12 @@ async def auth_middleware(request: Request, call_next):
 
     path = request.url.path
     if path in _OPEN_PATHS or request.method == "OPTIONS":
+        return await call_next(request)
+
+    # The MCP server is mounted at /mcp and does its own Bearer-API-key auth
+    # (ChatGPT sends the key as `Authorization: Bearer`, which this middleware
+    # would otherwise reject as a bad session token). Let those requests through.
+    if path == "/mcp" or path.startswith("/mcp/"):
         return await call_next(request)
 
     # 1. Bearer session — dashboard users.
@@ -252,6 +264,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount the MCP Streamable-HTTP server for ChatGPT agents at /mcp. It runs its
+# own Bearer-API-key auth (see mcp_server.http_app); the session manager is
+# started in the lifespan above.
+app.mount("/mcp", oversee_mcp_app)
 
 
 # ---------------------------------------------------------------------------
