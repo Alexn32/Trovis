@@ -265,11 +265,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount the MCP Streamable-HTTP server for ChatGPT agents at /mcp. It runs its
-# own Bearer-API-key auth (see mcp_server.http_app); the session manager is
-# started in the lifespan above. The canonical URL is /mcp/ (trailing slash) —
-# Starlette redirects /mcp → /mcp/ automatically.
-app.mount("/mcp", oversee_mcp_app)
+# Intercept /mcp and /mcp/ at the ASGI level BEFORE Starlette routing, so both
+# paths hit the MCP app directly (no 307 redirect that drops the POST body).
+# This wraps the whole FastAPI app; non-MCP requests pass through untouched.
+_inner_app = app.router
+
+_original_asgi = app.build_middleware_stack
+
+
+class _MCPInterceptMiddleware:
+    """ASGI middleware that routes /mcp and /mcp/ to the MCP server."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            if path == "/mcp" or path == "/mcp/" or path.startswith("/mcp/"):
+                # Strip /mcp prefix so the inner MCP app sees "/"
+                inner = path[4:] or "/"
+                await oversee_mcp_app(dict(scope, path=inner), receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_MCPInterceptMiddleware)
 
 
 # ---------------------------------------------------------------------------
