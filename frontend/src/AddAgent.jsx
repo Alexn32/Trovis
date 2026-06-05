@@ -1443,9 +1443,10 @@ OTEL_TRACES_EXPORTER=otlp`,
 
 function ChatGPTInstructions({ agentName, endpoint }) {
   const apiKey = getApiKey() || 'YOUR_API_KEY'
-  // The MCP endpoint lives on the same host as the REST API, at /mcp.
-  const base = (endpoint || '').replace(/\/v1\/traces\/?$/, '') || 'https://web-production-e6bc4.up.railway.app'
-  const mcpUrl = base + '/mcp'
+  // The MCP endpoint MUST be publicly reachable (ChatGPT's servers call it),
+  // so we always use the production URL — never localhost.
+  const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
+  const mcpUrl = PRODUCTION_HOST + '/mcp'
 
   const monitoringInstructions = `## Monitoring
 You are connected to Oversee for activity monitoring.
