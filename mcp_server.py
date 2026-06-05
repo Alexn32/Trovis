@@ -31,7 +31,18 @@ import database
 # streamable_http_path="/" because we mount this app under "/mcp" on the main
 # FastAPI app (Starlette strips the "/mcp" prefix before the inner app sees it);
 # the public endpoint is therefore https://<host>/mcp.
-mcp = FastMCP("oversee", stateless_http=True, streamable_http_path="/")
+# host="0.0.0.0" prevents FastMCP from auto-enabling localhost-only DNS rebinding
+# protection (which rejects the Railway hostname). We do our own Bearer-API-key
+# auth, so DNS rebinding protection is unnecessary.
+from mcp.server.transport_security import TransportSecuritySettings as _TSS
+
+mcp = FastMCP(
+    "oversee",
+    stateless_http=True,
+    streamable_http_path="/",
+    host="0.0.0.0",
+    transport_security=_TSS(enable_dns_rebinding_protection=False),
+)
 
 # Per-request account id, set by the ASGI auth wrapper around the MCP app and
 # read by the tools. Defaults to None (unauthenticated).
