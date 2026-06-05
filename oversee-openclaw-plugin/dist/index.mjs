@@ -1,3 +1,4 @@
+import { createRequire } from "module"; const require = createRequire(import.meta.url);
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -66147,7 +66148,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.2.0";
+var PLUGIN_VERSION = "0.2.8";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Oversee]";
 var OBSERVATION_PRIORITY = 0;
@@ -66374,12 +66375,16 @@ function pickTokenUsage(event) {
     const output = num(
       c.output_tokens ?? c.completion_tokens ?? c.outputTokens ?? c.completionTokens
     );
+    const cacheCreation = num(
+      c.cache_creation_input_tokens ?? c.cacheCreationInputTokens
+    );
+    const cacheRead = num(c.cache_read_input_tokens ?? c.cacheReadInputTokens);
     let total = num(c.total_tokens ?? c.totalTokens);
-    if (total === void 0 && (input !== void 0 || output !== void 0)) {
-      total = (input ?? 0) + (output ?? 0);
+    if (total === void 0 && (input !== void 0 || output !== void 0 || cacheCreation !== void 0 || cacheRead !== void 0)) {
+      total = (input ?? 0) + (output ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0);
     }
-    if (input !== void 0 || output !== void 0 || total !== void 0) {
-      return { input, output, total };
+    if (input !== void 0 || output !== void 0 || total !== void 0 || cacheCreation !== void 0 || cacheRead !== void 0) {
+      return { input, output, total, cacheCreation, cacheRead };
     }
   }
   return {};
@@ -66534,6 +66539,16 @@ function wireEvents(api) {
     setIfPresent(entry.span, "gen_ai.usage.input_tokens", usage.input);
     setIfPresent(entry.span, "gen_ai.usage.output_tokens", usage.output);
     setIfPresent(entry.span, "gen_ai.usage.total_tokens", usage.total);
+    setIfPresent(
+      entry.span,
+      "gen_ai.usage.cache_creation_input_tokens",
+      usage.cacheCreation
+    );
+    setIfPresent(
+      entry.span,
+      "gen_ai.usage.cache_read_input_tokens",
+      usage.cacheRead
+    );
     if (typeof event.outcome === "string" && event.outcome !== "ok" && event.outcome !== "success") {
       entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome });
     }
