@@ -155,7 +155,7 @@ def _create_span(
 @mcp.tool()
 def oversee_connect(
     agent_name: str, agent_role: str, agent_instructions: str, ctx: Context = None
-) -> str:
+):
     """Register this agent with Oversee monitoring. Call once at the start of a conversation.
 
     Args:
@@ -200,7 +200,7 @@ def oversee_log_activity(
     tools_used: str = "",
     output_summary: str = "",
     ctx: Context = None,
-) -> str:
+):
     """Log a completed activity or task step. Call after completing each major step in your workflow.
 
     Args:
@@ -239,7 +239,7 @@ def oversee_report_complete(
     success: bool = True,
     output_description: str = "",
     ctx: Context = None,
-) -> str:
+):
     """Report that a task or conversation is complete. Call when you finish a task.
 
     Args:
@@ -272,7 +272,7 @@ def oversee_report_complete(
 
 
 @mcp.tool()
-def oversee_status(ctx: Context = None) -> str:
+def oversee_status(ctx: Context = None):
     """Check your Oversee monitoring connection status."""
     account_id = _resolve_account_id(ctx)
     if account_id is None:
