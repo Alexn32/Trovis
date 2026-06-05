@@ -365,7 +365,9 @@ function Step3Header({ agentName, setAgentName, endpoint }) {
           </button>
         </div>
         <p className="helper-text">
-          Replace localhost with your Oversee server address in production.
+          Where agents send telemetry. The Oversee SDKs target this
+          automatically — you only set it manually for the OpenClaw plugin or
+          raw OpenTelemetry setups.
         </p>
       </div>
     </div>
@@ -636,10 +638,14 @@ with tracer.start_as_current_span("my-operation") as span:
 // to Oversee, so we can pre-fill the endpoint and their API key directly.
 // The wizard's Step3Header agentName/endpoint fields are ignored here —
 // the values that matter are the live session ones.
+// The OTEL ingest endpoint agents send telemetry to. This is the Oversee
+// API (Railway), NOT the dashboard origin (Vercel) — so we use VITE_API_URL
+// (set at build time) and fall back to the production API, never the page
+// origin, which would be wrong for the hosted dashboard.
+const PRODUCTION_API = 'https://web-production-e6bc4.up.railway.app'
+
 function computeOverseeEndpoint() {
-  const base =
-    import.meta.env.VITE_API_URL ||
-    (typeof window !== 'undefined' ? window.location.origin : '')
+  const base = import.meta.env.VITE_API_URL || PRODUCTION_API
   return base.replace(/\/+$/, '') + '/v1/traces'
 }
 
@@ -1468,13 +1474,12 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // Top-level wizard component
 // ---------------------------------------------------------------------------
 
-const DEFAULT_ENDPOINT = 'http://localhost:8080/v1/traces'
-
 export default function AddAgent({ onClose }) {
   const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
   const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
   const [agentName, setAgentName] = useState('')
-  const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT)
+  // Defaults to the real Oversee API ingest endpoint (VITE_API_URL → prod).
+  const [endpoint, setEndpoint] = useState(computeOverseeEndpoint())
 
   const selectedPlatform = PLATFORMS.find((p) => p.id === platform)
   const needsProvider = selectedPlatform?.needsProvider ?? false
