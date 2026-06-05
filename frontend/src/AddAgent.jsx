@@ -1540,6 +1540,13 @@ agent = Agent(
         Oversee fleet like any other agent.
       </p>
 
+      <Callout variant="warning">
+        <strong>Requires Developer Mode.</strong> ChatGPT only exposes custom MCP
+        tools when Developer Mode is enabled. Go to{' '}
+        <strong>ChatGPT Settings → Developer features</strong> (or Beta features)
+        and turn it on. Available on Plus, Pro, Team, Business, and Enterprise plans.
+      </Callout>
+
       <Callout variant="info">
         Unlike the silent OpenClaw / Hermes integrations, ChatGPT agents{' '}
         <strong>actively report</strong> each step. Add the monitoring instructions
@@ -1552,12 +1559,19 @@ agent = Agent(
             label: 'Agent Builder (no-code)',
             content: (
               <div className="numbered-steps">
-                <NumberedStep n={1} title="Open your ChatGPT agent and click + Browse apps" />
-                <NumberedStep n={2} title='Select "Custom MCP"' />
-                <NumberedStep n={3} title="Enter the Oversee MCP URL">
+                <NumberedStep n={1} title="Enable Developer Mode in ChatGPT">
+                  <p className="step-desc">
+                    Go to <strong>ChatGPT Settings → Developer features</strong>{' '}
+                    (or Beta features) and enable <strong>Developer Mode</strong>.
+                    Without this, ChatGPT silently ignores custom MCP tools.
+                  </p>
+                </NumberedStep>
+                <NumberedStep n={2} title="Open your ChatGPT agent and click + Browse apps" />
+                <NumberedStep n={3} title='Select "Custom MCP"' />
+                <NumberedStep n={4} title="Enter the Oversee MCP URL">
                   <CodeBlock code={mcpUrl} />
                 </NumberedStep>
-                <NumberedStep n={4} title="Set up authentication">
+                <NumberedStep n={5} title="Set up authentication">
                   <p className="step-desc" style={{ marginBottom: 8 }}>
                     Under <strong>Authentication</strong>, select{' '}
                     <strong>Access token / API key</strong>. Under{' '}
@@ -1566,15 +1580,15 @@ agent = Agent(
                   </p>
                   {keyRevealWidget}
                 </NumberedStep>
-                <NumberedStep n={5} title="Check the risk acknowledgement box and click Create" />
-                <NumberedStep n={6} title="When prompted, paste your API key">
+                <NumberedStep n={6} title="Check the risk acknowledgement box and click Create" />
+                <NumberedStep n={7} title="When prompted, paste your API key">
                   <p className="step-desc">
                     ChatGPT will show a "Connect" dialog asking for your access
-                    token. Paste the same API key from step 4.
+                    token. Paste the same API key from step 5.
                   </p>
                 </NumberedStep>
                 <NumberedStep
-                  n={7}
+                  n={8}
                   title="Add this to the END of your agent's Instructions"
                 >
                   <p className="step-desc" style={{ marginBottom: 8 }}>
@@ -1582,7 +1596,7 @@ agent = Agent(
                   </p>
                   <CodeBlock code={monitoringInstructions} />
                 </NumberedStep>
-                <NumberedStep n={8} title="Test it">
+                <NumberedStep n={9} title="Test it">
                   <p className="step-desc">
                     Send your agent a message. It should call{' '}
                     <code>oversee_connect</code>, then appear in your Oversee
