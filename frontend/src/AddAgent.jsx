@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { getApiKey } from './api.js'
+import { api, getApiKey } from './api.js'
 
 // ============================================================================
 // AddAgent — the three-step onboarding wizard.
@@ -1442,13 +1442,51 @@ OTEL_TRACES_EXPORTER=otlp`,
 // ---------------------------------------------------------------------------
 
 function ChatGPTInstructions({ agentName, endpoint }) {
-  const apiKey = getApiKey() || 'YOUR_API_KEY'
   // The MCP endpoint MUST be publicly reachable (ChatGPT's servers call it),
   // so we always use the production URL — never localhost.
   // Trailing slash is required — Starlette mounts need it, and ChatGPT's MCP
   // client doesn't follow 307 redirects from /mcp to /mcp/.
   const PRODUCTION_HOST = 'https://web-production-e6bc4.up.railway.app'
   const mcpUrl = PRODUCTION_HOST + '/mcp/'
+
+  // Password-gated API key reveal (same pattern as Settings.jsx).
+  const [revealState, setRevealState] = useState('hidden') // 'hidden' | 'asking' | 'shown'
+  const [revealPw, setRevealPw] = useState('')
+  const [revealKey, setRevealKey] = useState(null)
+  const [revealErr, setRevealErr] = useState(null)
+  const [revealBusy, setRevealBusy] = useState(false)
+  const [keyCopied, setKeyCopied] = useState(false)
+
+  async function doReveal(e) {
+    e.preventDefault()
+    setRevealBusy(true)
+    setRevealErr(null)
+    try {
+      const res = await api.revealApiKeys(revealPw)
+      const keys = res.keys || []
+      if (keys.length === 0) {
+        setRevealErr('No API keys found on this account.')
+      } else {
+        setRevealKey(keys[0].key)
+        setRevealState('shown')
+      }
+      setRevealPw('')
+    } catch (err) {
+      setRevealErr(err.message || 'Could not reveal key')
+    } finally {
+      setRevealBusy(false)
+    }
+  }
+  async function copyKey() {
+    if (!revealKey) return
+    try {
+      await navigator.clipboard.writeText(revealKey)
+      setKeyCopied(true)
+      setTimeout(() => setKeyCopied(false), 1500)
+    } catch {}
+  }
+
+  const displayKey = revealKey || 'YOUR_API_KEY'
 
   const monitoringInstructions = `## Monitoring
 You are connected to Oversee for activity monitoring.
@@ -1468,12 +1506,53 @@ agent = Agent(
                 "server_url": "${mcpUrl}",
                 "require_approval": "never",
                 "headers": {
-                    "Authorization": "Bearer ${apiKey}"
+                    "Authorization": "Bearer ${displayKey}"
                 }
             }
         )
     ],
 )`
+
+  // Shared API key reveal widget used in both tabs.
+  const keyRevealWidget = (
+    <div className="chatgpt-key-reveal">
+      {revealState === 'hidden' && (
+        <button type="button" className="btn btn-secondary btn-sm" onClick={() => setRevealState('asking')}>
+          Reveal API key
+        </button>
+      )}
+      {revealState === 'asking' && (
+        <form className="chatgpt-key-form" onSubmit={doReveal}>
+          <input
+            className="text-input"
+            type="password"
+            placeholder="Enter your password"
+            value={revealPw}
+            onChange={(e) => setRevealPw(e.target.value)}
+            autoFocus
+          />
+          <button type="submit" className="btn btn-primary btn-sm" disabled={revealBusy || !revealPw}>
+            {revealBusy ? 'Revealing…' : 'Reveal'}
+          </button>
+          <button type="button" className="btn btn-link btn-sm" onClick={() => { setRevealState('hidden'); setRevealErr(null); setRevealPw('') }}>
+            Cancel
+          </button>
+          {revealErr && <p className="form-error">{revealErr}</p>}
+        </form>
+      )}
+      {revealState === 'shown' && revealKey && (
+        <div className="chatgpt-key-display">
+          <code className="key-text">{revealKey}</code>
+          <button type="button" className="copy-btn-inline" onClick={copyKey}>
+            {keyCopied ? '✓ Copied' : 'Copy'}
+          </button>
+          <button type="button" className="btn btn-link btn-sm" onClick={() => { setRevealState('hidden'); setRevealKey(null) }}>
+            Hide
+          </button>
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <>
@@ -1501,12 +1580,24 @@ agent = Agent(
                 <NumberedStep n={3} title="Enter the Oversee MCP URL">
                   <CodeBlock code={mcpUrl} />
                 </NumberedStep>
-                <NumberedStep n={4} title="If asked for authentication headers, add:">
-                  <CodeBlock code={`Authorization: Bearer ${apiKey}`} />
+                <NumberedStep n={4} title="Set up authentication">
+                  <p className="step-desc" style={{ marginBottom: 8 }}>
+                    Under <strong>Authentication</strong>, select{' '}
+                    <strong>Access token / API key</strong>. Under{' '}
+                    <strong>Header scheme</strong>, select <strong>Bearer</strong>.
+                    Then enter your Oversee API key when prompted.
+                  </p>
+                  {keyRevealWidget}
                 </NumberedStep>
-                <NumberedStep n={5} title='Click "Create app" to connect' />
+                <NumberedStep n={5} title="Check the risk acknowledgement box and click Create" />
+                <NumberedStep n={6} title="When prompted, paste your API key">
+                  <p className="step-desc">
+                    ChatGPT will show a "Connect" dialog asking for your access
+                    token. Paste the same API key from step 4.
+                  </p>
+                </NumberedStep>
                 <NumberedStep
-                  n={6}
+                  n={7}
                   title="Add this to the END of your agent's Instructions"
                 >
                   <p className="step-desc" style={{ marginBottom: 8 }}>
@@ -1514,7 +1605,7 @@ agent = Agent(
                   </p>
                   <CodeBlock code={monitoringInstructions} />
                 </NumberedStep>
-                <NumberedStep n={7} title="Test it">
+                <NumberedStep n={8} title="Test it">
                   <p className="step-desc">
                     Send your agent a message. It should call{' '}
                     <code>oversee_connect</code>, then appear in your Oversee
@@ -1531,11 +1622,14 @@ agent = Agent(
                 <NumberedStep n={1} title="Install the SDK">
                   <CodeBlock code="pip install openai-agents" />
                 </NumberedStep>
-                <NumberedStep n={2} title="Add the Oversee MCP tool to your agent">
+                <NumberedStep n={2} title="Get your Oversee API key">
+                  {keyRevealWidget}
+                </NumberedStep>
+                <NumberedStep n={3} title="Add the Oversee MCP tool to your agent">
                   <CodeBlock code={sdkSnippet} />
                 </NumberedStep>
                 <NumberedStep
-                  n={3}
+                  n={4}
                   title="Add monitoring instructions to the agent's system prompt"
                 >
                   <p className="step-desc" style={{ marginBottom: 8 }}>
@@ -1543,7 +1637,7 @@ agent = Agent(
                   </p>
                   <CodeBlock code={monitoringInstructions} />
                 </NumberedStep>
-                <NumberedStep n={4} title="Run and verify">
+                <NumberedStep n={5} title="Run and verify">
                   <p className="step-desc">
                     Start your agent. The first conversation should call{' '}
                     <code>oversee_connect</code>, then log each step via{' '}

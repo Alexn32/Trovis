@@ -2534,6 +2534,10 @@ a:hover {
 .numbered-step-body {
   margin-left: 30px;
 }
+.chatgpt-key-reveal { margin-top: 10px; }
+.chatgpt-key-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chatgpt-key-form .text-input { max-width: 200px; }
+.chatgpt-key-display { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 
 .callout {
   padding: 12px 14px;
