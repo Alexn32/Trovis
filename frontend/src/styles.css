@@ -10,53 +10,63 @@
 
 :root,
 :root[data-theme="dark"] {
-  --bg-primary: #09090b;
-  --bg-surface: #111113;
-  --bg-surface-hover: #18181b;
-  --bg-elevated: #1c1c1f;
-  --border-default: #1e1e22;
-  --border-hover: #27272a;
-  --text-primary: #f4f4f5;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
-  --text-dim: #52525b;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-faint: rgba(37, 99, 235, 0.16);
-  --success: #34d399;
-  --warning: #fbbf24;
-  --error: #f87171;
-  --idle: #6b7280;
-  --success-faint: rgba(52, 211, 153, 0.12);
-  --warning-faint: rgba(251, 191, 36, 0.12);
-  --error-faint: rgba(248, 113, 113, 0.12);
-  --idle-faint: rgba(107, 114, 128, 0.12);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  /* Warm-dark surfaces (was cold blue-black) */
+  --bg-primary: #1a1714;
+  --bg-surface: #222019;
+  --bg-surface-hover: #2e2b24;
+  --bg-elevated: #2e2b24;
+  --border-default: #3a3630;
+  --border-hover: #4a4640;
+  --text-primary: #f0ece6;
+  --text-secondary: #c8c2b8;
+  --text-muted: #9c958a;
+  --text-dim: #7a7368;
+  /* Accent = the warm "primary" (cream in dark) for buttons/active tabs */
+  --accent: #f0ece6;
+  --accent-hover: #c8c2b8;
+  --accent-faint: rgba(240, 236, 230, 0.10);
+  --accent-bg: #f0ece6;
+  --accent-text: #1a1714;
+  --success: #3bb87e;
+  --warning: #e8924a;
+  --error: #e05040;
+  --idle: #5a5448;
+  --success-faint: rgba(59, 184, 126, 0.14);
+  --warning-faint: rgba(232, 146, 74, 0.14);
+  --error-faint: rgba(224, 80, 64, 0.14);
+  --idle-faint: rgba(90, 84, 72, 0.18);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.15);
+  --shadow-md: 0 2px 12px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.25);
   --code-bg: rgba(255, 255, 255, 0.05);
+  --nav-bg: rgba(26, 23, 20, 0.85);
+  --nav-border: #3a3630;
+  --scrollbar-thumb: #3a3630;
+  --vignette: rgba(0, 0, 0, 0.08);
+  --backdrop: rgba(0, 0, 0, 0.5);
   /* Workflow graph: agents teal, humans purple, connections gray. */
   --wf-agent: #2dd4bf;
   --wf-agent-faint: rgba(45, 212, 191, 0.14);
   --wf-human: #a78bfa;
   --wf-human-faint: rgba(167, 139, 250, 0.16);
   --wf-edge: #8b8b94;
-  --wf-trigger: #9ca3af;
-  --wf-trigger-faint: rgba(156, 163, 175, 0.14);
-  --wf-decision: #fbbf24;
-  --wf-decision-faint: rgba(251, 191, 36, 0.14);
-  --wf-output: #34d399;
-  --wf-output-faint: rgba(52, 211, 153, 0.14);
+  --wf-trigger: #9c958a;
+  --wf-trigger-faint: rgba(156, 149, 138, 0.14);
+  --wf-decision: #e8924a;
+  --wf-decision-faint: rgba(232, 146, 74, 0.14);
+  --wf-output: #3bb87e;
+  --wf-output-faint: rgba(59, 184, 126, 0.14);
   /* Dashboard (daily briefing surface) */
-  --dash-spark: #e5e7eb;
-  --dash-crit: #f87171;
-  --dash-warn: #fb923c;
-  --dash-info: #64748b;
-  --dash-offline: #3f3f46;
-  --dash-rec-bg: rgba(16, 185, 129, 0.10);
-  --dash-rec-border: rgba(16, 185, 129, 0.28);
-  --dash-rec-label: #34d399;
-  --dash-rec-text: #6ee7b7;
-  /* Workflow canvas node types (dark variants of the spec palette) */
+  --dash-spark: #f0ece6;
+  --dash-crit: #e05040;
+  --dash-warn: #e8924a;
+  --dash-info: #9c958a;
+  --dash-offline: #5a5448;
+  --dash-rec-bg: #1e2a1a;
+  --dash-rec-border: #3a5430;
+  --dash-rec-label: #6ab058;
+  --dash-rec-text: #8ec880;
+  /* Workflow canvas node types (kept vibrant per spec) */
   --node-trigger: #a5b4fc;
   --node-trigger-bg: rgba(99, 102, 241, 0.16);
   --node-trigger-border: rgba(99, 102, 241, 0.42);
@@ -72,77 +82,89 @@
   --node-output: #34d399;
   --node-output-bg: rgba(5, 150, 105, 0.18);
   --node-output-border: rgba(5, 150, 105, 0.42);
-  --wf2-edge: #3f3f46;
-  --wf2-branch: #fbbf24;
-  --wf2-grid: #1e1e22;
+  --wf2-edge: #4a4640;
+  --wf2-branch: #e8924a;
+  --wf2-grid: #3a3630;
+  --canvas-dot: #3a3630;
 }
 
 :root[data-theme="light"] {
-  --bg-primary: #ffffff;
-  --bg-surface: #f8f8f7;
-  --bg-surface-hover: #f0f0ee;
-  --bg-elevated: #ffffff;
-  --border-default: #e4e4e3;
-  --border-hover: #d4d4d3;
-  --text-primary: #1a1a1a;
-  --text-secondary: #525252;
-  --text-muted: #737373;
-  --text-dim: #a3a3a3;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-faint: rgba(37, 99, 235, 0.10);
-  --success: #059669;
-  --warning: #d97706;
-  --error: #dc2626;
-  --idle: #6b7280;
-  --success-faint: rgba(5, 150, 105, 0.10);
-  --warning-faint: rgba(217, 119, 6, 0.10);
-  --error-faint: rgba(220, 38, 38, 0.10);
-  --idle-faint: rgba(107, 114, 128, 0.10);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.07);
-  --code-bg: rgba(0, 0, 0, 0.05);
+  /* Warm cream / linen surfaces (was cool gray/white) */
+  --bg-primary: #f5f1eb;
+  --bg-surface: #fbf8f3;
+  --bg-surface-hover: #ece8e1;
+  --bg-elevated: #fbf8f3;
+  --border-default: #ddd7ce;
+  --border-hover: #c9c1b4;
+  --text-primary: #2c2418;
+  --text-secondary: #4a4137;
+  --text-muted: #6b6358;
+  --text-dim: #8c8378;
+  /* Accent = the warm "primary" (dark brown) for buttons/active tabs */
+  --accent: #2c2418;
+  --accent-hover: #4a4137;
+  --accent-faint: rgba(44, 36, 24, 0.06);
+  --accent-bg: #2c2418;
+  --accent-text: #faf8f4;
+  --success: #2a9d6e;
+  --warning: #d4792a;
+  --error: #c43528;
+  --idle: #b8b0a4;
+  --success-faint: rgba(42, 157, 110, 0.10);
+  --warning-faint: rgba(212, 121, 42, 0.10);
+  --error-faint: rgba(196, 53, 40, 0.10);
+  --idle-faint: rgba(184, 176, 164, 0.20);
+  --shadow-sm: 0 1px 2px rgba(44, 36, 24, 0.03);
+  --shadow-md: 0 2px 12px rgba(44, 36, 24, 0.04);
+  --shadow-lg: 0 4px 24px rgba(44, 36, 24, 0.08), 0 1px 3px rgba(44, 36, 24, 0.04);
+  --code-bg: rgba(44, 36, 24, 0.05);
+  --nav-bg: rgba(251, 248, 243, 0.85);
+  --nav-border: #ddd7ce;
+  --scrollbar-thumb: #d6d0c7;
+  --vignette: rgba(44, 36, 24, 0.03);
+  --backdrop: rgba(44, 36, 24, 0.28);
   /* Workflow graph: agents teal, humans purple, connections gray. */
   --wf-agent: #0d9488;
   --wf-agent-faint: rgba(13, 148, 136, 0.10);
   --wf-human: #7c3aed;
   --wf-human-faint: rgba(124, 58, 237, 0.10);
-  --wf-edge: #9ca3af;
-  --wf-trigger: #6b7280;
-  --wf-trigger-faint: rgba(107, 114, 128, 0.10);
-  --wf-decision: #d97706;
-  --wf-decision-faint: rgba(217, 119, 6, 0.10);
-  --wf-output: #059669;
-  --wf-output-faint: rgba(5, 150, 105, 0.10);
+  --wf-edge: #b8b0a4;
+  --wf-trigger: #8c8378;
+  --wf-trigger-faint: rgba(140, 131, 120, 0.12);
+  --wf-decision: #d4792a;
+  --wf-decision-faint: rgba(212, 121, 42, 0.10);
+  --wf-output: #2a9d6e;
+  --wf-output-faint: rgba(42, 157, 110, 0.10);
   /* Dashboard (daily briefing surface) */
-  --dash-spark: #0f172a;
-  --dash-crit: #dc2626;
-  --dash-warn: #ea580c;
-  --dash-info: #94a3b8;
-  --dash-offline: #cbd5e1;
-  --dash-rec-bg: #f0fdf4;
-  --dash-rec-border: #bbf7d0;
-  --dash-rec-label: #16a34a;
-  --dash-rec-text: #15803d;
-  /* Workflow canvas node types (spec palette) */
+  --dash-spark: #2c2418;
+  --dash-crit: #c43528;
+  --dash-warn: #d4792a;
+  --dash-info: #8c8378;
+  --dash-offline: #b8b0a4;
+  --dash-rec-bg: #f0f5ed;
+  --dash-rec-border: #c4d4b8;
+  --dash-rec-label: #4a7a35;
+  --dash-rec-text: #3a6628;
+  /* Workflow canvas node types (vibrant accents kept; agent warmed) */
   --node-trigger: #6366f1;
   --node-trigger-bg: #eef2ff;
   --node-trigger-border: #c7d2fe;
-  --node-agent: #0f172a;
-  --node-agent-bg: #ffffff;
-  --node-agent-border: #e2e8f0;
+  --node-agent: #2c2418;
+  --node-agent-bg: #fbf8f3;
+  --node-agent-border: #ddd7ce;
   --node-human: #7c3aed;
   --node-human-bg: #f5f3ff;
   --node-human-border: #ddd6fe;
-  --node-decision: #d97706;
+  --node-decision: #d4792a;
   --node-decision-bg: #fffbeb;
   --node-decision-border: #fde68a;
-  --node-output: #059669;
+  --node-output: #2a9d6e;
   --node-output-bg: #ecfdf5;
   --node-output-border: #a7f3d0;
-  --wf2-edge: #c4c9d0;
-  --wf2-branch: #d97706;
-  --wf2-grid: #e5e7ea;
+  --wf2-edge: #c9c1b4;
+  --wf2-branch: #d4792a;
+  --wf2-grid: #ddd7ce;
+  --canvas-dot: #ddd7ce;
 }
 
 /* ---------- base ---------- */
@@ -211,14 +233,18 @@ a:hover {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .app-header {
   position: sticky;
   top: 0;
   z-index: 20;
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border-default);
+  /* Frosted glass so the paper-grain texture shows through subtly on scroll */
+  background: var(--nav-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--nav-border);
   padding: 14px 24px;
   display: flex;
   align-items: center;
@@ -305,6 +331,9 @@ a:hover {
   flex: 1;
   display: flex;
   min-height: 0;
+  /* Sit above the fixed paper-grain texture overlay (z-index 0). */
+  position: relative;
+  z-index: 1;
 }
 
 /* ---------- buttons ---------- */
@@ -335,7 +364,7 @@ a:hover {
 
 .btn-primary {
   background: var(--accent);
-  color: white;
+  color: var(--accent-text);
   border-color: var(--accent);
 }
 
@@ -1237,7 +1266,7 @@ a:hover {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: 10px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-lg);
   padding: 8px;
 }
 
@@ -3479,7 +3508,7 @@ a:hover {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4188,10 +4217,10 @@ a:hover {
   z-index: 50; display: flex; align-items: center; gap: 9px;
   padding: 10px 20px; border-radius: 100px;
   background: var(--bg-elevated); border: 1px solid var(--border-hover);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-lg);
   transition: box-shadow 0.15s ease, color 0.15s ease;
 }
-.dash-ask-pill:hover { box-shadow: 0 6px 30px rgba(0, 0, 0, 0.14), 0 2px 5px rgba(0, 0, 0, 0.06); }
+.dash-ask-pill:hover { box-shadow: var(--shadow-lg); }
 .dash-ask-pill-text { font-size: 13px; font-weight: 600; color: var(--text-muted); }
 .dash-ask-pill:hover .dash-ask-pill-text { color: var(--text-primary); }
 .dash-kbd {
@@ -4202,13 +4231,13 @@ a:hover {
 
 .dash-ask-overlay {
   position: fixed; inset: 0; z-index: 60;
-  background: rgba(0, 0, 0, 0.2); backdrop-filter: blur(2px);
+  background: var(--backdrop); backdrop-filter: blur(2px);
   display: flex; justify-content: center; align-items: flex-end;
 }
 .dash-ask-panel {
   width: 100%; max-width: 680px; max-height: 70vh;
   background: var(--bg-elevated); border: 1px solid var(--border-default); border-bottom: none;
-  border-radius: 16px 16px 0 0; box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.12);
+  border-radius: 16px 16px 0 0; box-shadow: var(--shadow-lg);
   display: flex; flex-direction: column;
   font-family: "Inter", -apple-system, sans-serif;
   animation: dash-slide-up 0.32s cubic-bezier(0.16, 1, 0.3, 1);
@@ -4355,13 +4384,13 @@ a:hover {
 
 /* ---------- create modal ---------- */
 .wf2-modal-backdrop {
-  position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.2);
+  position: fixed; inset: 0; z-index: 60; background: var(--backdrop);
   backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; padding: 20px;
 }
 .wf2-modal {
   width: 100%; max-width: 540px; background: var(--bg-elevated);
   border: 1px solid var(--border-default); border-radius: 16px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-lg);
   font-family: "Inter", sans-serif; max-height: 90vh; overflow: auto;
 }
 .wf2-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 6px; }
@@ -4687,3 +4716,18 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
   .costp-thead span:nth-child(3), .costp-row span:nth-child(3),
   .costp-thead span:nth-child(5), .costp-row span:nth-child(5) { display: none; }
 }
+
+
+/* ---------- scrollbars (warm) ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-track { background: transparent; }

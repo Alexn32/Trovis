@@ -201,6 +201,7 @@ function AppInner() {
 
   return (
     <div className="app">
+      <TextureOverlay />
       <Header
         tab={tab}
         onTabChange={(t) => {
@@ -213,6 +214,41 @@ function AppInner() {
         onOpenSettings={openSettings}
       />
       <main className="app-main">{mainContent}</main>
+    </div>
+  )
+}
+
+// Paper-grain texture — a fixed, full-screen overlay rendered on every page,
+// behind all content (z-index 0; content sits at z-index 1). The vignette
+// color is theme-aware via --vignette (warm in light, black in dark).
+function TextureOverlay() {
+  return (
+    <div
+      aria-hidden="true"
+      style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0 }}
+    >
+      <svg width="100%" height="100%" style={{ position: 'absolute', inset: 0 }}>
+        <filter id="grain-coarse">
+          <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="4" stitchTiles="stitch" />
+          <feColorMatrix type="saturate" values="0" />
+        </filter>
+        <rect width="100%" height="100%" filter="url(#grain-coarse)" opacity="0.035" />
+      </svg>
+      <svg width="100%" height="100%" style={{ position: 'absolute', inset: 0 }}>
+        <filter id="grain-fine">
+          <feTurbulence type="fractalNoise" baseFrequency="1.8" numOctaves="3" stitchTiles="stitch" />
+          <feColorMatrix type="saturate" values="0" />
+        </filter>
+        <rect width="100%" height="100%" filter="url(#grain-fine)" opacity="0.025" />
+      </svg>
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          background:
+            'radial-gradient(ellipse at 50% 30%, transparent 50%, var(--vignette) 100%)',
+        }}
+      />
     </div>
   )
 }
