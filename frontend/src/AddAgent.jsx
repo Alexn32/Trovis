@@ -1,16 +1,16 @@
 import { useState } from 'react'
 import { getApiKey } from './api.js'
-import { OpenAIIcon, AnthropicIcon, RobotIcon, ActivityIcon } from './Icons.jsx'
+import { OpenAIIcon, AnthropicIcon, ActivityIcon, OpenClawIcon } from './Icons.jsx'
 
-// Per-platform logo + brand color for the picker tiles. Real brands (OpenAI,
-// Claude/Anthropic) use their logomarks; the in-house platforms (OpenClaw,
-// Hermes) get thematic glyphs since they have no public logo.
+// Per-platform logo + brand color for the picker tiles. OpenClaw uses its own
+// full-color lobster mark; OpenAI / Claude use their logomarks tinted to brand;
+// Hermes (no public logo) gets a thematic glyph.
 const PLATFORM_LOGOS = {
-  openclaw:         { Icon: RobotIcon,     color: 'var(--text-secondary)' },
-  'openai-agents':  { Icon: OpenAIIcon,    color: '#10a37f' },
+  openclaw:           { Icon: OpenClawIcon }, // self-colored
+  'openai-agents':    { Icon: OpenAIIcon,    color: '#10a37f' },
   'claude-agent-sdk': { Icon: AnthropicIcon, color: '#d97757' },
-  'claude-agents':  { Icon: AnthropicIcon, color: '#d97757' },
-  hermes:           { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
+  'claude-agents':    { Icon: AnthropicIcon, color: '#d97757' },
+  hermes:             { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
 }
 
 // ============================================================================
