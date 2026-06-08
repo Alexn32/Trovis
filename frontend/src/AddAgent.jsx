@@ -1,5 +1,17 @@
 import { useState } from 'react'
 import { getApiKey } from './api.js'
+import { OpenAIIcon, AnthropicIcon, RobotIcon, ActivityIcon } from './Icons.jsx'
+
+// Per-platform logo + brand color for the picker tiles. Real brands (OpenAI,
+// Claude/Anthropic) use their logomarks; the in-house platforms (OpenClaw,
+// Hermes) get thematic glyphs since they have no public logo.
+const PLATFORM_LOGOS = {
+  openclaw:         { Icon: RobotIcon,     color: 'var(--text-secondary)' },
+  'openai-agents':  { Icon: OpenAIIcon,    color: '#10a37f' },
+  'claude-agent-sdk': { Icon: AnthropicIcon, color: '#d97757' },
+  'claude-agents':  { Icon: AnthropicIcon, color: '#d97757' },
+  hermes:           { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
+}
 
 // ============================================================================
 // AddAgent — the three-step onboarding wizard.
@@ -284,17 +296,28 @@ function PlatformStep({ onSelect }) {
         Pick the closest match — we'll show you exactly what to do next.
       </p>
       <div className="platform-grid">
-        {PLATFORMS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            className="platform-card"
-            onClick={() => onSelect(p)}
-          >
-            <span className="platform-card-label">{p.label}</span>
-            <span className="platform-card-subtitle">{p.subtitle}</span>
-          </button>
-        ))}
+        {PLATFORMS.map((p) => {
+          const logo = PLATFORM_LOGOS[p.id]
+          const Logo = logo?.Icon
+          return (
+            <button
+              key={p.id}
+              type="button"
+              className="platform-card"
+              onClick={() => onSelect(p)}
+            >
+              {Logo && (
+                <span className="platform-card-logo" style={{ color: logo.color }}>
+                  <Logo size={20} />
+                </span>
+              )}
+              <span className="platform-card-text">
+                <span className="platform-card-label">{p.label}</span>
+                <span className="platform-card-subtitle">{p.subtitle}</span>
+              </span>
+            </button>
+          )
+        })}
       </div>
     </div>
   )
