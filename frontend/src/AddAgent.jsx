@@ -6,12 +6,26 @@ import { OpenAIIcon, AnthropicIcon, ActivityIcon, OpenClawIcon } from './Icons.j
 // full-color lobster mark; OpenAI / Claude use their logomarks tinted to brand;
 // Hermes (no public logo) gets a thematic glyph.
 const PLATFORM_LOGOS = {
-  openclaw:           { Icon: OpenClawIcon }, // self-colored
-  'openai-agents':    { Icon: OpenAIIcon,    color: '#10a37f' },
-  'claude-agent-sdk': { Icon: AnthropicIcon, color: '#d97757' },
-  'claude-agents':    { Icon: AnthropicIcon, color: '#d97757' },
-  hermes:             { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
+  openclaw:        { Icon: OpenClawIcon }, // self-colored
+  'openai-agents': { Icon: OpenAIIcon,    color: '#10a37f' },
+  claude:          { Icon: AnthropicIcon, color: '#d97757' },
+  hermes:          { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
 }
+
+// The two Claude variants shown on the sub-step after picking "Claude Agents".
+// Each maps to the existing instructions platform id.
+const CLAUDE_VARIANTS = [
+  {
+    id: 'claude-agent-sdk',
+    label: 'Claude Agent SDK',
+    subtitle: 'query() + ClaudeSDKClient — the Claude Code engine',
+  },
+  {
+    id: 'claude-agents',
+    label: 'Claude Managed Agents',
+    subtitle: 'client.beta.agents + beta.sessions API',
+  },
+]
 
 // ============================================================================
 // AddAgent — the three-step onboarding wizard.
@@ -37,8 +51,8 @@ const PLATFORM_LOGOS = {
 const PLATFORMS = [
   { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
-  { id: 'claude-agent-sdk', label: 'Claude Agent SDK',        subtitle: 'query() + ClaudeSDKClient (Claude Code engine)',  needsProvider: false },
-  { id: 'claude-agents',  label: 'Claude Managed Agents',     subtitle: 'client.beta.agents + beta.sessions API',         needsProvider: false },
+  // One Claude tile; a sub-step then splits SDK vs Managed Agents.
+  { id: 'claude',         label: 'Claude Agents',             subtitle: 'Claude Agent SDK or Managed Agents',             needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
   // ChatGPT is intentionally not in the picker: OpenAI's MCP app registration
   // is pending. The MCP server + OAuth/Actions backend remain live and tested.
@@ -1500,33 +1514,37 @@ function InstructionsView({ platform, agentName, endpoint }) {
 export default function AddAgent({ onClose }) {
   const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
   const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
+  const [claudeVariant, setClaudeVariant] = useState(null) // 'claude-agent-sdk' | 'claude-agents'
   const [agentName, setAgentName] = useState('')
   // Defaults to the real Oversee API ingest endpoint (VITE_API_URL → prod).
   const [endpoint, setEndpoint] = useState(computeOverseeEndpoint())
 
   const selectedPlatform = PLATFORMS.find((p) => p.id === platform)
   const needsProvider = selectedPlatform?.needsProvider ?? false
-  const totalSteps = selectedPlatform && !needsProvider ? 2 : 3
+  const needsClaudeVariant = platform === 'claude'
+  // Either kind of sub-selection sits at step 2 before the instructions.
+  const needsSubStep = needsProvider || needsClaudeVariant
+  const subChosen = needsProvider ? !!provider : needsClaudeVariant ? !!claudeVariant : true
+  const totalSteps = selectedPlatform && !needsSubStep ? 2 : 3
 
   // Derived step:
-  //  - no platform yet            → 1
-  //  - platform needs provider, none picked → 2
-  //  - everything else            → final (2 or 3)
+  //  - no platform yet                    → 1
+  //  - platform needs a sub-step, none picked → 2
+  //  - everything else                    → final (2 or 3)
   let step
   if (!platform) step = 1
-  else if (needsProvider && !provider) step = 2
+  else if (needsSubStep && !subChosen) step = 2
   else step = totalSteps
 
   function handleBack() {
     // "Most recent selection wins" — going back unsets the latest pick.
-    if (provider) setProvider(null)
+    if (claudeVariant) setClaudeVariant(null)
+    else if (provider) setProvider(null)
     else if (platform) setPlatform(null)
   }
 
   function handlePlatformPick(p) {
     setPlatform(p.id)
-    // If the user backs out and re-enters with a different platform that
-    // doesn't need a provider, leave provider as-is — it's just ignored.
   }
 
   function handleProviderPick(p) {
@@ -1534,9 +1552,11 @@ export default function AddAgent({ onClose }) {
   }
 
   const onBack = step > 1 ? handleBack : null
-  // The final step is always the instructions view — at step 3 when a provider
-  // was chosen, or at step 2 when the platform skipped provider selection.
   const showInstructions = step === totalSteps && step > 1 && !!platform
+
+  // Claude resolves to one of the two real instruction platforms once a
+  // variant is chosen; every other platform passes through unchanged.
+  const effectivePlatform = needsClaudeVariant ? claudeVariant : platform
 
   return (
     <div className="add-agent">
@@ -1549,9 +1569,12 @@ export default function AddAgent({ onClose }) {
 
       {step === 1 && <PlatformStep onSelect={handlePlatformPick} />}
       {step === 2 && needsProvider && <ProviderStep onSelect={handleProviderPick} />}
+      {step === 2 && needsClaudeVariant && (
+        <ClaudeVariantStep onSelect={(v) => setClaudeVariant(v.id)} />
+      )}
       {showInstructions && (
         <>
-          {platform !== 'openclaw' && (
+          {effectivePlatform !== 'openclaw' && (
             // OpenClaw auto-fills endpoint + key from the live session
             // (the user is already logged in to Oversee), so the generic
             // wizard inputs would just duplicate what OpenClawInstructions
@@ -1563,12 +1586,42 @@ export default function AddAgent({ onClose }) {
             />
           )}
           <InstructionsView
-            platform={platform}
+            platform={effectivePlatform}
             agentName={agentName}
             endpoint={endpoint}
           />
         </>
       )}
+    </div>
+  )
+}
+
+// Sub-step after picking "Claude Agents": choose the SDK flavor.
+function ClaudeVariantStep({ onSelect }) {
+  return (
+    <div>
+      <h2 className="wizard-title">Which Claude setup?</h2>
+      <p className="wizard-subtitle">
+        Both report to Oversee the same way — pick the one your code uses.
+      </p>
+      <div className="platform-grid">
+        {CLAUDE_VARIANTS.map((v) => (
+          <button
+            key={v.id}
+            type="button"
+            className="platform-card"
+            onClick={() => onSelect(v)}
+          >
+            <span className="platform-card-logo" style={{ color: '#d97757' }}>
+              <AnthropicIcon size={20} />
+            </span>
+            <span className="platform-card-text">
+              <span className="platform-card-label">{v.label}</span>
+              <span className="platform-card-subtitle">{v.subtitle}</span>
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
