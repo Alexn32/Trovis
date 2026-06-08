@@ -1,0 +1,30 @@
+{
+  "name": "Oversee",
+  "description": "Monitor your AI agents. Oversee tracks what your agents do, how they perform, and what they cost — across any platform.",
+  "long_description": "Oversee is the system of record for companies running AI agents. Connect your ChatGPT agents to get centralized visibility into what they're doing, whether they're performing well, and how they fit into broader workflows. Oversee ingests telemetry, generates plain-English descriptions of agent activity, and shows operators a unified view of their entire AI workforce.",
+  "categories": ["developer_tools", "productivity"],
+  "website": "https://oversee-pi.vercel.app",
+  "privacy_policy_url": "https://oversee-pi.vercel.app/privacy",
+  "contact_email": "alexn963@gmail.com",
+  "mcp_server": {
+    "url": "https://web-production-e6bc4.up.railway.app/mcp/",
+    "transport": "streamable-http",
+    "authentication": {
+      "type": "oauth2",
+      "authorization_url": "https://web-production-e6bc4.up.railway.app/oauth/authorize",
+      "token_url": "https://web-production-e6bc4.up.railway.app/oauth/token",
+      "client_id": "oversee-chatgpt",
+      "scope": ""
+    }
+  },
+  "tools": [
+    {
+      "name": "search",
+      "description": "Search Oversee monitoring data. Use queries like: 'connect:<agent_name>|<role>|<instructions>' to register an agent, 'status' to check connection, 'log:<step_name>|<description>' to record a step, 'complete:<summary>' to report task finished."
+    },
+    {
+      "name": "fetch",
+      "description": "Fetch details for an Oversee monitoring result."
+    }
+  ]
+}
