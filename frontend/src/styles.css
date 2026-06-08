@@ -2409,17 +2409,6 @@ a:hover {
   color: var(--text-muted);
 }
 
-.step3-header {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: 10px;
-  padding: 18px;
-  margin-bottom: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 .field {
   display: flex;
   flex-direction: column;
