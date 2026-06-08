@@ -361,57 +361,6 @@ function ProviderStep({ onSelect }) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — header (agent name + endpoint)
-// ---------------------------------------------------------------------------
-
-function Step3Header({ agentName, setAgentName, endpoint }) {
-  const [copied, setCopied] = useState(false)
-  async function copyEndpoint() {
-    try {
-      await navigator.clipboard.writeText(endpoint)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {}
-  }
-  return (
-    <div className="step3-header">
-      <div className="field">
-        <label className="field-label" htmlFor="agent-name-input">Agent name</label>
-        <input
-          id="agent-name-input"
-          type="text"
-          className="text-input"
-          placeholder="my-agent-name"
-          value={agentName}
-          onChange={(e) => setAgentName(e.target.value)}
-          autoComplete="off"
-          spellCheck="false"
-        />
-        <p className="helper-text">This identifies your agent in Oversee.</p>
-      </div>
-      <div className="field">
-        <label className="field-label">Oversee endpoint</label>
-        <div className="endpoint-display">
-          <code className="endpoint-url">{endpoint}</code>
-          <button
-            type="button"
-            className="copy-btn-inline"
-            onClick={copyEndpoint}
-          >
-            {copied ? '✓ Copied' : 'Copy'}
-          </button>
-        </div>
-        <p className="helper-text">
-          Where agents send telemetry. The Oversee SDKs target this
-          automatically — you only set it manually for the OpenClaw plugin or
-          raw OpenTelemetry setups.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Reusable instruction patterns
 // ---------------------------------------------------------------------------
 
@@ -671,10 +620,6 @@ with tracer.start_as_current_span("my-operation") as span:
 // Instruction pages — OpenClaw
 // ---------------------------------------------------------------------------
 
-// OpenClaw is special among the platforms: the user is already logged in
-// to Oversee, so we can pre-fill the endpoint and their API key directly.
-// The wizard's Step3Header agentName/endpoint fields are ignored here —
-// the values that matter are the live session ones.
 // The OTEL ingest endpoint agents send telemetry to. This is the Oversee
 // API (Railway), NOT the dashboard origin (Vercel) — so we use VITE_API_URL
 // (set at build time) and fall back to the production API, never the page
@@ -1515,9 +1460,9 @@ export default function AddAgent({ onClose }) {
   const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
   const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
   const [claudeVariant, setClaudeVariant] = useState(null) // 'claude-agent-sdk' | 'claude-agents'
-  const [agentName, setAgentName] = useState('')
-  // Defaults to the real Oversee API ingest endpoint (VITE_API_URL → prod).
-  const [endpoint, setEndpoint] = useState(computeOverseeEndpoint())
+  // The ingest endpoint (VITE_API_URL → prod). Agents name themselves on
+  // connect and are renamable on the dashboard, so there's no name input.
+  const [endpoint] = useState(computeOverseeEndpoint())
 
   const selectedPlatform = PLATFORMS.find((p) => p.id === platform)
   const needsProvider = selectedPlatform?.needsProvider ?? false
@@ -1573,24 +1518,11 @@ export default function AddAgent({ onClose }) {
         <ClaudeVariantStep onSelect={(v) => setClaudeVariant(v.id)} />
       )}
       {showInstructions && (
-        <>
-          {effectivePlatform !== 'openclaw' && (
-            // OpenClaw auto-fills endpoint + key from the live session
-            // (the user is already logged in to Oversee), so the generic
-            // wizard inputs would just duplicate what OpenClawInstructions
-            // displays at the top of its own section.
-            <Step3Header
-              agentName={agentName}
-              setAgentName={setAgentName}
-              endpoint={endpoint}
-            />
-          )}
-          <InstructionsView
-            platform={effectivePlatform}
-            agentName={agentName}
-            endpoint={endpoint}
-          />
-        </>
+        <InstructionsView
+          platform={effectivePlatform}
+          agentName=""
+          endpoint={endpoint}
+        />
       )}
     </div>
   )
