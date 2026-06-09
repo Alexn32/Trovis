@@ -2,7 +2,7 @@
 
 Given a service_name, pull recent telemetry and ask Claude to write a plain-
 English description of what the agent does. This is the feature that makes
-Oversee useful on day one: a non-technical operator can read the description
+Trovis useful on day one: a non-technical operator can read the description
 and immediately understand each agent's job.
 """
 
@@ -20,7 +20,7 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 1024
 
 SYSTEM_PROMPT = (
-    "You are an AI analyst for Oversee, an agent management system. "
+    "You are an AI analyst for Trovis, an agent management system. "
     "Given telemetry data from an AI agent, write a clear, concise description "
     "of what this agent does in plain English. Include: what its job appears "
     "to be, what tools or APIs it uses, how often it runs, and any notable "
@@ -30,7 +30,7 @@ SYSTEM_PROMPT = (
 )
 
 REGISTRATION_SYSTEM_PROMPT = (
-    "You are an AI analyst for Oversee, an agent management system. You have "
+    "You are an AI analyst for Trovis, an agent management system. You have "
     "been given the agent's own configuration files that define its purpose, "
     "personality, and operating rules. Use these as the primary source of "
     "truth for describing what this agent does. Supplement with telemetry "
@@ -282,7 +282,7 @@ def describe_agent(
 
 
 WEEKLY_SYSTEM_PROMPT = (
-    "You are an AI analyst for Oversee. Given week-over-week stats for an "
+    "You are an AI analyst for Trovis. Given week-over-week stats for an "
     "AI agent, write a 2-3 sentence plain-English summary of the week for "
     "a non-technical operations manager. Lead with what the agent did, "
     "then the most notable trend, then any concern or highlight. Be "
@@ -375,7 +375,7 @@ def weekly_summary(
 
 
 CAPABILITIES_SYSTEM_PROMPT = (
-    "You are an AI analyst for Oversee. Based on an agent's "
+    "You are an AI analyst for Trovis. Based on an agent's "
     "configuration and observed behavior, list its capabilities in "
     "three categories. READS FROM: what data sources it accesses. "
     "WRITES TO: what systems it changes. CAN DO: what concrete "
@@ -481,7 +481,7 @@ def capabilities(
 
 
 WORKFLOW_SYSTEM_PROMPT = (
-    "You are a process analyst for Oversee, an agent management system. You "
+    "You are a process analyst for Trovis, an agent management system. You "
     "reconstruct the end-to-end process an AI agent participates in — "
     "including the HUMAN steps around it — from its telemetry and identity "
     "files. Agent steps come from observed tool calls. Human steps are "
@@ -735,7 +735,7 @@ def _claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 2000) -
 
 
 WORKFLOW_DESC_SYSTEM_PROMPT = (
-    "You are a process analyst for Oversee. Turn a plain-English description "
+    "You are a process analyst for Trovis. Turn a plain-English description "
     "of how work flows into an ordered list of workflow steps — both "
     "automated (agent) and human steps. Reference the provided agent names "
     "when relevant. Mark review/approval/handoff steps as 'human'. Return "
@@ -872,7 +872,7 @@ def fleet_briefing(stats: dict[str, Any]) -> dict[str, str]:
 
 
 DASHBOARD_ATTENTION_SYSTEM_PROMPT = (
-    "You are an SRE-minded analyst for Oversee. For each flagged agent, write a "
+    "You are an SRE-minded analyst for Trovis. For each flagged agent, write a "
     "short title, a one-sentence detail explaining the likely problem, a concrete "
     "recommendation, and a brief impact estimate. Be specific and use the numbers "
     "provided. Plain prose, no markdown. Return ONLY valid JSON."

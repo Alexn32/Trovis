@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import AddAgent from './AddAgent.jsx'
-import { SparkleIcon, CheckCircleIcon } from './Icons.jsx'
+import { TrovisMark, CheckCircleIcon, TrovisLogo } from './Icons.jsx'
 
 // Post-signup onboarding wizard. Shown once to the org owner (gated in App.jsx
 // on `!me.org.onboarded_at`). Linear steps: name → connect first agent →
@@ -101,9 +101,7 @@ export default function Onboarding({ me, onDone }) {
   return (
     <div className="onboard">
       <div className="onboard-top">
-        <span className="onboard-brand">
-          <span className="onboard-dot" /> oversee
-        </span>
+        <TrovisLogo />
         <button type="button" className="onboard-skip-all" onClick={finish} disabled={finishing}>
           Skip setup
         </button>
@@ -118,9 +116,9 @@ export default function Onboarding({ me, onDone }) {
 
         {stepKey === 'name' && (
           <div className="onboard-step">
-            <div className="onboard-mark"><SparkleIcon size={22} /></div>
+            <div className="onboard-mark"><TrovisMark size={22} /></div>
             <h1 className="onboard-title">Welcome, {firstName}.</h1>
-            <p className="onboard-sub">Let’s get Oversee set up. First, name your workspace.</p>
+            <p className="onboard-sub">Let’s get Trovis set up. First, name your workspace.</p>
             <label className="onboard-field">
               <span>Workspace name</span>
               <input
@@ -223,7 +221,7 @@ export default function Onboarding({ me, onDone }) {
             <h1 className="onboard-title">You’re all set.</h1>
             <p className="onboard-sub">
               Your dashboard fills in automatically as your agents send telemetry.
-              Oversee tracks costs for you — set a budget limit anytime in Settings.
+              Trovis tracks costs for you — set a budget limit anytime in Settings.
             </p>
             <button type="button" className="btn btn-primary onboard-done-btn" onClick={finish} disabled={finishing}>
               {finishing ? 'Finishing…' : 'Go to dashboard'}

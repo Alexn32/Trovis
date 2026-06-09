@@ -4,7 +4,7 @@ import { AskVisualRenderer } from './AskVisuals.jsx'
 // Sub-dollar costs render in cents (e.g. "2.6¢"); shared with Fleet so they match.
 import { formatCost as fmtMoney } from './utils.js'
 import {
-  SparkleIcon,
+  TrovisMark,
   ChevronDownIcon,
   ChevronRightIcon,
   SendIcon,
@@ -151,7 +151,7 @@ function WaitingCard() {
     <div className="dash-card dash-waiting">
       <div className="dash-waiting-pulse" aria-hidden="true">
         <span className="dash-sq">
-          <SparkleIcon size={11} />
+          <TrovisMark size={11} />
         </span>
       </div>
       <h2 className="dash-waiting-title">Your first agent is connected</h2>
@@ -204,7 +204,7 @@ function BriefingCard({ data, loading }) {
     <div className="dash-card dash-briefing">
       <div className="dash-card-head">
         <span className="dash-sq">
-          <SparkleIcon size={10} />
+          <TrovisMark size={10} />
         </span>
         <span className="dash-briefing-label">Daily Briefing</span>
       </div>
@@ -652,7 +652,7 @@ function AskPill() {
     return (
       <button type="button" className="dash-ask-pill" onClick={() => setOpen(true)}>
         <span className="dash-sq">
-          <SparkleIcon size={10} />
+          <TrovisMark size={10} />
         </span>
         <span className="dash-ask-pill-text">Ask about your fleet</span>
         <kbd className="dash-kbd">⌘K</kbd>
@@ -666,7 +666,7 @@ function AskPill() {
         <div className="dash-ask-head">
           <span className="dash-ask-title">
             <span className="dash-sq">
-              <SparkleIcon size={10} />
+              <TrovisMark size={10} />
             </span>
             Ask about your fleet
           </span>
@@ -754,9 +754,9 @@ function Bubble({ m }) {
       <div className="dash-bubble">
         <div className="dash-bubble-head">
           <span className="dash-sq sm">
-            <SparkleIcon size={9} />
+            <TrovisMark size={9} />
           </span>
-          OVERSEE
+          TROVIS
         </div>
         {m.visual && <AskVisualRenderer visual={m.visual} />}
         <div className="dash-bubble-text">{m.content}</div>

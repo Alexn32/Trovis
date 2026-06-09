@@ -23,6 +23,7 @@ import {
   MoonIcon,
   PlusIcon,
   SunIcon,
+  TrovisLogo,
 } from './Icons.jsx'
 
 // Top-level shell.
@@ -134,10 +135,7 @@ function AppInner() {
       <div className="login-shell">
         <div className="login-card">
           <header className="login-header">
-            <div className="brand">
-              <span className="brand-dot" />
-              Oversee
-            </div>
+            <TrovisLogo />
           </header>
           <div className="login-body">
             <p className="login-prompt">Restoring session…</p>
@@ -295,10 +293,7 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
   return (
     <header className="app-header">
       <div className="app-header-left">
-        <div className="brand">
-          <span className="brand-dot" />
-          Oversee
-        </div>
+        <TrovisLogo />
         <nav className="tabs" role="tablist" aria-label="Views">
           {tabs.map(([id, label]) => (
             <button

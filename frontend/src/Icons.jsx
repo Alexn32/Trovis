@@ -116,6 +116,41 @@ export function SparkleIcon({ size = 24 }) {
   )
 }
 
+// The Trovis brand mark — a crosshair. Uses currentColor for its strokes so it
+// inherits the parent's text color (e.g. white inside a teal brand square, or
+// --brand-accent inline). Replaces the old sparkle (✦) everywhere it appeared.
+export function TrovisMark({ size = 20, className = '' }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 40 40"
+      fill="none"
+      className={className}
+      style={{ display: 'inline-block', verticalAlign: 'middle' }}
+    >
+      <line x1="12" y1="14" x2="28" y2="14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+      <line x1="20" y1="14" x2="20" y2="28" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+      <line x1="14" y1="20" x2="18" y2="20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <line x1="22" y1="20" x2="26" y2="20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+// The full Trovis lockup: tinted crosshair badge + "trovis" wordmark. Renders
+// inline (no per-theme image swap) and colors itself from --brand-accent, so it
+// adapts to light/dark automatically. Replaces the old dot + "Oversee" brand.
+export function TrovisLogo({ className = '' }) {
+  return (
+    <span className={`trovis-logo ${className}`}>
+      <span className="trovis-logo-badge">
+        <TrovisMark size={20} />
+      </span>
+      <span className="trovis-logo-word">trovis</span>
+    </span>
+  )
+}
+
 export function AlertIcon({ size = 14 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>

@@ -38,7 +38,7 @@ class AgentNotFoundError(LookupError):
 
 
 SYSTEM_FLEET = (
-    "You are an analyst for Oversee, an agent management system. You have "
+    "You are an analyst for Trovis, an agent management system. You have "
     "read access to summaries for every AI agent the user is running. "
     "Answer the user's question using only the telemetry data provided below.\n"
     "- Be direct and specific. Refer to agents by their service_name.\n"
@@ -49,7 +49,7 @@ SYSTEM_FLEET = (
 )
 
 SYSTEM_AGENT = (
-    "You are an analyst for Oversee, an agent management system. You have "
+    "You are an analyst for Trovis, an agent management system. You have "
     "read access to one specific agent's telemetry: its summary stats, "
     "AI-generated description, any identity/configuration files it has "
     "published, and its most recent spans. Answer the user's question "
@@ -109,7 +109,7 @@ Rules:
 # plain-prose answers with no markdown so they read well in a chat bubble.
 # Includes the generative-UI catalog so Claude can attach an inline visual.
 SYSTEM_FLEET_CONCISE = (
-    "You are an analyst for Oversee, an agent management system. You have "
+    "You are an analyst for Trovis, an agent management system. You have "
     "read access to summaries for every AI agent the user is running. "
     "Answer the user's question using only the telemetry data provided below.\n"
     "- Be concise: 2-4 sentences max unless they explicitly ask for detail.\n"

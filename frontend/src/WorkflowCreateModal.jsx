@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
-import { SparkleIcon, GearIcon, PlusIcon } from './Icons.jsx'
+import { TrovisMark, GearIcon, PlusIcon } from './Icons.jsx'
 
 // Creation modal: Describe it (AI full graph) · From agents (multi-agent
 // telemetry inference) · Start blank. Mirrors the spec's 3-method selector.
 
 const METHODS = [
-  { id: 'describe', Icon: SparkleIcon, title: 'Describe it', sub: 'AI builds the flow' },
+  { id: 'describe', Icon: TrovisMark, title: 'Describe it', sub: 'AI builds the flow' },
   { id: 'agents', Icon: GearIcon, title: 'From agents', sub: 'Pick agents, infer flow' },
   { id: 'blank', Icon: PlusIcon, title: 'Start blank', sub: 'Build from scratch' },
 ]
@@ -206,7 +206,7 @@ export default function WorkflowCreateModal({ onClose, onCreated }) {
                 onClick={submit}
                 disabled={!canSubmit}
               >
-                {method !== 'blank' && <SparkleIcon size={13} />} {primaryLabel}
+                {method !== 'blank' && <TrovisMark size={13} />} {primaryLabel}
               </button>
             </div>
           </div>
