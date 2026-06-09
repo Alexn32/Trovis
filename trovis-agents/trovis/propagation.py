@@ -1,6 +1,6 @@
 """Cross-process trace propagation for agent-to-agent calls.
 
-When agent A (one process) calls agent B (another process), Oversee can only
+When agent A (one process) calls agent B (another process), Trovis can only
 draw the A → B connection if both agents' spans land in the **same trace**.
 These helpers carry the trace context across the wire so that happens:
 
@@ -10,23 +10,23 @@ These helpers carry the trace context across the wire so that happens:
     the receiver's spans become children of the caller's span — same
     `trace_id`, and B's first span points back at A's span as its parent.
 
-That shared trace + parent link is exactly what the Oversee backend's
+That shared trace + parent link is exactly what the Trovis backend's
 connection detector uses to surface "Agent A feeds into Agent B".
 
 W3C Trace Context is the OpenTelemetry default wire format; these are thin
 wrappers over `opentelemetry.propagate` so callers don't touch the OTEL API.
-Both processes must have called `oversee.init()`.
+Both processes must have called `trovis.init()`.
 
 Example
 -------
 Caller (agent A), inside a tool/run so a span is active::
 
-    import httpx, oversee
-    resp = httpx.post(url, headers=oversee.inject(), json=payload)
+    import httpx, trovis
+    resp = httpx.post(url, headers=trovis.inject(), json=payload)
 
 Receiver (agent B)::
 
-    with oversee.continue_trace(request.headers):
+    with trovis.continue_trace(request.headers):
         result = await Runner.run(agent_b, payload)
 """
 
@@ -66,13 +66,13 @@ def continue_trace(
 
     Wrap the work an incoming agent-to-agent request triggers. Spans created
     inside the block (including the agent framework's own spans) become
-    children of the remote parent and share its `trace_id`, so Oversee links
+    children of the remote parent and share its `trace_id`, so Trovis links
     the two agents. Yields the linking span.
 
     No-op-friendly: with no incoming context it simply starts a normal span.
     """
     token = _otel_context.attach(extract(carrier))
-    tracer = trace.get_tracer("oversee")
+    tracer = trace.get_tracer("trovis")
     try:
         with tracer.start_as_current_span(span_name) as span:
             yield span

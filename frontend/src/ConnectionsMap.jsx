@@ -18,7 +18,7 @@ const ROW_GAP = 96
 const TOP = 70
 const LEFT = 80
 const PAD = 60
-const LS_POS = 'oversee_map_positions'
+const LS_POS = 'trovis_map_positions'
 
 function loadPos() {
   try {

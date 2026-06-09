@@ -1,14 +1,14 @@
-"""Oversee SDK — init() entrypoint for OpenAI Agents.
+"""Trovis SDK — init() entrypoint for OpenAI Agents.
 
 Wires three things in order:
   1. OpenTelemetry: TracerProvider with an OTLPSpanExporter pointed
-     at the Oversee /v1/traces endpoint, authenticated via the
-     X-Oversee-Api-Key header.
+     at the Trovis /v1/traces endpoint, authenticated via the
+     X-Trovis-Api-Key header.
   2. OpenAI Agents SDK tracing: best-effort registration of the
      openai-agents-opentelemetry processor so SDK-internal spans
      (LLM calls, tool calls, handoffs, guardrails, run completion)
      flow into the same OTEL pipeline. Plus a CaptureProcessor that
-     adds Oversee-named content spans when capture_outputs is on.
+     adds Trovis-named content spans when capture_outputs is on.
   3. Agent identity registration: monkey-patches Agent.__init__ so
      each unique agent registers itself once on first construction.
 
@@ -27,17 +27,24 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-from oversee.exporter import OTLPJsonSpanExporter
-from oversee.registration import (
+from trovis.exporter import OTLPJsonSpanExporter
+from trovis.registration import (
     CaptureProcessor,
     patch_agent_for_registration,
     set_capture_outputs,
 )
-from oversee.version import __version__
+from trovis.version import __version__
 
 DEFAULT_ENDPOINT = "https://web-production-e6bc4.up.railway.app/v1/traces"
 
-logger = logging.getLogger("oversee")
+logger = logging.getLogger("trovis")
+
+
+def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read a config env var, preferring TROVIS_<name> and falling back to the
+    legacy OVERSEE_<name> — so agents that set OVERSEE_* before the rename keep
+    working. The fallback is permanent."""
+    return os.environ.get(f"TROVIS_{name}", os.environ.get(f"OVERSEE_{name}", default))
 
 # Module-level state. The init() call is safe to repeat — we only set
 # up the tracer provider on the first call.
@@ -45,7 +52,7 @@ _INITIALIZED = False
 _CAPTURE_PROCESSOR: Optional[CaptureProcessor] = None
 
 # Shared bag of resolved configuration. Populated by `_setup_otel`,
-# read by platform adapters (notably oversee/hermes.py) that need to
+# read by platform adapters (notably trovis/hermes.py) that need to
 # know the tracer, endpoint, or capture flag without coupling to
 # init()'s argument resolution.
 _state: dict[str, Any] = {}
@@ -58,7 +65,7 @@ def _setup_otel(
     platform: str = "agent",
 ) -> Any:
     """Construct (or reuse) the global TracerProvider pointed at an
-    Oversee endpoint. Returns the tracer.
+    Trovis endpoint. Returns the tracer.
 
     Idempotent: the first caller wins. Subsequent calls return the
     already-built tracer without rebuilding the pipeline — important
@@ -67,7 +74,7 @@ def _setup_otel(
     means `init()` and `hermes.register()` can both reach for this
     helper without coordinating.
 
-    Uses the in-package OTLPJsonSpanExporter because the Oversee
+    Uses the in-package OTLPJsonSpanExporter because the Trovis
     backend speaks OTLP/JSON. The standard
     `opentelemetry-exporter-otlp-proto-http` package would send
     protobuf and 400.
@@ -79,13 +86,13 @@ def _setup_otel(
         {
             "service.name": agent_name,
             "service.version": __version__,
-            "oversee.sdk.version": __version__,
-            "oversee.sdk.platform": platform,
+            "trovis.sdk.version": __version__,
+            "trovis.sdk.platform": platform,
         }
     )
     headers: dict[str, str] = {}
     if api_key:
-        headers["X-Oversee-Api-Key"] = api_key
+        headers["X-Trovis-Api-Key"] = api_key
 
     exporter = OTLPJsonSpanExporter(endpoint=endpoint, headers=headers)
     provider = TracerProvider(resource=resource)
@@ -93,7 +100,7 @@ def _setup_otel(
     trace.set_tracer_provider(provider)
 
     # Ensure the global text-map propagator is W3C Trace Context (+ baggage)
-    # so oversee.inject()/continue_trace() carry trace context across
+    # so trovis.inject()/continue_trace() carry trace context across
     # agent-to-agent calls. This is OTEL's default, but we set it
     # explicitly (guarded) so propagation works even if something cleared
     # or replaced it earlier in the process.
@@ -111,9 +118,9 @@ def _setup_otel(
             )
         )
     except Exception as e:  # noqa: BLE001 — propagation is best-effort
-        logger.debug("[Oversee] could not set global propagator: %s", e)
+        logger.debug("[Trovis] could not set global propagator: %s", e)
 
-    tracer = trace.get_tracer("oversee")
+    tracer = trace.get_tracer("trovis")
     _state["tracer"] = tracer
     _state["endpoint"] = endpoint
     _state["api_key"] = api_key
@@ -129,24 +136,24 @@ def init(
     capture_outputs: bool = False,
     platform: str = "auto",
 ) -> None:
-    """Connect this process's agents to Oversee.
+    """Connect this process's agents to Trovis.
 
     Call once at startup, before constructing any Agent. Idempotent —
     re-calling updates the capture flag but doesn't rebuild the OTEL
     pipeline (would lose buffered spans).
 
     Args:
-        api_key: Oversee API key. Falls back to OVERSEE_API_KEY env var.
-            None is allowed for local dev against an unsecured backend.
+        api_key: Trovis API key. Falls back to TROVIS_API_KEY (legacy
+            OVERSEE_API_KEY) env var. None is allowed for local dev.
         agent_name: service.name resource attribute. Falls back to
-            OVERSEE_AGENT_NAME env var, then "openai-agent".
-        endpoint: OTLP/HTTP traces endpoint. Falls back to
-            OVERSEE_ENDPOINT env var, then the Oversee cloud default.
+            TROVIS_AGENT_NAME (legacy OVERSEE_AGENT_NAME), then "openai-agent".
+        endpoint: OTLP/HTTP traces endpoint. Falls back to TROVIS_ENDPOINT
+            (legacy OVERSEE_ENDPOINT), then the Trovis cloud default.
         capture_outputs: When True, the CaptureProcessor emits
-            additional Oversee-named spans with the actual message /
+            additional Trovis-named spans with the actual message /
             response / tool-result content (truncated to 10 000 chars).
-            Off by default for privacy. Falls back to
-            OVERSEE_CAPTURE_OUTPUTS env var (case-insensitive "true").
+            Off by default for privacy. Falls back to TROVIS_CAPTURE_OUTPUTS
+            (legacy OVERSEE_CAPTURE_OUTPUTS) env var (case-insensitive "true").
         platform: Which SDK(s) to hook into. One of:
             - "auto" (default) — detects installed SDKs and hooks
               whatever's available. Safe to use even when only one of
@@ -158,21 +165,21 @@ def init(
     """
     global _INITIALIZED, _CAPTURE_PROCESSOR
 
-    # Priority: explicit arg → env var → default.
+    # Priority: explicit arg → env var (TROVIS_*, legacy OVERSEE_*) → default.
     resolved_endpoint = (
         endpoint
-        or os.environ.get("OVERSEE_ENDPOINT")
+        or _env("ENDPOINT")
         or DEFAULT_ENDPOINT
     )
-    resolved_api_key = api_key or os.environ.get("OVERSEE_API_KEY")
+    resolved_api_key = api_key or _env("API_KEY")
     resolved_agent_name = (
         agent_name
-        or os.environ.get("OVERSEE_AGENT_NAME")
+        or _env("AGENT_NAME")
         or "openai-agent"
     )
     resolved_capture = bool(
         capture_outputs
-        or os.environ.get("OVERSEE_CAPTURE_OUTPUTS", "").lower() == "true"
+        or (_env("CAPTURE_OUTPUTS", "") or "").lower() == "true"
     )
 
     # Setting the capture flag must happen on every call, even when
@@ -180,7 +187,7 @@ def init(
     set_capture_outputs(resolved_capture)
 
     if _INITIALIZED:
-        logger.debug("[Oversee] init() called again — capture flag updated only")
+        logger.debug("[Trovis] init() called again — capture flag updated only")
         return
 
     # 1. OpenTelemetry pipeline — shared with the Hermes adapter so
@@ -219,14 +226,14 @@ def init(
 
     if do_anthropic:
         # Import lazily — the anthropic SDK is an optional dep and we
-        # don't want importing oversee to fail when it isn't installed.
-        from oversee.anthropic import setup_anthropic
+        # don't want importing trovis to fail when it isn't installed.
+        from trovis.anthropic import setup_anthropic
 
         setup_anthropic()
         active.append("anthropic")
 
     if do_claude_sdk:
-        from oversee.claude_agent_sdk import setup_claude_agent_sdk
+        from trovis.claude_agent_sdk import setup_claude_agent_sdk
 
         setup_claude_agent_sdk()
         active.append("claude-agent-sdk")
@@ -234,16 +241,16 @@ def init(
     _INITIALIZED = True
 
     print(
-        f"[Oversee] Connected. Sending telemetry to {resolved_endpoint} "
+        f"[Trovis] Connected. Sending telemetry to {resolved_endpoint} "
         f"as '{resolved_agent_name}'"
     )
     if resolved_capture:
-        print("[Oversee] Output capture: enabled")
+        print("[Trovis] Output capture: enabled")
     if active:
-        print(f"[Oversee] Platforms: {', '.join(active)}")
+        print(f"[Trovis] Platforms: {', '.join(active)}")
     else:
         print(
-            "[Oversee] No agent SDK detected — manual spans only. "
+            "[Trovis] No agent SDK detected — manual spans only. "
             "Install openai-agents, anthropic, or claude-agent-sdk to "
             "enable per-SDK instrumentation."
         )
@@ -316,18 +323,18 @@ def _wire_agents_tracing(capture_processor: CaptureProcessor) -> None:
         try:
             register(otel_processor)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Oversee] Could not attach OTEL processor: {e}")
+            logger.warning(f"[Trovis] Could not attach OTEL processor: {e}")
 
     # 2b. Our capture processor — listens to the same SDK events and
-    # emits Oversee-named content spans when the flag is on. Always
+    # emits Trovis-named content spans when the flag is on. Always
     # registered; the flag is checked per-event so flipping
-    # OVERSEE_CAPTURE_OUTPUTS at runtime takes effect on the next
+    # TROVIS_CAPTURE_OUTPUTS at runtime takes effect on the next
     # event.
     if register is not None:
         try:
             register(capture_processor)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Oversee] Could not attach capture processor: {e}")
+            logger.warning(f"[Trovis] Could not attach capture processor: {e}")
 
 
 def _resolve_agents_register():
@@ -360,7 +367,7 @@ def _resolve_agents_register():
         pass
 
     logger.warning(
-        "[Oversee] OpenAI Agents SDK not detected. Agent SDK events will "
+        "[Trovis] OpenAI Agents SDK not detected. Agent SDK events will "
         "not produce OTEL spans automatically — only manually-traced spans "
         "and agent registrations will ship. Install with: "
         "pip install openai-agents"
@@ -382,8 +389,8 @@ def _build_official_otel_processor():
         except (ImportError, AttributeError):
             continue
     logger.warning(
-        "[Oversee] openai-agents-opentelemetry not installed. LLM and "
-        "tool spans from the Agents SDK won't ship — only Oversee's "
+        "[Trovis] openai-agents-opentelemetry not installed. LLM and "
+        "tool spans from the Agents SDK won't ship — only Trovis's "
         "agent registration + capture spans. Install with: "
         "pip install openai-agents-opentelemetry"
     )

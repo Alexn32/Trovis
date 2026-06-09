@@ -12,7 +12,7 @@ const ThemeContext = createContext({
   cycle: () => {},
 })
 
-const LS_KEY = 'oversee_theme'
+const LS_KEY = 'trovis_theme'
 
 function readStoredTheme() {
   try {

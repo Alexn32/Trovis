@@ -1,10 +1,10 @@
-# Oversee — Agent Management System (AMS)
+# Trovis — Agent Management System (AMS)
 
 ## What we're building
 
-Oversee is the **system of record for companies running AI agents**. As companies deploy more AI agents across their operations (CrewAI, LangChain, OpenAI Agents SDK, Claude Cowork, Claude Code, custom Python agents, etc.), nobody has centralized visibility into what those agents are doing, whether they're performing well, or how they fit into broader workflows alongside humans.
+Trovis is the **system of record for companies running AI agents**. As companies deploy more AI agents across their operations (CrewAI, LangChain, OpenAI Agents SDK, Claude Cowork, Claude Code, custom Python agents, etc.), nobody has centralized visibility into what those agents are doing, whether they're performing well, or how they fit into broader workflows alongside humans.
 
-Oversee solves this by:
+Trovis solves this by:
 
 1. **Ingesting telemetry** from any agent platform via OpenTelemetry (OTEL) — the industry standard supported by all major agent frameworks.
 2. **Using Claude** to generate plain-English descriptions of what each agent does based on its observed behavior.
@@ -34,6 +34,6 @@ Goal: a working demo we can show potential customers within a few weeks.
 
 - **Build for the OTEL standard, not any one framework.** Anything that emits OTEL spans should work out of the box. Don't hardcode framework-specific schemas.
 - **SQLite now, Postgres-shaped schemas.** Use types and patterns that port cleanly to Postgres (e.g. avoid SQLite-only quirks; prefer ISO timestamps, explicit foreign keys).
-- **Agents are derived, not declared.** An "agent" in Oversee is inferred from telemetry — typically a `service.name` or similar resource attribute on incoming spans. Don't require users to pre-register agents.
-- **Plain-English descriptions are a first-class product surface.** The Claude-generated description of each agent is what makes Oversee useful on day one. Treat that pipeline as core, not a nice-to-have.
+- **Agents are derived, not declared.** An "agent" in Trovis is inferred from telemetry — typically a `service.name` or similar resource attribute on incoming spans. Don't require users to pre-register agents.
+- **Plain-English descriptions are a first-class product surface.** The Claude-generated description of each agent is what makes Trovis useful on day one. Treat that pipeline as core, not a nice-to-have.
 - **Demo-driven.** Every decision should be evaluated against: does this get us to a working, showable demo faster?

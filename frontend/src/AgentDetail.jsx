@@ -734,7 +734,7 @@ function RecentOutputs({ outputs }) {
       {outputs.length === 0 ? (
         <div className="callout callout-info">
           Output capture is not enabled for this agent. To see what your
-          agents produce, run <code>/oversee capture on</code> in your
+          agents produce, run <code>/trovis capture on</code> in your
           agent's chat, or add <code>captureOutputs: true</code> to your
           plugin config.
         </div>

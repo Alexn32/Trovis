@@ -1,7 +1,7 @@
 {
-  "name": "@alexn32/openclaw-plugin",
-  "version": "0.2.8",
-  "description": "Oversee Agent Management — automatic telemetry for OpenClaw agents",
+  "name": "@alexn32/trovis-openclaw-plugin",
+  "version": "0.3.0",
+  "description": "Trovis Agent Management — automatic telemetry for OpenClaw agents",
   "type": "module",
   "openclaw": {
     "extensions": ["./dist/index.mjs"],

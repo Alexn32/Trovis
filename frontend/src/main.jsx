@@ -1,3 +1,4 @@
+import './migrate.js' // must run before any module reads localStorage
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'

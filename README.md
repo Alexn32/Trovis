@@ -1,4 +1,4 @@
-# Oversee — The Agent Management System
+# Trovis — The Agent Management System
 
 The system of record for companies running AI agents. Ingests OpenTelemetry traces from any agent platform and gives operators a unified view of their AI workforce.
 
@@ -12,7 +12,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # required for /describe; everything else 
 uvicorn main:app --reload --port 8080
 ```
 
-The server creates `oversee.db` (SQLite) on first run. To use Postgres locally instead, export `DATABASE_URL=postgresql://...` before starting — the storage layer flips automatically.
+The server creates `trovis.db` (SQLite) on first run. To use Postgres locally instead, export `DATABASE_URL=postgresql://...` before starting — the storage layer flips automatically.
 
 ## Production deployment (Railway)
 

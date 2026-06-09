@@ -3,12 +3,12 @@
 Mirrors the OpenClaw plugin's `agent_registration` span. Every time the
 host code constructs an `agents.Agent(...)` instance we emit one
 registration span carrying:
-  - oversee.agent.id          — Agent.name
-  - oversee.agent.soul        — Agent.instructions (the system prompt;
+  - trovis.agent.id          — Agent.name
+  - trovis.agent.soul        — Agent.instructions (the system prompt;
                                  this IS the agent's identity)
-  - oversee.agent.identity    — name + handoff_description when present
-  - oversee.agent.model       — Agent.model
-  - oversee.agent.workspace_path — empty (no filesystem workspace for
+  - trovis.agent.identity    — name + handoff_description when present
+  - trovis.agent.model       — Agent.model
+  - trovis.agent.workspace_path — empty (no filesystem workspace for
                                     SDK agents; kept for schema parity
                                     with the OpenClaw plugin)
 
@@ -27,7 +27,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-logger = logging.getLogger("oversee")
+logger = logging.getLogger("trovis")
 
 # 32 KB matches the OpenClaw plugin's truncation budget — comfortably
 # under OTLP's per-attribute size limits and large enough for almost
@@ -102,18 +102,18 @@ def emit_registration_span(
 ) -> None:
     """Emit one `agent_registration` span. Safe to call without an
     active span context — the tracer creates a root span."""
-    tracer = trace.get_tracer("oversee.registration")
+    tracer = trace.get_tracer("trovis.registration")
     span = tracer.start_span("agent_registration")
     try:
-        span.set_attribute("oversee.event.type", "agent_registration")
-        span.set_attribute("oversee.agent.id", name or "main")
+        span.set_attribute("trovis.event.type", "agent_registration")
+        span.set_attribute("trovis.agent.id", name or "main")
         if instructions:
-            span.set_attribute("oversee.agent.soul", _truncate(instructions))
+            span.set_attribute("trovis.agent.soul", _truncate(instructions))
         identity = "\n".join(p for p in (name, description) if p).strip()
         if identity:
-            span.set_attribute("oversee.agent.identity", _truncate(identity))
-        span.set_attribute("oversee.agent.model", model or "default")
-        span.set_attribute("oversee.agent.workspace_path", "")
+            span.set_attribute("trovis.agent.identity", _truncate(identity))
+        span.set_attribute("trovis.agent.model", model or "default")
+        span.set_attribute("trovis.agent.workspace_path", "")
     finally:
         span.end()
 
@@ -134,7 +134,7 @@ def patch_agent_for_registration() -> None:
         from agents import Agent
     except ImportError:
         logger.warning(
-            "[Oversee] OpenAI Agents SDK not found. Telemetry will still "
+            "[Trovis] OpenAI Agents SDK not found. Telemetry will still "
             "flow for manually-traced spans, but agent registration is "
             "skipped. Install with: pip install openai-agents"
         )
@@ -158,14 +158,14 @@ def patch_agent_for_registration() -> None:
 
             emit_registration_span(name, instructions, model, description)
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Oversee] Skipped registration for agent: {e}")
+            logger.debug(f"[Trovis] Skipped registration for agent: {e}")
 
     Agent.__init__ = wrapped_init  # type: ignore[method-assign]
     _PATCHED = True
 
 
 # ---------------------------------------------------------------------------
-# Output capture — observe agent run events and add Oversee-named
+# Output capture — observe agent run events and add Trovis-named
 # attributes / spans so the dashboard can show real conversation
 # content when the operator has opted in.
 # ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ def _json_safe(value: Any) -> str:
 
 
 class CaptureProcessor:
-    """OpenAI Agents SDK tracing processor that emits Oversee-named
+    """OpenAI Agents SDK tracing processor that emits Trovis-named
     OTEL spans carrying actual content when capture-outputs is on.
 
     Listens to FunctionSpanData (tool calls) and ResponseSpanData /
@@ -204,7 +204,7 @@ class CaptureProcessor:
     """
 
     def __init__(self) -> None:
-        self._tracer = trace.get_tracer("oversee.capture")
+        self._tracer = trace.get_tracer("trovis.capture")
 
     # The OpenAI Agents SDK's TracingProcessor interface accepts these
     # four methods. We only care about `on_span_end` — that's when
@@ -224,7 +224,7 @@ class CaptureProcessor:
         try:
             self._handle(span)
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Oversee] capture failed: {e}")
+            logger.debug(f"[Trovis] capture failed: {e}")
 
     def shutdown(self) -> None:
         pass
@@ -254,17 +254,17 @@ class CaptureProcessor:
         if not content:
             return
         with self._tracer.start_as_current_span("tool_call") as s:
-            s.set_attribute("oversee.event.type", "tool_call")
+            s.set_attribute("trovis.event.type", "tool_call")
             if name:
-                s.set_attribute("oversee.tool.name", name)
+                s.set_attribute("trovis.tool.name", name)
             s.set_attribute(
-                "oversee.tool.result",
+                "trovis.tool.result",
                 _truncate(content, _CONTENT_BYTE_LIMIT),
             )
 
     def _emit_model_io(self, sd: Any, kind: str) -> None:
         # Inbound user prompt / outbound model response — the SDK
-        # surfaces both on the same span type. We emit two Oversee
+        # surfaces both on the same span type. We emit two Trovis
         # spans, one for each direction, to match the OpenClaw
         # plugin's message_received / message_sending separation.
         input_value = getattr(sd, "input", None)
@@ -276,20 +276,20 @@ class CaptureProcessor:
                 with self._tracer.start_as_current_span(
                     "message_received"
                 ) as s:
-                    s.set_attribute("oversee.event.type", "message_received")
+                    s.set_attribute("trovis.event.type", "message_received")
                     s.set_attribute(
-                        "oversee.message.content",
+                        "trovis.message.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
-                    s.set_attribute("oversee.message.source", kind)
+                    s.set_attribute("trovis.message.source", kind)
 
         if output_value is not None:
             text = _json_safe(output_value)
             if text:
                 with self._tracer.start_as_current_span("llm_output") as s:
-                    s.set_attribute("oversee.event.type", "llm_output")
+                    s.set_attribute("trovis.event.type", "llm_output")
                     s.set_attribute(
-                        "oversee.response.content",
+                        "trovis.response.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
-                    s.set_attribute("oversee.response.source", kind)
+                    s.set_attribute("trovis.response.source", kind)

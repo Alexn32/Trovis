@@ -1,15 +1,15 @@
-"""Hermes Agent support for Oversee.
+"""Hermes Agent support for Trovis.
 
 Hermes is a Python-based agent platform with its own plugin loader.
 Plugins are discovered either by being dropped into `~/.hermes/plugins/`
 or — what this module enables — via Python entry points under the
-group `hermes_agent.plugins`. We register `oversee.hermes_plugin` in
+group `hermes_agent.plugins`. We register `trovis.hermes_plugin` in
 pyproject.toml; Hermes calls `register(ctx)` here on every gateway
 start.
 
 The integration mirrors the OpenClaw plugin's shape — same span
 vocabulary (`agent_registration`, `tool_call`), same identity files
-(SOUL.md, memory.md), same `/oversee` slash command surface — so an
+(SOUL.md, memory.md), same `/trovis` slash command surface — so an
 operator running both shows up in one Fleet view without doing
 anything special on the dashboard side.
 """
@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("oversee.hermes")
+logger = logging.getLogger("trovis.hermes")
 
 
 # ---------------------------------------------------------------------------
@@ -44,26 +44,26 @@ def register(ctx: Any) -> None:
     # operators set the endpoint + key in their shell or via the
     # `requires_env` declaration in plugin.yaml (which Hermes prompts
     # for at install time).
-    endpoint = os.environ.get(
-        "OVERSEE_ENDPOINT",
+    from trovis.core import _env  # TROVIS_* with legacy OVERSEE_* fallback
+
+    endpoint = _env(
+        "ENDPOINT",
         "https://web-production-e6bc4.up.railway.app/v1/traces",
     )
-    api_key = os.environ.get("OVERSEE_API_KEY", "")
-    agent_name = os.environ.get("OVERSEE_AGENT_NAME", "hermes-agent")
-    capture_outputs = (
-        os.environ.get("OVERSEE_CAPTURE_OUTPUTS", "").lower() == "true"
-    )
+    api_key = _env("API_KEY", "")
+    agent_name = _env("AGENT_NAME", "hermes-agent")
+    capture_outputs = (_env("CAPTURE_OUTPUTS", "") or "").lower() == "true"
 
     if not endpoint:
         print(
-            "[Oversee] No endpoint configured. Set OVERSEE_ENDPOINT or use "
-            "/oversee connect."
+            "[Trovis] No endpoint configured. Set TROVIS_ENDPOINT or use "
+            "/trovis connect."
         )
         return
 
     # OTEL pipeline. _setup_otel is shared with the OpenAI/Anthropic
     # entry points so the resource shape stays consistent.
-    from oversee.core import _setup_otel, _state
+    from trovis.core import _setup_otel, _state
 
     _setup_otel(
         endpoint=endpoint,
@@ -93,26 +93,26 @@ def register(ctx: Any) -> None:
     _try(lambda: ctx.register_hook("post_model_call", _on_model_call))
     _try(
         lambda: ctx.register_command(
-            "oversee",
-            _handle_oversee_command,
-            "Oversee agent monitoring",
+            "trovis",
+            _handle_trovis_command,
+            "Trovis agent monitoring",
         )
     )
     _try(
         lambda: ctx.register_cli_command(
-            "oversee",
-            "Oversee agent monitoring commands",
+            "trovis",
+            "Trovis agent monitoring commands",
             None,
             _handle_cli,
         )
     )
 
     print(
-        f"[Oversee] Connected. Sending telemetry to {endpoint} "
+        f"[Trovis] Connected. Sending telemetry to {endpoint} "
         f"as '{agent_name}'"
     )
     if capture_outputs:
-        print("[Oversee] Output capture: enabled")
+        print("[Trovis] Output capture: enabled")
 
 
 def _try(fn: Any) -> None:
@@ -121,7 +121,7 @@ def _try(fn: Any) -> None:
     try:
         fn()
     except (AttributeError, TypeError) as e:
-        logger.debug(f"[Oversee] Hermes ctx method unsupported: {e}")
+        logger.debug(f"[Trovis] Hermes ctx method unsupported: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +134,10 @@ def _on_tool_call(tool_name: Any, params: Any, result: Any) -> None:
 
     Same attribute vocabulary as the OpenClaw plugin so the dashboard's
     span aggregation, ownership, and Ask features work uniformly:
-    `oversee.tool.name`, `oversee.tool.param_keys`, and (under opt-in
-    capture) `oversee.tool.result`.
+    `trovis.tool.name`, `trovis.tool.param_keys`, and (under opt-in
+    capture) `trovis.tool.result`.
     """
-    from oversee.core import _state
+    from trovis.core import _state
 
     tracer = _state.get("tracer")
     if not tracer:
@@ -147,19 +147,19 @@ def _on_tool_call(tool_name: Any, params: Any, result: Any) -> None:
     agent_name = _state.get("agent_name", "hermes-agent")
 
     with tracer.start_as_current_span("tool_call") as span:
-        span.set_attribute("oversee.event.type", "tool_call")
-        span.set_attribute("oversee.agent.id", agent_name)
+        span.set_attribute("trovis.event.type", "tool_call")
+        span.set_attribute("trovis.agent.id", agent_name)
         if tool_name:
-            span.set_attribute("oversee.tool.name", str(tool_name))
+            span.set_attribute("trovis.tool.name", str(tool_name))
         # Param KEYS only by default — values can carry user data.
         if isinstance(params, dict):
             span.set_attribute(
-                "oversee.tool.param_keys",
+                "trovis.tool.param_keys",
                 json.dumps(list(params.keys())),
             )
         if capture and result is not None:
             span.set_attribute(
-                "oversee.tool.result",
+                "trovis.tool.result",
                 _truncate(str(result), 10_000),
             )
 
@@ -174,7 +174,7 @@ def _on_model_call(*args: Any, **kwargs: Any) -> None:
     input/output token counts. Anything we can't find is simply
     omitted — never raises.
     """
-    from oversee.core import _state
+    from trovis.core import _state
 
     tracer = _state.get("tracer")
     if not tracer:
@@ -212,8 +212,8 @@ def _on_model_call(*args: Any, **kwargs: Any) -> None:
         return  # nothing usable — don't emit an empty model_call span
 
     with tracer.start_as_current_span("model_call") as span:
-        span.set_attribute("oversee.event.type", "model_call")
-        span.set_attribute("oversee.agent.id", agent_name)
+        span.set_attribute("trovis.event.type", "model_call")
+        span.set_attribute("trovis.agent.id", agent_name)
         if model:
             span.set_attribute("gen_ai.request.model", str(model))
         if inp is not None:
@@ -237,15 +237,15 @@ def _bag_get(obj: Any, *keys: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# /oversee chat command
+# /trovis chat command
 # ---------------------------------------------------------------------------
 
 
-def _handle_oversee_command(args: str = "", **_kwargs: Any) -> str:
-    """Handle `/oversee …` inside the Hermes chat. Returns a JSON
+def _handle_trovis_command(args: str = "", **_kwargs: Any) -> str:
+    """Handle `/trovis …` inside the Hermes chat. Returns a JSON
     string per Hermes' command protocol (we follow the same shape
     the OpenClaw plugin's command returns)."""
-    from oversee.core import _state
+    from trovis.core import _state
 
     parts = (args or "").strip().split()
     sub = parts[0].lower() if parts else ""
@@ -303,16 +303,16 @@ def _handle_oversee_command(args: str = "", **_kwargs: Any) -> str:
             }
         )
 
-    # Default — bare /oversee, unknown subcommand, or `help`.
+    # Default — bare /trovis, unknown subcommand, or `help`.
     return json.dumps(
         {
             "success": True,
             "message": (
-                "Oversee commands:\n"
-                "/oversee connect <url>     — set the OTLP endpoint\n"
-                "/oversee apikey <key>      — set the API key\n"
-                "/oversee capture on|off    — toggle content capture\n"
-                "/oversee status            — show connection state"
+                "Trovis commands:\n"
+                "/trovis connect <url>     — set the OTLP endpoint\n"
+                "/trovis apikey <key>      — set the API key\n"
+                "/trovis capture on|off    — toggle content capture\n"
+                "/trovis status            — show connection state"
             ),
         }
     )
@@ -320,11 +320,11 @@ def _handle_oversee_command(args: str = "", **_kwargs: Any) -> str:
 
 def _handle_cli(*args: Any, **kwargs: Any) -> Any:
     """Hermes CLI handler — currently just delegates to the same
-    chat-command logic so `hermes oversee status` behaves like
-    `/oversee status`. The first positional, when present, is the
+    chat-command logic so `hermes trovis status` behaves like
+    `/trovis status`. The first positional, when present, is the
     subcommand string."""
     arg_str = " ".join(str(a) for a in args) if args else ""
-    return _handle_oversee_command(arg_str, **kwargs)
+    return _handle_trovis_command(arg_str, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -346,32 +346,32 @@ def _read_file(path: Path) -> str:
 def _send_registration(agent_name: str, soul: str, memory: str) -> None:
     """Emit the one-shot `agent_registration` span carrying identity.
 
-    Same vocabulary as the OpenClaw plugin (`oversee.agent.id`,
-    `oversee.agent.soul`, `oversee.agent.identity`, `oversee.agent.model`)
+    Same vocabulary as the OpenClaw plugin (`trovis.agent.id`,
+    `trovis.agent.soul`, `trovis.agent.identity`, `trovis.agent.model`)
     so the dashboard's auto-describe pipeline + Claude prompts can
     treat Hermes agents identically.
     """
-    from oversee.core import _state
+    from trovis.core import _state
 
     tracer = _state.get("tracer")
     if not tracer:
         return
 
     with tracer.start_as_current_span("agent_registration") as span:
-        span.set_attribute("oversee.event.type", "agent_registration")
-        span.set_attribute("oversee.agent.id", agent_name)
+        span.set_attribute("trovis.event.type", "agent_registration")
+        span.set_attribute("trovis.agent.id", agent_name)
         if soul:
-            span.set_attribute("oversee.agent.soul", soul)
-        span.set_attribute("oversee.agent.identity", agent_name)
-        span.set_attribute("oversee.agent.platform", "hermes")
+            span.set_attribute("trovis.agent.soul", soul)
+        span.set_attribute("trovis.agent.identity", agent_name)
+        span.set_attribute("trovis.agent.platform", "hermes")
         # Workspace path included for schema parity with OpenClaw —
         # Hermes' equivalent is the `~/.hermes` config dir.
         span.set_attribute(
-            "oversee.agent.workspace_path",
+            "trovis.agent.workspace_path",
             str(Path.home() / ".hermes"),
         )
         if memory:
-            span.set_attribute("oversee.agent.memory", memory)
+            span.set_attribute("trovis.agent.memory", memory)
 
 
 def _truncate(s: str, limit: int) -> str:
