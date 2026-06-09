@@ -45,14 +45,10 @@ export function nsToMs(ns) {
   return ns / 1_000_000
 }
 
-// Format a USD cost. Always rendered in dollars (e.g. "$0.68", "$12.50").
-// Amounts below a cent keep extra precision so a $0.0042 agent doesn't read
-// as a misleading "$0.00"; vanishingly small amounts collapse to "<$0.0001".
+// Format a USD cost. Always rendered in dollars rounded to the nearest cent
+// (e.g. "$0.01", "$0.68", "$12.50") — never more than 2 decimal places.
 export function formatCost(usd) {
   const n = Number(usd) || 0
-  if (n === 0) return '$0.00'
-  if (n < 0.0001) return '<$0.0001'
-  if (n < 0.01) return `$${n.toFixed(4)}`
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
