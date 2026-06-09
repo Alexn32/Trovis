@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { AskVisualRenderer } from './AskVisuals.jsx'
-// Sub-dollar costs render in cents (e.g. "2.6¢"); shared with Fleet so they match.
+// Costs always render in dollars (e.g. "$0.68"); shared with Fleet so they match.
 import { formatCost as fmtMoney } from './utils.js'
 import {
   TrovisMark,
