@@ -88,7 +88,7 @@ def _resolve_account_id(ctx: Context | None) -> int | None:
                 return row["account_id"]
     except Exception:  # noqa: BLE001 — context/request may be absent on some transports
         pass
-    token = os.environ.get("OVERSEE_MCP_API_KEY") or os.environ.get("OVERSEE_API_KEY")
+    token = database.env("MCP_API_KEY") or database.env("API_KEY")
     if token:
         row = database.validate_api_key(token)
         if row:
@@ -126,7 +126,7 @@ def _create_span(
         dur = int(max(0.0, float(duration_seconds or 0)) * 1_000_000_000)
     except (TypeError, ValueError):
         dur = 0
-    attrs: dict[str, Any] = {"oversee.agent.id": "main"}
+    attrs: dict[str, Any] = {"trovis.agent.id": "main"}
     attrs.update({k: v for k, v in attributes.items() if v not in (None, "")})
     database.insert_spans(
         [
@@ -144,7 +144,7 @@ def _create_span(
                 "attributes": attrs,
                 "resource_attributes": {
                     "service.name": service_name,
-                    "oversee.platform": "chatgpt",
+                    "trovis.platform": "chatgpt",
                 },
             }
         ],
@@ -232,7 +232,7 @@ async def search(query: str, ctx: Context = None) -> SearchOutput:
         )
         _set_current_agent(account_id, name)
         _create_span(name, "agent_registration",
-                      {"oversee.event.type": "agent_registration", "oversee.agent.role": role},
+                      {"trovis.event.type": "agent_registration", "trovis.agent.role": role},
                       account_id)
         return _result("connected", f"Connected as {name}")
 
@@ -244,8 +244,8 @@ async def search(query: str, ctx: Context = None) -> SearchOutput:
         step = (parts[0].strip() if parts else "") or "activity"
         desc = parts[1].strip() if len(parts) > 1 else ""
         _create_span(service, step,
-                      {"oversee.event.type": "agent_activity", "oversee.step.name": step,
-                       "oversee.step.description": desc},
+                      {"trovis.event.type": "agent_activity", "trovis.step.name": step,
+                       "trovis.step.description": desc},
                       account_id)
         return _result("logged", f"Logged: {step}")
 
@@ -255,8 +255,8 @@ async def search(query: str, ctx: Context = None) -> SearchOutput:
             return _result("error", "Call connect first")
         summary = q[9:].strip()
         _create_span(service, "agent_run_complete",
-                      {"oversee.event.type": "agent_run_complete",
-                       "oversee.task.summary": summary},
+                      {"trovis.event.type": "agent_run_complete",
+                       "trovis.task.summary": summary},
                       account_id)
         return _result("completed", f"Task complete: {summary}")
 

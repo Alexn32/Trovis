@@ -156,9 +156,9 @@ async def _pricing_refresh_loop() -> None:
 async def lifespan(app: FastAPI):
     database.init_db()
     refresh_task: asyncio.Task | None = None
-    # OVERSEE_DISABLE_PRICING_SYNC=1 turns off the network pull (offline dev,
-    # tests) — the seeded prices still cover the common models.
-    if os.getenv("OVERSEE_DISABLE_PRICING_SYNC", "").lower() not in (
+    # TROVIS_DISABLE_PRICING_SYNC=1 (legacy: OVERSEE_DISABLE_PRICING_SYNC) turns
+    # off the network pull (offline dev, tests) — seeded prices cover common models.
+    if (database.env("DISABLE_PRICING_SYNC", "") or "").lower() not in (
         "1",
         "true",
         "yes",
@@ -234,7 +234,11 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 2. API key — agents + legacy dashboard. No user → no member-mgmt power.
-    header_key = request.headers.get("X-Oversee-Api-Key")
+    # Accept the new header and the legacy one (live pre-rename agents still
+    # send X-Oversee-Api-Key) — keep both permanently.
+    header_key = request.headers.get("X-Trovis-Api-Key") or request.headers.get(
+        "X-Oversee-Api-Key"
+    )
     if header_key:
         result = database.validate_api_key(header_key)
         if not result:
@@ -273,8 +277,9 @@ def _require_owner(request: Request) -> int:
 # API: any origin may call it, but every protected route still requires a valid
 # token the caller's site can't obtain. (allow_credentials=True + "*" would let
 # any website make credentialed requests — a real hole, and invalid per the CORS
-# spec.) To lock origins down further, set OVERSEE_CORS_ORIGINS to a comma list.
-_cors_origins_env = os.environ.get("OVERSEE_CORS_ORIGINS", "").strip()
+# spec.) To lock origins down further, set TROVIS_CORS_ORIGINS (legacy:
+# OVERSEE_CORS_ORIGINS) to a comma list.
+_cors_origins_env = (database.env("CORS_ORIGINS", "") or "").strip()
 _cors_origins = (
     [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
     if _cors_origins_env
@@ -494,20 +499,20 @@ def _extract_registrations(
     described: set[tuple[str, str]] = set()
     for span in spans:
         attrs = span.get("attributes") or {}
-        if attrs.get("oversee.event.type") != "agent_registration":
+        if database.attr(attrs, "event.type") != "agent_registration":
             continue
         service_name = span["service_name"]
-        agent_id = attrs.get("oversee.agent.id") or "main"
+        agent_id = database.attr(attrs, "agent.id") or "main"
         database.save_registration(
             service_name=service_name,
             agent_id=agent_id,
-            soul=attrs.get("oversee.agent.soul") or "",
-            identity=attrs.get("oversee.agent.identity") or "",
-            operating_manual=attrs.get("oversee.agent.operating_manual") or "",
-            user_context=attrs.get("oversee.agent.user_context") or "",
-            memory=attrs.get("oversee.agent.memory") or "",
-            workspace_path=attrs.get("oversee.agent.workspace_path") or "",
-            model=attrs.get("oversee.agent.model") or "",
+            soul=database.attr(attrs, "agent.soul") or "",
+            identity=database.attr(attrs, "agent.identity") or "",
+            operating_manual=database.attr(attrs, "agent.operating_manual") or "",
+            user_context=database.attr(attrs, "agent.user_context") or "",
+            memory=database.attr(attrs, "agent.memory") or "",
+            workspace_path=database.attr(attrs, "agent.workspace_path") or "",
+            model=database.attr(attrs, "agent.model") or "",
             account_id=account_id,
         )
         # Don't re-describe the same (service, agent) twice in one batch.
@@ -606,7 +611,7 @@ def _agent_id_for_span(span: dict[str, Any]) -> str:
     ingest can compute the (service, agent) pair without importing
     private helpers."""
     attrs = span.get("attributes") or {}
-    val = attrs.get("oversee.agent.id")
+    val = database.attr(attrs, "agent.id")
     if isinstance(val, str) and val:
         return val
     return "main"
@@ -1830,7 +1835,7 @@ async def create_invite(request: Request, body: InviteCreate) -> InviteCreateRes
     inv = database.create_invite(
         account_id, body.email, role, inviter["id"] if inviter else None
     )
-    base = (os.environ.get("OVERSEE_APP_URL") or str(request.base_url)).rstrip("/")
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
     return InviteCreateResponse(
         invite_url=f"{base}/accept-invite?token={inv['token']}",
         email=inv["email"],
@@ -1997,7 +2002,7 @@ def _monthly_budget(account_id: int | None = None) -> float:
         if saved is not None:
             return saved
     try:
-        return float(os.environ.get("OVERSEE_MONTHLY_BUDGET", "500") or 500)
+        return float(database.env("MONTHLY_BUDGET", "500") or 500)
     except (TypeError, ValueError):
         return 500.0
 
@@ -2153,12 +2158,8 @@ def _work_activity(spans: list[dict]) -> dict:
         name = s.get("span_name") or ""
         ops[name] = ops.get(name, 0) + 1
         attrs = s.get("attributes") or {}
-        for k in (
-            "oversee.tool.result",
-            "oversee.response.content",
-            "oversee.message.content",
-        ):
-            v = attrs.get(k)
+        for suffix in ("tool.result", "response.content", "message.content"):
+            v = database.attr(attrs, suffix)
             if v:
                 samples.append(str(v)[:200])
                 break
@@ -2562,11 +2563,12 @@ async def ask_agent(
 # /actions/* with Bearer access_token.
 # ---------------------------------------------------------------------------
 
-_OVERSEE_APP_URL = os.environ.get("OVERSEE_APP_URL", "https://oversee-pi.vercel.app")
-_OVERSEE_API_URL = os.environ.get("OVERSEE_API_URL", "https://web-production-e6bc4.up.railway.app")
-# OAuth client_id/secret — set in env for production; defaults for dev.
-_OAUTH_CLIENT_ID = os.environ.get("OVERSEE_OAUTH_CLIENT_ID", "oversee-chatgpt")
-_OAUTH_CLIENT_SECRET = os.environ.get("OVERSEE_OAUTH_CLIENT_SECRET", "oversee-dev-secret")
+_OVERSEE_APP_URL = database.env("APP_URL", "https://oversee-pi.vercel.app")
+_OVERSEE_API_URL = database.env("API_URL", "https://web-production-e6bc4.up.railway.app")
+# OAuth client_id/secret — set in env for production; defaults for dev. Default
+# literals stay `oversee-*` (registered values, not brand identifiers).
+_OAUTH_CLIENT_ID = database.env("OAUTH_CLIENT_ID", "oversee-chatgpt")
+_OAUTH_CLIENT_SECRET = database.env("OAUTH_CLIENT_SECRET", "oversee-dev-secret")
 
 
 from starlette.responses import HTMLResponse, RedirectResponse
@@ -2760,12 +2762,12 @@ async def action_connect(request: Request):
         "status_code": 0,
         "status_message": "",
         "attributes": {
-            "oversee.event.type": "agent_registration",
-            "oversee.agent.role": role,
+            "trovis.event.type": "agent_registration",
+            "trovis.agent.role": role,
         },
         "resource_attributes": {
             "service.name": name,
-            "oversee.platform": "chatgpt",
+            "trovis.platform": "chatgpt",
         },
     }], account_id=account_id)
     return {"status": "connected", "agent_name": name,
@@ -2799,15 +2801,15 @@ async def action_log(request: Request):
         "status_code": 0,
         "status_message": "",
         "attributes": {
-            "oversee.event.type": "agent_activity",
-            "oversee.step.name": step,
-            "oversee.step.description": desc,
-            "oversee.tools.used": str(body.get("tools_used", "")),
-            "oversee.output.summary": str(body.get("output_summary", "")),
+            "trovis.event.type": "agent_activity",
+            "trovis.step.name": step,
+            "trovis.step.description": desc,
+            "trovis.tools.used": str(body.get("tools_used", "")),
+            "trovis.output.summary": str(body.get("output_summary", "")),
         },
         "resource_attributes": {
             "service.name": service,
-            "oversee.platform": "chatgpt",
+            "trovis.platform": "chatgpt",
         },
     }], account_id=account_id)
     return {"status": "logged", "step_name": step}
@@ -2838,13 +2840,13 @@ async def action_complete(request: Request):
         "status_code": 0 if success else 2,
         "status_message": "" if success else "task failed",
         "attributes": {
-            "oversee.event.type": "agent_run_complete",
-            "oversee.task.summary": summary,
-            "oversee.run.success": success,
+            "trovis.event.type": "agent_run_complete",
+            "trovis.task.summary": summary,
+            "trovis.run.success": success,
         },
         "resource_attributes": {
             "service.name": service,
-            "oversee.platform": "chatgpt",
+            "trovis.platform": "chatgpt",
         },
     }], account_id=account_id)
     return {"status": "completed", "task_summary": summary}
