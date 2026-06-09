@@ -75,6 +75,7 @@ from models import (
     MeResponse,
     NewKeyResponse,
     OrgPublic,
+    OrgProfileUpdate,
     RevealKeysRequest,
     RevealKeysResponse,
     SetPasswordRequest,
@@ -1785,6 +1786,27 @@ async def get_org(request: Request) -> OrgPublic:
     return OrgPublic(**org)
 
 
+@app.put("/org", response_model=OrgPublic)
+async def update_org(request: Request, body: OrgProfileUpdate) -> OrgPublic:
+    """Owner-only: set the workspace (org) display name. Used by onboarding."""
+    account_id = _require_owner(request)
+    database.update_account_profile(account_id, body.name)
+    org = database.get_account(account_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    return OrgPublic(**org)
+
+
+@app.post("/auth/onboarding/complete", status_code=204)
+async def complete_onboarding(request: Request) -> None:
+    """Mark the account's onboarding wizard as done (idempotent). The owner
+    calls this when they finish or skip the post-signup wizard."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    database.mark_account_onboarded(account_id)
+
+
 @app.get("/org/members", response_model=list[UserPublic])
 async def list_members(request: Request) -> list[UserPublic]:
     """All users in the caller's org (owner + members can view)."""
@@ -2156,10 +2178,17 @@ async def dashboard_briefing(request: Request) -> BriefingResponse:
     from time import time as _time
 
     now_ns = int(_time() * 1_000_000_000)
-    tasks_yesterday = database.count_fleet_spans(account_id, now_ns - _NS_PER_DAY)
-    tasks_last_week = database.count_fleet_spans(account_id, now_ns - 7 * _NS_PER_DAY)
+    # activity_only → exclude agent_registration spans, so "tasks" reflect real
+    # work (and a just-connected agent reads as 0 → dashboard shows its
+    # "waiting for telemetry" state instead of a fake task count).
+    tasks_yesterday = database.count_fleet_spans(
+        account_id, now_ns - _NS_PER_DAY, activity_only=True
+    )
+    tasks_last_week = database.count_fleet_spans(
+        account_id, now_ns - 7 * _NS_PER_DAY, activity_only=True
+    )
     tasks_prev_week = database.count_fleet_spans(
-        account_id, now_ns - 14 * _NS_PER_DAY, now_ns - 7 * _NS_PER_DAY
+        account_id, now_ns - 14 * _NS_PER_DAY, now_ns - 7 * _NS_PER_DAY, activity_only=True
     )
     delta = _pct_delta(tasks_last_week, tasks_prev_week)
     tasks_delta = (

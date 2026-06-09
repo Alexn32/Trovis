@@ -10,6 +10,7 @@ import Login from './Login.jsx'
 import Team from './Team.jsx'
 import Workflows from './Workflows.jsx'
 import Settings from './Settings.jsx'
+import Onboarding from './Onboarding.jsx'
 import {
   api,
   clearApiKey,
@@ -153,6 +154,33 @@ function AppInner() {
         initialMode={inviteToken ? 'accept-invite' : 'choose'}
         inviteToken={inviteToken}
       />
+    )
+  }
+
+  // First-run onboarding: a brand-new org owner (session auth) hasn't been
+  // through setup yet. Full-screen takeover until they finish or skip; one
+  // POST persists `onboarded_at` so it never reappears. API-key sessions and
+  // invited members never see it.
+  const needsOnboarding =
+    me?.auth === 'session' &&
+    me?.user?.role === 'owner' &&
+    !me?.org?.onboarded_at
+  if (needsOnboarding) {
+    return (
+      <div className="app">
+        <TextureOverlay />
+        <Onboarding
+          me={me}
+          onDone={() => {
+            setMe((prev) =>
+              prev
+                ? { ...prev, org: { ...prev.org, onboarded_at: new Date().toISOString() } }
+                : prev
+            )
+            setTab('dashboard')
+          }}
+        />
+      </div>
     )
   }
 

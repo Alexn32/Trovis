@@ -72,17 +72,104 @@ export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, userName
     }
   }, [])
 
+  // "Waiting for telemetry": right after onboarding the account has an agent
+  // but no real activity yet (its only span is the registration). The briefing
+  // counts are activity-only, so tasks_last_week === 0 + ≥1 agent means we
+  // should show a warm placeholder instead of empty briefing/attention/cost/
+  // work-feed cards. We fetch the briefing once here (the expensive Claude
+  // call) and pass it down so BriefingCard doesn't refetch.
+  const [briefing, setBriefing] = useState(null)
+  const [briefingLoading, setBriefingLoading] = useState(true)
+  const [hasAgents, setHasAgents] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    setBriefingLoading(true)
+    api
+      .getBriefing()
+      .then((d) => alive && setBriefing(d))
+      .catch(
+        () =>
+          alive &&
+          setBriefing({
+            summary: '',
+            tasks_yesterday: 0,
+            tasks_last_week: 0,
+            tasks_delta: '—',
+          }),
+      )
+      .finally(() => alive && setBriefingLoading(false))
+    api
+      .listAgents()
+      .then((d) => alive && setHasAgents(Array.isArray(d) && d.length > 0))
+      .catch(() => alive && setHasAgents(false))
+    return () => {
+      alive = false
+    }
+  }, [refreshKey])
+
+  const waiting =
+    hasAgents === true &&
+    briefing !== null &&
+    (briefing.tasks_last_week || 0) === 0
+
+  // While waiting, poll a little faster so the page resolves itself the moment
+  // the first real spans land (reuses the shared refreshKey plumbing).
+  useEffect(() => {
+    if (!waiting) return
+    const t = setInterval(() => setRefreshKey((k) => k + 1), 15000)
+    return () => clearInterval(t)
+  }, [waiting])
+
   return (
     <div className="dash">
       <Greeting userName={userName} />
-      <BriefingCard refreshKey={refreshKey} />
-      <div className="dash-grid-2">
-        <AttentionCard refreshKey={refreshKey} />
-        <CostCard refreshKey={refreshKey} onOpenCost={onOpenCost} />
-      </div>
-      <WorkFeedCard refreshKey={refreshKey} onGoFleet={onGoFleet} />
+      {waiting ? (
+        <WaitingCard />
+      ) : (
+        <>
+          <BriefingCard data={briefing} loading={briefingLoading} />
+          <div className="dash-grid-2">
+            <AttentionCard refreshKey={refreshKey} />
+            <CostCard refreshKey={refreshKey} onOpenCost={onOpenCost} />
+          </div>
+          <WorkFeedCard refreshKey={refreshKey} onGoFleet={onGoFleet} />
+        </>
+      )}
       <FleetGrid refreshKey={refreshKey} onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
       <AskPill />
+    </div>
+  )
+}
+
+// Shown after onboarding while the first agent's telemetry hasn't arrived.
+// Replaces the briefing/attention/cost/work-feed cards; the Fleet grid (which
+// shows the connected agent) and the Ask pill stay. Auto-disappears once the
+// briefing reports activity (the parent polls every 15s).
+function WaitingCard() {
+  return (
+    <div className="dash-card dash-waiting">
+      <div className="dash-waiting-pulse" aria-hidden="true">
+        <span className="dash-sq">
+          <SparkleIcon size={11} />
+        </span>
+      </div>
+      <h2 className="dash-waiting-title">Your first agent is connected</h2>
+      <p className="dash-waiting-sub">
+        Waiting for telemetry. This page fills in automatically the moment your
+        agent sends its first activity — no refresh needed.
+      </p>
+      <ul className="dash-waiting-checklist">
+        <li className="is-done">
+          <span className="dash-wait-mark">✓</span> Agent connected
+        </li>
+        <li className="is-active">
+          <span className="dash-wait-mark dot" /> First spans received
+        </li>
+        <li>
+          <span className="dash-wait-mark dot" /> Dashboard populates
+        </li>
+      </ul>
     </div>
   )
 }
@@ -112,31 +199,7 @@ function Greeting({ userName }) {
 
 // --- 2. Daily Briefing -----------------------------------------------------
 
-function BriefingCard({ refreshKey }) {
-  const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    let alive = true
-    api
-      .getBriefing()
-      .then((d) => alive && setData(d))
-      .catch(
-        () =>
-          alive &&
-          setData({
-            summary: '',
-            tasks_yesterday: 0,
-            tasks_last_week: 0,
-            tasks_delta: '—',
-          }),
-      )
-      .finally(() => alive && setLoading(false))
-    return () => {
-      alive = false
-    }
-  }, [refreshKey])
-
+function BriefingCard({ data, loading }) {
   return (
     <div className="dash-card dash-briefing">
       <div className="dash-card-head">

@@ -564,6 +564,14 @@ class OrgPublic(BaseModel):
     name: str | None = None
     account_type: str = "individual"  # 'individual' | 'business'
     created_at: str | None = None
+    # Set when the owner finishes/skips onboarding; null → wizard still shows.
+    onboarded_at: str | None = None
+
+
+class OrgProfileUpdate(BaseModel):
+    """Body for PUT /org — set the workspace (org) display name."""
+
+    name: str = ""
 
 
 class SignupRequest(BaseModel):

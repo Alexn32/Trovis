@@ -352,6 +352,10 @@ export const api = {
 
   // --- organization (members + invites) ---
   getOrg: () => request('/org'),
+  updateOrg: (data) => request('/org', { method: 'PUT', body: JSON.stringify(data) }),
+  // Onboarding: mark the post-signup wizard done (idempotent).
+  completeOnboarding: () =>
+    request('/auth/onboarding/complete', { method: 'POST' }),
   getMembers: () => request('/org/members'),
   createInvite: (data) =>
     request('/org/invites', { method: 'POST', body: JSON.stringify(data) }),
