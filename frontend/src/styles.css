@@ -27,6 +27,10 @@
   --accent-faint: rgba(240, 236, 230, 0.10);
   --accent-bg: #f0ece6;
   --accent-text: #1a1714;
+  /* Trovis brand accent — slate teal. Brand identity only; status stays green. */
+  --brand-accent: #7A9E9E;
+  --brand-accent-bg: rgba(122, 158, 158, 0.12);
+  --brand-accent-hover: #8ab0b0;
   --success: #3bb87e;
   --warning: #e8924a;
   --error: #e05040;
@@ -106,6 +110,10 @@
   --accent-faint: rgba(44, 36, 24, 0.06);
   --accent-bg: #2c2418;
   --accent-text: #faf8f4;
+  /* Trovis brand accent — slate teal. Brand identity only; status stays green. */
+  --brand-accent: #5A7B7B;
+  --brand-accent-bg: rgba(90, 123, 123, 0.08);
+  --brand-accent-hover: #4a6b6b;
   --success: #2a9d6e;
   --warning: #d4792a;
   --error: #c43528;
@@ -275,6 +283,33 @@ a:hover {
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-faint);
+}
+
+/* Trovis lockup — tinted crosshair badge + wordmark, colored from the brand
+   accent so it adapts to light/dark. Replaces the old dot + "Oversee" brand. */
+.trovis-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--brand-accent);
+  line-height: 1;
+}
+.trovis-logo-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--brand-accent-bg);
+  flex-shrink: 0;
+}
+.trovis-logo-word {
+  font-family: "DM Sans", sans-serif;
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+  color: var(--brand-accent);
 }
 
 .tabs {
@@ -4047,7 +4082,7 @@ a:hover {
    ============================================================================= */
 
 .dash {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   max-width: 1120px;
   margin: 0 auto;
@@ -4057,7 +4092,7 @@ a:hover {
   gap: 20px;
 }
 
-/* Black (auto-inverting) square icon with a white sparkle. */
+/* Trovis brand square — slate-teal tile holding the white crosshair mark. */
 .dash-sq {
   display: inline-flex;
   align-items: center;
@@ -4065,8 +4100,8 @@ a:hover {
   width: 20px;
   height: 20px;
   border-radius: 5px;
-  background: var(--text-primary);
-  color: var(--bg-primary);
+  background: var(--brand-accent);
+  color: #fff;
   flex-shrink: 0;
 }
 .dash-sq.sm { width: 16px; height: 16px; border-radius: 4px; }
@@ -4248,7 +4283,7 @@ a:hover {
   background: var(--bg-elevated); border: 1px solid var(--border-default); border-bottom: none;
   border-radius: 16px 16px 0 0; box-shadow: var(--shadow-lg);
   display: flex; flex-direction: column;
-  font-family: "Inter", -apple-system, sans-serif;
+  font-family: "DM Sans", -apple-system, sans-serif;
   animation: dash-slide-up 0.32s cubic-bezier(0.16, 1, 0.3, 1);
 }
 @keyframes dash-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
@@ -4319,7 +4354,7 @@ a:hover {
    ============================================================================= */
 
 .wf2 {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   display: flex;
   flex-direction: column;
@@ -4400,7 +4435,7 @@ a:hover {
   width: 100%; max-width: 540px; background: var(--bg-elevated);
   border: 1px solid var(--border-default); border-radius: 16px;
   box-shadow: var(--shadow-lg);
-  font-family: "Inter", sans-serif; max-height: 90vh; overflow: auto;
+  font-family: "DM Sans", sans-serif; max-height: 90vh; overflow: auto;
 }
 .wf2-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 6px; }
 .wf2-modal-title { font-size: 17px; font-weight: 800; color: var(--text-primary); }
@@ -4733,7 +4768,7 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
    colors key off the warm CSS variables → works light + dark.
    ============================================================================= */
 .onboard {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   position: relative;
   z-index: 1;
@@ -4792,7 +4827,7 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .onboard-mark {
   display: inline-flex; align-items: center; justify-content: center;
   width: 44px; height: 44px; border-radius: 12px;
-  background: var(--accent-faint); color: var(--text-primary);
+  background: var(--brand-accent-bg); color: var(--brand-accent);
   margin-bottom: 16px;
 }
 .onboard-title {
@@ -4878,7 +4913,7 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .dash-waiting-pulse::before,
 .dash-waiting-pulse::after {
   content: ""; position: absolute; inset: 0; z-index: 0;
-  border-radius: 11px; background: var(--text-primary);
+  border-radius: 11px; background: var(--brand-accent);
   animation: dashWaitPulse 2.4s ease-out infinite;
 }
 .dash-waiting-pulse::after { animation-delay: 1.2s; }

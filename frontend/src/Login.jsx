@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api, setApiKey, setSessionToken } from './api.js'
 import { Spinner } from './ui.jsx'
+import { TrovisLogo } from './Icons.jsx'
 
 // Auth screen. Real logins now: email + password → a session token. Modes:
 //   choose → login | signup | claim
@@ -30,10 +31,7 @@ export default function Login({ onAuthed, initialMode = 'choose', inviteToken = 
     <div className="login-shell">
       <div className="login-card">
         <header className="login-header">
-          <div className="brand">
-            <span className="brand-dot" />
-            Oversee
-          </div>
+          <TrovisLogo />
         </header>
 
         {mode === 'choose' && (
@@ -175,7 +173,7 @@ function SignupPanel({ onSuccess, onBack }) {
 
   return (
     <form className="login-body" onSubmit={handleSubmit}>
-      <p className="login-prompt">Create your Oversee account.</p>
+      <p className="login-prompt">Create your Trovis account.</p>
 
       <label className="field-label">Account type</label>
       <div className="auth-type-toggle">
@@ -316,7 +314,7 @@ function AcceptInvitePanel({ token, onSuccess }) {
 
   return (
     <form className="login-body" onSubmit={handleSubmit}>
-      <p className="login-prompt">You've been invited to a team on Oversee. Set up your login.</p>
+      <p className="login-prompt">You've been invited to a team on Trovis. Set up your login.</p>
       <label className="field-label">Your name</label>
       <input className="text-input" type="text" placeholder="Alex Nielsen" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
       <label className="field-label">Password</label>

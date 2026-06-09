@@ -33,7 +33,7 @@ const CLAUDE_VARIANTS = [
 // Step 1: choose a platform (always shown).
 // Step 2: choose an LLM provider (skipped for platforms that don't need it).
 // Step 3: platform/provider-specific setup instructions, with an editable
-//         agent name and a copyable Oversee endpoint at the top.
+//         agent name and a copyable Trovis endpoint at the top.
 //
 // All copy buttons render *already-substituted* code so what you see is
 // exactly what gets copied to the clipboard.
@@ -43,7 +43,7 @@ const CLAUDE_VARIANTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Only the three platforms with first-party Oversee integrations
+// Only the three platforms with first-party Trovis integrations
 // are surfaced for now. Generic Python / Node / framework /
 // no-code-product instruction pages still exist in this file — they
 // just aren't reachable from the picker. Re-adding any tile to this
@@ -267,7 +267,7 @@ function Callout({ variant = 'info', children }) {
 function SuccessCallout() {
   return (
     <Callout variant="success">
-      Once connected, your agent will appear on the Oversee dashboard within seconds.
+      Once connected, your agent will appear on the Trovis dashboard within seconds.
     </Callout>
   )
 }
@@ -433,7 +433,7 @@ function PythonInstrumentorTabs({
               <NumberedStep n={3} title="Run your agent with these environment variables">
                 <CodeBlock code={envCmd} />
               </NumberedStep>
-              <NumberedStep n={4} title="Your agent will appear in Oversee within seconds." />
+              <NumberedStep n={4} title="Your agent will appear in Trovis within seconds." />
               <SuccessCallout />
             </>
           ),
@@ -452,7 +452,7 @@ function PythonInstrumentorTabs({
               <NumberedStep n={3} title="Run your agent normally">
                 <CodeBlock code={`python ${runFile}`} />
               </NumberedStep>
-              <NumberedStep n={4} title="Your agent will appear in Oversee within seconds." />
+              <NumberedStep n={4} title="Your agent will appear in Trovis within seconds." />
               <SuccessCallout />
             </>
           ),
@@ -623,7 +623,7 @@ with tracer.start_as_current_span("my-operation") as span:
 // Instruction pages — OpenClaw
 // ---------------------------------------------------------------------------
 
-// The OTEL ingest endpoint agents send telemetry to. This is the Oversee
+// The OTEL ingest endpoint agents send telemetry to. This is the Trovis
 // API (Railway), NOT the dashboard origin (Vercel) — so we use VITE_API_URL
 // (set at build time) and fall back to the production API, never the page
 // origin, which would be wrong for the hosted dashboard.
@@ -644,15 +644,15 @@ function OpenClawInstructions() {
       <h2 className="instructions-title">Connect OpenClaw agents</h2>
       <p className="instructions-subtitle">
         Install the plugin and every agent on this OpenClaw instance starts
-        reporting telemetry to Oversee.
+        reporting telemetry to Trovis.
       </p>
 
       <Callout variant="blue">
-        <strong>OpenClaw + Oversee:</strong> Install the plugin, connect
+        <strong>OpenClaw + Trovis:</strong> Install the plugin, connect
         through chat, and every agent is monitored automatically.
       </Callout>
 
-      <PrefillBlock label="Your Oversee endpoint" value={endpoint} />
+      <PrefillBlock label="Your Trovis endpoint" value={endpoint} />
       <PrefillBlock
         label="Your API key"
         value={apiKey}
@@ -727,7 +727,7 @@ result = await Runner.run(agent, "Help me with my order")`,
         stays unchanged.
       </p>
 
-      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
       <PrefillBlock
         label="Your API key"
         value={apiKey}
@@ -745,8 +745,8 @@ result = await Runner.run(agent, "Help me with my order")`,
       <NumberedStep n={3} title="Run your agent as you normally would">
         <p>
           Every <code>Agent()</code> you construct registers itself with
-          Oversee on first creation. The agent's <code>name</code> and{' '}
-          <code>instructions</code> become its identity — Oversee uses
+          Trovis on first creation. The agent's <code>name</code> and{' '}
+          <code>instructions</code> become its identity — Trovis uses
           them to auto-generate a plain-English description on the
           dashboard.
         </p>
@@ -767,11 +767,11 @@ result = await Runner.run(agent, "Help me with my order")`,
       </p>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Oversee API key
+          <code>OVERSEE_API_KEY</code> — your Trovis API key
         </li>
         <li>
           <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
-          the Oversee cloud)
+          the Trovis cloud)
         </li>
         <li>
           <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
@@ -794,7 +794,7 @@ result = await Runner.run(agent, "Help me with my order")`,
 // Mirrors the OpenAI Agents SDK page. The oversee-agents package
 // ships a `platform="anthropic"` mode that monkey-patches the
 // anthropic SDK's beta.agents + beta.sessions resources to emit the
-// same Oversee-named OTEL spans as every other agent platform.
+// same Trovis-named OTEL spans as every other agent platform.
 
 function AnthropicAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
@@ -817,7 +817,7 @@ agent = client.beta.agents.create(
 session = client.beta.sessions.create(agent=agent.id, environment_id=env_id)
 
 for event in client.beta.sessions.stream(session.id):
-    ...  # your event handling — spans flow into Oversee automatically`,
+    ...  # your event handling — spans flow into Trovis automatically`,
     agentName,
     resolvedEndpoint,
   ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
@@ -829,10 +829,10 @@ for event in client.beta.sessions.stream(session.id):
         Two-line setup with the <code>oversee-agents</code> package.
         Your <code>client.beta.agents.create</code> and{' '}
         <code>client.beta.sessions.stream</code> calls stay unchanged —
-        Oversee patches the SDK transparently.
+        Trovis patches the SDK transparently.
       </p>
 
-      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
       <PrefillBlock
         label="Your API key"
         value={apiKey}
@@ -877,7 +877,7 @@ for event in client.beta.sessions.stream(session.id):
 
 init(api_key="${apiKey || 'ov_sk_…'}", platform="anthropic")
 client = monitor(anthropic.Anthropic())
-# Only this client emits Oversee spans.`}
+# Only this client emits Trovis spans.`}
       />
 
       <h3 className="section-title section-title-spaced">Environment variables</h3>
@@ -887,11 +887,11 @@ client = monitor(anthropic.Anthropic())
       </p>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Oversee API key
+          <code>OVERSEE_API_KEY</code> — your Trovis API key
         </li>
         <li>
           <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
-          the Oversee cloud)
+          the Trovis cloud)
         </li>
         <li>
           <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
@@ -914,7 +914,7 @@ client = monitor(anthropic.Anthropic())
 // Distinct from "Claude Managed Agents" above: this is the
 // claude-agent-sdk package (query() + ClaudeSDKClient, the Claude Code
 // engine), NOT the anthropic.beta.agents API. The adapter wraps
-// query() so each run's message stream becomes the usual Oversee spans.
+// query() so each run's message stream becomes the usual Trovis spans.
 
 function ClaudeAgentSdkInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
@@ -954,7 +954,7 @@ async for message in query(
         calls <code>client.beta.agents.create(...)</code>.
       </Callout>
 
-      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
       <PrefillBlock
         label="Your API key"
         value={apiKey}
@@ -997,11 +997,11 @@ async for message in query(
       <h3 className="section-title section-title-spaced">Environment variables</h3>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Oversee API key
+          <code>OVERSEE_API_KEY</code> — your Trovis API key
         </li>
         <li>
           <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
-          the Oversee cloud)
+          the Trovis cloud)
         </li>
         <li>
           <code>OVERSEE_AGENT_NAME</code> — default{' '}
@@ -1059,7 +1059,7 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
         via a Python entry point, so Hermes finds it automatically.
       </p>
 
-      <PrefillBlock label="Your Oversee endpoint" value={resolvedEndpoint} />
+      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
       <PrefillBlock
         label="Your API key"
         value={apiKey}
@@ -1070,7 +1070,7 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
         <CodeBlock code={installCmd} />
       </NumberedStep>
 
-      <NumberedStep n={2} title="Enable the Oversee plugin in Hermes">
+      <NumberedStep n={2} title="Enable the Trovis plugin in Hermes">
         <CodeBlock code={enableCmd} />
         <p style={{ marginTop: 8 }}>
           Hermes will prompt you for <code>OVERSEE_API_KEY</code> the
@@ -1111,11 +1111,11 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
       <h3 className="section-title section-title-spaced">Environment variables</h3>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Oversee API key
+          <code>OVERSEE_API_KEY</code> — your Trovis API key
         </li>
         <li>
           <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
-          the Oversee cloud)
+          the Trovis cloud)
         </li>
         <li>
           <code>OVERSEE_AGENT_NAME</code> — default{' '}
@@ -1175,14 +1175,14 @@ function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
         OpenClaw gateway and applies to every agent on the instance.
       </p>
 
-      <NumberedStep n={1} title="Install the Oversee plugin">
+      <NumberedStep n={1} title="Install the Trovis plugin">
         <CodeBlock code={installCmd} />
         <p className="helper-text">
           Paste this to your agent or run in terminal — either works.
         </p>
       </NumberedStep>
 
-      <NumberedStep n={2} title="Connect to your Oversee instance">
+      <NumberedStep n={2} title="Connect to your Trovis instance">
         <CodeBlock code={connectCmd} />
       </NumberedStep>
 
@@ -1225,7 +1225,7 @@ function OpenClawTerminalSetup({ endpoint, apiKey, installCmd }) {
         Run these in the terminal where <code>openclaw</code> is installed.
       </p>
 
-      <NumberedStep n={1} title="Install the Oversee plugin">
+      <NumberedStep n={1} title="Install the Trovis plugin">
         <CodeBlock code={installCmd} />
       </NumberedStep>
 
@@ -1285,14 +1285,14 @@ function ClaudeCoworkInstructions({ endpoint }) {
     <>
       <h2 className="instructions-title">Native OTEL export — no code changes needed</h2>
       <p className="instructions-subtitle">
-        Claude Cowork has built-in OpenTelemetry support. Just enter your Oversee endpoint.
+        Claude Cowork has built-in OpenTelemetry support. Just enter your Trovis endpoint.
       </p>
       <NumberedStep n={1} title="Open Claude Desktop and go to Organization settings → Cowork (or Settings → Monitoring)." />
-      <NumberedStep n={2} title="Enter your Oversee OTLP endpoint">
+      <NumberedStep n={2} title="Enter your Trovis OTLP endpoint">
         <CodeBlock code={endpoint} />
       </NumberedStep>
       <NumberedStep n={3} title="Select the OTLP protocol: HTTP/JSON." />
-      <NumberedStep n={4} title="Add authentication headers if required by your Oversee deployment." />
+      <NumberedStep n={4} title="Add authentication headers if required by your Trovis deployment." />
       <NumberedStep n={5} title="Click Save. Events begin flowing immediately." />
       <Callout variant="info">
         Requires Claude Team or Enterprise plan. Admin access required.
@@ -1378,7 +1378,7 @@ sdk.start();`,
       <NumberedStep n={3} title="Start your agent with this preload">
         <CodeBlock code="node --require ./tracing.js your-agent.js" />
       </NumberedStep>
-      <NumberedStep n={4} title="Your agent will appear in Oversee within seconds." />
+      <NumberedStep n={4} title="Your agent will appear in Trovis within seconds." />
       <Callout variant="info">
         The auto-instrumentations-node package automatically traces HTTP calls,
         including calls to OpenAI, Anthropic, xAI, and other LLM APIs.
@@ -1405,7 +1405,7 @@ OTEL_TRACES_EXPORTER=otlp`,
     <>
       <h2 className="instructions-title">Generic OpenTelemetry setup</h2>
       <p>
-        Any application that exports OpenTelemetry traces via HTTP/JSON can connect to Oversee.
+        Any application that exports OpenTelemetry traces via HTTP/JSON can connect to Trovis.
       </p>
       <NumberedStep n={1} title="Configure your application with these environment variables">
         <CodeBlock code={envBlock} />
@@ -1537,7 +1537,7 @@ function ClaudeVariantStep({ onSelect }) {
     <div>
       <h2 className="wizard-title">Which Claude setup?</h2>
       <p className="wizard-subtitle">
-        Both report to Oversee the same way — pick the one your code uses.
+        Both report to Trovis the same way — pick the one your code uses.
       </p>
       <div className="platform-grid">
         {CLAUDE_VARIANTS.map((v) => (

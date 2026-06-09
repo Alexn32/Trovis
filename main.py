@@ -175,7 +175,7 @@ async def lifespan(app: FastAPI):
         database.shutdown_db()
 
 
-app = FastAPI(title="Oversee", version=VERSION, lifespan=lifespan)
+app = FastAPI(title="Trovis", version=VERSION, lifespan=lifespan)
 
 
 # Middleware ordering note: in Starlette, the LAST-added middleware becomes
@@ -1656,7 +1656,7 @@ async def signup(body: SignupRequest) -> SignupResponse:
         user=UserPublic(**user),
         org=OrgPublic(**account),
         api_key=api_key,
-        message="Welcome to Oversee. Use the API key to connect agents.",
+        message="Welcome to Trovis. Use the API key to connect agents.",
     )
 
 
@@ -2587,7 +2587,7 @@ async def oauth_authorize(
     html = f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Oversee — Authorize</title>
+<title>Trovis — Authorize</title>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -2615,9 +2615,9 @@ async def oauth_authorize(
 </style>
 </head><body>
 <div class="card">
-  <div class="logo"><span class="dot"></span><span class="brand">oversee</span></div>
+  <div class="logo"><span class="dot"></span><span class="brand">trovis</span></div>
   <h2>Authorize ChatGPT</h2>
-  <p>ChatGPT wants to connect to your Oversee account to monitor agent activity.</p>
+  <p>ChatGPT wants to connect to your Trovis account to monitor agent activity.</p>
   <ul class="perms">
     <li>Report agent activity and task completions</li>
     <li>Register agents in your fleet</li>
@@ -2631,7 +2631,7 @@ async def oauth_authorize(
     <label>Email</label>
     <input type="email" name="email" required placeholder="you@company.com">
     <label>Password</label>
-    <input type="password" name="password" required placeholder="Your Oversee password">
+    <input type="password" name="password" required placeholder="Your Trovis password">
     <div class="err" id="err"></div>
     <button type="submit" class="btn">Authorize</button>
     <button type="button" class="btn btn-cancel" onclick="window.close()">Cancel</button>
@@ -2729,7 +2729,7 @@ _action_agents: dict[int, str] = {}
 
 @app.post("/actions/connect")
 async def action_connect(request: Request):
-    """Register a ChatGPT agent with Oversee. Call at the start of a conversation."""
+    """Register a ChatGPT agent with Trovis. Call at the start of a conversation."""
     account_id = _resolve_action_account(request)
     if account_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -2769,7 +2769,7 @@ async def action_connect(request: Request):
         },
     }], account_id=account_id)
     return {"status": "connected", "agent_name": name,
-            "message": f"Connected to Oversee as '{name}'. Activity is now being monitored."}
+            "message": f"Connected to Trovis as '{name}'. Activity is now being monitored."}
 
 
 @app.post("/actions/log")
@@ -2860,7 +2860,7 @@ async def action_status(request: Request):
     return {
         "status": "active",
         "agent_name": service,
-        "message": f"Oversee monitoring active{' — reporting as ' + repr(service) if service else ''}.",
+        "message": f"Trovis monitoring active{' — reporting as ' + repr(service) if service else ''}.",
     }
 
 
@@ -2870,8 +2870,8 @@ async def actions_openapi():
     return {
         "openapi": "3.1.0",
         "info": {
-            "title": "Oversee Agent Monitoring",
-            "description": "Monitor your AI agents with Oversee. Track activity, log steps, and report completions.",
+            "title": "Trovis Agent Monitoring",
+            "description": "Monitor your AI agents with Trovis. Track activity, log steps, and report completions.",
             "version": "1.0.0",
         },
         "servers": [{"url": _OVERSEE_API_URL}],
@@ -2879,7 +2879,7 @@ async def actions_openapi():
             "/actions/connect": {
                 "post": {
                     "operationId": "connectAgent",
-                    "summary": "Register an agent with Oversee monitoring",
+                    "summary": "Register an agent with Trovis monitoring",
                     "description": "Call at the start of each conversation to register this agent. Provide the agent's name, role, and instructions.",
                     "requestBody": {
                         "required": True,
@@ -2954,7 +2954,7 @@ async def actions_openapi():
                 "get": {
                     "operationId": "checkStatus",
                     "summary": "Check monitoring connection status",
-                    "description": "Check if Oversee monitoring is active and which agent is being tracked.",
+                    "description": "Check if Trovis monitoring is active and which agent is being tracked.",
                     "responses": {"200": {"description": "Monitoring status"}},
                 },
             },

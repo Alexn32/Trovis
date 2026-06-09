@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
-import { SendIcon, SparkleIcon } from './Icons.jsx'
+import { SendIcon, TrovisMark } from './Icons.jsx'
 
 // Conversational interface, wired to POST /ask. Stateless on the backend:
 // the full thread ships with every request, which is how we get multi-turn
@@ -125,7 +125,7 @@ export default function Ask() {
       <div className="ask-shell">
         <div className="ask-empty">
           <span className="ask-empty-icon">
-            <SparkleIcon size={24} />
+            <TrovisMark size={24} />
           </span>
           <h2>Ask anything about your agents</h2>
           <p className="ask-empty-subtitle">

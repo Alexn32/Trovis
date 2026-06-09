@@ -18,7 +18,7 @@ import {
   ChevronRightIcon,
   PencilIcon,
   SendIcon,
-  SparkleIcon,
+  TrovisMark,
   TrashIcon,
 } from './Icons.jsx'
 
@@ -314,7 +314,7 @@ function DetailHead({ summary, registration, agentId, account }) {
               </>
             ) : (
               <>
-                <SparkleIcon size={13} /> Generate now
+                <TrovisMark size={13} /> Generate now
               </>
             )}
           </button>
@@ -835,7 +835,7 @@ function AskAboutAgent({ summary, agentId }) {
       <div className="section-block-header">
         <h3 className="section-label">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-            <SparkleIcon size={13} /> Ask about this agent
+            <TrovisMark size={13} /> Ask about this agent
           </span>
         </h3>
       </div>
