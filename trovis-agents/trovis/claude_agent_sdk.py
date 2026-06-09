@@ -1,13 +1,13 @@
-"""Claude Agent SDK support for Oversee.
+"""Claude Agent SDK support for Trovis.
 
 The Claude Agent SDK (`claude-agent-sdk`) drives the Claude Code engine
 via `query()` and `ClaudeSDKClient` — this is NOT the
-`anthropic.beta.agents` Managed Agents API (that's `oversee/anthropic.py`).
+`anthropic.beta.agents` Managed Agents API (that's `trovis/anthropic.py`).
 The two are easy to confuse; they're different products with different
 entry points.
 
 This adapter wraps `claude_agent_sdk.query()` so each run's message
-stream becomes Oversee spans, using the same vocabulary as every other
+stream becomes Trovis spans, using the same vocabulary as every other
 platform:
 
     options.system_prompt        → agent_registration (once per agent)
@@ -35,9 +35,9 @@ from typing import Any, AsyncIterator, Optional
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from oversee.registration import is_capture_enabled
+from trovis.registration import is_capture_enabled
 
-logger = logging.getLogger("oversee.claude_agent_sdk")
+logger = logging.getLogger("trovis.claude_agent_sdk")
 
 _PATCHED = False
 _ORIGINALS: dict[str, Any] = {}
@@ -53,7 +53,7 @@ _SOUL_BYTE_LIMIT = 32 * 1024
 
 
 def setup_claude_agent_sdk() -> bool:
-    """Monkey-patch the Claude Agent SDK to emit Oversee spans. Idempotent.
+    """Monkey-patch the Claude Agent SDK to emit Trovis spans. Idempotent.
 
     Patches `claude_agent_sdk.query` (the primary entry point) and, when
     present, `ClaudeSDKClient.receive_response` (the streaming entry
@@ -69,7 +69,7 @@ def setup_claude_agent_sdk() -> bool:
         import claude_agent_sdk  # noqa: F401
     except ImportError:
         logger.warning(
-            "[Oversee] claude-agent-sdk not installed — Claude Agent SDK "
+            "[Trovis] claude-agent-sdk not installed — Claude Agent SDK "
             "instrumentation is disabled. Install with: "
             "pip install claude-agent-sdk"
         )
@@ -78,7 +78,7 @@ def setup_claude_agent_sdk() -> bool:
     patched_any = _patch_query() | _patch_client_stream()
     if not patched_any:
         logger.warning(
-            "[Oversee] claude-agent-sdk present but neither query() nor "
+            "[Trovis] claude-agent-sdk present but neither query() nor "
             "ClaudeSDKClient.receive_response could be patched — the SDK's "
             "shape is unexpected."
         )
@@ -126,7 +126,7 @@ def _patch_client_stream() -> bool:
         cls.receive_response = patched  # type: ignore[method-assign]
         return True
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"[Oversee] could not patch ClaudeSDKClient: {e}")
+        logger.debug(f"[Trovis] could not patch ClaudeSDKClient: {e}")
         return False
 
 
@@ -154,7 +154,7 @@ async def _instrumented_stream(
         try:
             _emit_for_message(message, agent_name, state)
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Oversee] message span emit failed: {e}")
+            logger.debug(f"[Trovis] message span emit failed: {e}")
         yield message
 
 
@@ -162,7 +162,7 @@ def _emit_for_message(
     message: Any, agent_name: str, state: dict[str, Any]
 ) -> None:
     kind = type(message).__name__
-    tracer = trace.get_tracer("oversee.claude_agent_sdk")
+    tracer = trace.get_tracer("trovis.claude_agent_sdk")
 
     if kind == "SystemMessage":
         # init system message carries session_id + model + tools.
@@ -181,15 +181,15 @@ def _emit_for_message(
     if kind == "UserMessage":
         text = _extract_text(_get(message, "content"))
         with tracer.start_as_current_span("message_received") as span:
-            span.set_attribute("oversee.event.type", "message_received")
-            span.set_attribute("oversee.agent.id", agent_name)
+            span.set_attribute("trovis.event.type", "message_received")
+            span.set_attribute("trovis.agent.id", agent_name)
             if run_id:
-                span.set_attribute("oversee.run.id", run_id)
+                span.set_attribute("trovis.run.id", run_id)
             if text:
-                span.set_attribute("oversee.message.content_length", len(text))
+                span.set_attribute("trovis.message.content_length", len(text))
                 if is_capture_enabled():
                     span.set_attribute(
-                        "oversee.message.content",
+                        "trovis.message.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
 
@@ -210,16 +210,16 @@ def _emit_for_message(
         text = "\n".join(text_parts)
         if text:
             with tracer.start_as_current_span("llm_output") as span:
-                span.set_attribute("oversee.event.type", "llm_output")
-                span.set_attribute("oversee.agent.id", agent_name)
+                span.set_attribute("trovis.event.type", "llm_output")
+                span.set_attribute("trovis.agent.id", agent_name)
                 if run_id:
-                    span.set_attribute("oversee.run.id", run_id)
+                    span.set_attribute("trovis.run.id", run_id)
                 if model:
                     span.set_attribute("gen_ai.request.model", str(model))
-                span.set_attribute("oversee.response.content_length", len(text))
+                span.set_attribute("trovis.response.content_length", len(text))
                 if is_capture_enabled():
                     span.set_attribute(
-                        "oversee.response.content",
+                        "trovis.response.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
 
@@ -231,23 +231,23 @@ def _emit_tool_use(
     tracer: Any, block: Any, agent_name: str, run_id: str
 ) -> None:
     with tracer.start_as_current_span("tool_call") as span:
-        span.set_attribute("oversee.event.type", "tool_call")
-        span.set_attribute("oversee.agent.id", agent_name)
+        span.set_attribute("trovis.event.type", "tool_call")
+        span.set_attribute("trovis.agent.id", agent_name)
         if run_id:
-            span.set_attribute("oversee.run.id", run_id)
+            span.set_attribute("trovis.run.id", run_id)
         name = _get(block, "name")
         if name:
-            span.set_attribute("oversee.tool.name", str(name))
+            span.set_attribute("trovis.tool.name", str(name))
         bid = _get(block, "id")
         if bid:
-            span.set_attribute("oversee.tool.call_id", str(bid))
+            span.set_attribute("trovis.tool.call_id", str(bid))
         # Param KEYS only by default (values may carry user data).
         tool_input = _get(block, "input")
         if isinstance(tool_input, dict):
             import json as _json
 
             span.set_attribute(
-                "oversee.tool.param_keys", _json.dumps(list(tool_input.keys()))
+                "trovis.tool.param_keys", _json.dumps(list(tool_input.keys()))
             )
 
 
@@ -260,11 +260,11 @@ def _emit_result(
     is_error = bool(_get(message, "is_error"))
 
     with tracer.start_as_current_span("agent_run_complete") as span:
-        span.set_attribute("oversee.event.type", "agent_run_complete")
-        span.set_attribute("oversee.agent.id", agent_name)
+        span.set_attribute("trovis.event.type", "agent_run_complete")
+        span.set_attribute("trovis.agent.id", agent_name)
         if sid:
-            span.set_attribute("oversee.run.id", sid)
-        span.set_attribute("oversee.run.success", not is_error)
+            span.set_attribute("trovis.run.id", sid)
+        span.set_attribute("trovis.run.success", not is_error)
         if is_error:
             span.set_status(StatusCode.ERROR)
 
@@ -315,18 +315,18 @@ def _maybe_register(call_kwargs: dict[str, Any]) -> None:
         return
     _REGISTERED.add(sig)
 
-    tracer = trace.get_tracer("oversee.claude_agent_sdk")
+    tracer = trace.get_tracer("trovis.claude_agent_sdk")
     span = tracer.start_span("agent_registration")
     try:
-        span.set_attribute("oversee.event.type", "agent_registration")
-        span.set_attribute("oversee.agent.id", agent_name)
+        span.set_attribute("trovis.event.type", "agent_registration")
+        span.set_attribute("trovis.agent.id", agent_name)
         if soul:
-            span.set_attribute("oversee.agent.soul", _truncate(soul, _SOUL_BYTE_LIMIT))
-        span.set_attribute("oversee.agent.identity", agent_name)
-        span.set_attribute("oversee.agent.platform", "claude-agent-sdk")
+            span.set_attribute("trovis.agent.soul", _truncate(soul, _SOUL_BYTE_LIMIT))
+        span.set_attribute("trovis.agent.identity", agent_name)
+        span.set_attribute("trovis.agent.platform", "claude-agent-sdk")
         if model:
-            span.set_attribute("oversee.agent.model", str(model))
-        span.set_attribute("oversee.agent.workspace_path", "")
+            span.set_attribute("trovis.agent.model", str(model))
+        span.set_attribute("trovis.agent.workspace_path", "")
     finally:
         span.end()
 

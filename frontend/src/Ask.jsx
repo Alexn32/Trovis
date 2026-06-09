@@ -109,7 +109,7 @@ export default function Ask() {
         'error rates, durations) but you cannot quote the actual content ' +
         'of messages, responses, or tool results — that data has not been ' +
         'captured. If the user asks about content, suggest they enable ' +
-        'capture by running `/oversee capture on` in their agent\'s chat.'
+        'capture by running `/trovis capture on` in their agent\'s chat.'
       )
     }
     return lines.join('\n')

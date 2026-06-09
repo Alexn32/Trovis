@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "oversee-agents"
-version = "0.3.0"
-description = "Connect your OpenAI agents to Oversee — two lines of code for full observability"
+name = "trovis-agents"
+version = "0.4.0"
+description = "Connect your agents to Trovis — two lines of code for full observability"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Oversee" }]
-keywords = ["openai", "agents", "observability", "opentelemetry", "oversee"]
+authors = [{ name = "Trovis" }]
+keywords = ["openai", "agents", "observability", "opentelemetry", "trovis"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -29,11 +29,11 @@ dependencies = [
 ]
 
 # Per-platform extras so users only install what they need:
-#   pip install oversee-agents[openai]      → OpenAI Agents SDK support
-#   pip install oversee-agents[anthropic]   → Claude Managed Agents support
-#   pip install oversee-agents[hermes]      → Hermes Agent plugin (no extra
-#                                              deps — Hermes provides the ctx)
-#   pip install oversee-agents[all]         → every platform's extras
+#   pip install trovis-agents[openai]      → OpenAI Agents SDK support
+#   pip install trovis-agents[anthropic]   → Claude Managed Agents support
+#   pip install trovis-agents[hermes]      → Hermes Agent plugin (no extra
+#                                             deps — Hermes provides the ctx)
+#   pip install trovis-agents[all]         → every platform's extras
 [project.optional-dependencies]
 openai = [
     "openai-agents-opentelemetry>=0.2.0",
@@ -58,20 +58,20 @@ dev = [
 ]
 
 # Hermes discovers plugins via Python entry points. Pointing at
-# `oversee.hermes_plugin` exposes that package's `register` function
+# `trovis.hermes_plugin` exposes that package's `register` function
 # to Hermes' loader.
 [project.entry-points."hermes_agent.plugins"]
-oversee = "oversee.hermes_plugin"
+trovis = "trovis.hermes_plugin"
 
 [project.urls]
 Homepage = "https://oversee.dev"
 Repository = "https://github.com/Alexn32/Oversee"
 
 [tool.setuptools.packages.find]
-include = ["oversee*"]
+include = ["trovis*"]
 
 # Ship plugin.yaml inside the wheel. Without this, the Hermes
 # manifest gets dropped at build time and the plugin loader can't
 # find it post-install.
 [tool.setuptools.package-data]
-"oversee.hermes_plugin" = ["plugin.yaml"]
+"trovis.hermes_plugin" = ["plugin.yaml"]

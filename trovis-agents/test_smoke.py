@@ -1,4 +1,4 @@
-"""Smoke test for the oversee-agents package.
+"""Smoke test for the trovis-agents package.
 
 Run from the package root:
 
@@ -47,15 +47,15 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 try:
-    step(1, "Importing oversee…")
-    import oversee
-    check("import oversee", True, f"version={oversee.__version__}")
-    check("init is callable", callable(oversee.init))
+    step(1, "Importing trovis…")
+    import trovis
+    check("import trovis", True, f"version={trovis.__version__}")
+    check("init is callable", callable(trovis.init))
 
     step(2, "Calling init() with a dummy endpoint (won't actually export)…")
     # Point at a localhost port nothing is listening on so the BatchSpanProcessor
     # quietly retries-and-drops without hanging on shutdown.
-    oversee.init(
+    trovis.init(
         api_key="test-key",
         agent_name="smoke-test-agent",
         endpoint="http://127.0.0.1:1/v1/traces",
@@ -77,11 +77,11 @@ try:
     step(4, "Emitting a manual span…")
     tracer = trace.get_tracer("smoke-test")
     with tracer.start_as_current_span("manual_span") as span:
-        span.set_attribute("oversee.smoke", "true")
+        span.set_attribute("trovis.smoke", "true")
     check("manual span emitted", True)
 
     step(5, "Toggling capture flag at runtime…")
-    from oversee.registration import is_capture_enabled, set_capture_outputs
+    from trovis.registration import is_capture_enabled, set_capture_outputs
 
     set_capture_outputs(True)
     check("capture flag flipped on", is_capture_enabled())
@@ -107,7 +107,7 @@ try:
         print("    SKIP — `agents` (openai-agents) not installed in this env")
 
     step(7, "Re-calling init() is idempotent…")
-    oversee.init(api_key="another-key", agent_name="smoke-test-agent")
+    trovis.init(api_key="another-key", agent_name="smoke-test-agent")
     check("second init() returned without raising", True)
 
     step(8, "Anthropic instrumentation (skipped if anthropic not installed)…")
@@ -115,7 +115,7 @@ try:
         import anthropic  # noqa: F401
         from anthropic.resources.beta.agents import Agents
         from anthropic.resources.beta.sessions import Sessions
-        from oversee.anthropic import (
+        from trovis.anthropic import (
             _is_patched,
             _reset_for_tests,
             setup_anthropic,
@@ -148,7 +148,7 @@ try:
         )
 
         # track_session round-trip — registers then cleans up.
-        from oversee.anthropic import _SESSION_TO_AGENT as _MAP
+        from trovis.anthropic import _SESSION_TO_AGENT as _MAP
         with track_session("sess_smoke", agent_name="smoke-bot"):
             check(
                 "track_session sets the mapping",
@@ -196,7 +196,7 @@ try:
     # platform-explicit re-init shouldn't crash even on an already-
     # initialized SDK. (Note: _INITIALIZED is true from step 2 so the
     # internal early-return path fires; this exercises that path.)
-    oversee.init(
+    trovis.init(
         api_key="another-key",
         agent_name="smoke-test-agent",
         platform="anthropic",
@@ -208,7 +208,7 @@ try:
     # it operates on a `ctx` object the Hermes runtime provides. We
     # build a fake ctx that records which hook/command names were
     # registered, then run `register(ctx)` and assert what landed.
-    from oversee.hermes_plugin import register as hermes_register
+    from trovis.hermes_plugin import register as hermes_register
 
     class FakeHermesCtx:
         def __init__(self):
@@ -232,28 +232,28 @@ try:
         any(name == "post_tool_call" for name, _ in ctx.hooks),
     )
     check(
-        "register_command('oversee', …)",
-        any(name == "oversee" for name, _, _ in ctx.commands),
+        "register_command('trovis', …)",
+        any(name == "trovis" for name, _, _ in ctx.commands),
     )
     check(
-        "register_cli_command('oversee', …)",
-        any(name == "oversee" for name, _, _, _ in ctx.cli),
+        "register_cli_command('trovis', …)",
+        any(name == "trovis" for name, _, _, _ in ctx.cli),
     )
 
-    # Drive the /oversee chat command end-to-end.
+    # Drive the /trovis chat command end-to-end.
     import json as _json
 
-    _, cmd_fn, _ = next(c for c in ctx.commands if c[0] == "oversee")
+    _, cmd_fn, _ = next(c for c in ctx.commands if c[0] == "trovis")
     status_resp = _json.loads(cmd_fn("status"))
-    check("/oversee status returns success", status_resp.get("success") is True)
+    check("/trovis status returns success", status_resp.get("success") is True)
     help_resp = _json.loads(cmd_fn(""))
     check(
-        "/oversee (no args) returns help text",
-        "Oversee commands" in help_resp.get("message", ""),
+        "/trovis (no args) returns help text",
+        "Trovis commands" in help_resp.get("message", ""),
     )
     capture_resp = _json.loads(cmd_fn("capture on"))
     check(
-        "/oversee capture on flips the flag",
+        "/trovis capture on flips the flag",
         "enabled" in capture_resp.get("message", ""),
     )
 
@@ -268,7 +268,7 @@ try:
     # match what the adapter dispatches on (type(m).__name__).
     import asyncio
 
-    from oversee import claude_agent_sdk as cas
+    from trovis import claude_agent_sdk as cas
 
     class SystemMessage:
         def __init__(self, data):
@@ -348,18 +348,18 @@ try:
     # "receiving" side and shares the trace_id.
     with tracer.start_as_current_span("prop_caller") as _caller:
         caller_trace = _caller.get_span_context().trace_id
-        carrier = oversee.inject()
+        carrier = trovis.inject()
     check(
         "inject() produced a traceparent",
         isinstance(carrier, dict) and "traceparent" in carrier,
         f"carrier keys={list(carrier)}",
     )
-    with oversee.continue_trace(carrier, "prop_receiver") as _recv:
+    with trovis.continue_trace(carrier, "prop_receiver") as _recv:
         check(
             "continue_trace continues the same trace",
             _recv.get_span_context().trace_id == caller_trace,
         )
-    check("inject/extract exported by package", hasattr(oversee, "continue_trace"))
+    check("inject/extract exported by package", hasattr(trovis, "continue_trace"))
 
     step(13, "Flushing spans before exit…")
     try:

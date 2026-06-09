@@ -144,7 +144,7 @@ TogetherAiInstrumentor().instrument()`,
 
 // Framework-level instrumentors (CrewAI / LangChain). OpenAI Agents SDK
 // gets its own dedicated onboarding page (OpenAIAgentsInstructions),
-// since the oversee-agents package handles setup in two lines and
+// since the trovis-agents package handles setup in two lines and
 // captures agent identity automatically.
 const FRAMEWORK_INSTRUMENTORS = {
   crewai: {
@@ -179,7 +179,7 @@ function effectiveAgentName(name) {
 function fill(text, agentName, endpoint) {
   return text
     .replaceAll('AGENT_NAME', effectiveAgentName(agentName))
-    .replaceAll('OVERSEE_ENDPOINT', endpoint)
+    .replaceAll('TROVIS_ENDPOINT', endpoint)
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +369,7 @@ function ProviderStep({ onSelect }) {
 
 const QUICK_ENV_TEMPLATE =
 `OTEL_SERVICE_NAME=AGENT_NAME \\
-OTEL_EXPORTER_OTLP_ENDPOINT=OVERSEE_ENDPOINT \\
+OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT \\
 OTEL_EXPORTER_OTLP_PROTOCOL=http/json \\
 OTEL_TRACES_EXPORTER=otlp \\
 python {RUN_FILE}`
@@ -384,7 +384,7 @@ from opentelemetry import trace
 resource = Resource.create({"service.name": "AGENT_NAME"})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="OVERSEE_ENDPOINT"))
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="TROVIS_ENDPOINT"))
 )
 trace.set_tracer_provider(provider)
 
@@ -494,7 +494,7 @@ function PythonXaiInstructions({ agentName, endpoint }) {
 
 telemetry = Telemetry()
 telemetry.setup_otlp_exporter(
-    endpoint="OVERSEE_ENDPOINT"
+    endpoint="TROVIS_ENDPOINT"
 )`,
     agentName, endpoint,
   )
@@ -593,7 +593,7 @@ from opentelemetry import trace
 resource = Resource.create({"service.name": "AGENT_NAME"})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="OVERSEE_ENDPOINT"))
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="TROVIS_ENDPOINT"))
 )
 trace.set_tracer_provider(provider)
 
@@ -688,10 +688,10 @@ function OpenClawInstructions() {
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — OpenAI Agents SDK (oversee-agents pip package)
+// Instructions page — OpenAI Agents SDK (trovis-agents pip package)
 // ---------------------------------------------------------------------------
 //
-// Two-line install via the dedicated SDK we ship at oversee-agents/. The
+// Two-line install via the dedicated SDK we ship at trovis-agents/. The
 // page pre-fills the operator's endpoint + API key the same way the
 // OpenClaw page does so they can paste the full setup snippet without
 // chasing values from elsewhere.
@@ -699,30 +699,30 @@ function OpenClawInstructions() {
 function OpenAIAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
-  const installCmd = 'pip install oversee-agents[openai]'
+  const installCmd = 'pip install trovis-agents[openai]'
   // The setup snippet uses our `fill()` substitution for AGENT_NAME +
-  // OVERSEE_ENDPOINT. The API key is substituted separately because
+  // TROVIS_ENDPOINT. The API key is substituted separately because
   // it's not in the standard placeholder set — we fall back to a
   // visible `ov_sk_…` placeholder when the user is logged out so the
   // snippet still reads cleanly.
   const setupCode = fill(
 `from agents import Agent, Runner
-from oversee import init
+from trovis import init
 
-init(api_key="OVERSEE_API_KEY", agent_name="AGENT_NAME")
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME")
 
 # Your existing code — no changes needed
 agent = Agent(name="Support", instructions="You handle customer tickets…")
 result = await Runner.run(agent, "Help me with my order")`,
     agentName,
     resolvedEndpoint,
-  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
     <>
       <h2 className="instructions-title">Connect OpenAI Agents SDK</h2>
       <p className="instructions-subtitle">
-        Two-line setup with the <code>oversee-agents</code> package.
+        Two-line setup with the <code>trovis-agents</code> package.
         Your existing <code>Agent</code> and <code>Runner</code> code
         stays unchanged.
       </p>
@@ -767,17 +767,17 @@ result = await Runner.run(agent, "Help me with my order")`,
       </p>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Trovis API key
+          <code>TROVIS_API_KEY</code> — your Trovis API key
         </li>
         <li>
-          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          <code>TROVIS_ENDPOINT</code> — custom endpoint (defaults to
           the Trovis cloud)
         </li>
         <li>
-          <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
+          <code>TROVIS_AGENT_NAME</code> — default <code>service.name</code>
         </li>
         <li>
-          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>TROVIS_CAPTURE_OUTPUTS</code> — set to{' '}
           <code>true</code> for content capture
         </li>
       </ul>
@@ -788,10 +788,10 @@ result = await Runner.run(agent, "Help me with my order")`,
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — Anthropic Claude Managed Agents (oversee-agents pip package)
+// Instructions page — Anthropic Claude Managed Agents (trovis-agents pip package)
 // ---------------------------------------------------------------------------
 //
-// Mirrors the OpenAI Agents SDK page. The oversee-agents package
+// Mirrors the OpenAI Agents SDK page. The trovis-agents package
 // ships a `platform="anthropic"` mode that monkey-patches the
 // anthropic SDK's beta.agents + beta.sessions resources to emit the
 // same Trovis-named OTEL spans as every other agent platform.
@@ -799,12 +799,12 @@ result = await Runner.run(agent, "Help me with my order")`,
 function AnthropicAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
-  const installCmd = 'pip install oversee-agents[anthropic]'
+  const installCmd = 'pip install trovis-agents[anthropic]'
   const setupCode = fill(
 `import anthropic
-from oversee import init
+from trovis import init
 
-init(api_key="OVERSEE_API_KEY", agent_name="AGENT_NAME", platform="anthropic")
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="anthropic")
 
 # Your existing code — no changes needed
 client = anthropic.Anthropic()
@@ -820,13 +820,13 @@ for event in client.beta.sessions.stream(session.id):
     ...  # your event handling — spans flow into Trovis automatically`,
     agentName,
     resolvedEndpoint,
-  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
     <>
       <h2 className="instructions-title">Connect Claude Managed Agents</h2>
       <p className="instructions-subtitle">
-        Two-line setup with the <code>oversee-agents</code> package.
+        Two-line setup with the <code>trovis-agents</code> package.
         Your <code>client.beta.agents.create</code> and{' '}
         <code>client.beta.sessions.stream</code> calls stay unchanged —
         Trovis patches the SDK transparently.
@@ -873,7 +873,7 @@ for event in client.beta.sessions.stream(session.id):
         hosts), wrap a single client instead:
       </p>
       <CodeBlock
-        code={`from oversee import init, monitor
+        code={`from trovis import init, monitor
 
 init(api_key="${apiKey || 'ov_sk_…'}", platform="anthropic")
 client = monitor(anthropic.Anthropic())
@@ -887,17 +887,17 @@ client = monitor(anthropic.Anthropic())
       </p>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Trovis API key
+          <code>TROVIS_API_KEY</code> — your Trovis API key
         </li>
         <li>
-          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          <code>TROVIS_ENDPOINT</code> — custom endpoint (defaults to
           the Trovis cloud)
         </li>
         <li>
-          <code>OVERSEE_AGENT_NAME</code> — default <code>service.name</code>
+          <code>TROVIS_AGENT_NAME</code> — default <code>service.name</code>
         </li>
         <li>
-          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>TROVIS_CAPTURE_OUTPUTS</code> — set to{' '}
           <code>true</code> for content capture
         </li>
       </ul>
@@ -908,7 +908,7 @@ client = monitor(anthropic.Anthropic())
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — Claude Agent SDK (oversee-agents, query() patch)
+// Instructions page — Claude Agent SDK (trovis-agents, query() patch)
 // ---------------------------------------------------------------------------
 //
 // Distinct from "Claude Managed Agents" above: this is the
@@ -919,13 +919,13 @@ client = monitor(anthropic.Anthropic())
 function ClaudeAgentSdkInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
-  const installCmd = 'pip install oversee-agents[claude-agent-sdk]'
+  const installCmd = 'pip install trovis-agents[claude-agent-sdk]'
   const setupCode = fill(
 `from claude_agent_sdk import query, ClaudeAgentOptions
-from oversee import init
+from trovis import init
 
 # Call init() BEFORE importing/using query so the patch is in place.
-init(api_key="OVERSEE_API_KEY", agent_name="AGENT_NAME", platform="claude-agent-sdk")
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="claude-agent-sdk")
 
 # Your existing code — no changes needed
 async for message in query(
@@ -935,7 +935,7 @@ async for message in query(
     ...  # handle messages as you already do`,
     agentName,
     resolvedEndpoint,
-  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
     <>
@@ -997,18 +997,18 @@ async for message in query(
       <h3 className="section-title section-title-spaced">Environment variables</h3>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Trovis API key
+          <code>TROVIS_API_KEY</code> — your Trovis API key
         </li>
         <li>
-          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          <code>TROVIS_ENDPOINT</code> — custom endpoint (defaults to
           the Trovis cloud)
         </li>
         <li>
-          <code>OVERSEE_AGENT_NAME</code> — default{' '}
+          <code>TROVIS_AGENT_NAME</code> — default{' '}
           <code>service.name</code>
         </li>
         <li>
-          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>TROVIS_CAPTURE_OUTPUTS</code> — set to{' '}
           <code>true</code> for content capture
         </li>
       </ul>
@@ -1019,43 +1019,43 @@ async for message in query(
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — Hermes Agent (oversee-agents pip package, entry point)
+// Instructions page — Hermes Agent (trovis-agents pip package, entry point)
 // ---------------------------------------------------------------------------
 //
 // Hermes discovers plugins via Python entry points, so the install
-// is `pip install oversee-agents[hermes]` plus `hermes plugins enable
-// oversee` — no scaffold to copy around. Same span vocabulary as the
-// OpenClaw plugin (and same `/oversee` chat command) so muscle memory
+// is `pip install trovis-agents[hermes]` plus `hermes plugins enable
+// trovis` — no scaffold to copy around. Same span vocabulary as the
+// OpenClaw plugin (and same `/trovis` chat command) so muscle memory
 // transfers cleanly between platforms.
 
 function HermesAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
-  const installCmd = 'pip install oversee-agents[hermes]'
-  const enableCmd = 'hermes plugins enable oversee'
+  const installCmd = 'pip install trovis-agents[hermes]'
+  const enableCmd = 'hermes plugins enable trovis'
   // Hermes prompts for these env vars at `plugins enable` time per the
   // plugin.yaml `requires_env` declaration; we also surface them here
   // so operators who'd rather set the shell env directly have a clear
   // recipe with their actual key/endpoint in place.
   const envExport = fill(
-`export OVERSEE_API_KEY="OVERSEE_API_KEY"
-export OVERSEE_ENDPOINT="OVERSEE_ENDPOINT"
-export OVERSEE_AGENT_NAME="AGENT_NAME"`,
+`export TROVIS_API_KEY="TROVIS_API_KEY"
+export TROVIS_ENDPOINT="TROVIS_ENDPOINT"
+export TROVIS_AGENT_NAME="AGENT_NAME"`,
     agentName,
     resolvedEndpoint,
-  ).replace('OVERSEE_API_KEY', apiKey || 'ov_sk_…')
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
   const chatCmds =
-`/oversee connect ${resolvedEndpoint}
-/oversee apikey ${apiKey || 'ov_sk_…'}
-/oversee capture on
-/oversee status`
+`/trovis connect ${resolvedEndpoint}
+/trovis apikey ${apiKey || 'ov_sk_…'}
+/trovis capture on
+/trovis status`
 
   return (
     <>
       <h2 className="instructions-title">Connect Hermes Agent</h2>
       <p className="instructions-subtitle">
         One <code>pip install</code> + one <code>hermes plugins enable</code>.
-        The plugin is bundled inside <code>oversee-agents</code> and exposed
+        The plugin is bundled inside <code>trovis-agents</code> and exposed
         via a Python entry point, so Hermes finds it automatically.
       </p>
 
@@ -1073,7 +1073,7 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
       <NumberedStep n={2} title="Enable the Trovis plugin in Hermes">
         <CodeBlock code={enableCmd} />
         <p style={{ marginTop: 8 }}>
-          Hermes will prompt you for <code>OVERSEE_API_KEY</code> the
+          Hermes will prompt you for <code>TROVIS_API_KEY</code> the
           first time. You can also set these in your shell ahead of
           time:
         </p>
@@ -1083,7 +1083,7 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
       <NumberedStep n={3} title="(Optional) Configure from chat">
         <p>
           Once Hermes is running, the plugin registers an{' '}
-          <code>/oversee</code> slash command so you can adjust the
+          <code>/trovis</code> slash command so you can adjust the
           connection without restarting:
         </p>
         <CodeBlock code={chatCmds} />
@@ -1095,8 +1095,8 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
         start), every <code>post_tool_call</code> as a{' '}
         <code>tool_call</code> span with the tool name and parameter
         keys. Tool results and <code>memory.md</code> are <em>not</em>{' '}
-        captured unless you flip <code>OVERSEE_CAPTURE_OUTPUTS=true</code>{' '}
-        or run <code>/oversee capture on</code>.
+        captured unless you flip <code>TROVIS_CAPTURE_OUTPUTS=true</code>{' '}
+        or run <code>/trovis capture on</code>.
       </Callout>
 
       <h3 className="section-title section-title-spaced">Manual install (alternative)</h3>
@@ -1105,24 +1105,24 @@ export OVERSEE_AGENT_NAME="AGENT_NAME"`,
         the plugin directory in by hand:
       </p>
       <CodeBlock
-        code={`cp -r $(python -c "import oversee.hermes_plugin, os; print(os.path.dirname(oversee.hermes_plugin.__file__))") ~/.hermes/plugins/oversee`}
+        code={`cp -r $(python -c "import trovis.hermes_plugin, os; print(os.path.dirname(trovis.hermes_plugin.__file__))") ~/.hermes/plugins/trovis`}
       />
 
       <h3 className="section-title section-title-spaced">Environment variables</h3>
       <ul>
         <li>
-          <code>OVERSEE_API_KEY</code> — your Trovis API key
+          <code>TROVIS_API_KEY</code> — your Trovis API key
         </li>
         <li>
-          <code>OVERSEE_ENDPOINT</code> — custom endpoint (defaults to
+          <code>TROVIS_ENDPOINT</code> — custom endpoint (defaults to
           the Trovis cloud)
         </li>
         <li>
-          <code>OVERSEE_AGENT_NAME</code> — default{' '}
+          <code>TROVIS_AGENT_NAME</code> — default{' '}
           <code>service.name</code> (defaults to <code>hermes-agent</code>)
         </li>
         <li>
-          <code>OVERSEE_CAPTURE_OUTPUTS</code> — set to{' '}
+          <code>TROVIS_CAPTURE_OUTPUTS</code> — set to{' '}
           <code>true</code> to include tool results + memory.md
         </li>
       </ul>
@@ -1166,8 +1166,8 @@ function PrefillBlock({ label, value, placeholder }) {
 }
 
 function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
-  const connectCmd = `/oversee connect ${endpoint}`
-  const apikeyCmd = `/oversee apikey ${apiKey || 'YOUR_KEY'}`
+  const connectCmd = `/trovis connect ${endpoint}`
+  const apikeyCmd = `/trovis apikey ${apiKey || 'YOUR_KEY'}`
   return (
     <>
       <p className="tab-subtitle">
@@ -1197,7 +1197,7 @@ function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
       </NumberedStep>
 
       <NumberedStep n={4} title="(Optional) Enable output capture">
-        <CodeBlock code="/oversee capture on" />
+        <CodeBlock code="/trovis capture on" />
         <p className="helper-text">
           Recommended — lets you see what your agents actually produce
           (messages, responses, tool results) in the dashboard.
@@ -1205,7 +1205,7 @@ function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
       </NumberedStep>
 
       <NumberedStep n={5} title="Verify">
-        <CodeBlock code="/oversee status" />
+        <CodeBlock code="/trovis status" />
       </NumberedStep>
 
       <SuccessCallout />
@@ -1215,10 +1215,10 @@ function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
 
 function OpenClawTerminalSetup({ endpoint, apiKey, installCmd }) {
   const configCommands =
-    `openclaw config set plugins.entries.oversee.config.endpoint "${endpoint}"\n` +
-    `openclaw config set plugins.entries.oversee.config.apiKey "${apiKey || 'YOUR_KEY'}"`
+    `openclaw config set plugins.entries.trovis.config.endpoint "${endpoint}"\n` +
+    `openclaw config set plugins.entries.trovis.config.apiKey "${apiKey || 'YOUR_KEY'}"`
   const captureCmd =
-    'openclaw config set plugins.entries.oversee.config.captureOutputs true'
+    'openclaw config set plugins.entries.trovis.config.captureOutputs true'
   return (
     <>
       <p className="tab-subtitle">
@@ -1316,7 +1316,7 @@ function ClaudeCodeInstructions({ endpoint }) {
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "OVERSEE_ENDPOINT"
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "TROVIS_ENDPOINT"
   }
 }`,
     '', endpoint,
@@ -1356,7 +1356,7 @@ const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumenta
 
 const sdk = new NodeSDK({
   traceExporter: new OTLPTraceExporter({
-    url: 'OVERSEE_ENDPOINT',
+    url: 'TROVIS_ENDPOINT',
   }),
   serviceName: 'AGENT_NAME',
   instrumentations: [getNodeAutoInstrumentations()],
@@ -1395,7 +1395,7 @@ sdk.start();`,
 function OtherInstructions({ agentName, endpoint }) {
   const envBlock = fill(
 `OTEL_SERVICE_NAME=AGENT_NAME
-OTEL_EXPORTER_OTLP_ENDPOINT=OVERSEE_ENDPOINT
+OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT
 OTEL_EXPORTER_OTLP_PROTOCOL=http/json
 OTEL_TRACES_EXPORTER=otlp`,
     agentName, endpoint,

@@ -1,30 +1,30 @@
 {
-  "id": "oversee",
-  "name": "Oversee Agent Management",
-  "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Oversee dashboard.",
-  "version": "0.2.8",
-  "author": "Oversee",
+  "id": "trovis",
+  "name": "Trovis Agent Management",
+  "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Trovis dashboard.",
+  "version": "0.3.0",
+  "author": "Trovis",
   "homepage": "https://oversee.dev",
   "activation": {
     "onStartup": true
   },
   "contracts": {
-    "commands": ["oversee"]
+    "commands": ["trovis"]
   },
   "configSchema": {
     "type": "object",
     "properties": {
       "endpoint": {
         "type": "string",
-        "description": "Oversee endpoint URL. Required — the plugin is inert until this is set."
+        "description": "Trovis endpoint URL. Required — the plugin is inert until this is set."
       },
       "agentName": {
         "type": "string",
-        "description": "Agent name shown in Oversee dashboard"
+        "description": "Agent name shown in Trovis dashboard"
       },
       "apiKey": {
         "type": "string",
-        "description": "Your Oversee API key from oversee.dev"
+        "description": "Your Trovis API key from oversee.dev"
       },
       "enabled": {
         "type": "boolean",

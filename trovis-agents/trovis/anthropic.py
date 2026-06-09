@@ -1,8 +1,8 @@
-"""Anthropic Claude Managed Agents support for Oversee.
+"""Anthropic Claude Managed Agents support for Trovis.
 
 The Anthropic SDK exposes `client.beta.agents.create(...)`,
 `client.beta.sessions.create(...)`, and `client.beta.sessions.stream(...)`.
-This module hooks each one to emit Oversee-named OTEL spans matching
+This module hooks each one to emit Trovis-named OTEL spans matching
 the rest of the dashboard's vocabulary:
 
   - agents.create()        → agent_registration span (soul, model, tools)
@@ -26,7 +26,7 @@ Three ways to activate, in increasing invasiveness:
 
 All paths fail soft: if `anthropic` isn't installed, or the SDK ships
 under different class paths than expected, we log a warning and the
-rest of Oversee keeps working.
+rest of Trovis keeps working.
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ from typing import Any, Iterator, Optional
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
-from oversee.registration import is_capture_enabled
+from trovis.registration import is_capture_enabled
 
-logger = logging.getLogger("oversee.anthropic")
+logger = logging.getLogger("trovis.anthropic")
 
 # Module state. setup_anthropic() is idempotent — these guard the
 # patches from being applied twice.
@@ -71,7 +71,7 @@ _CONTENT_BYTE_LIMIT = 10_000
 
 
 def setup_anthropic() -> bool:
-    """Monkey-patch the anthropic SDK to emit Oversee spans. Idempotent.
+    """Monkey-patch the anthropic SDK to emit Trovis spans. Idempotent.
 
     Returns True when at least one patch was applied. Returns False —
     with a warning logged — when anthropic isn't installed or the
@@ -86,7 +86,7 @@ def setup_anthropic() -> bool:
         import anthropic  # noqa: F401
     except ImportError:
         logger.warning(
-            "[Oversee] anthropic SDK not installed — Claude Managed "
+            "[Trovis] anthropic SDK not installed — Claude Managed "
             "Agents instrumentation is disabled. Install with: "
             "pip install anthropic"
         )
@@ -100,7 +100,7 @@ def setup_anthropic() -> bool:
 
     if not (a or s or t):
         logger.warning(
-            "[Oversee] Could not locate any anthropic.beta resource "
+            "[Trovis] Could not locate any anthropic.beta resource "
             "classes to patch. Falling back to monitor(client) per "
             "instance is recommended."
         )
@@ -111,7 +111,7 @@ def setup_anthropic() -> bool:
 
 
 def monitor(client: Any) -> Any:
-    """Apply Oversee instrumentation to a single Anthropic client.
+    """Apply Trovis instrumentation to a single Anthropic client.
 
     Useful when class-level monkey-patching is undesirable (multiple
     clients with different telemetry needs) or fragile (SDK version
@@ -124,7 +124,7 @@ def monitor(client: Any) -> Any:
         sessions = beta.sessions
     except AttributeError as e:
         logger.warning(
-            f"[Oversee] monitor(): client.beta.{{agents,sessions}} not "
+            f"[Trovis] monitor(): client.beta.{{agents,sessions}} not "
             f"found — anthropic SDK shape unexpected ({e}). Returning "
             f"client unchanged."
         )
@@ -143,7 +143,7 @@ def monitor(client: Any) -> Any:
 def track_session(session_id: str, agent_name: str = "main") -> Iterator[None]:
     """Register a session_id → agent_name mapping for the duration of
     the block. Spans emitted by the stream wrapper inside this block
-    are tagged with `oversee.agent.id = agent_name`.
+    are tagged with `trovis.agent.id = agent_name`.
 
     Requires `setup_anthropic()` or `monitor(client)` to have been
     called — track_session alone does not emit per-event spans.
@@ -230,7 +230,7 @@ def _wrap_instance_method(obj: Any, name: str, builder: Any) -> None:
     try:
         original = getattr(obj, name)
     except AttributeError:
-        logger.debug(f"[Oversee] {type(obj).__name__}.{name} missing — skipping")
+        logger.debug(f"[Trovis] {type(obj).__name__}.{name} missing — skipping")
         return
     setattr(obj, name, builder(original))
 
@@ -278,7 +278,7 @@ def _resolve_class(
                 return cls
         except ImportError:
             continue
-    logger.debug(f"[Oversee] couldn't resolve {module}.{class_name}")
+    logger.debug(f"[Trovis] couldn't resolve {module}.{class_name}")
     return None
 
 
@@ -289,11 +289,11 @@ def _resolve_class(
 
 def _safe(fn: Any, *args: Any, **kwargs: Any) -> None:
     """Run a recording function; swallow + log any error so user code
-    never breaks because of Oversee."""
+    never breaks because of Trovis."""
     try:
         fn(*args, **kwargs)
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"[Oversee] {fn.__name__} failed: {e}")
+        logger.debug(f"[Trovis] {fn.__name__} failed: {e}")
 
 
 def _record_agent(agent_obj: Any, kwargs: dict[str, Any]) -> None:
@@ -310,19 +310,19 @@ def _record_agent(agent_obj: Any, kwargs: dict[str, Any]) -> None:
     tools = _get(agent_obj, "tools") or kwargs.get("tools") or []
     tool_types = _serialize_tool_types(tools)
 
-    tracer = trace.get_tracer("oversee.anthropic")
+    tracer = trace.get_tracer("trovis.anthropic")
     span = tracer.start_span("agent_registration")
     try:
-        span.set_attribute("oversee.event.type", "agent_registration")
-        span.set_attribute("oversee.agent.id", name)
+        span.set_attribute("trovis.event.type", "agent_registration")
+        span.set_attribute("trovis.agent.id", name)
         if system:
-            span.set_attribute("oversee.agent.soul", _truncate_attr(system))
-        span.set_attribute("oversee.agent.identity", name)
-        span.set_attribute("oversee.agent.model", model_id)
+            span.set_attribute("trovis.agent.soul", _truncate_attr(system))
+        span.set_attribute("trovis.agent.identity", name)
+        span.set_attribute("trovis.agent.model", model_id)
         if tool_types:
-            span.set_attribute("oversee.agent.tools", tool_types)
+            span.set_attribute("trovis.agent.tools", tool_types)
         # Schema parity with the OpenClaw plugin / OpenAI registration.
-        span.set_attribute("oversee.agent.workspace_path", "")
+        span.set_attribute("trovis.agent.workspace_path", "")
     finally:
         span.end()
 
@@ -359,7 +359,7 @@ def _instrumented_iterator(
         try:
             _emit_event_span(event, session_id)
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Oversee] event span emit failed: {e}")
+            logger.debug(f"[Trovis] event span emit failed: {e}")
         yield event
 
 
@@ -372,37 +372,37 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
     )
     run_id = session_id or ""
 
-    tracer = trace.get_tracer("oversee.anthropic")
+    tracer = trace.get_tracer("trovis.anthropic")
 
     if event_type == "user.message":
         text = _extract_text(_get(event, "content"))
         with tracer.start_as_current_span("message_received") as span:
-            span.set_attribute("oversee.event.type", "message_received")
-            span.set_attribute("oversee.agent.id", agent_name)
+            span.set_attribute("trovis.event.type", "message_received")
+            span.set_attribute("trovis.agent.id", agent_name)
             if run_id:
-                span.set_attribute("oversee.run.id", run_id)
+                span.set_attribute("trovis.run.id", run_id)
             if text:
-                span.set_attribute("oversee.message.content_length", len(text))
+                span.set_attribute("trovis.message.content_length", len(text))
                 if is_capture_enabled():
                     span.set_attribute(
-                        "oversee.message.content",
+                        "trovis.message.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
 
     elif event_type == "agent.message":
         text = _extract_text(_get(event, "content"))
         with tracer.start_as_current_span("message_sent") as span:
-            span.set_attribute("oversee.event.type", "message_sent")
-            span.set_attribute("oversee.agent.id", agent_name)
+            span.set_attribute("trovis.event.type", "message_sent")
+            span.set_attribute("trovis.agent.id", agent_name)
             if run_id:
-                span.set_attribute("oversee.run.id", run_id)
+                span.set_attribute("trovis.run.id", run_id)
             if text:
                 span.set_attribute(
-                    "oversee.response.content_length", len(text)
+                    "trovis.response.content_length", len(text)
                 )
                 if is_capture_enabled():
                     span.set_attribute(
-                        "oversee.response.content",
+                        "trovis.response.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
                     )
             # Token usage rides on the agent.message event. Pair it with
@@ -432,31 +432,31 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
 
     elif event_type == "agent.tool_use":
         with tracer.start_as_current_span("tool_call") as span:
-            span.set_attribute("oversee.event.type", "tool_call")
-            span.set_attribute("oversee.agent.id", agent_name)
+            span.set_attribute("trovis.event.type", "tool_call")
+            span.set_attribute("trovis.agent.id", agent_name)
             if run_id:
-                span.set_attribute("oversee.run.id", run_id)
+                span.set_attribute("trovis.run.id", run_id)
             tool_name = _get(event, "name")
             if tool_name:
-                span.set_attribute("oversee.tool.name", str(tool_name))
+                span.set_attribute("trovis.tool.name", str(tool_name))
             tool_id = _get(event, "id")
             if tool_id:
-                span.set_attribute("oversee.tool.call_id", str(tool_id))
+                span.set_attribute("trovis.tool.call_id", str(tool_id))
 
     elif event_type == "session.status_idle":
         with tracer.start_as_current_span("agent_run_complete") as span:
-            span.set_attribute("oversee.event.type", "agent_run_complete")
-            span.set_attribute("oversee.agent.id", agent_name)
+            span.set_attribute("trovis.event.type", "agent_run_complete")
+            span.set_attribute("trovis.agent.id", agent_name)
             if run_id:
-                span.set_attribute("oversee.run.id", run_id)
-            span.set_attribute("oversee.run.success", True)
+                span.set_attribute("trovis.run.id", run_id)
+            span.set_attribute("trovis.run.success", True)
 
     elif event_type and event_type.startswith("agent.error"):
         with tracer.start_as_current_span("agent_error") as span:
-            span.set_attribute("oversee.event.type", "agent_error")
-            span.set_attribute("oversee.agent.id", agent_name)
+            span.set_attribute("trovis.event.type", "agent_error")
+            span.set_attribute("trovis.agent.id", agent_name)
             if run_id:
-                span.set_attribute("oversee.run.id", run_id)
+                span.set_attribute("trovis.run.id", run_id)
             span.set_status(StatusCode.ERROR)
 
 

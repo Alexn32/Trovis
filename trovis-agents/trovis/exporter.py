@@ -1,7 +1,7 @@
 """OTLP/JSON span exporter.
 
 The Python `opentelemetry-exporter-otlp-proto-http` package only emits
-protobuf-encoded payloads. Our Oversee backend (and the OpenClaw plugin
+protobuf-encoded payloads. Our Trovis backend (and the OpenClaw plugin
 that the dashboard is built around) speaks OTLP/JSON — protobuf would
 be a 400. This module ships a minimal JSON exporter so the Python SDK
 talks the same dialect as the rest of the stack.
@@ -20,7 +20,7 @@ import requests
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
-logger = logging.getLogger("oversee.exporter")
+logger = logging.getLogger("trovis.exporter")
 
 
 def _attr_value(value: Any) -> dict[str, Any]:
@@ -146,7 +146,7 @@ class OTLPJsonSpanExporter(SpanExporter):
 
     Mirrors the wire format the Node.js `@opentelemetry/
     exporter-trace-otlp-http` package emits by default — which is
-    what the Oversee backend already understands.
+    what the Trovis backend already understands.
     """
 
     def __init__(
@@ -171,7 +171,7 @@ class OTLPJsonSpanExporter(SpanExporter):
         try:
             payload = _encode(spans)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Oversee] OTLP/JSON encode failed: {e}")
+            logger.warning(f"[Trovis] OTLP/JSON encode failed: {e}")
             return SpanExportResult.FAILURE
 
         try:
@@ -182,13 +182,13 @@ class OTLPJsonSpanExporter(SpanExporter):
                 timeout=self._timeout_sec,
             )
         except requests.RequestException as e:
-            logger.warning(f"[Oversee] OTLP/JSON HTTP error: {e}")
+            logger.warning(f"[Trovis] OTLP/JSON HTTP error: {e}")
             return SpanExportResult.FAILURE
 
         if 200 <= resp.status_code < 300:
             return SpanExportResult.SUCCESS
         logger.warning(
-            f"[Oversee] OTLP/JSON export rejected: {resp.status_code} "
+            f"[Trovis] OTLP/JSON export rejected: {resp.status_code} "
             f"{resp.text[:200]}"
         )
         return SpanExportResult.FAILURE

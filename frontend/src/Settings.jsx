@@ -165,7 +165,7 @@ function ApiKeyCard() {
       <h3 className="settings-card-title">API key</h3>
       <p className="settings-note">
         Use this to connect agents (the <code>api_key</code> in
-        <code> oversee.init()</code>). It's a long-lived credential —
+        <code> trovis.init()</code>). It's a long-lived credential —
         revealing it requires your password.
       </p>
 

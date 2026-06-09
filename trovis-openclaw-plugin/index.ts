@@ -1,8 +1,8 @@
 /**
- * @oversee/openclaw-plugin
+ * @trovis/openclaw-plugin
  * ============================================================================
- * Automatic agent telemetry for Oversee. Captures messages, tool calls, LLM
- * calls, and run completion, and forwards them to the configured Oversee
+ * Automatic agent telemetry for Trovis. Captures messages, tool calls, LLM
+ * calls, and run completion, and forwards them to the configured Trovis
  * endpoint as OpenTelemetry traces. Also reads agent identity files
  * (SOUL.md, IDENTITY.md, AGENTS.md, USER.md, MEMORY.md) at startup and
  * sends them as an `agent_registration` span so the dashboard knows what
@@ -48,10 +48,10 @@ const PLUGIN_VERSION = "0.2.8"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
-const LOG = "[Oversee]"
+const LOG = "[Trovis]"
 const OBSERVATION_PRIORITY = 0
 // OTLP backends typically cap individual attribute values; 32 KB keeps us
-// well inside Oversee's TEXT column and most other backends' limits.
+// well inside Trovis's TEXT column and most other backends' limits.
 const ATTR_BYTE_LIMIT = 32 * 1024
 
 // ---------------------------------------------------------------------------
@@ -283,13 +283,13 @@ function initTelemetry(
   const resource = new Resource({
     "service.name": agentName,
     "service.version": PLUGIN_VERSION,
-    "oversee.plugin.version": PLUGIN_VERSION,
+    "trovis.plugin.version": PLUGIN_VERSION,
     "openclaw.gateway.version": gatewayVersion,
   })
 
   const exporter = new OTLPTraceExporter({
     url: endpoint,
-    headers: apiKey ? { "X-Oversee-Api-Key": apiKey } : undefined,
+    headers: apiKey ? { "X-Trovis-Api-Key": apiKey } : undefined,
   })
 
   const sdk = new NodeSDK({
@@ -313,20 +313,20 @@ function initTelemetry(
   process.once("SIGINT", shutdown)
   process.once("SIGTERM", shutdown)
 
-  return trace.getTracer("@oversee/openclaw-plugin", PLUGIN_VERSION)
+  return trace.getTracer("@trovis/openclaw-plugin", PLUGIN_VERSION)
 }
 
 function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   if (state.disabled) return null
   if (state.initialized) return state.tracer
 
-  // Defense-in-depth: register() also checks OVERSEE_ENABLED=false and
+  // Defense-in-depth: register() also checks TROVIS_ENABLED=false and
   // bails before wiring hooks, so this path is rarely reached. But if
   // for some reason hooks WERE wired and the operator set the env var
   // late, this stops any telemetry from going out.
-  if (process.env.OVERSEE_ENABLED === "false") {
+  if ((process.env.TROVIS_ENABLED ?? process.env.OVERSEE_ENABLED) === "false") {
     state.disabled = true
-    console.log(`${LOG} Plugin disabled via OVERSEE_ENABLED=false`)
+    console.log(`${LOG} Plugin disabled via TROVIS_ENABLED=false`)
     return null
   }
 
@@ -342,11 +342,11 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   // No hardcoded default — operator must opt in by configuring an endpoint.
   // If we get this far without one, mark disabled so we don't log on every
   // subsequent hook firing.
-  const endpoint = pluginConfig?.endpoint ?? process.env.OVERSEE_ENDPOINT
+  const endpoint = pluginConfig?.endpoint ?? (process.env.TROVIS_ENDPOINT ?? process.env.OVERSEE_ENDPOINT)
   if (!endpoint) {
     state.disabled = true
     console.log(
-      `${LOG} No endpoint configured. Set plugins.entries.oversee.config.endpoint to enable telemetry.`,
+      `${LOG} No endpoint configured. Set plugins.entries.trovis.config.endpoint to enable telemetry.`,
     )
     return null
   }
@@ -354,18 +354,18 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   state.endpoint = endpoint
   state.agentName =
     pluginConfig?.agentName ??
-    process.env.OVERSEE_AGENT_NAME ??
+    (process.env.TROVIS_AGENT_NAME ?? process.env.OVERSEE_AGENT_NAME) ??
     DEFAULT_AGENT_NAME
-  state.apiKey = pluginConfig?.apiKey ?? process.env.OVERSEE_API_KEY
+  state.apiKey = pluginConfig?.apiKey ?? (process.env.TROVIS_API_KEY ?? process.env.OVERSEE_API_KEY)
   // USER.md and MEMORY.md may carry personal data; the operator has to
-  // explicitly opt in to having those files shipped to Oversee.
+  // explicitly opt in to having those files shipped to Trovis.
   state.readUserData = Boolean(pluginConfig?.readUserData)
   // Message content / tool outputs are opt-in for the same reason. Use
   // ?? (not ||) so an explicit `false` in pluginConfig overrides a
   // `true` env var.
   state.captureOutputs = Boolean(
     pluginConfig?.captureOutputs ??
-      (process.env.OVERSEE_CAPTURE_OUTPUTS === "true"),
+      ((process.env.TROVIS_CAPTURE_OUTPUTS ?? process.env.OVERSEE_CAPTURE_OUTPUTS) === "true"),
   )
 
   state.tracer = initTelemetry(
@@ -439,17 +439,17 @@ function sendAgentRegistration(
     ? readFileOrEmpty(workspacePath, "MEMORY.md")
     : ""
 
-  span.setAttribute("oversee.event.type", "agent_registration")
-  span.setAttribute("oversee.agent.id", agentId)
-  span.setAttribute("oversee.agent.workspace_path", workspacePath)
-  span.setAttribute("oversee.agent.model", model || "unknown")
-  if (soul) span.setAttribute("oversee.agent.soul", truncate(soul))
-  if (identity) span.setAttribute("oversee.agent.identity", truncate(identity))
+  span.setAttribute("trovis.event.type", "agent_registration")
+  span.setAttribute("trovis.agent.id", agentId)
+  span.setAttribute("trovis.agent.workspace_path", workspacePath)
+  span.setAttribute("trovis.agent.model", model || "unknown")
+  if (soul) span.setAttribute("trovis.agent.soul", truncate(soul))
+  if (identity) span.setAttribute("trovis.agent.identity", truncate(identity))
   if (operatingManual)
-    span.setAttribute("oversee.agent.operating_manual", truncate(operatingManual))
+    span.setAttribute("trovis.agent.operating_manual", truncate(operatingManual))
   if (userContext)
-    span.setAttribute("oversee.agent.user_context", truncate(userContext))
-  if (memory) span.setAttribute("oversee.agent.memory", truncate(memory))
+    span.setAttribute("trovis.agent.user_context", truncate(userContext))
+  if (memory) span.setAttribute("trovis.agent.memory", truncate(memory))
 
   span.end()
 
@@ -703,25 +703,25 @@ function wireEvents(api: OpenClawApi): void {
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("message_received", { kind: SpanKind.SERVER })
-    span.setAttribute("oversee.event.type", "message_received")
-    setIfPresent(span, "oversee.session.key", ctx.sessionKey)
+    span.setAttribute("trovis.event.type", "message_received")
+    setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(
       span,
-      "oversee.message.sender_id",
+      "trovis.message.sender_id",
       event?.senderId ?? ctx.senderId,
     )
-    setIfPresent(span, "oversee.message.thread_id", event?.threadId)
+    setIfPresent(span, "trovis.message.thread_id", event?.threadId)
     setIfPresent(
       span,
-      "oversee.message.content_length",
+      "trovis.message.content_length",
       typeof event?.content === "string" ? event.content.length : undefined,
     )
-    setIfPresent(span, "oversee.trace.id", ctx.traceId)
-    setIfPresent(span, "oversee.trace.span_id", ctx.spanId)
-    setIfPresent(span, "oversee.trace.parent_span_id", ctx.parentSpanId)
+    setIfPresent(span, "trovis.trace.id", ctx.traceId)
+    setIfPresent(span, "trovis.trace.span_id", ctx.spanId)
+    setIfPresent(span, "trovis.trace.parent_span_id", ctx.parentSpanId)
     // Multi-agent gateways: the backend uses this to split spans into
     // per-agent virtual service names (`<service>-<agent_id>`).
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
     // Capture inbound message text when the operator opted in.
     if (
       state.captureOutputs &&
@@ -729,7 +729,7 @@ function wireEvents(api: OpenClawApi): void {
       event.content.length > 0
     ) {
       span.setAttribute(
-        "oversee.message.content",
+        "trovis.message.content",
         truncate(event.content, 10_000),
       )
     }
@@ -747,13 +747,13 @@ function wireEvents(api: OpenClawApi): void {
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT })
-    span.setAttribute("oversee.event.type", "message_sending")
-    setIfPresent(span, "oversee.session.key", ctx.sessionKey)
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "oversee.message.thread_id", event?.threadId)
+    span.setAttribute("trovis.event.type", "message_sending")
+    setIfPresent(span, "trovis.session.key", ctx.sessionKey)
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "trovis.message.thread_id", event?.threadId)
     setIfPresent(
       span,
-      "oversee.response.content_length",
+      "trovis.response.content_length",
       typeof event?.content === "string" ? event.content.length : undefined,
     )
     if (
@@ -762,7 +762,7 @@ function wireEvents(api: OpenClawApi): void {
       event.content.length > 0
     ) {
       span.setAttribute(
-        "oversee.response.content",
+        "trovis.response.content",
         truncate(event.content, 10_000),
       )
     }
@@ -781,10 +781,10 @@ function wireEvents(api: OpenClawApi): void {
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("message_sent", { kind: SpanKind.CLIENT })
     const success = event?.success ?? !event?.error
-    span.setAttribute("oversee.event.type", "message_sent")
-    setIfPresent(span, "oversee.session.key", ctx.sessionKey)
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
-    span.setAttribute("oversee.delivery.success", Boolean(success))
+    span.setAttribute("trovis.event.type", "message_sent")
+    setIfPresent(span, "trovis.session.key", ctx.sessionKey)
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    span.setAttribute("trovis.delivery.success", Boolean(success))
     if (!success) {
       span.setStatus({
         code: SpanStatusCode.ERROR,
@@ -801,16 +801,16 @@ function wireEvents(api: OpenClawApi): void {
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("tool_call", { kind: SpanKind.INTERNAL })
-    span.setAttribute("oversee.event.type", "tool_call")
-    span.setAttribute("oversee.tool.name", event.toolName)
-    span.setAttribute("oversee.tool.call_id", event.toolCallId)
+    span.setAttribute("trovis.event.type", "tool_call")
+    span.setAttribute("trovis.tool.name", event.toolName)
+    span.setAttribute("trovis.tool.call_id", event.toolCallId)
     // PRIVACY: parameter KEYS only — values are never read.
     span.setAttribute(
-      "oversee.tool.param_keys",
+      "trovis.tool.param_keys",
       JSON.stringify(Object.keys(event?.params ?? {})),
     )
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
 
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() })
   })
@@ -823,8 +823,8 @@ function wireEvents(api: OpenClawApi): void {
 
     const success = event?.success ?? !event?.error
     const duration = event?.durationMs ?? Date.now() - entry.startedAt
-    entry.span.setAttribute("oversee.tool.success", Boolean(success))
-    entry.span.setAttribute("oversee.tool.duration_ms", duration)
+    entry.span.setAttribute("trovis.tool.success", Boolean(success))
+    entry.span.setAttribute("trovis.tool.duration_ms", duration)
     if (!success) {
       entry.span.setStatus({
         code: SpanStatusCode.ERROR,
@@ -851,7 +851,7 @@ function wireEvents(api: OpenClawApi): void {
         }
       }
       if (typeof raw === "string" && raw.length > 0) {
-        entry.span.setAttribute("oversee.tool.result", truncate(raw, 10_000))
+        entry.span.setAttribute("trovis.tool.result", truncate(raw, 10_000))
       }
     }
     entry.span.end()
@@ -863,12 +863,12 @@ function wireEvents(api: OpenClawApi): void {
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT })
-    span.setAttribute("oversee.event.type", "model_call")
+    span.setAttribute("trovis.event.type", "model_call")
     setIfPresent(span, "gen_ai.system", event?.provider)
     setIfPresent(span, "gen_ai.request.model", event?.model)
-    span.setAttribute("oversee.model.call_id", event.callId)
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
+    span.setAttribute("trovis.model.call_id", event.callId)
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
 
     modelSpans.set(event.callId, { span, startedAt: Date.now() })
   })
@@ -879,8 +879,8 @@ function wireEvents(api: OpenClawApi): void {
     if (!entry) return
     modelSpans.delete(event.callId)
 
-    entry.span.setAttribute("oversee.model.duration_ms", event.durationMs)
-    setIfPresent(entry.span, "oversee.model.outcome", event.outcome)
+    entry.span.setAttribute("trovis.model.duration_ms", event.durationMs)
+    setIfPresent(entry.span, "trovis.model.outcome", event.outcome)
     // Token usage → OTEL GenAI semantic conventions. The backend reads
     // these attribute names to compute cost. Only set what we actually
     // found; absent fields stay off the span so the backend records NULL.
@@ -919,11 +919,11 @@ function wireEvents(api: OpenClawApi): void {
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL })
-    span.setAttribute("oversee.event.type", "llm_output")
-    setIfPresent(span, "oversee.session.key", ctx.sessionKey)
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
-    setIfPresent(span, "oversee.model.call_id", event?.callId)
+    span.setAttribute("trovis.event.type", "llm_output")
+    setIfPresent(span, "trovis.session.key", ctx.sessionKey)
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
+    setIfPresent(span, "trovis.model.call_id", event?.callId)
     setIfPresent(span, "gen_ai.system", event?.provider)
     setIfPresent(span, "gen_ai.request.model", event?.model)
 
@@ -933,12 +933,12 @@ function wireEvents(api: OpenClawApi): void {
     const responseText = event?.assistantTexts?.join("\n") ?? ""
     setIfPresent(
       span,
-      "oversee.response.content_length",
+      "trovis.response.content_length",
       responseText.length > 0 ? responseText.length : undefined,
     )
     if (state.captureOutputs && responseText.length > 0) {
       span.setAttribute(
-        "oversee.response.content",
+        "trovis.response.content",
         truncate(responseText, 10_000),
       )
     }
@@ -953,13 +953,13 @@ function wireEvents(api: OpenClawApi): void {
     const span = tracer.startSpan("agent_run_complete", {
       kind: SpanKind.INTERNAL,
     })
-    span.setAttribute("oversee.event.type", "agent_run_complete")
-    setIfPresent(span, "oversee.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "oversee.run.id", event?.runId ?? ctx.runId)
+    span.setAttribute("trovis.event.type", "agent_run_complete")
+    setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
 
     const success = event?.success ?? !event?.error
     if (typeof success === "boolean") {
-      span.setAttribute("oversee.run.success", success)
+      span.setAttribute("trovis.run.success", success)
       if (!success) {
         span.setStatus({
           code: SpanStatusCode.ERROR,
@@ -967,9 +967,9 @@ function wireEvents(api: OpenClawApi): void {
         })
       }
     }
-    setIfPresent(span, "oversee.run.message_provider", ctx.messageProvider)
-    setIfPresent(span, "oversee.run.channel_id", ctx.channelId)
-    setIfPresent(span, "oversee.run.job_id", ctx.jobId)
+    setIfPresent(span, "trovis.run.message_provider", ctx.messageProvider)
+    setIfPresent(span, "trovis.run.channel_id", ctx.channelId)
+    setIfPresent(span, "trovis.run.job_id", ctx.jobId)
     span.end()
   })
 }
@@ -978,9 +978,9 @@ function wireEvents(api: OpenClawApi): void {
 // Command wiring
 // ---------------------------------------------------------------------------
 //
-// /oversee is the user-facing setup command. Same UX pattern as channel
+// /trovis is the user-facing setup command. Same UX pattern as channel
 // plugins like /telegram or /whatsapp: the plugin knows what it needs, the
-// command tells the user how to provide it, and `/oversee status` reflects
+// command tells the user how to provide it, and `/trovis status` reflects
 // the live connection state.
 
 /** Mask an API key for display in chat — first 6 chars + "…" + last 4. */
@@ -1005,7 +1005,7 @@ function persistHint(key: string, value: string | boolean): string {
     typeof value === "boolean" ? (value ? "true" : "false") : value
   return (
     `Setting applied for this session. To make permanent, run:\n` +
-    `\`openclaw config set plugins.entries.oversee.config.${key} ${display}\``
+    `\`openclaw config set plugins.entries.trovis.config.${key} ${display}\``
   )
 }
 
@@ -1016,13 +1016,13 @@ function wireCommands(api: OpenClawApi): void {
   }
 
   const command: PluginCommand = {
-    name: "oversee",
-    description: "Connect to Oversee agent monitoring",
+    name: "trovis",
+    description: "Connect to Trovis agent monitoring",
     acceptsArgs: true,
     async handler(ctx: CommandContext): Promise<CommandResult> {
       // ctx.args is the raw text after the command name — split it
       // ourselves. Multiple spaces collapse via /\s+/. Empty args means
-      // the user typed bare `/oversee` (the help screen).
+      // the user typed bare `/trovis` (the help screen).
       const raw = (ctx?.args ?? "").trim()
       const parts = raw.length > 0 ? raw.split(/\s+/) : []
       const sub = parts[0]?.toLowerCase() ?? ""
@@ -1034,7 +1034,7 @@ function wireCommands(api: OpenClawApi): void {
         const endpoint = arg1
         state.endpoint = endpoint
         return reply(
-          `✅ Oversee endpoint set: \`${endpoint}\`\n\n` +
+          `✅ Trovis endpoint set: \`${endpoint}\`\n\n` +
             persistHint("endpoint", endpoint) +
             `\n\nThe OTLP exporter was constructed at gateway start, so ` +
             `**restart the gateway** after persisting for spans to ` +
@@ -1047,7 +1047,7 @@ function wireCommands(api: OpenClawApi): void {
         const key = arg1
         state.apiKey = key
         return reply(
-          `✅ Oversee API key set: \`${maskKey(key)}\`\n\n` +
+          `✅ Trovis API key set: \`${maskKey(key)}\`\n\n` +
             persistHint("apiKey", key) +
             `\n\nThe auth header is set on the exporter at gateway ` +
             `start, so **restart the gateway** after persisting for the ` +
@@ -1063,8 +1063,8 @@ function wireCommands(api: OpenClawApi): void {
           `✅ Output capture **${enable ? "enabled" : "disabled"}**.\n\n` +
             (enable
               ? `Message content and tool results will now appear on ` +
-                `spans as \`oversee.message.content\`, ` +
-                `\`oversee.response.content\`, and \`oversee.tool.result\` ` +
+                `spans as \`trovis.message.content\`, ` +
+                `\`trovis.response.content\`, and \`trovis.tool.result\` ` +
                 `(each truncated to 10 000 chars).\n\n`
               : `Message content and tool results will no longer be ` +
                 `captured. Existing spans aren't modified.\n\n`) +
@@ -1088,7 +1088,7 @@ function wireCommands(api: OpenClawApi): void {
       // --- settings ------------------------------------------------------
       if (sub === "settings") {
         const lines = [
-          `⚙️ **Oversee Settings**`,
+          `⚙️ **Trovis Settings**`,
           ``,
           `• Endpoint: \`${state.endpoint || "(not set)"}\``,
           `• API key: \`${maskKey(state.apiKey)}\``,
@@ -1105,31 +1105,31 @@ function wireCommands(api: OpenClawApi): void {
         const enabled = state.initialized
         return reply(
           enabled
-            ? `✅ Oversee is active.\n\n` +
+            ? `✅ Trovis is active.\n\n` +
                 `• Endpoint: \`${state.endpoint}\`\n` +
                 `• Agent: \`${state.agentName}\`\n` +
                 `• Telemetry: flowing`
-            : `⚠️ Oversee is not connected.\n\n` +
-                `Get your endpoint URL from your Oversee dashboard ` +
+            : `⚠️ Trovis is not connected.\n\n` +
+                `Get your endpoint URL from your Trovis dashboard ` +
                 `(Add Agent → OpenClaw), then run:\n\n` +
-                `\`/oversee connect <your-endpoint-url>\``,
+                `\`/trovis connect <your-endpoint-url>\``,
         )
       }
 
       // --- default / help ------------------------------------------------
       return reply(
-        `🔍 **Oversee Agent Monitoring**\n\n` +
+        `🔍 **Trovis Agent Monitoring**\n\n` +
           `**Setup**\n` +
-          `• \`/oversee connect <url>\` — set the Oversee endpoint\n` +
-          `• \`/oversee apikey <key>\` — set your API key\n\n` +
+          `• \`/trovis connect <url>\` — set the Trovis endpoint\n` +
+          `• \`/trovis apikey <key>\` — set your API key\n\n` +
           `**Capture toggles**\n` +
-          `• \`/oversee capture on\` / \`off\` — message + tool output capture (default off)\n` +
-          `• \`/oversee userdata on\` / \`off\` — USER.md + MEMORY.md in registration (default off)\n\n` +
+          `• \`/trovis capture on\` / \`off\` — message + tool output capture (default off)\n` +
+          `• \`/trovis userdata on\` / \`off\` — USER.md + MEMORY.md in registration (default off)\n\n` +
           `**Inspect**\n` +
-          `• \`/oversee settings\` — show all current config\n` +
-          `• \`/oversee status\` — connection state + telemetry flowing or not\n\n` +
+          `• \`/trovis settings\` — show all current config\n` +
+          `• \`/trovis status\` — connection state + telemetry flowing or not\n\n` +
           `Setting commands update in-memory state immediately. To make ` +
-          `permanent, run \`openclaw config set plugins.entries.oversee.config.<key> <value>\`. ` +
+          `permanent, run \`openclaw config set plugins.entries.trovis.config.<key> <value>\`. ` +
           `\`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`,
       )
     },
@@ -1140,10 +1140,10 @@ function wireCommands(api: OpenClawApi): void {
   // rest of the plugin (telemetry hooks are what matters).
   try {
     api.registerCommand(command)
-    console.log(`${LOG} /oversee command registered.`)
+    console.log(`${LOG} /trovis command registered.`)
   } catch (e) {
     console.warn(
-      `${LOG} Failed to register /oversee command: ${(e as Error).message}. ` +
+      `${LOG} Failed to register /trovis command: ${(e as Error).message}. ` +
         `Telemetry will continue to work; command-based setup is unavailable.`,
     )
   }
@@ -1154,10 +1154,10 @@ function wireCommands(api: OpenClawApi): void {
 // ---------------------------------------------------------------------------
 
 export default definePluginEntry({
-  id: "oversee",
-  name: "Oversee Agent Management",
+  id: "trovis",
+  name: "Trovis Agent Management",
   description:
-    "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Oversee dashboard.",
+    "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Trovis dashboard.",
   register(api: OpenClawApi) {
     state.gatewayVersion =
       api?.version ?? api?.gateway?.version ?? "unknown"
@@ -1166,8 +1166,8 @@ export default definePluginEntry({
     // hooks when an operator wants the plugin totally inert. The
     // pluginConfig.enabled flag from openclaw.json is checked later
     // inside ensureInit, on the first hook that exposes pluginConfig.
-    if (process.env.OVERSEE_ENABLED === "false") {
-      console.log(`${LOG} Plugin disabled via OVERSEE_ENABLED=false.`)
+    if ((process.env.TROVIS_ENABLED ?? process.env.OVERSEE_ENABLED) === "false") {
+      console.log(`${LOG} Plugin disabled via TROVIS_ENABLED=false.`)
       return
     }
 
@@ -1180,7 +1180,7 @@ export default definePluginEntry({
 
     // Belt-and-braces: a bad command shape thrown synchronously from
     // wireCommands must never prevent wireEvents from running. Telemetry
-    // is what people install this plugin for; the /oversee command is a
+    // is what people install this plugin for; the /trovis command is a
     // convenience.
     try {
       wireCommands(api)
