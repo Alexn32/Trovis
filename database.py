@@ -994,6 +994,9 @@ def init_db() -> None:
         # Editable org-wide monthly cost budget (the cost page's "limit"). NULL
         # until set → falls back to the OVERSEE_MONTHLY_BUDGET env default.
         _try_add_column(cur, "accounts", "monthly_budget_usd", "REAL")
+        # Set when the owner finishes (or skips) the post-signup onboarding
+        # wizard. NULL → wizard still shows for the owner.
+        _try_add_column(cur, "accounts", "onboarded_at", "TIMESTAMP")
         # Connection edges gained "what's transferred" metrics post-launch.
         _try_add_column(cur, "agent_connections", "via_operations", "TEXT")
         _try_add_column(cur, "agent_connections", "total_tokens", "INTEGER DEFAULT 0")
@@ -3650,6 +3653,7 @@ def count_fleet_spans(
     account_id: int | None,
     since_ns: int,
     until_ns: int | None = None,
+    activity_only: bool = False,
 ) -> int:
     """Count spans (tasks) across the whole fleet within a time window.
 
@@ -3657,14 +3661,21 @@ def count_fleet_spans(
     optional). Account-scoped when account_id is provided; counts all rows
     otherwise (local-dev / pre-auth behavior). Powers the briefing's
     today / last-7d / prior-7d task counts.
+
+    `activity_only=True` excludes `agent_registration` spans — a just-connected
+    agent has only a registration span, which isn't a real "task", so the
+    briefing counts (and the dashboard's "waiting for telemetry" signal) reflect
+    actual activity.
     """
     account_filter = f"AND account_id = {PH}" if account_id is not None else ""
     until_filter = f"AND start_time_unix < {PH}" if until_ns is not None else ""
+    activity_filter = "AND span_name != 'agent_registration'" if activity_only else ""
     sql = f"""
         SELECT COUNT(*) AS n
         FROM spans
         WHERE start_time_unix >= {PH}
           {until_filter}
+          {activity_filter}
           {account_filter}
     """
     args: list[Any] = [since_ns]
@@ -4112,10 +4123,12 @@ def create_account(
 
 
 def get_account(account_id: int) -> dict[str, Any] | None:
-    """Return an org by id: {id, email, name, account_type, created_at}."""
+    """Return an org by id: {id, email, name, account_type, created_at,
+    onboarded_at}."""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            f"SELECT id, email, account_type, name, created_at FROM accounts WHERE id = {PH}",
+            "SELECT id, email, account_type, name, created_at, onboarded_at "
+            f"FROM accounts WHERE id = {PH}",
             (account_id,),
         )
         row = cur.fetchone()
@@ -4127,7 +4140,33 @@ def get_account(account_id: int) -> dict[str, Any] | None:
         "account_type": row["account_type"],
         "name": row["name"],
         "created_at": _ts_to_str(row["created_at"]),
+        "onboarded_at": _ts_to_str(_row_get(row, "onboarded_at")),
     }
+
+
+def update_account_profile(account_id: int | None, name: str | None) -> None:
+    """Set the org's display name (used by the onboarding 'name workspace' step)."""
+    if account_id is None:
+        return
+    clean = (name or "").strip() or None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE accounts SET name = {PH} WHERE id = {PH}", (clean, account_id)
+        )
+
+
+def mark_account_onboarded(account_id: int | None) -> None:
+    """Stamp onboarded_at so the post-signup wizard never shows again.
+    Idempotent — only sets it the first time."""
+    if account_id is None:
+        return
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE accounts SET onboarded_at = COALESCE(onboarded_at, {now_sql}) "
+            f"WHERE id = {PH}",
+            (account_id,),
+        )
 
 
 def get_account_by_email(email: str) -> dict[str, Any] | None:

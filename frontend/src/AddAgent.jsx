@@ -291,9 +291,12 @@ function WizardHeader({ step, total, onBack, onClose }) {
         )}
         <StepIndicator step={step} total={total} />
       </div>
-      <button type="button" className="close-btn" onClick={onClose} aria-label="Close">
-        ×
-      </button>
+      {/* No close button when embedded (e.g. inside onboarding) — the host owns chrome. */}
+      {onClose && (
+        <button type="button" className="close-btn" onClick={onClose} aria-label="Close">
+          ×
+        </button>
+      )}
     </div>
   )
 }
@@ -1456,7 +1459,7 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // Top-level wizard component
 // ---------------------------------------------------------------------------
 
-export default function AddAgent({ onClose }) {
+export default function AddAgent({ onClose, embedded = false }) {
   const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
   const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
   const [claudeVariant, setClaudeVariant] = useState(null) // 'claude-agent-sdk' | 'claude-agents'
@@ -1509,7 +1512,7 @@ export default function AddAgent({ onClose }) {
         step={step}
         total={totalSteps}
         onBack={onBack}
-        onClose={onClose}
+        onClose={embedded ? null : onClose}
       />
 
       {step === 1 && <PlatformStep onSelect={handlePlatformPick} />}

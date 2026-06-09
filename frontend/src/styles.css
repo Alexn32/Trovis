@@ -4727,6 +4727,202 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 }
 
 
+/* =============================================================================
+   Onboarding — post-signup setup wizard (full-screen takeover)
+   Scoped under .onboard so the Inter typography matches the Dashboard; all
+   colors key off the warm CSS variables → works light + dark.
+   ============================================================================= */
+.onboard {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 20px 64px;
+}
+.onboard-top {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 4px;
+}
+.onboard-brand {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-weight: 750; font-size: 15px; letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.onboard-brand .onboard-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--text-primary);
+}
+.onboard-skip-all {
+  border: none; background: none; cursor: pointer; font: inherit;
+  font-size: 13px; color: var(--text-muted);
+  padding: 6px 8px; border-radius: 6px;
+}
+.onboard-skip-all:hover:not(:disabled) { color: var(--text-secondary); }
+
+.onboard-card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 16px;
+  padding: 30px 34px 26px;
+  margin-top: 18px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.10);
+}
+.onboard-dots {
+  display: flex; gap: 6px; justify-content: center; margin-bottom: 24px;
+}
+.onboard-dot-step {
+  width: 28px; height: 4px; border-radius: 2px;
+  background: var(--border-default);
+  transition: background 0.25s ease;
+}
+.onboard-dot-step.is-on { background: var(--text-primary); }
+
+.onboard-step { display: flex; flex-direction: column; }
+.onboard-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; border-radius: 12px;
+  background: var(--accent-faint); color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.onboard-title {
+  font-size: 23px; font-weight: 760; letter-spacing: -0.02em;
+  color: var(--text-primary); margin: 0 0 8px;
+}
+.onboard-sub {
+  font-size: 14.5px; line-height: 1.55; color: var(--text-secondary);
+  margin: 0 0 22px; max-width: 46ch;
+}
+.onboard-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 4px; }
+.onboard-field > span {
+  font-size: 12px; font-weight: 650; color: var(--text-muted);
+}
+.onboard-invite-row { display: flex; gap: 8px; }
+.onboard-invite-row .text-input { flex: 1 1 auto; }
+.onboard-invite-link {
+  display: flex; align-items: center; gap: 8px; margin-top: 12px;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  border-radius: 8px; padding: 8px 10px;
+}
+.onboard-invite-link code {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.onboard-connected {
+  display: inline-flex; align-items: center; gap: 7px; align-self: flex-start;
+  background: var(--success-faint); color: var(--success);
+  font-size: 13px; font-weight: 600;
+  padding: 7px 12px; border-radius: 8px; margin-bottom: 16px;
+}
+.onboard-addagent {
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background: var(--bg-surface);
+  margin-bottom: 4px;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+/* The embedded AddAgent owns its own internal layout; shed the full-page frame. */
+.onboard-addagent .add-agent {
+  max-width: none;
+  margin: 0;
+  padding: 16px;
+}
+
+.onboard-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-top: 26px; padding-top: 18px;
+  border-top: 1px solid var(--border-default);
+}
+.onboard-foot-right { display: flex; align-items: center; gap: 6px; }
+.onboard .btn-link {
+  border: none; background: none; cursor: pointer; font: inherit;
+  font-size: 13.5px; color: var(--text-muted); padding: 9px 12px;
+  border-radius: 8px; white-space: nowrap;
+}
+.onboard .btn-link:hover:not(:disabled) { color: var(--text-secondary); }
+
+.onboard-done { align-items: center; text-align: center; }
+.onboard-done .onboard-mark {
+  background: var(--success-faint); color: var(--success);
+}
+.onboard-done .onboard-sub { max-width: 42ch; }
+.onboard-done-btn { margin-top: 8px; min-width: 184px; justify-content: center; }
+
+@media (max-width: 600px) {
+  .onboard-card { padding: 24px 20px 20px; }
+  .onboard-title { font-size: 20px; }
+}
+
+/* ---------- Dashboard: waiting-for-telemetry state ---------- */
+.dash-waiting {
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center; padding: 42px 28px;
+}
+.dash-waiting-pulse { position: relative; margin-bottom: 20px; }
+.dash-waiting-pulse .dash-sq {
+  width: 40px; height: 40px; border-radius: 11px; position: relative; z-index: 1;
+}
+.dash-waiting-pulse::before,
+.dash-waiting-pulse::after {
+  content: ""; position: absolute; inset: 0; z-index: 0;
+  border-radius: 11px; background: var(--text-primary);
+  animation: dashWaitPulse 2.4s ease-out infinite;
+}
+.dash-waiting-pulse::after { animation-delay: 1.2s; }
+@keyframes dashWaitPulse {
+  0%   { transform: scale(1); opacity: 0.22; }
+  70%  { transform: scale(2.1); opacity: 0; }
+  100% { transform: scale(2.1); opacity: 0; }
+}
+.dash-waiting-title {
+  font-size: 19px; font-weight: 740; letter-spacing: -0.01em;
+  color: var(--text-primary); margin: 0 0 8px;
+}
+.dash-waiting-sub {
+  font-size: 14px; line-height: 1.55; color: var(--text-secondary);
+  margin: 0 0 24px; max-width: 46ch;
+}
+.dash-waiting-checklist {
+  list-style: none; margin: 0; padding: 0; text-align: left;
+  display: flex; flex-direction: column; gap: 11px;
+}
+.dash-waiting-checklist li {
+  display: flex; align-items: center; gap: 11px;
+  font-size: 13.5px; color: var(--text-muted);
+}
+.dash-waiting-checklist li.is-done { color: var(--text-secondary); }
+.dash-wait-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0;
+  font-size: 11px; font-weight: 700;
+}
+.dash-waiting-checklist li.is-done .dash-wait-mark {
+  background: var(--success-faint); color: var(--success);
+}
+.dash-wait-mark.dot { border: 1.5px solid var(--border-hover); background: transparent; }
+.dash-waiting-checklist li.is-active .dash-wait-mark.dot {
+  border-color: var(--text-muted);
+  animation: dashWaitDot 1.4s ease-in-out infinite;
+}
+@keyframes dashWaitDot {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+
+
 /* ---------- scrollbars (warm) ---------- */
 * {
   scrollbar-width: thin;
