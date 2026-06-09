@@ -2,7 +2,7 @@
 
 The backend is chosen at module load by the DATABASE_URL env var:
   DATABASE_URL set    → Postgres via psycopg2 (production / Railway)
-  DATABASE_URL unset  → SQLite at ./oversee.db (local development)
+  DATABASE_URL unset  → SQLite at ./trovis.db (local development)
 
 Callers don't need to know which backend is active: schema, query semantics,
 and return shapes are identical. SQL placeholders are `?` for SQLite and
@@ -40,11 +40,44 @@ if USE_POSTGRES:
 else:
     import sqlite3
 
-    SQLITE_PATH = "oversee.db"
+    SQLITE_PATH = "trovis.db"
+    # Back-compat: if a pre-rename local DB exists and the new one doesn't,
+    # keep using it so a developer's existing SQLite data isn't orphaned.
+    # (Prod uses Postgres via DATABASE_URL, so this branch never runs there.)
+    if not os.path.exists(SQLITE_PATH) and os.path.exists("oversee.db"):
+        SQLITE_PATH = "oversee.db"
 
 # Bind-parameter placeholder for the active backend. Used in SQL strings via
 # f-string substitution. PH is a module constant, not user input.
 PH = "%s" if USE_POSTGRES else "?"
+
+
+# ---------------------------------------------------------------------------
+# Trovis rename back-compat (PERMANENT — never remove these fallbacks)
+# ---------------------------------------------------------------------------
+# The product/SDK was renamed oversee → trovis, but live agents deployed before
+# the rename still emit `oversee.*` span attributes + set `OVERSEE_*` env vars,
+# and historical rows in the spans table carry `oversee.*` JSON forever. Every
+# attribute read and server env lookup therefore prefers the new `trovis`/
+# `TROVIS_` name and falls back to the legacy one. Removing the fallback would
+# break still-deployed agents and orphan historical data — keep it permanently.
+
+
+def attr(attrs: dict[str, Any] | None, suffix: str, default: Any = None) -> Any:
+    """Read a span attribute by suffix, preferring `trovis.<suffix>` and
+    falling back to the legacy `oversee.<suffix>` (e.g. suffix='agent.id')."""
+    if not attrs:
+        return default
+    val = attrs.get(f"trovis.{suffix}")
+    if val is None:
+        val = attrs.get(f"oversee.{suffix}", default)
+    return val
+
+
+def env(name: str, default: str | None = None) -> str | None:
+    """Read an env var, preferring `TROVIS_<name>` and falling back to the
+    legacy `OVERSEE_<name>` (e.g. name='APP_URL')."""
+    return os.environ.get(f"TROVIS_{name}", os.environ.get(f"OVERSEE_{name}", default))
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +235,8 @@ def _detect_platform(resource_attrs_json: str | None) -> str | None:
 
     if "openclaw.gateway.version" in attrs:
         return "OpenClaw Agent"
-    if "oversee.plugin.version" in attrs:
-        return "Oversee-instrumented Agent"
+    if "trovis.plugin.version" in attrs or "oversee.plugin.version" in attrs:
+        return "Trovis-instrumented Agent"
 
     lang = attrs.get("telemetry.sdk.language")
     if isinstance(lang, str) and lang:
@@ -1268,13 +1301,13 @@ _INSERT_COLUMN_COUNT = 20
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
     """Extract the per-event agent id from a parsed span's attributes.
 
-    The OpenClaw plugin stamps this on every hook span as `oversee.agent.id`.
-    Other OTEL SDKs don't set it; those agents are single-instance, so we
-    default to 'main' to keep them grouped as one entry per service.
+    The plugin stamps this on every hook span as `trovis.agent.id` (legacy
+    agents: `oversee.agent.id`). Other OTEL SDKs don't set it; those agents are
+    single-instance, so we default to 'main' to keep them grouped per service.
     """
     if not attrs:
         return "main"
-    val = attrs.get("oversee.agent.id")
+    val = attr(attrs, "agent.id")
     if isinstance(val, str) and val:
         return val
     return "main"
@@ -3479,17 +3512,19 @@ def get_window_aggregate(
           AND COALESCE(agent_id, 'main') = {PH}
           AND start_time_unix >= {PH}
           AND start_time_unix <  {PH}
-          AND attributes LIKE {PH}
+          AND (attributes LIKE {PH} OR attributes LIKE {PH})
           {account_filter}
     """
-    # The tools query needs the pattern arg slotted BEFORE the
+    # The tools query needs the pattern args slotted BEFORE the
     # optional account_id (placeholder order: service, agent,
-    # start, end, pattern, [account_id]).
+    # start, end, pattern(s), [account_id]). Two patterns: the new
+    # `trovis.*` namespace + the legacy `oversee.*` (live/historical agents).
     tools_args: list[Any] = [
         service_name,
         agent_id or "main",
         start_time_ns,
         end_time_ns,
+        '%"trovis.tool.name":%',
         '%"oversee.tool.name":%',
     ]
     if account_id is not None:
@@ -3516,7 +3551,7 @@ def get_window_aggregate(
             attrs = json.loads(r["attributes"] or "{}")
         except (TypeError, ValueError):
             continue
-        name = attrs.get("oversee.tool.name")
+        name = attr(attrs, "tool.name")
         if isinstance(name, str) and name:
             tool_set.add(name)
 
@@ -4879,7 +4914,11 @@ def detect_agent_connections(
 
 
 # Capture-content attribute keys (set by the plugin/SDK when capture is on).
+# New `trovis.*` first, then legacy `oversee.*` (live agents + historical rows).
 _CAPTURE_KEYS = (
+    "trovis.message.content",
+    "trovis.response.content",
+    "trovis.tool.result",
     "oversee.message.content",
     "oversee.response.content",
     "oversee.tool.result",
@@ -5020,7 +5059,12 @@ def delete_connection(account_id: int | None, conn_id: int) -> bool:
 # Attributes the plugin sets when captureOutputs is enabled. One span
 # carries at most one of these (they're emitted on different span types:
 # message_received / message_sent / tool_call).
+# Both the new `trovis.*` namespace and the legacy `oversee.*` (live agents +
+# historical rows) — keep both permanently.
 _CAPTURE_ATTR_PATTERNS = (
+    '%"trovis.message.content":%',
+    '%"trovis.response.content":%',
+    '%"trovis.tool.result":%',
     '%"oversee.message.content":%',
     '%"oversee.response.content":%',
     '%"oversee.tool.result":%',
@@ -5058,6 +5102,9 @@ def get_agent_outputs(
             attributes LIKE {PH}
             OR attributes LIKE {PH}
             OR attributes LIKE {PH}
+            OR attributes LIKE {PH}
+            OR attributes LIKE {PH}
+            OR attributes LIKE {PH}
           )
         ORDER BY start_time_unix DESC
         LIMIT {PH}
@@ -5085,15 +5132,15 @@ def get_agent_outputs(
         # Detect which capture attribute fired. Order matters only when
         # a span carries more than one — which shouldn't happen with the
         # current plugin, but we prefer the most specific signal.
-        if "oversee.tool.result" in attrs:
+        if attr(attrs, "tool.result") is not None:
             content_type = "tool_result"
-            content = attrs.get("oversee.tool.result") or ""
-        elif "oversee.response.content" in attrs:
+            content = attr(attrs, "tool.result") or ""
+        elif attr(attrs, "response.content") is not None:
             content_type = "response"
-            content = attrs.get("oversee.response.content") or ""
-        elif "oversee.message.content" in attrs:
+            content = attr(attrs, "response.content") or ""
+        elif attr(attrs, "message.content") is not None:
             content_type = "message"
-            content = attrs.get("oversee.message.content") or ""
+            content = attr(attrs, "message.content") or ""
         else:
             # WHERE clause matched but JSON parse showed no key — happens
             # if a value contained the literal pattern. Skip cleanly.
