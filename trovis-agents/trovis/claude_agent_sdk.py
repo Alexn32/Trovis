@@ -144,7 +144,9 @@ async def _instrumented_stream(
 
     `last_model` is threaded across messages so the ResultMessage (which
     carries the run's token totals but not the model) can be tagged with
-    the model seen on the AssistantMessages.
+    the model seen on the AssistantMessages. Per-turn token usage is captured
+    on each AssistantMessage's llm_output span; `run_usage_captured` tracks
+    that so ResultMessage usage is only a fallback (no double-counting).
     """
     _maybe_register(call_kwargs)
     agent_name = _agent_name(call_kwargs)
@@ -208,7 +210,18 @@ def _emit_for_message(
             elif btype == "ToolUseBlock":
                 _emit_tool_use(tracer, block, agent_name, run_id)
         text = "\n".join(text_parts)
-        if text:
+        # Per-turn token usage rides on each AssistantMessage. Capturing it here
+        # — not only on the final ResultMessage — is what makes multi-step
+        # agentic runs cost-accurate: one query() makes many model calls, but
+        # ResultMessage.usage reflects only the last/aggregate turn, which
+        # silently undercounted every multi-step run.
+        inp, out, tot, cache_create, cache_read = _extract_usage(
+            _get(message, "usage")
+        )
+        has_usage = tot is not None
+        # Emit the llm_output span when there's text OR usage (a tool-use turn
+        # has no text but still billed tokens we must not drop).
+        if text or has_usage:
             with tracer.start_as_current_span("llm_output") as span:
                 span.set_attribute("trovis.event.type", "llm_output")
                 span.set_attribute("trovis.agent.id", agent_name)
@@ -216,12 +229,29 @@ def _emit_for_message(
                     span.set_attribute("trovis.run.id", run_id)
                 if model:
                     span.set_attribute("gen_ai.request.model", str(model))
-                span.set_attribute("trovis.response.content_length", len(text))
-                if is_capture_enabled():
-                    span.set_attribute(
-                        "trovis.response.content",
-                        _truncate(text, _CONTENT_BYTE_LIMIT),
-                    )
+                if text:
+                    span.set_attribute("trovis.response.content_length", len(text))
+                    if is_capture_enabled():
+                        span.set_attribute(
+                            "trovis.response.content",
+                            _truncate(text, _CONTENT_BYTE_LIMIT),
+                        )
+                if has_usage:
+                    if inp is not None:
+                        span.set_attribute("gen_ai.usage.input_tokens", inp)
+                    if out is not None:
+                        span.set_attribute("gen_ai.usage.output_tokens", out)
+                    span.set_attribute("gen_ai.usage.total_tokens", tot)
+                    if cache_create is not None:
+                        span.set_attribute(
+                            "gen_ai.usage.cache_creation_input_tokens", cache_create
+                        )
+                    if cache_read is not None:
+                        span.set_attribute(
+                            "gen_ai.usage.cache_read_input_tokens", cache_read
+                        )
+                    # Mark the run so _emit_result doesn't re-count the totals.
+                    state["run_usage_captured"] = True
 
     elif kind == "ResultMessage":
         _emit_result(tracer, message, agent_name, state)
@@ -268,29 +298,46 @@ def _emit_result(
         if is_error:
             span.set_status(StatusCode.ERROR)
 
-        # Token usage → cost. The model came off the AssistantMessages.
-        # Cached input tokens are billed at different rates than plain input,
-        # so surface them separately for accurate cost.
-        inp, out, tot, cache_create, cache_read = _extract_usage(
-            _get(message, "usage")
-        )
-        if tot is not None:
-            model = state.get("last_model")
-            if model:
-                span.set_attribute("gen_ai.request.model", str(model))
-            if inp is not None:
-                span.set_attribute("gen_ai.usage.input_tokens", inp)
-            if out is not None:
-                span.set_attribute("gen_ai.usage.output_tokens", out)
-            span.set_attribute("gen_ai.usage.total_tokens", tot)
-            if cache_create is not None:
-                span.set_attribute(
-                    "gen_ai.usage.cache_creation_input_tokens", cache_create
-                )
-            if cache_read is not None:
-                span.set_attribute(
-                    "gen_ai.usage.cache_read_input_tokens", cache_read
-                )
+        # The SDK's own authoritative cost for the whole run (all turns +
+        # caching). Informational — surfaced for cross-checking the
+        # token-derived estimate; the backend still prices from tokens.
+        total_cost = _get(message, "total_cost_usd")
+        try:
+            if total_cost is not None and float(total_cost) > 0:
+                span.set_attribute("trovis.run.cost_usd", float(total_cost))
+        except (TypeError, ValueError):
+            pass
+
+        # Token usage → cost. Per-turn usage is now captured on each
+        # AssistantMessage (llm_output span), which sums to the true run total.
+        # Only fall back to the ResultMessage's usage when no per-turn usage was
+        # seen (older SDKs that don't populate AssistantMessage.usage) —
+        # otherwise we'd double-count the run's tokens.
+        if not state.get("run_usage_captured"):
+            inp, out, tot, cache_create, cache_read = _extract_usage(
+                _get(message, "usage")
+            )
+            if tot is not None:
+                model = state.get("last_model")
+                if model:
+                    span.set_attribute("gen_ai.request.model", str(model))
+                if inp is not None:
+                    span.set_attribute("gen_ai.usage.input_tokens", inp)
+                if out is not None:
+                    span.set_attribute("gen_ai.usage.output_tokens", out)
+                span.set_attribute("gen_ai.usage.total_tokens", tot)
+                if cache_create is not None:
+                    span.set_attribute(
+                        "gen_ai.usage.cache_creation_input_tokens", cache_create
+                    )
+                if cache_read is not None:
+                    span.set_attribute(
+                        "gen_ai.usage.cache_read_input_tokens", cache_read
+                    )
+
+    # Reset the per-run flag so the next run on this (possibly long-lived)
+    # session starts fresh.
+    state["run_usage_captured"] = False
 
 
 # ---------------------------------------------------------------------------
