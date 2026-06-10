@@ -283,6 +283,7 @@ CREATE TABLE IF NOT EXISTS spans (
     cache_creation_input_tokens INTEGER DEFAULT NULL,
     cache_read_input_tokens     INTEGER DEFAULT NULL,
     estimated_cost_usd  REAL      DEFAULT NULL,
+    cost_source         TEXT      DEFAULT NULL,
     created_at          TIMESTAMP DEFAULT NOW()
 )
 """
@@ -320,6 +321,7 @@ CREATE TABLE IF NOT EXISTS spans (
     cache_creation_input_tokens INTEGER DEFAULT NULL,
     cache_read_input_tokens     INTEGER DEFAULT NULL,
     estimated_cost_usd  REAL    DEFAULT NULL,
+    cost_source         TEXT    DEFAULT NULL,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -1013,6 +1015,12 @@ def init_db() -> None:
         # NULL on pre-cache-era rows → treated as 0 (no cache cost recoverable).
         _try_add_column(cur, "spans", "cache_creation_input_tokens", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "spans", "cache_read_input_tokens", "INTEGER DEFAULT NULL")
+        # Cost provenance: 'reported' = the SDK supplied an authoritative run
+        # cost (trovis.run.cost_usd) and estimated_cost_usd IS that value;
+        # 'covered' = a per-turn span whose token cost is already included in
+        # a reported run total (cost zeroed to avoid double-counting);
+        # NULL/'estimate' = token-derived estimate (recompute may re-price).
+        _try_add_column(cur, "spans", "cost_source", "TEXT DEFAULT NULL")
         # Pricing provenance: which source set each rate, and when it was
         # last refreshed. Lets the admin endpoint report freshness and lets
         # us tell a seeded fallback price apart from a live LiteLLM one.
@@ -1125,10 +1133,15 @@ def recompute_span_costs(account_id: int | None = None) -> dict[str, Any]:
     (NULL cache columns) re-price on input/output alone. Account-scoped when
     `account_id` is given, else the whole table. Returns {scanned, updated}."""
     account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    # Only token-derived estimates are re-priced. 'reported' rows carry the
+    # SDK's authoritative run cost and 'covered' rows are deliberately zeroed
+    # (their cost lives in a reported total) — re-pricing either would
+    # corrupt exact billing.
     sql = (
         "SELECT id, attributes, input_tokens, output_tokens, "
         "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd "
-        f"FROM spans WHERE total_tokens IS NOT NULL {account_filter}"
+        "FROM spans WHERE total_tokens IS NOT NULL "
+        f"AND (cost_source IS NULL OR cost_source = 'estimate') {account_filter}"
     )
     args: tuple[Any, ...] = (account_id,) if account_id is not None else ()
     updated = 0
@@ -1298,14 +1311,21 @@ def get_cost_audit(
                 day,
                 {
                     "date": day, "spans": 0, "token_spans": 0, "priced_spans": 0,
-                    "tokens": 0, "cost": 0.0, "unpriced_tokens": 0, "no_usage_spans": 0,
+                    "tokens": 0, "cost": 0.0, "unpriced_tokens": 0,
+                    "no_usage_spans": 0, "reported_spans": 0,
                 },
             )
             d["spans"] += 1
             tok = row["total_tokens"]
             cost = row["estimated_cost_usd"]
             if tok is None:
-                d["no_usage_spans"] += 1
+                # Token-less spans normally carry no cost — except SDK-reported
+                # run totals (cost without usage), which must count.
+                if cost is not None:
+                    d["reported_spans"] += 1
+                    d["cost"] += float(cost or 0.0)
+                else:
+                    d["no_usage_spans"] += 1
                 continue
             d["token_spans"] += 1
             d["tokens"] += int(tok or 0)
@@ -1376,9 +1396,10 @@ _INSERT_COLUMNS = (
     "start_time_unix, end_time_unix, status_code, status_message, "
     "attributes, resource_attributes, account_id, "
     "input_tokens, output_tokens, total_tokens, "
-    "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd"
+    "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd, "
+    "cost_source"
 )
-_INSERT_COLUMN_COUNT = 20
+_INSERT_COLUMN_COUNT = 21
 
 
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
@@ -1406,6 +1427,11 @@ def _to_int(v: Any) -> int | None:
         return int(v) if v is not None else None
     except (TypeError, ValueError):
         return None
+
+
+# Run ids are SDK session/run uuids. Only ids matching this are used to build
+# LIKE patterns for cross-batch cost covering (guards against pattern abuse).
+_RUN_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,128}$")
 
 
 def _extract_tokens(
@@ -1589,6 +1615,14 @@ def insert_spans(
     model is in the pricing table, an estimated USD cost is computed and
     stored. Spans without usage data store NULLs and are ignored by the
     cost aggregates.
+
+    SDK-reported cost beats estimation: when a span carries an authoritative
+    run cost (`trovis.run.cost_usd`, e.g. the Claude Agent SDK's own
+    `total_cost_usd` — which includes internal model calls our token stream
+    never sees), that value IS the span's cost (`cost_source='reported'`),
+    and the same run's per-turn token estimates are zeroed
+    (`cost_source='covered'`) so the run isn't double-counted. Works for any
+    platform that reports a run cost; everything else keeps token estimates.
     """
     if not spans:
         return 0
@@ -1596,7 +1630,9 @@ def insert_spans(
     with _connect() as conn, _cursor(conn) as cur:
         pricing = _load_pricing(cur)
 
-        rows = []
+        # Pass 1: which runs in this batch carry an SDK-reported total?
+        parsed: list[tuple] = []
+        reported_runs: set[str] = set()
         for s in spans:
             attrs = s.get("attributes") or {}
             inp, out, tot = _extract_tokens(attrs)
@@ -1606,11 +1642,39 @@ def insert_spans(
             # total_tokens counts every billed token, cache included.
             if has_usage:
                 tot = (tot or 0) + (cc or 0) + (cr or 0)
-            cost = (
-                _compute_cost(model, inp, out, pricing, cache_creation=cc, cache_read=cr)
-                if has_usage
-                else None
+            run_id = attr(attrs, "run.id")
+            run_id = str(run_id) if run_id else None
+            reported: float | None = None
+            try:
+                rc = attr(attrs, "run.cost_usd")
+                if rc is not None and float(rc) > 0:
+                    reported = round(float(rc), 6)
+            except (TypeError, ValueError):
+                pass
+            if reported is not None and run_id:
+                reported_runs.add(run_id)
+            parsed.append(
+                (s, attrs, inp, out, tot, cc, cr, model, has_usage, run_id, reported)
             )
+
+        rows = []
+        for (
+            s, attrs, inp, out, tot, cc, cr, model, has_usage, run_id, reported,
+        ) in parsed:
+            if reported is not None:
+                cost: float | None = reported
+                source: str | None = "reported"
+            elif has_usage and run_id in reported_runs:
+                cost = 0.0  # included in this run's reported total
+                source = "covered"
+            elif has_usage:
+                cost = _compute_cost(
+                    model, inp, out, pricing, cache_creation=cc, cache_read=cr
+                )
+                source = None  # token-derived estimate
+            else:
+                cost = None
+                source = None
             rows.append(
                 (
                     s["trace_id"],
@@ -1633,6 +1697,7 @@ def insert_spans(
                     cc,
                     cr,
                     cost,
+                    source,
                 )
             )
 
@@ -1648,6 +1713,30 @@ def insert_spans(
                 f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES ({placeholders})",
                 rows,
             )
+
+        # Cross-batch covering: a run's per-turn spans often arrive in earlier
+        # export batches than its run-complete span. Now that the run's
+        # reported total has landed, zero those earlier token estimates so the
+        # run isn't double-counted. Prior 'reported' rows are left alone —
+        # per the Agent SDK docs each result reflects only its own query()
+        # call, so multiple reported totals on one session legitimately sum.
+        for rid in reported_runs:
+            if not _RUN_ID_SAFE_RE.match(rid):
+                continue  # don't build LIKE patterns from exotic ids
+            sql = (
+                "UPDATE spans SET estimated_cost_usd = 0, cost_source = 'covered' "
+                f"WHERE (attributes LIKE {PH} OR attributes LIKE {PH}) "
+                "AND total_tokens IS NOT NULL "
+                "AND (cost_source IS NULL OR cost_source = 'estimate')"
+            )
+            args: list[Any] = [
+                f'%"trovis.run.id": "{rid}"%',
+                f'%"oversee.run.id": "{rid}"%',
+            ]
+            if account_id is not None:
+                sql += f" AND account_id = {PH}"
+                args.append(account_id)
+            cur.execute(sql, tuple(args))
     return len(rows)
 
 
@@ -3724,10 +3813,10 @@ def get_agent_costs(
     )
     sql = f"""
         SELECT start_time_unix, input_tokens, output_tokens, total_tokens,
-               estimated_cost_usd, attributes
+               estimated_cost_usd, attributes, cost_source
         FROM spans
         WHERE service_name = {PH}
-          AND total_tokens IS NOT NULL
+          AND (total_tokens IS NOT NULL OR estimated_cost_usd IS NOT NULL)
           AND start_time_unix >= {PH}
           {account_filter}
           {agent_filter}
@@ -3771,6 +3860,8 @@ def get_agent_costs(
         d["cost"] += cost
 
         # Model bucket — read gen_ai.request.model from attributes JSON.
+        # SDK-reported run totals may not name a model (the run can span
+        # several internally); label them honestly instead of "unknown".
         model = "unknown"
         try:
             attrs = json.loads(r["attributes"] or "{}")
@@ -3778,6 +3869,8 @@ def get_agent_costs(
                 model = attrs.get("gen_ai.request.model") or "unknown"
         except (TypeError, ValueError):
             pass
+        if model == "unknown" and _row_get(r, "cost_source") == "reported":
+            model = "(run total)"
         m = by_model.setdefault(model, {"tokens": 0, "cost": 0.0})
         m["tokens"] += tot
         m["cost"] += cost
@@ -3857,8 +3950,9 @@ def get_fleet_daily_cost(
     returning [{date, tokens, cost}] sorted ascending. Days with no
     usage are omitted — the caller fills gaps for the sparkline.
 
-    Only spans carrying usage data (`total_tokens IS NOT NULL`) count,
-    matching `get_agent_costs`.
+    Counts spans carrying usage data OR a cost — SDK-reported run totals
+    (`cost_source='reported'`) may carry no tokens but must count, matching
+    `get_agent_costs`.
     """
     days = max(1, min(365, int(days)))
     from time import time as _time
@@ -3870,7 +3964,7 @@ def get_fleet_daily_cost(
     sql = f"""
         SELECT start_time_unix, total_tokens, estimated_cost_usd
         FROM spans
-        WHERE total_tokens IS NOT NULL
+        WHERE (total_tokens IS NOT NULL OR estimated_cost_usd IS NOT NULL)
           AND start_time_unix >= {PH}
           {account_filter}
         ORDER BY start_time_unix ASC
@@ -3910,9 +4004,10 @@ def get_cost_breakdown(account_id: int | None) -> dict[str, Any]:
 
     account_filter = f"AND account_id = {PH}" if account_id is not None else ""
     sql = f"""
-        SELECT service_name, total_tokens, estimated_cost_usd, attributes
+        SELECT service_name, total_tokens, estimated_cost_usd, attributes,
+               cost_source
         FROM spans
-        WHERE total_tokens IS NOT NULL
+        WHERE (total_tokens IS NOT NULL OR estimated_cost_usd IS NOT NULL)
           AND start_time_unix >= {PH}
           {account_filter}
     """
@@ -3938,6 +4033,8 @@ def get_cost_breakdown(account_id: int | None) -> dict[str, Any]:
                 model = attrs.get("gen_ai.request.model") or "unknown"
         except (TypeError, ValueError):
             pass
+        if model == "unknown" and _row_get(r, "cost_source") == "reported":
+            model = "(run total)"
         m = by_model.setdefault(model, {"tokens": 0, "cost": 0.0})
         m["tokens"] += tok
         m["cost"] += cost
