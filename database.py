@@ -1827,11 +1827,18 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     # GROUP BY or aggregated — `agent_id` IS in the GROUP BY, so the
     # `COALESCE(spans.agent_id, 'main')` reads are legal there.
     # Day/week thresholds for the windowed cost columns (nanoseconds).
+    # "Today" is the UTC calendar day (since 00:00 UTC), matching the 30-day
+    # chart + month-to-date (both UTC-bucketed) and the providers' billing day,
+    # so "Today" equals the last point of the trend chart and lines up with the
+    # console. "7d" stays a rolling 7-day window.
     from time import time as _time
 
     _now_ns = int(_time() * 1_000_000_000)
     _day_ns = 24 * 60 * 60 * 1_000_000_000
-    today_ns = _now_ns - _day_ns
+    _utc_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    today_ns = int(_utc_midnight.timestamp() * 1_000_000_000)
     week_ns = _now_ns - 7 * _day_ns
 
     agg_sql = f"""

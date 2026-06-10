@@ -16,7 +16,7 @@ function agoLabel(ts) {
 }
 
 // Dedicated cost page (overlay opened from the dashboard Cost card). Shows
-// today (rolling 24h, matching Fleet), month-to-date vs. an editable org
+// today (UTC calendar day, matching the trend chart + console), month-to-date vs. an editable org
 // budget, a 30-day trend, a per-agent breakdown with editable monthly caps,
 // and an org-wide by-model breakdown. Costs render via the shared formatCost
 // (always dollars, rounded to the nearest cent).
@@ -165,7 +165,7 @@ export default function CostPage({ onBack, onOpenAgent }) {
         <div className="costp-sum-box">
           <span className="costp-sum-label">Today</span>
           <span className="costp-bignum">{fmtMoney(data.today)}</span>
-          <span className="costp-sum-sub">rolling 24 hours</span>
+          <span className="costp-sum-sub">today (UTC)</span>
         </div>
         <div className="costp-sum-box">
           <span className="costp-sum-label">This month</span>
