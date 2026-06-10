@@ -2289,7 +2289,10 @@ async def dashboard_attention(request: Request) -> list[AttentionItem]:
 
 
 def _agent_cost_trend(a: dict) -> str:
-    """today (rolling 24h) vs the trailing 7-day daily average."""
+    """today (UTC calendar day) vs the trailing 7-day daily average. Note:
+    early in the UTC day the partial-day total reads low against a full-day
+    average, so the arrow leans down in the morning and fills in through the
+    day — acceptable for a soft indicator."""
     c_today = a.get("cost_today") or 0.0
     avg = (a.get("cost_7d") or 0.0) / 7.0
     if c_today > avg * 1.1:
@@ -2316,9 +2319,9 @@ def _daily_series(daily_rows: list[dict]) -> tuple[list[float], float, str]:
 
 @app.get("/dashboard/cost", response_model=CostResponse)
 async def dashboard_cost(request: Request) -> CostResponse:
-    """Cost Intelligence card. `today` is the rolling-24h fleet spend (sum of
-    each agent's cost_today) — identical to the Fleet page's "cost today" —
-    and per-agent rows show that same today figure. Month-to-date vs. the org
+    """Cost Intelligence card. `today` is the UTC-calendar-day fleet spend (sum
+    of each agent's cost_today) — identical to the Fleet page's "cost today" and
+    to the last point of the 30-day sparkline. Month-to-date vs. the org
     budget; 30-day sparkline. Pure DB, no Claude."""
     account_id = getattr(request.state, "account_id", None)
     agents = database.get_agents(account_id=account_id)
@@ -2352,7 +2355,7 @@ async def dashboard_cost(request: Request) -> CostResponse:
 
 @app.get("/cost/overview", response_model=CostOverview)
 async def cost_overview(request: Request) -> CostOverview:
-    """The dedicated cost page: today (rolling 24h), month-to-date vs. the org
+    """The dedicated cost page: today (UTC calendar day), month-to-date vs. the org
     budget, a 30-day trend, per-agent breakdown (today/7d/all-time/MTD + the
     editable monthly cap + over-cap flag), and an org-wide by-model breakdown."""
     account_id = getattr(request.state, "account_id", None)
