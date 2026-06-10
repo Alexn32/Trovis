@@ -2406,6 +2406,23 @@ async def cost_overview(request: Request) -> CostOverview:
     )
 
 
+@app.get("/cost/audit")
+async def cost_audit(
+    request: Request,
+    service: str | None = Query(default=None),
+    days: int = Query(default=30, ge=1, le=365),
+) -> dict[str, Any]:
+    """Per-day, per-model cost audit for debugging a wrong total. Shows, per UTC
+    day, how many spans carried usage tokens vs how many got a price, the total
+    tokens/cost, and the tokens that landed UNPRICED (cost NULL) with the models
+    responsible — separating a price-table gap from an SDK usage-capture gap.
+    Account-scoped; pass `?service=` to focus one agent."""
+    account_id = getattr(request.state, "account_id", None)
+    return database.get_cost_audit(
+        account_id=account_id, service_name=service, days=days
+    )
+
+
 @app.put("/cost/budget", response_model=CostOverview)
 async def set_cost_budget(request: Request, body: BudgetUpdate) -> CostOverview:
     """Set (or clear) the org's monthly budget, then return the fresh overview."""

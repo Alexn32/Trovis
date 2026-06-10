@@ -19,7 +19,7 @@ function agoLabel(ts) {
 // today (rolling 24h, matching Fleet), month-to-date vs. an editable org
 // budget, a 30-day trend, a per-agent breakdown with editable monthly caps,
 // and an org-wide by-model breakdown. Costs render via the shared formatCost
-// (sub-dollar amounts in cents).
+// (always dollars, rounded to the nearest cent).
 
 function fmtTokens(n) {
   const v = Number(n) || 0
@@ -30,6 +30,7 @@ function fmtTokens(n) {
 
 export default function CostPage({ onBack, onOpenAgent }) {
   const [data, setData] = useState(null)
+  const [audit, setAudit] = useState(null)
   const [error, setError] = useState(null)
   const [budgetInput, setBudgetInput] = useState('')
   const [savingBudget, setSavingBudget] = useState(false)
@@ -45,6 +46,9 @@ export default function CostPage({ onBack, onOpenAgent }) {
       setBudgetInput(d.month_budget ? String(d.month_budget) : '')
       setLastUpdated(Date.now())
       setError(null)
+      // Non-blocking: flag any tokens that landed unpriced so an undercount
+      // never reads as the truth. Failure here must not break the page.
+      api.getCostAudit().then(setAudit).catch(() => {})
     } catch (e) {
       setError(e.message || 'Could not load cost data')
     } finally {
@@ -139,6 +143,22 @@ export default function CostPage({ onBack, onOpenAgent }) {
           </button>
         </div>
       </div>
+
+      {audit && audit.unpriced_token_total > 0 && (
+        <div className="costp-unpriced-warn">
+          <strong>Heads up — costs below are undercounted.</strong>{' '}
+          {fmtTokens(audit.unpriced_token_total)} tokens from{' '}
+          {audit.unpriced_models.length} model
+          {audit.unpriced_models.length === 1 ? '' : 's'} aren’t priced yet
+          {audit.unpriced_models[0]
+            ? ` (${audit.unpriced_models
+                .slice(0, 3)
+                .map((m) => m.model)
+                .join(', ')}${audit.unpriced_models.length > 3 ? '…' : ''})`
+            : ''}
+          . They’ll be priced automatically once the rate is known.
+        </div>
+      )}
 
       {/* Summary row */}
       <div className="costp-summary">
