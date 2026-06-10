@@ -1257,6 +1257,89 @@ def get_pricing_coverage(
     }
 
 
+def get_cost_audit(
+    account_id: int | None = None,
+    service_name: str | None = None,
+    days: int = 30,
+) -> dict[str, Any]:
+    """Per-day, per-model cost breakdown for debugging undercounting.
+
+    For each UTC day in the window it reports total spans, how many carried
+    usage tokens, how many of those got a price, total tokens, total stored
+    cost, and the tokens that were token-bearing but UNPRICED (cost NULL).
+    This separates the two failure modes: a *match gap* (tokens present but
+    cost NULL → model not in the price table) vs a *capture gap* (few/no
+    token-bearing spans on a day the agent clearly ran → the SDK didn't emit
+    `gen_ai.usage.*`). Account-scoped; optional single-agent filter.
+    """
+    window_ns = time.time_ns() - days * 24 * 60 * 60 * 1_000_000_000
+    sql = (
+        "SELECT start_time_unix, attributes, total_tokens, estimated_cost_usd "
+        f"FROM spans WHERE start_time_unix >= {PH}"
+    )
+    params: list[Any] = [window_ns]
+    if account_id is not None:
+        sql += f" AND account_id = {PH}"
+        params.append(account_id)
+    if service_name is not None:
+        sql += f" AND service_name = {PH}"
+        params.append(service_name)
+
+    days_map: dict[str, dict[str, Any]] = {}
+    unpriced: dict[str, dict[str, int]] = {}
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(params))
+        for row in cur.fetchall():
+            ts = row["start_time_unix"] or 0
+            day = datetime.fromtimestamp(ts / 1_000_000_000, tz=timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
+            d = days_map.setdefault(
+                day,
+                {
+                    "date": day, "spans": 0, "token_spans": 0, "priced_spans": 0,
+                    "tokens": 0, "cost": 0.0, "unpriced_tokens": 0, "no_usage_spans": 0,
+                },
+            )
+            d["spans"] += 1
+            tok = row["total_tokens"]
+            cost = row["estimated_cost_usd"]
+            if tok is None:
+                d["no_usage_spans"] += 1
+                continue
+            d["token_spans"] += 1
+            d["tokens"] += int(tok or 0)
+            if cost is not None:
+                d["priced_spans"] += 1
+                d["cost"] += float(cost or 0.0)
+            else:
+                d["unpriced_tokens"] += int(tok or 0)
+                try:
+                    attrs = json.loads(row["attributes"] or "{}")
+                except (TypeError, ValueError):
+                    attrs = {}
+                model = (attrs.get("gen_ai.request.model") if isinstance(attrs, dict)
+                         else None) or "(no model on span)"
+                agg = unpriced.setdefault(model, {"spans": 0, "tokens": 0})
+                agg["spans"] += 1
+                agg["tokens"] += int(tok or 0)
+
+    day_rows = sorted(days_map.values(), key=lambda x: x["date"], reverse=True)
+    for d in day_rows:
+        d["cost"] = round(d["cost"], 6)
+    unpriced_models = sorted(
+        ({"model": m, **agg} for m, agg in unpriced.items()),
+        key=lambda x: x["tokens"], reverse=True,
+    )
+    return {
+        "window_days": days,
+        "service_name": service_name,
+        "days": day_rows,
+        "unpriced_models": unpriced_models,
+        "unpriced_token_total": sum(m["tokens"] for m in unpriced_models),
+    }
+
+
 def _try_add_column(cur, table: str, column: str, type_decl: str) -> None:
     """Add a column if it doesn't already exist. Idempotent on both backends.
 
@@ -1366,6 +1449,42 @@ def _normalize_model(model: Any) -> str:
     return str(model).strip().lower().split("/")[-1]
 
 
+# Anthropic prices by tier; OpenAI's 4o family shares a rate. Used by the
+# same-family fallback so a model id we don't explicitly carry still resolves
+# to its tier's rate instead of NULL (which would silently drop its cost).
+_CLAUDE_TIERS = ("opus", "sonnet", "haiku")
+
+
+def _version_tuple(key: str) -> tuple[int, ...]:
+    """Numeric tokens in a model key, for picking the newest in a tier:
+    'claude-opus-4-7' → (4, 7), 'claude-opus-4' → (4,)."""
+    return tuple(int(n) for n in re.findall(r"\d+", key))
+
+
+def _family_fallback(
+    norm: str, pricing: dict[str, tuple[float, float]]
+) -> tuple[float, float] | None:
+    """Estimate a rate for an unknown id by its model family/tier — the newest
+    KNOWN same-tier rate. Returns None when the family is unrecognized (the id
+    still surfaces as unmatched in coverage, but a known-family model never
+    prices as $0)."""
+    parts = set(norm.split("-"))
+    if "claude" in norm:
+        for tier in _CLAUDE_TIERS:
+            if tier in parts:
+                cands = [
+                    k for k in pricing
+                    if k.startswith("claude-") and tier in k.split("-")
+                ]
+                if cands:
+                    return pricing[max(cands, key=_version_tuple)]
+    if norm.startswith("gpt-4o") or norm.startswith("gpt-5") or norm.startswith("gpt-4."):
+        target = "gpt-4o-mini" if "mini" in norm or "nano" in norm else "gpt-4o"
+        if target in pricing:
+            return pricing[target]
+    return None
+
+
 # One trailing date/version token providers append to a base id, e.g.
 # '-20250514', '-2024-08-06', '-v1:0', '-001', '-latest'.
 _DATE_SUFFIX_RE = re.compile(
@@ -1414,7 +1533,12 @@ def _match_pricing(
     base = _strip_date_suffix(norm)
     if base != norm and base in pricing:
         return pricing[base]
-    return None
+    # Same-family fallback: a brand-new/variant id we don't carry yet
+    # (e.g. 'claude-opus-4-9', 'claude-sonnet-5') should price at the newest
+    # KNOWN same-tier rate rather than store NULL and silently drop the cost.
+    # Anthropic prices by tier, so the newest opus/sonnet/haiku rate is a sound
+    # estimate. Surfaces in /admin/pricing/coverage either way.
+    return _family_fallback(norm, pricing)
 
 
 def _compute_cost(

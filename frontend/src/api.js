@@ -317,6 +317,12 @@ export const api = {
   getWorkFeed: () => request('/dashboard/work-feed'),
   // --- dedicated cost page ---
   getCostOverview: () => request('/cost/overview'),
+  // Per-day / per-model cost audit — surfaces tokens that landed unpriced
+  // (cost undercounted) so a pricing/capture gap is visible, not silent.
+  getCostAudit: (service, days = 30) =>
+    request(
+      `/cost/audit?days=${days}${service ? `&service=${encodeURIComponent(service)}` : ''}`,
+    ),
   setBudget: (monthlyBudget) =>
     request('/cost/budget', {
       method: 'PUT',
