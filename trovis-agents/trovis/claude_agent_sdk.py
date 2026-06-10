@@ -219,6 +219,16 @@ def _emit_for_message(
             _get(message, "usage")
         )
         has_usage = tot is not None
+        # Parallel tool calls produce multiple AssistantMessages sharing one
+        # message_id with IDENTICAL usage — count each id once or parallel
+        # turns inflate the totals (per the Agent SDK cost-tracking docs).
+        msg_id = _get(message, "message_id")
+        if has_usage and msg_id:
+            seen: set = state.setdefault("seen_msg_ids", set())
+            if msg_id in seen:
+                has_usage = False
+            else:
+                seen.add(msg_id)
         # Emit the llm_output span when there's text OR usage (a tool-use turn
         # has no text but still billed tokens we must not drop).
         if text or has_usage:
@@ -298,9 +308,16 @@ def _emit_result(
         if is_error:
             span.set_status(StatusCode.ERROR)
 
-        # The SDK's own authoritative cost for the whole run (all turns +
-        # caching). Informational — surfaced for cross-checking the
-        # token-derived estimate; the backend still prices from tokens.
+        # Always tag the run's primary model (seen on the AssistantMessages)
+        # so cost/by-model views can attribute the run's reported cost.
+        run_model = state.get("last_model")
+        if run_model:
+            span.set_attribute("gen_ai.request.model", str(run_model))
+
+        # The SDK's own cost for the whole run() call — all turns, internal
+        # model calls (e.g. Haiku subagents), and cache TTL rates included.
+        # The Trovis backend uses this as the run's cost when present
+        # (cost_source='reported'), zeroing the per-turn estimates it covers.
         total_cost = _get(message, "total_cost_usd")
         try:
             if total_cost is not None and float(total_cost) > 0:
@@ -318,9 +335,6 @@ def _emit_result(
                 _get(message, "usage")
             )
             if tot is not None:
-                model = state.get("last_model")
-                if model:
-                    span.set_attribute("gen_ai.request.model", str(model))
                 if inp is not None:
                     span.set_attribute("gen_ai.usage.input_tokens", inp)
                 if out is not None:
@@ -335,9 +349,10 @@ def _emit_result(
                         "gen_ai.usage.cache_read_input_tokens", cache_read
                     )
 
-    # Reset the per-run flag so the next run on this (possibly long-lived)
+    # Reset per-run tracking so the next run on this (possibly long-lived)
     # session starts fresh.
     state["run_usage_captured"] = False
+    state["seen_msg_ids"] = set()
 
 
 # ---------------------------------------------------------------------------
