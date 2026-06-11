@@ -4875,6 +4875,29 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 }
 .wf2-add-step:hover { border-color: var(--text-primary); color: var(--text-primary); }
 
+/* Conversational AI edit bar (edit mode) */
+.wf2-ai-bar {
+  max-width: 860px; margin: 14px auto 0; padding: 0 20px; width: 100%;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.wf2-ai-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+  border-radius: 12px; padding: 7px 8px 7px 12px;
+}
+.wf2-ai-row:focus-within { border-color: var(--text-primary); }
+.wf2-ai-spark { color: #6366f1; font-size: 14px; flex-shrink: 0; }
+.wf2-ai-input {
+  flex: 1; min-width: 0; border: none; background: none; outline: none;
+  font: inherit; font-size: 13px; color: var(--text-primary);
+}
+.wf2-ai-input::placeholder { color: var(--text-dim); }
+.wf2-ai-apply { flex-shrink: 0; padding: 7px 16px; font-size: 12.5px; }
+.wf2-ai-msg { font-size: 11px; padding: 0 4px; }
+.wf2-ai-msg.hint { color: var(--text-muted); }
+.wf2-ai-msg.ok { color: var(--success); font-weight: 600; }
+.wf2-ai-msg.error { color: var(--error); font-weight: 600; }
+
 /* Editable nodes: pointer cursor, delete control + connect port. */
 .wf2-node2.is-editable { cursor: pointer; }
 .wf2-node-del {

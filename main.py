@@ -92,6 +92,8 @@ from models import (
     WeeklyTrends,
     WorkFeedItem,
     Workflow,
+    WorkflowAiEdit,
+    WorkflowAiEditResult,
     WorkflowCreate,
     WorkflowDescribe,
     WorkflowEdge,
@@ -1091,6 +1093,41 @@ async def delete_workflow_participant(
         raise HTTPException(status_code=404, detail="workflow not found")
     if not database.delete_workflow_participant(participant_id, workflow_id):
         raise HTTPException(status_code=404, detail="participant not found")
+
+
+@app.post(
+    "/workflows/{workflow_id}/ai-edit", response_model=WorkflowAiEditResult
+)
+async def ai_edit_workflow(
+    workflow_id: int, request: Request, body: WorkflowAiEdit
+) -> WorkflowAiEditResult:
+    """Apply a plain-English edit instruction to an existing workflow. Claude
+    returns a minimal set of edit operations (add/update/delete step, add/delete
+    edge, add participant) that preserve existing step ids; we apply them and
+    return the updated graph + a one-line summary."""
+    account_id = getattr(request.state, "account_id", None)
+    wf = database.get_workflow(workflow_id, account_id=account_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if not (body.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="instruction is required")
+    agents = database.get_agents(account_id=account_id)
+    try:
+        result = describer.workflow_edit_operations(wf, body.instruction, agents)
+    except describer.APIKeyMissingError:
+        raise HTTPException(
+            status_code=503,
+            detail="AI is unavailable — the backend needs an ANTHROPIC_API_KEY.",
+        )
+    applied = database.apply_workflow_edit_operations(
+        workflow_id, result.get("operations") or []
+    )
+    updated = database.get_workflow(workflow_id, account_id=account_id)
+    return WorkflowAiEditResult(
+        summary=result.get("summary") or "",
+        applied=applied,
+        workflow=Workflow(**updated),
+    )
 
 
 def _build_agents_context(
