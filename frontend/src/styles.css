@@ -4613,9 +4613,147 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .wf2-detail-stat-value.tone-warn { color: var(--dash-warn); }
 .wf2-detail-stat-value.mono { font-family: "IBM Plex Mono", monospace; font-size: 11px; }
 
+/* =============================================================================
+   Workflow canvas redesign — handoff altitude (.wf2-node2), worker colors,
+   loops, animated flow. Layered on the .wf2 palette; works light + dark.
+   ============================================================================= */
+
+/* Header roster + toggle */
+.wf2-roster { display: flex; gap: 6px; flex-wrap: wrap; }
+.wf2-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; font-weight: 650; padding: 3px 9px; border-radius: 100px;
+  background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-secondary);
+}
+.wf2-chip-mark { width: 7px; height: 7px; flex-shrink: 0; }
+.wf2-chip-mark.is-square { border-radius: 2px; }
+.wf2-chip-mark.is-circle { border-radius: 50%; }
+.wf2-head-stat-value.tone-human { color: var(--node-human); }
+
+.wf2-view-toggle {
+  display: inline-flex; border: 1px solid var(--border-hover); border-radius: 8px;
+  overflow: hidden; flex-shrink: 0;
+}
+.wf2-view-toggle button {
+  font: inherit; font-size: 11.5px; font-weight: 650; padding: 5px 12px;
+  background: var(--bg-elevated); color: var(--text-muted); border: none;
+}
+.wf2-view-toggle button + button { border-left: 1px solid var(--border-hover); }
+.wf2-view-toggle button.is-on { background: var(--accent-bg); color: var(--accent-text); }
+
+/* Nodes */
+.wf2-node2 {
+  position: absolute; z-index: 1; box-sizing: border-box; cursor: grab; user-select: none;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 13px; border-radius: 13px;
+  background: var(--node-agent-bg);
+  border: 1px solid var(--border-default);
+  border-top-width: 3px; border-top-style: solid;
+  box-shadow: 0 2px 10px rgba(44, 36, 24, 0.05);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.wf2-node2:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(44, 36, 24, 0.12); }
+.wf2-node2:active { cursor: grabbing; }
+.wf2-node2.type-trigger { background: var(--bg-surface); }
+.wf2-node2.type-agent { background: var(--node-agent-bg); }
+.wf2-node2.type-human { background: var(--node-human-bg); }
+.wf2-node2.type-decision { background: var(--node-decision-bg); }
+.wf2-node2.type-output { background: var(--node-output-bg); }
+.wf2-node2.can-expand { cursor: pointer; }
+.wf2-node2.is-expanded { box-shadow: 0 12px 30px rgba(44, 36, 24, 0.16); }
+
+.wf2-node2-badges { display: flex; align-items: center; gap: 5px; }
+.wf2-type-pill {
+  font-size: 7.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em;
+  color: #fff; padding: 2px 7px; border-radius: 100px; flex-shrink: 0;
+}
+.wf2-count-pill {
+  font-size: 9px; font-weight: 700; color: var(--text-muted);
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  padding: 1px 6px; border-radius: 100px;
+}
+.wf2-chev { margin-left: auto; color: var(--text-muted); display: inline-flex; transition: transform 0.2s ease; }
+.wf2-chev.is-open { transform: rotate(180deg); }
+
+.wf2-node2-name { font-size: 12.5px; font-weight: 700; color: var(--text-primary); line-height: 1.25; }
+.wf2-node2-stats { display: flex; align-items: center; gap: 8px; font-size: 9.5px; color: var(--text-muted); flex-wrap: wrap; }
+.wf2-node2-stats .dim { color: var(--text-dim); }
+.wf2-node2-stats .wf2-wait { color: var(--node-human); font-weight: 600; }
+.wf2-decision-stats { display: inline-flex; gap: 6px; }
+.wf2-decision-stats .good { color: var(--success); font-weight: 700; }
+.wf2-decision-stats .warn { color: var(--node-decision); font-weight: 700; }
+
+.wf2-human-pills { display: flex; gap: 5px; margin-top: 1px; }
+.wf2-hpill { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 100px; }
+.wf2-hpill.good { color: var(--success); background: var(--success-faint); }
+.wf2-hpill.warn { color: var(--node-decision); background: var(--warning-faint); }
+
+/* Expand-in-place */
+.wf2-expand { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-default); }
+.wf2-expand-step { display: flex; gap: 8px; align-items: flex-start; }
+.wf2-expand-num {
+  flex-shrink: 0; width: 16px; height: 16px; border-radius: 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; color: var(--text-secondary);
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+}
+.wf2-expand-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wf2-expand-name { font-size: 10.5px; font-weight: 650; color: var(--text-primary); line-height: 1.3; }
+.wf2-expand-meta { font-size: 8px; color: var(--text-dim); font-family: "IBM Plex Mono", monospace; }
+
+/* Forward edges + animated flow */
+.wf2-fedge { fill: none; stroke: #b8b0a4; stroke-width: 2; }
+.wf2-fedge-label { fill: var(--success); font-size: 9.5px; font-weight: 700; }
+.wf2-flow-dot { fill: #2a9d6e; opacity: 0.8; }
+
+/* Loop label pill (rendered inside an SVG foreignObject) */
+.wf2-loop-pill-wrap { display: flex; justify-content: center; }
+.wf2-loop-pill {
+  display: inline-block; white-space: nowrap;
+  font-size: 9.5px; font-weight: 700; line-height: 1.4;
+  padding: 2px 9px; border-radius: 100px;
+  background: var(--bg-surface); border: 1px solid;
+}
+
+/* Insert affordance (visual hint only, V1) */
+.wf2-insert {
+  position: absolute; z-index: 2; width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-surface); border: 1px solid var(--border-hover);
+  color: var(--text-muted); font-size: 15px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.wf2-insert.is-shown { opacity: 1; }
+.wf2-insert:hover { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent-bg); }
+
+/* Insight strip */
+.wf2-insights {
+  display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
+  max-width: 860px; margin: 14px auto 18px; padding: 0 20px; width: 100%;
+}
+.wf2-insight {
+  flex: 1; min-width: 280px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+  border-radius: 12px; padding: 13px 16px;
+}
+.wf2-insight p { margin: 5px 0 0; font-size: 12px; color: var(--text-secondary); line-height: 1.55; }
+.wf2-insight-label { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em; }
+.wf2-insight.loop .wf2-insight-label { color: var(--node-decision); }
+.wf2-insight.map .wf2-insight-label { color: #5A7B7B; }
+
+/* WorkflowList loop badge + colored participant marks */
+.wf2-part-dot.is-square { width: 6px; height: 6px; border-radius: 2px; }
+.wf2-part-dot.is-circle { width: 6px; height: 6px; border-radius: 50%; }
+.wf2-steps-with-loops { display: inline-flex; align-items: center; gap: 7px; }
+.wf2-loop-badge {
+  font-size: 9px; font-weight: 700; color: var(--node-decision);
+  background: var(--warning-faint); padding: 1px 7px; border-radius: 100px;
+}
+
 @media (max-width: 760px) {
   .wf2-method-grid { grid-template-columns: 1fr; }
   .wf2-detail { width: 100%; }
+  .wf2-insights { flex-direction: column; }
 }
 
 /* =============================================================================

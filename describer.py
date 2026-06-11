@@ -973,11 +973,23 @@ WORKFLOW_GRAPH_SYSTEM_PROMPT = (
     "trigger and ends with an output. Return ONLY valid JSON, no markdown."
 )
 
+_WORKFLOW_LOOP_RULES = (
+    "LOOPS: If the description includes revision cycles, retries, or 'goes back to' "
+    "patterns (e.g. 'if QA fails it goes back to the writer', 'rejected drafts return "
+    "for revision'), create an edge where to_index < from_index. Mark it "
+    '"is_branch": true and give it a short label describing the loop (e.g. "failed QA", '
+    '"revision requested"). Loops are normal — most real workflows have them. Do NOT '
+    "duplicate steps to avoid a backward edge.\n"
+    "Layout for loops: do not adjust positions for loop edges. Keep all steps on the "
+    "main left-to-right line. The frontend routes loop edges below the flow automatically."
+)
+
 _WORKFLOW_LAYOUT_RULES = (
     "Layout rules: flow left to right. Start at x=60 and add 230 for each sequential "
     "step, all at y=200. Decision branches: the escalation/yes path goes to y=80 and "
     "the default/no path stays at y=200; converge back to y=200 when paths rejoin. "
-    "Use node_width=170 and node_height=72."
+    "Use node_width=170 and node_height=72.\n"
+    f"{_WORKFLOW_LOOP_RULES}"
 )
 
 

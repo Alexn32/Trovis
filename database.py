@@ -2912,6 +2912,7 @@ def _row_to_workflow(row: Any) -> dict[str, Any]:
         "agent_id": row["agent_id"],
         "method": _row_get(row, "method", "generate") or "generate",
         "source_description": _row_get(row, "source_description"),
+        "loop_count": int(_row_get(row, "loop_count", 0) or 0),
         "created_at": _ts_to_str(row["created_at"]),
         "updated_at": _ts_to_str(row["updated_at"]),
     }
@@ -3064,7 +3065,11 @@ def get_workflows(account_id: int | None) -> list[dict[str, Any]]:
     sql = f"""
         SELECT w.*,
                (SELECT COUNT(*) FROM workflow_steps s WHERE s.workflow_id = w.id) AS step_count,
-               (SELECT COUNT(*) FROM workflow_participants p WHERE p.workflow_id = w.id) AS participant_count
+               (SELECT COUNT(*) FROM workflow_participants p WHERE p.workflow_id = w.id) AS participant_count,
+               (SELECT COUNT(*) FROM workflow_edges e
+                  JOIN workflow_steps fs ON fs.id = e.from_step_id
+                  JOIN workflow_steps ts ON ts.id = e.to_step_id
+                  WHERE e.workflow_id = w.id AND ts.step_order < fs.step_order) AS loop_count
         FROM workflows w
         {account_filter}
         ORDER BY w.updated_at DESC, w.id DESC
@@ -3651,9 +3656,24 @@ def get_workflow_step_stats(
         "avg_cycle_ms": 0.0,
         "escalation_rate": None,
         "avg_human_wait_ms": None,
+        "loop_rate": None,
+        "avg_rounds": None,
     }
     if not services:
         return result
+
+    # Does the graph contain a backward edge (a loop)? Loop metrics are only
+    # meaningful — and only "derivable" — for workflows that actually loop.
+    order_by_id = {s["id"]: s["step_order"] for s in steps}
+    has_loop_edge = any(
+        order_by_id.get(e["to_step_id"], 0) < order_by_id.get(e["from_step_id"], 0)
+        for e in wf.get("edges", [])
+    )
+    # Operations that correspond to real agent steps — a repeat of one of these
+    # span_names within a single trace is the signal that the run looped back.
+    loop_ops = sorted(
+        {s["operation"] for s in steps if s["step_type"] == "agent" and s["operation"]}
+    )
 
     span_acct = (
         f"AND account_id = {PH}" if account_id is not None else "AND account_id IS NULL"
@@ -3703,6 +3723,31 @@ def get_workflow_step_stats(
         )
         roll = cur.fetchone()
 
+        # Loop metrics: a run "looped" when the same step span_name appears 2+
+        # times for the same agent within one trace. Only derivable when the
+        # graph actually has a backward edge and there are step operations to
+        # inspect — otherwise we leave loop_rate / avg_rounds null (honest).
+        loop_rows = []
+        if has_loop_edge and loop_ops:
+            op_ph = ", ".join([PH] * len(loop_ops))
+            cur.execute(
+                f"""
+                SELECT trace_id, service_name, COALESCE(agent_id, 'main') AS agent_id,
+                       span_name, COUNT(*) AS c
+                FROM spans
+                WHERE service_name IN ({placeholders})
+                  AND span_name IN ({op_ph})
+                  AND start_time_unix >= {PH}
+                  {span_acct}
+                GROUP BY trace_id, service_name, COALESCE(agent_id, 'main'), span_name
+                """,
+                tuple(
+                    [*services, *loop_ops, start_ns]
+                    + ([account_id] if account_id is not None else [])
+                ),
+            )
+            loop_rows = cur.fetchall()
+
     tot_spans = 0
     tot_errors = 0
     for s in steps:
@@ -3727,6 +3772,19 @@ def get_workflow_step_stats(
     result["success_rate"] = (
         round((tot_spans - tot_errors) / tot_spans * 100, 1) if tot_spans else 0.0
     )
+
+    # Roll the loop rows up per trace: rounds = max repeat count of any looped
+    # span in that trace; a trace looped when rounds >= 2.
+    if has_loop_edge and loop_ops and result["total_runs"] > 0:
+        rounds_by_trace: dict[Any, int] = {}
+        for r in loop_rows:
+            c = int(r["c"] or 0)
+            if c > rounds_by_trace.get(r["trace_id"], 0):
+                rounds_by_trace[r["trace_id"]] = c
+        looped = [n for n in rounds_by_trace.values() if n >= 2]
+        result["loop_rate"] = round(len(looped) / result["total_runs"] * 100, 1)
+        result["avg_rounds"] = round(sum(looped) / len(looped), 1) if looped else 0.0
+
     return result
 
 

@@ -11,10 +11,17 @@ const METHODS = [
   { id: 'blank', Icon: PlusIcon, title: 'Start blank', sub: 'Build from scratch' },
 ]
 
-export default function WorkflowCreateModal({ onClose, onCreated }) {
-  const [method, setMethod] = useState('describe')
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
+export default function WorkflowCreateModal({
+  onClose,
+  onCreated,
+  initialMethod = 'describe',
+  initialName = '',
+  initialDescription = '',
+  title = 'New Workflow',
+}) {
+  const [method, setMethod] = useState(initialMethod)
+  const [name, setName] = useState(initialName)
+  const [description, setDescription] = useState(initialDescription)
   const [agents, setAgents] = useState(null)
   const [picked, setPicked] = useState([]) // service_names
   const [rolesText, setRolesText] = useState('')
@@ -84,7 +91,7 @@ export default function WorkflowCreateModal({ onClose, onCreated }) {
     <div className="wf2-modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="wf2-modal" onClick={(e) => e.stopPropagation()}>
         <div className="wf2-modal-head">
-          <span className="wf2-modal-title">New Workflow</span>
+          <span className="wf2-modal-title">{title}</span>
           {!busy && (
             <button type="button" className="wf2-modal-close" onClick={onClose} aria-label="Close">
               ×
