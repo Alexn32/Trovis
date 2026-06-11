@@ -1,4 +1,4 @@
-# @alexn32/openclaw-plugin
+# @trovis/openclaw-plugin
 
 Trovis plugin for OpenClaw — automatic agent telemetry and management.
 
@@ -27,7 +27,7 @@ Either takes effect at the next gateway start. The env var also fires defensivel
 ## Installation
 
 ```bash
-openclaw plugins install clawhub:@alexn32/openclaw-plugin
+openclaw plugins install clawhub:@trovis/openclaw-plugin
 ```
 
 Then restart your OpenClaw gateway.

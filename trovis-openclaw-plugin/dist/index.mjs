@@ -66148,7 +66148,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.2.8";
+var PLUGIN_VERSION = "0.3.0";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
