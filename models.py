@@ -325,6 +325,8 @@ class Workflow(BaseModel):
     edges: list[WorkflowEdge] = Field(default_factory=list)
     step_count: int = 0
     participant_count: int = 0
+    # Number of backward (loop) edges in the graph — surfaced on the list card.
+    loop_count: int = 0
     # Derived in the list endpoint from participant-agent health.
     status: str = "healthy"
     created_at: str | None = None
@@ -505,6 +507,10 @@ class WorkflowStats(BaseModel):
     avg_cycle_ms: float = 0.0
     escalation_rate: float | None = None
     avg_human_wait_ms: float | None = None
+    # Loop metrics (24h): null when not derivable (no backward edge in the
+    # graph, or no trace data showing a step span repeated within one trace).
+    loop_rate: float | None = None
+    avg_rounds: float | None = None
 
 
 class AgentDescription(BaseModel):

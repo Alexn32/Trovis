@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { PlusIcon } from './Icons.jsx'
 import WorkflowCreateModal from './WorkflowCreateModal.jsx'
+import { assignWorkerColors, agentKey, HUMAN_COLOR } from './workerColors.js'
 
 function fmtRel(iso) {
   if (!iso) return '—'
@@ -84,6 +85,7 @@ export default function WorkflowList({ onSelect }) {
           {workflows.map((w) => {
             const s = statsById[w.id]
             const success = s?.success_rate
+            const colors = assignWorkerColors(w.participants || [])
             return (
               <button
                 key={w.id}
@@ -105,11 +107,18 @@ export default function WorkflowList({ onSelect }) {
                     {w.participants.map((p, i) =>
                       p.type === 'human' ? (
                         <span key={`h${i}`} className="wf2-part-pill human">
+                          <span
+                            className="wf2-part-dot is-circle"
+                            style={{ background: HUMAN_COLOR }}
+                          />
                           👤 {p.role_name || 'Human'}
                         </span>
                       ) : (
                         <span key={`a${i}`} className="wf2-part-pill agent">
-                          <span className="wf2-part-dot" />
+                          <span
+                            className="wf2-part-dot is-square"
+                            style={{ background: colors[agentKey(p.agent_service_name, p.agent_id)] }}
+                          />
                           {p.agent_service_name}
                           {p.agent_id && p.agent_id !== 'main' ? ` · ${p.agent_id}` : ''}
                         </span>
@@ -119,7 +128,19 @@ export default function WorkflowList({ onSelect }) {
                 )}
 
                 <div className="wf2-card-stats">
-                  <Stat label="Steps" value={w.step_count} />
+                  <Stat
+                    label="Steps"
+                    value={
+                      w.loop_count > 0 ? (
+                        <span className="wf2-steps-with-loops">
+                          {w.step_count}
+                          <span className="wf2-loop-badge">↻ {w.loop_count} loops</span>
+                        </span>
+                      ) : (
+                        w.step_count
+                      )
+                    }
+                  />
                   <Stat label="Runs 24h" value={s ? s.total_runs : '—'} dim={s && !s.total_runs} />
                   <Stat
                     label="Success"
