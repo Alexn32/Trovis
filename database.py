@@ -5834,3 +5834,107 @@ def get_agent_outputs(
             }
         )
     return outputs
+
+
+# Captured-content snippets in the activity feed are truncated to this many
+# characters server-side — enough to convey the gist of a message/response/tool
+# result without shipping a whole transcript to the dashboard.
+_ACTIVITY_CONTENT_CHARS = 280
+
+
+def get_fleet_activity(
+    account_id: int | None,
+    since_ns: int,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Chronological, fleet-wide work feed: real work events across ALL agents
+    in the window, newest first. Excludes `agent_registration` (a just-connected
+    agent isn't doing work). Surfaces captured message/response/tool content when
+    the span carried it (dual-read `trovis.*` / `oversee.*` via attr()), else the
+    row is just the operation. Pure DB — no Claude — so it always renders fast.
+    account-scoped when account_id is provided.
+
+    The one query mirrors get_agents' display-name correlated subquery so each
+    row is labeled with the operator's name when set. The placeholder order
+    matters: the dn subquery sits textually BEFORE the WHERE clause, so its
+    account_id binds first.
+    """
+    limit = max(1, min(500, int(limit)))
+    account_filter = f"AND s.account_id = {PH}" if account_id is not None else ""
+    dn_filter = f"AND dn.account_id = {PH}" if account_id is not None else ""
+    sql = f"""
+        SELECT
+            s.service_name,
+            COALESCE(s.agent_id, 'main')                     AS agent_id,
+            s.span_name,
+            s.start_time_unix,
+            s.end_time_unix,
+            s.status_code,
+            s.attributes,
+            (
+                SELECT display_name
+                FROM agent_display_names dn
+                WHERE dn.service_name = s.service_name
+                  AND COALESCE(dn.agent_id, 'main') = COALESCE(s.agent_id, 'main')
+                  {dn_filter}
+                LIMIT 1
+            )                                                AS display_name
+        FROM spans s
+        WHERE s.start_time_unix >= {PH}
+          AND s.span_name != 'agent_registration'
+          {account_filter}
+        ORDER BY s.start_time_unix DESC
+        LIMIT {PH}
+    """
+    args: list[Any] = []
+    if account_id is not None:
+        args.append(account_id)   # dn_filter (SELECT subquery — binds first)
+    args.append(since_ns)         # WHERE start_time_unix >= …
+    if account_id is not None:
+        args.append(account_id)   # account_filter (WHERE)
+    args.append(limit)
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        rows = cur.fetchall()
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            attrs = json.loads(r["attributes"] or "{}")
+        except (TypeError, ValueError):
+            attrs = {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+
+        # Surface the most specific captured content, if any.
+        content: str | None = None
+        content_type: str | None = None
+        if attr(attrs, "tool.result") is not None:
+            content_type, content = "tool_result", str(attr(attrs, "tool.result") or "")
+        elif attr(attrs, "response.content") is not None:
+            content_type, content = "response", str(attr(attrs, "response.content") or "")
+        elif attr(attrs, "message.content") is not None:
+            content_type, content = "message", str(attr(attrs, "message.content") or "")
+        if content is not None:
+            content = content.strip()[:_ACTIVITY_CONTENT_CHARS] or None
+            if content is None:
+                content_type = None
+
+        tool = attr(attrs, "tool.name")
+        duration_ms = (r["end_time_unix"] - r["start_time_unix"]) / 1_000_000.0
+        items.append(
+            {
+                "time": _ns_to_iso(r["start_time_unix"]),
+                "service_name": r["service_name"],
+                "agent_id": r["agent_id"],
+                "agent": r["display_name"] or r["service_name"],
+                "operation": r["span_name"],
+                "status": "error" if r["status_code"] == 2 else "ok",
+                "duration_ms": duration_ms,
+                "content": content,
+                "content_type": content_type,
+                "tool": str(tool) if tool is not None else None,
+            }
+        )
+    return items

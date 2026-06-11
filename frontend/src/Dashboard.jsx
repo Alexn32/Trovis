@@ -47,7 +47,7 @@ function fmtRel(iso) {
 }
 
 
-export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, userName }) {
+export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, onViewAllWorkFeed, userName }) {
   // Silently re-sync every data card when the tab regains focus (throttled to
   // once per 30s). Cards keep their current data on screen while refetching —
   // no skeleton flash — so this is invisible until fresh numbers arrive. The
@@ -131,7 +131,7 @@ export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, userName
             <AttentionCard refreshKey={refreshKey} />
             <CostCard refreshKey={refreshKey} onOpenCost={onOpenCost} />
           </div>
-          <WorkFeedCard refreshKey={refreshKey} onGoFleet={onGoFleet} />
+          <WorkFeedCard refreshKey={refreshKey} onViewAll={onViewAllWorkFeed || onGoFleet} />
         </>
       )}
       <FleetGrid refreshKey={refreshKey} onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
@@ -457,7 +457,7 @@ function TrendArrow({ trend }) {
 
 // --- 4. Work Feed ----------------------------------------------------------
 
-function WorkFeedCard({ onGoFleet, refreshKey }) {
+function WorkFeedCard({ onViewAll, refreshKey }) {
   const [feed, setFeed] = useState(null)
 
   useEffect(() => {
@@ -475,7 +475,7 @@ function WorkFeedCard({ onGoFleet, refreshKey }) {
     <section className="dash-section">
       <div className="dash-section-head">
         <span className="dash-section-title">Work Feed</span>
-        <button type="button" className="dash-link" onClick={onGoFleet}>
+        <button type="button" className="dash-link" onClick={onViewAll}>
           View all →
         </button>
       </div>

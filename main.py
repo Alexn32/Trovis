@@ -49,6 +49,7 @@ from models import (
     AskRequest,
     AskResponse,
     AcceptInviteRequest,
+    ActivityItem,
     AttentionItem,
     BriefingResponse,
     ClaimRequest,
@@ -2679,6 +2680,26 @@ async def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
             )
         )
     return feed
+
+
+@app.get("/dashboard/activity", response_model=list[ActivityItem])
+async def dashboard_activity(
+    request: Request,
+    hours: int = 24,
+    limit: int = 200,
+) -> list[ActivityItem]:
+    """Chronological, fleet-wide Work Feed — the actual work events across all
+    agents in the last `hours`, newest first (the detail behind the dashboard's
+    per-agent rollup). Pure DB, no Claude, so it always renders fast."""
+    account_id = getattr(request.state, "account_id", None)
+    hours = max(1, min(24 * 30, int(hours)))
+    limit = max(1, min(500, int(limit)))
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    since_ns = now_ns - hours * (_NS_PER_DAY // 24)  # _NS_PER_DAY // 24 = ns/hour
+    rows = database.get_fleet_activity(account_id, since_ns, limit=limit)
+    return [ActivityItem(**r) for r in rows]
 
 
 @app.post("/dashboard/ask", response_model=AskResponse)

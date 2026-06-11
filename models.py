@@ -938,3 +938,21 @@ class WorkFeedItem(BaseModel):
     agent: str
     summary: str = ""
     tasks: int = 0
+
+
+class ActivityItem(BaseModel):
+    """One row in the chronological, fleet-wide Work Feed — a single real work
+    event (span), newest first. `content`/`content_type` are populated only
+    when the span carried captured output (message / response / tool result);
+    `tool` is the tool name when the event was a tool call."""
+
+    time: str | None = None
+    agent: str
+    service_name: str
+    agent_id: str = "main"
+    operation: str
+    status: str = "ok"  # 'ok' | 'error'
+    duration_ms: float = 0.0
+    content: str | None = None
+    content_type: str | None = None  # 'message' | 'response' | 'tool_result'
+    tool: str | None = None

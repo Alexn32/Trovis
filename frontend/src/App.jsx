@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
+import WorkFeedPage from './WorkFeedPage.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
 import AskPill from './AskPill.jsx'
@@ -206,12 +207,15 @@ function AppInner() {
     mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} />
   } else if (overlay?.kind === 'cost') {
     mainContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
+  } else if (overlay?.kind === 'workfeed') {
+    mainContent = <WorkFeedPage onBack={closeOverlay} onOpenAgent={openDetail} />
   } else if (tab === 'dashboard') {
     mainContent = (
       <Dashboard
         onOpenAgent={openDetail}
         onGoFleet={() => setTab('fleet')}
         onOpenCost={() => setOverlay({ kind: 'cost' })}
+        onViewAllWorkFeed={() => setOverlay({ kind: 'workfeed' })}
         userName={account.userName}
       />
     )

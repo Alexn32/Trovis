@@ -349,6 +349,9 @@ export const api = {
   getAttention: () => request('/dashboard/attention'),
   getCost: () => request('/dashboard/cost'),
   getWorkFeed: () => request('/dashboard/work-feed'),
+  // Chronological, fleet-wide activity stream for the Work Feed page.
+  getActivity: (hours = 24, limit = 200) =>
+    request(`/dashboard/activity?hours=${hours}&limit=${limit}`),
   // --- dedicated cost page ---
   getCostOverview: () => request('/cost/overview'),
   // Per-day / per-model cost audit — surfaces tokens that landed unpriced

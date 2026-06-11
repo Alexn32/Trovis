@@ -5169,6 +5169,55 @@ select.wf2-input { cursor: pointer; }
   .costp-thead span:nth-child(5), .costp-row span:nth-child(5) { display: none; }
 }
 
+/* ---------- Work Feed page (overlay) ----------
+   Header + per-agent summary rows reuse the dashboard .dash-feed-* look; the
+   chronological activity stream adds its own status-dot row + content snippet. */
+.wfp-titlerow { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.wfp-sub { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.wfp-activity { padding: 0; }
+.wfp-divider {
+  position: sticky; top: 0; z-index: 1;
+  padding: 8px 18px; font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+  background: var(--bg-surface); border-bottom: 1px solid var(--border-default);
+}
+.wfp-act-row {
+  display: flex; gap: 10px; padding: 12px 18px;
+  border-bottom: 1px solid var(--border-default);
+}
+.wfp-act-row:last-child { border-bottom: none; }
+.wfp-act-row:hover { background: var(--bg-surface-hover); }
+.wfp-dot {
+  flex-shrink: 0; width: 7px; height: 7px; margin-top: 6px; border-radius: 50%;
+  background: var(--success);
+}
+.wfp-dot.err { background: var(--dash-warn); }
+.wfp-act-body { flex: 1; min-width: 0; }
+.wfp-act-top { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.wfp-agent {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-size: 12.5px; font-weight: 700; color: var(--text-primary);
+}
+.wfp-agent:hover { text-decoration: underline; text-underline-offset: 2px; }
+.wfp-op { font-size: 12.5px; color: var(--text-secondary); }
+.wfp-time { font-size: 11.5px; font-weight: 500; color: var(--text-muted); margin-left: auto; white-space: nowrap; }
+.wfp-tag {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--text-muted); background: var(--bg-surface);
+  border: 1px solid var(--border-default); padding: 1px 6px; border-radius: 100px;
+}
+.wfp-tag.err { color: var(--dash-warn); background: var(--warning-faint); border-color: transparent; }
+.wfp-snippet {
+  margin-top: 5px; font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+  background: var(--bg-primary); border: 1px solid var(--border-default);
+  border-radius: 7px; padding: 7px 10px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.wfp-snippet-type {
+  display: inline-block; margin-right: 6px; font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
+}
+
 
 /* =============================================================================
    Onboarding — post-signup setup wizard (full-screen takeover)
