@@ -656,7 +656,7 @@ export function computeOverseeEndpoint() {
 function OpenClawInstructions() {
   const endpoint = computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
-  const installCmd = 'openclaw plugins install clawhub:@alexn32/openclaw-plugin'
+  const installCmd = 'openclaw plugins install clawhub:@trovis/openclaw-plugin'
 
   return (
     <>
