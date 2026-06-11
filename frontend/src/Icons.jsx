@@ -119,12 +119,16 @@ export function SparkleIcon({ size = 24 }) {
 // The Trovis brand mark — a crosshair. Uses currentColor for its strokes so it
 // inherits the parent's text color (e.g. white inside a teal brand square, or
 // --brand-accent inline). Replaces the old sparkle (✦) everywhere it appeared.
+// viewBox is cropped tight to the crosshair's actual extents (its strokes only
+// span x≈11→29, y≈13→29 of the original 40×40 box). This fills the box instead
+// of floating a tiny mark in whitespace, and renders the strokes ~2× heavier so
+// the mark carries the same visual weight as the "trovis" wordmark beside it.
 export function TrovisMark({ size = 20, className = '' }) {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 40 40"
+      viewBox="10 11 20 20"
       fill="none"
       className={className}
       style={{ display: 'inline-block', verticalAlign: 'middle' }}
@@ -144,7 +148,7 @@ export function TrovisLogo({ className = '' }) {
   return (
     <span className={`trovis-logo ${className}`}>
       <span className="trovis-logo-badge">
-        <TrovisMark size={20} />
+        <TrovisMark size={22} />
       </span>
       <span className="trovis-logo-word">trovis</span>
     </span>
