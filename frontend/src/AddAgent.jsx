@@ -380,6 +380,7 @@ const QUICK_ENV_TEMPLATE =
 OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT \\
 OTEL_EXPORTER_OTLP_PROTOCOL=http/json \\
 OTEL_TRACES_EXPORTER=otlp \\
+OTEL_EXPORTER_OTLP_HEADERS=X-Trovis-Api-Key=TROVIS_API_KEY \\
 python {RUN_FILE}`
 
 const EXPLICIT_SETUP_TEMPLATE =
@@ -392,22 +393,26 @@ from opentelemetry import trace
 resource = Resource.create({"service.name": "AGENT_NAME"})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="TROVIS_ENDPOINT"))
+    BatchSpanProcessor(OTLPSpanExporter(
+        endpoint="TROVIS_ENDPOINT",
+        headers={"X-Trovis-Api-Key": "TROVIS_API_KEY"},
+    ))
 )
 trace.set_tracer_provider(provider)
 
 {IMPORT_LINES}`
 
-function pythonQuickEnvCmd(agentName, endpoint, runFile) {
+function pythonQuickEnvCmd(agentName, endpoint, runFile, apiKey) {
   return fill(QUICK_ENV_TEMPLATE.replace('{RUN_FILE}', runFile), agentName, endpoint)
+    .replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 }
 
-function pythonExplicitSetup(importLines, agentName, endpoint) {
+function pythonExplicitSetup(importLines, agentName, endpoint, apiKey) {
   return fill(
     EXPLICIT_SETUP_TEMPLATE.replace('{IMPORT_LINES}', importLines),
     agentName,
     endpoint,
-  )
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 }
 
 // Quick + Explicit tabs for any Python instrumentor-style integration.
@@ -419,10 +424,11 @@ function PythonInstrumentorTabs({
   runFile = 'your_agent.py',
   preNote,
 }) {
+  const apiKey = getApiKey() || ''
   const quickInstall = `pip install opentelemetry-distro opentelemetry-exporter-otlp ${pkg}`
   const explicitInstall = `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http ${pkg}`
-  const envCmd = pythonQuickEnvCmd(agentName, endpoint, runFile)
-  const explicitSetup = pythonExplicitSetup(importLines, agentName, endpoint)
+  const envCmd = pythonQuickEnvCmd(agentName, endpoint, runFile, apiKey)
+  const explicitSetup = pythonExplicitSetup(importLines, agentName, endpoint, apiKey)
 
   return (
     <Tabs
@@ -568,7 +574,8 @@ from opentelemetry.instrumentation.openai import OpenAIInstrumentor
 
 AnthropicInstrumentor().instrument()
 OpenAIInstrumentor().instrument()`
-  const envCmd = pythonQuickEnvCmd(agentName, endpoint, 'your_agent.py')
+  const apiKey = getApiKey() || ''
+  const envCmd = pythonQuickEnvCmd(agentName, endpoint, 'your_agent.py', apiKey)
 
   return (
     <>
@@ -591,6 +598,7 @@ OpenAIInstrumentor().instrument()`
 }
 
 function PythonGenericInstructions({ agentName, endpoint }) {
+  const apiKey = getApiKey() || ''
   const setup = fill(
 `from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -601,7 +609,10 @@ from opentelemetry import trace
 resource = Resource.create({"service.name": "AGENT_NAME"})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="TROVIS_ENDPOINT"))
+    BatchSpanProcessor(OTLPSpanExporter(
+        endpoint="TROVIS_ENDPOINT",
+        headers={"X-Trovis-Api-Key": "TROVIS_API_KEY"},
+    ))
 )
 trace.set_tracer_provider(provider)
 
@@ -611,7 +622,7 @@ with tracer.start_as_current_span("my-operation") as span:
     span.set_attribute("custom.key", "value")
     # your agent logic here`,
     agentName, endpoint,
-  )
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
     <>
@@ -1357,6 +1368,7 @@ function ClaudeCodeInstructions({ endpoint }) {
 // ---------------------------------------------------------------------------
 
 function NodeInstructions({ agentName, endpoint }) {
+  const apiKey = getApiKey() || ''
   const install = 'npm install @opentelemetry/api @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http @opentelemetry/auto-instrumentations-node'
   const tracing = fill(
 `const { NodeSDK } = require('@opentelemetry/sdk-node');
@@ -1366,6 +1378,7 @@ const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumenta
 const sdk = new NodeSDK({
   traceExporter: new OTLPTraceExporter({
     url: 'TROVIS_ENDPOINT',
+    headers: { 'X-Trovis-Api-Key': 'TROVIS_API_KEY' },
   }),
   serviceName: 'AGENT_NAME',
   instrumentations: [getNodeAutoInstrumentations()],
@@ -1373,7 +1386,7 @@ const sdk = new NodeSDK({
 
 sdk.start();`,
     agentName, endpoint,
-  )
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
     <>
@@ -1402,13 +1415,15 @@ sdk.start();`,
 // ---------------------------------------------------------------------------
 
 function OtherInstructions({ agentName, endpoint }) {
+  const apiKey = getApiKey() || ''
   const envBlock = fill(
 `OTEL_SERVICE_NAME=AGENT_NAME
 OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT
 OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-OTEL_TRACES_EXPORTER=otlp`,
+OTEL_TRACES_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_HEADERS=X-Trovis-Api-Key=TROVIS_API_KEY`,
     agentName, endpoint,
-  )
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
     <>
