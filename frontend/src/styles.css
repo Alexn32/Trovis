@@ -4357,6 +4357,111 @@ a:hover {
 }
 
 /* =============================================================================
+   AI-guided Add Agent — landing hero + conversational connect guide.
+   Reuses the dashboard Ask bubble/input primitives (.dash-msg, .dash-bubble,
+   .dash-ask-input-wrap, .dash-ask-loading) so themes come free.
+   ============================================================================= */
+
+.aa-landing {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 48px 20px 40px;
+  min-height: 58vh;
+  justify-content: center;
+}
+.aa-landing-close { position: absolute; top: 0; right: 0; }
+.aa-landing-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 56px; height: 56px; border-radius: 15px;
+  background: var(--brand-accent); color: #fff; margin-bottom: 22px;
+}
+.aa-landing-title {
+  font-size: 30px; font-weight: 800; letter-spacing: -0.02em;
+  color: var(--text-primary); margin: 0 0 10px;
+}
+.aa-landing-sub {
+  font-size: 15px; line-height: 1.55; color: var(--text-muted);
+  max-width: 430px; margin: 0 0 28px;
+}
+.aa-landing-cta { font-size: 15px; padding: 12px 24px; gap: 8px; border-radius: 10px; }
+.aa-landing-manual {
+  margin-top: 14px; background: none; border: none; cursor: pointer;
+  font-size: 13.5px; font-weight: 600; color: var(--text-muted);
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.aa-landing-manual:hover { color: var(--text-primary); }
+.aa-landing-logos {
+  display: flex; align-items: center; gap: 11px; flex-wrap: wrap;
+  justify-content: center; margin-top: 44px;
+}
+.aa-landing-logo { display: inline-flex; align-items: center; opacity: 0.6; }
+.aa-landing-logos-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-dim);
+}
+
+.connect-guide {
+  display: flex;
+  flex-direction: column;
+  max-width: 720px;
+  margin: 0 auto;
+  width: 100%;
+  height: calc(100vh - 220px);
+  min-height: 420px;
+}
+.connect-head {
+  display: flex; align-items: center; gap: 14px;
+  padding-bottom: 14px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-default);
+}
+.connect-head-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 700; color: var(--text-primary);
+  margin-right: auto;
+}
+.connect-thread {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 18px 2px;
+}
+.connect-code { margin-top: 8px; }
+.connect-code-title {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px;
+}
+.connect-code-note { font-size: 11.5px; color: var(--dash-warn, var(--text-muted)); margin-top: 5px; }
+.connect-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.connect-chip {
+  padding: 6px 12px; border-radius: 100px; border: 1px solid var(--border-hover);
+  background: var(--bg-elevated); font-size: 12px; font-weight: 500;
+  color: var(--text-secondary); cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease;
+}
+.connect-chip:hover:not(:disabled) { background: var(--bg-surface-hover); border-color: var(--text-dim); }
+.connect-chip:disabled { opacity: 0.45; cursor: default; }
+.connect-banner {
+  display: inline-flex; align-items: center; gap: 8px; align-self: center;
+  background: var(--success-faint); color: var(--success);
+  font-size: 13px; padding: 8px 14px; border-radius: 8px;
+}
+.connect-input-row { padding-top: 12px; }
+.connect-skip {
+  align-self: center; margin-top: 12px; padding-top: 12px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--text-muted);
+}
+.connect-skip:hover { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
+
+/* Embedded in the onboarding card (narrower, scrolls at 56vh): give the guide
+   a shorter fixed height and let the landing breathe a little less. */
+.onboard-addagent .connect-guide { height: 46vh; min-height: 320px; max-width: none; }
+.onboard-addagent .aa-landing { padding: 28px 12px; min-height: 0; }
+
+/* =============================================================================
    Workflows redesign — multi-agent spatial flow canvas (scoped to .wf2)
    Inter typography + the spec's node palette, all via CSS variables so the
    pages work in light and dark.

@@ -37,11 +37,16 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Oversee
+# Local SQLite DB (dev only; prod is Postgres). Both the legacy `oversee.db`
+# name and the current `trovis.db` are ignored.
 oversee.db
 oversee.db-journal
 oversee.db-shm
 oversee.db-wal
+trovis.db
+trovis.db-journal
+trovis.db-shm
+trovis.db-wal
 
 # The OpenClaw plugin ships pre-compiled, so its dist/ is tracked even
 # though the generic `dist/` rule above would otherwise hide it.

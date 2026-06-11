@@ -344,6 +344,13 @@ export const api = {
       body: JSON.stringify({ messages }),
     }),
 
+  // Guided add-agent chat ("Set up with AI"). Returns { answer, options, code }.
+  askConnect: (messages) =>
+    request('/connect/ask', {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    }),
+
   // --- auth (real users + orgs) ---
   signup: (data) =>
     request('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),

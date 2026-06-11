@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 import anthropic
@@ -167,6 +168,97 @@ SYSTEM_FLEET_CONCISE = (
     + _VISUAL_CATALOG
 )
 
+# Exact commands the connect guide may emit, sourced from the Add-Agent wizard
+# pages (AddAgent.jsx). _SETUP_KNOWLEDGE covers the what; this covers the
+# copy-paste how. Keep both in sync with the wizard when instructions change.
+_CONNECT_SETUP_EXTRAS = (
+    "\n\nExact setup recipes (the only commands you may give):\n"
+    "- OpenAI Agents SDK: pip install trovis-agents[openai] then, before the "
+    "agent framework is imported:\n"
+    "  from trovis import init\n"
+    "  init(api_key=\"TROVIS_API_KEY\", endpoint=\"TROVIS_ENDPOINT\", "
+    "agent_name=\"<their-agent-name>\")\n"
+    "- Claude Agent SDK (query()/ClaudeSDKClient): pip install "
+    "trovis-agents[claude-agent-sdk]; same init() lines with "
+    "platform=\"claude-agent-sdk\", and init() MUST run before importing "
+    "query/ClaudeSDKClient.\n"
+    "- Anthropic Managed Agents (client.beta.agents...): pip install "
+    "trovis-agents[anthropic]; same init() lines with platform=\"anthropic\".\n"
+    "- Claude Code (the CLI): add to the \"env\" object in "
+    "~/.claude/settings.json, then restart Claude Code:\n"
+    "  \"CLAUDE_CODE_ENABLE_TELEMETRY\": \"1\"\n"
+    "  \"OTEL_TRACES_EXPORTER\": \"otlp\"\n"
+    "  \"OTEL_EXPORTER_OTLP_PROTOCOL\": \"http/json\"\n"
+    "  \"OTEL_EXPORTER_OTLP_ENDPOINT\": \"TROVIS_ENDPOINT\"\n"
+    "  \"OTEL_EXPORTER_OTLP_HEADERS\": \"X-Trovis-Api-Key=TROVIS_API_KEY\"\n"
+    "- OpenClaw: openclaw plugins install clawhub:@alexn32/openclaw-plugin, "
+    "then in any chat: /trovis connect TROVIS_ENDPOINT then /trovis apikey "
+    "TROVIS_API_KEY then optionally /trovis capture on, /trovis status. "
+    "Terminal alternative: openclaw config set "
+    "plugins.entries.trovis.config.endpoint TROVIS_ENDPOINT and ...config."
+    "apiKey TROVIS_API_KEY.\n"
+    "- Hermes: pip install trovis-agents[hermes] then hermes plugins enable "
+    "trovis (it prompts for the key/endpoint; or export TROVIS_API_KEY/"
+    "TROVIS_ENDPOINT/TROVIS_AGENT_NAME first).\n"
+    "- Anything else that can emit OpenTelemetry (custom Python, LangChain, "
+    "CrewAI, Node, ...): if it's Python, pip install trovis-agents and the "
+    "same two init() lines (platform=\"auto\"); otherwise point its OTLP/HTTP "
+    "exporter at Trovis with env vars:\n"
+    "  OTEL_SERVICE_NAME=<their-agent-name>\n"
+    "  OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT\n"
+    "  OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
+    "  OTEL_TRACES_EXPORTER=otlp\n"
+    "  OTEL_EXPORTER_OTLP_HEADERS=X-Trovis-Api-Key=TROVIS_API_KEY\n"
+    "- Do NOT invent other Trovis packages, commands, or flags. For anything "
+    "not listed, use the generic OTEL recipe.\n"
+)
+
+# Guided add-agent chat (the "Set up with AI" flow on the Add Agent page).
+# One short question or step per turn; quick-reply chips via `options`;
+# copy-paste snippets via `code` with TROVIS_API_KEY / TROVIS_ENDPOINT
+# placeholders that the frontend substitutes with the org's real values.
+SYSTEM_CONNECT = (
+    "You are the Trovis connect guide. You walk the user through connecting "
+    "ONE AI agent to Trovis, step by step, in a chat. The DATA section below "
+    "lists the agents already connected to this account.\n"
+    "\n"
+    "Always respond with raw JSON (no code fences, nothing outside the JSON):\n"
+    "{\"answer\": \"...\", \"options\": [], \"code\": []}\n"
+    "- answer: 1-3 short plain sentences. No markdown. Never put commands or "
+    "code inline in the answer — commands go ONLY in code.\n"
+    "- options: quick-reply chips, ONLY when you are asking a genuine "
+    "multiple-choice question (2-5 options, each under 30 characters). Leave "
+    "[] for open-ended questions.\n"
+    "- code: copy-paste snippets, each {\"title\": \"...\", \"language\": "
+    "\"bash|python|json\", \"content\": \"...\"}. Leave [] when there is "
+    "nothing to run.\n"
+    "\n"
+    "Conversation rules:\n"
+    "- ONE question at a time. ONE step per turn (at most two tightly coupled "
+    "steps, like install + init). End each step with a short confirmation "
+    "question (\"Run that, then tell me how it went — or paste any error.\").\n"
+    "- In code, write the literal placeholders TROVIS_API_KEY and "
+    "TROVIS_ENDPOINT wherever the user's key or endpoint belongs — the UI "
+    "fills in their real values. Never write ov_sk_ keys yourself, and never "
+    "repeat a key the user pastes into the chat.\n"
+    "- When you give the final \"run your agent\" step, tell them to watch "
+    "this chat — a green connected banner appears here automatically within "
+    "seconds of the agent's first telemetry.\n"
+    "- If DATA shows their agent already arrived, congratulate them and offer "
+    "next steps (rename it on the dashboard, set a budget on the Cost page, "
+    "ask about it anytime with the assistant) instead of repeating setup.\n"
+    "- If they are not sure what their agent is built with, ask ONE "
+    "clarifying question with concrete signals as chips (e.g. does their "
+    "code call query() / client.beta.agents / neither). Still unsure → use "
+    "the generic OTEL recipe.\n"
+    "- If they ask an unrelated question mid-flow, answer it briefly from "
+    "what you know, then steer back to the current step.\n"
+    "- If they paste an error, diagnose using the troubleshooting facts "
+    "below; do not guess beyond them."
+    + _SETUP_KNOWLEDGE
+    + _CONNECT_SETUP_EXTRAS
+)
+
 
 # ---------------------------------------------------------------------------
 # Public entry points
@@ -216,6 +308,85 @@ def ask_about_fleet(
     system = SYSTEM_FLEET_CONCISE if concise else SYSTEM_FLEET
     raw = _call_claude(api_key, system, context, messages)
     return _parse_ask_response(raw)
+
+
+def _parse_connect_response(raw_text: str) -> dict[str, Any]:
+    """Parse a connect-guide reply into {answer, options, code}, tolerant of
+    non-JSON. Mirrors _parse_ask_response: strip ``` fences, json.loads, and
+    on any failure degrade to plain text with empty options/code. A truncated
+    reply (MAX_TOKENS cutoff) is salvaged via the "answer" field when
+    possible so raw JSON never lands in the chat. Never raises."""
+    text = (raw_text or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        answer = parsed.get("answer")
+        if isinstance(answer, str) and answer.strip():
+            options = [
+                o.strip()
+                for o in (parsed.get("options") or [])
+                if isinstance(o, str) and o.strip()
+            ][:6]
+            code = []
+            for block in (parsed.get("code") or [])[:4]:
+                if not isinstance(block, dict):
+                    continue
+                content = block.get("content")
+                if not (isinstance(content, str) and content.strip()):
+                    continue
+                title = block.get("title")
+                language = block.get("language")
+                code.append(
+                    {
+                        "title": title if isinstance(title, str) else None,
+                        "language": language if isinstance(language, str) else None,
+                        "content": content,
+                    }
+                )
+            return {"answer": answer.strip(), "options": options, "code": code}
+    # Truncated JSON: pull the answer string out so the user never sees raw
+    # JSON. Matches "answer": "..." allowing escaped quotes.
+    m = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)', text)
+    if m:
+        try:
+            salvaged = json.loads(f'"{m.group(1)}"')
+        except (json.JSONDecodeError, ValueError):
+            salvaged = m.group(1)
+        if salvaged.strip():
+            return {"answer": salvaged.strip(), "options": [], "code": []}
+    return {"answer": (raw_text or "").strip(), "options": [], "code": []}
+
+
+def ask_connect(
+    account_id: int | None,
+    messages: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Guided add-agent chat. Returns {answer, options, code}. The client
+    seeds the thread with a hardcoded assistant greeting; the Anthropic API
+    requires the first message to be role=user, so prepend a synthetic primer
+    when the history starts with the assistant (also covers histories whose
+    head was trimmed by the client's turn cap)."""
+    api_key = _require_api_key()
+    agents = database.get_agents(account_id=account_id)
+    context = _format_fleet_context(agents)
+    msgs = list(messages or [])
+    if msgs and (msgs[0] or {}).get("role") == "assistant":
+        msgs.insert(
+            0,
+            {
+                "role": "user",
+                "content": "(I just opened the guided agent-connect flow.)",
+            },
+        )
+    raw = _call_claude(api_key, SYSTEM_CONNECT, context, msgs)
+    return _parse_connect_response(raw)
 
 
 def ask_about_agent(

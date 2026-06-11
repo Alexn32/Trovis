@@ -1,6 +1,14 @@
 import { useState } from 'react'
 import { getApiKey } from './api.js'
-import { OpenAIIcon, AnthropicIcon, ActivityIcon, OpenClawIcon } from './Icons.jsx'
+import {
+  OpenAIIcon,
+  AnthropicIcon,
+  ActivityIcon,
+  OpenClawIcon,
+  SparkleIcon,
+  TrovisMark,
+} from './Icons.jsx'
+import ConnectGuide from './ConnectGuide.jsx'
 
 // Per-platform logo + brand color for the picker tiles. OpenClaw uses its own
 // full-color lobster mark; OpenAI / Claude use their logomarks tinted to brand;
@@ -186,7 +194,7 @@ function fill(text, agentName, endpoint) {
 // Primitives
 // ---------------------------------------------------------------------------
 
-function CodeBlock({ code }) {
+export function CodeBlock({ code }) {
   const [copied, setCopied] = useState(false)
   async function copy() {
     try {
@@ -629,7 +637,7 @@ with tracer.start_as_current_span("my-operation") as span:
 // origin, which would be wrong for the hosted dashboard.
 const PRODUCTION_API = 'https://web-production-e6bc4.up.railway.app'
 
-function computeOverseeEndpoint() {
+export function computeOverseeEndpoint() {
   const base = import.meta.env.VITE_API_URL || PRODUCTION_API
   return base.replace(/\/+$/, '') + '/v1/traces'
 }
@@ -1036,14 +1044,15 @@ function HermesAgentsInstructions({ agentName, endpoint }) {
   // Hermes prompts for these env vars at `plugins enable` time per the
   // plugin.yaml `requires_env` declaration; we also surface them here
   // so operators who'd rather set the shell env directly have a clear
-  // recipe with their actual key/endpoint in place.
-  const envExport = fill(
+  // recipe with their actual key/endpoint in place. The negative lookahead
+  // fills only the quoted VALUES — `fill()` would clobber the var names too.
+  const envExport =
 `export TROVIS_API_KEY="TROVIS_API_KEY"
 export TROVIS_ENDPOINT="TROVIS_ENDPOINT"
-export TROVIS_AGENT_NAME="AGENT_NAME"`,
-    agentName,
-    resolvedEndpoint,
-  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
+export TROVIS_AGENT_NAME="AGENT_NAME"`
+    .replace(/TROVIS_API_KEY(?!=)/g, apiKey || 'ov_sk_…')
+    .replace(/TROVIS_ENDPOINT(?!=)/g, resolvedEndpoint)
+    .replace(/AGENT_NAME(?!=)/g, effectiveAgentName(agentName))
   const chatCmds =
 `/trovis connect ${resolvedEndpoint}
 /trovis apikey ${apiKey || 'ov_sk_…'}
@@ -1459,7 +1468,101 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // Top-level wizard component
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Top-level shell — landing → AI guide | manual wizard
+// ---------------------------------------------------------------------------
+
 export default function AddAgent({ onClose, embedded = false }) {
+  const [view, setView] = useState('landing') // 'landing' | 'guide' | 'manual'
+  // Once visited, the guide stays MOUNTED (hidden) across guide↔manual
+  // switches so the chat history and connect-poll baseline survive a detour.
+  const [guideVisited, setGuideVisited] = useState(false)
+
+  return (
+    <div className="add-agent">
+      {view === 'landing' && (
+        <AddAgentLanding
+          onStartGuide={() => {
+            setGuideVisited(true)
+            setView('guide')
+          }}
+          onManual={() => setView('manual')}
+          onClose={embedded ? null : onClose}
+        />
+      )}
+      {guideVisited && (
+        <div style={{ display: view === 'guide' ? undefined : 'none' }}>
+          <ConnectGuide
+            active={view === 'guide'}
+            onBack={() => setView('landing')}
+            onClose={embedded ? null : onClose}
+            onSkipToManual={() => setView('manual')}
+          />
+        </div>
+      )}
+      {view === 'manual' && (
+        <ManualWizard
+          onClose={onClose}
+          embedded={embedded}
+          onBackToLanding={() => setView('landing')}
+        />
+      )}
+    </div>
+  )
+}
+
+// The hero shown when the Add Agent overlay opens: one primary path (the AI
+// guide) and one secondary (the classic platform-picker wizard).
+function AddAgentLanding({ onStartGuide, onManual, onClose }) {
+  return (
+    <div className="aa-landing">
+      {onClose && (
+        <button
+          type="button"
+          className="close-btn aa-landing-close"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          ×
+        </button>
+      )}
+      <div className="aa-landing-mark">
+        <TrovisMark size={26} />
+      </div>
+      <h1 className="aa-landing-title">Connect an agent</h1>
+      <p className="aa-landing-sub">
+        Trovis walks you through it — answer a couple of questions and get
+        copy-paste setup for your exact stack.
+      </p>
+      <button type="button" className="btn btn-primary aa-landing-cta" onClick={onStartGuide}>
+        <SparkleIcon size={15} /> Set up with AI
+      </button>
+      <button type="button" className="aa-landing-manual" onClick={onManual}>
+        Add manually instead
+      </button>
+      <div className="aa-landing-logos">
+        <span className="aa-landing-logos-label">Works with</span>
+        {PLATFORMS.map((p) => {
+          const logo = PLATFORM_LOGOS[p.id]
+          const Logo = logo?.Icon
+          return Logo ? (
+            <span key={p.id} className="aa-landing-logo" title={p.label}>
+              <Logo size={16} />
+            </span>
+          ) : null
+        })}
+        <span className="aa-landing-logos-label">+ anything OTEL</span>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Manual wizard — the classic platform-picker flow (previously the default
+// export). Internals unchanged; the shell above owns the .add-agent wrapper.
+// ---------------------------------------------------------------------------
+
+function ManualWizard({ onClose, embedded = false, onBackToLanding = null }) {
   const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
   const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
   const [claudeVariant, setClaudeVariant] = useState(null) // 'claude-agent-sdk' | 'claude-agents'
@@ -1499,7 +1602,8 @@ export default function AddAgent({ onClose, embedded = false }) {
     setProvider(p.id)
   }
 
-  const onBack = step > 1 ? handleBack : null
+  // Step-1 Back returns to the Add Agent landing (the shell owns that view).
+  const onBack = step > 1 ? handleBack : onBackToLanding
   const showInstructions = step === totalSteps && step > 1 && !!platform
 
   // Claude resolves to one of the two real instruction platforms once a
@@ -1507,7 +1611,7 @@ export default function AddAgent({ onClose, embedded = false }) {
   const effectivePlatform = needsClaudeVariant ? claudeVariant : platform
 
   return (
-    <div className="add-agent">
+    <div>
       <WizardHeader
         step={step}
         total={totalSteps}
