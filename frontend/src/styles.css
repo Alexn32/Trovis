@@ -4256,6 +4256,13 @@ a:hover {
 @keyframes dash-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
 /* ---------- 6. floating ask pill + slide-up panel ---------- */
+/* The pill + panel render at the app-shell level (every page), outside the
+   .dash wrapper — pin the Inter typography they were designed with. */
+.dash-ask-pill,
+.dash-ask-overlay {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
 .dash-ask-pill {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   z-index: 50; display: flex; align-items: center; gap: 9px;

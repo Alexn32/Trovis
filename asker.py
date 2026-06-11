@@ -21,8 +21,10 @@ import anthropic
 
 import database
 
-MODEL = "claude-sonnet-4-6"
-MAX_TOKENS = 1024
+# The Ask assistant is a primary product surface (global ⌘K pill) — use the
+# most capable model. Setup walkthroughs need more room than quick answers.
+MODEL = "claude-opus-4-7"
+MAX_TOKENS = 1500
 
 # How many recent spans to include in the per-agent context. 30 covers the
 # most common "why did this fail" question without bloating prompts.
@@ -108,15 +110,60 @@ Rules:
 # Tighter variant for the Dashboard "Ask about your fleet" pill: short,
 # plain-prose answers with no markdown so they read well in a chat bubble.
 # Includes the generative-UI catalog so Claude can attach an inline visual.
+# What the assistant knows about setting Trovis up — kept factually in sync
+# with the Add-Agent wizard and the trovis-agents SDK. This is what lets the
+# pill walk a user through connecting an agent, not just read telemetry.
+_SETUP_KNOWLEDGE = (
+    "\n\nYou are also the Trovis setup expert. Facts you know:\n"
+    "- Connecting an agent: the Add Agent button (top right) has guided steps "
+    "for OpenClaw, OpenAI Agents SDK, Claude Agents (Claude Agent SDK or "
+    "Anthropic Managed Agents), and Hermes Agent.\n"
+    "- Python platforms use the trovis-agents pip package with an extra per "
+    "platform: pip install trovis-agents[openai], [anthropic], "
+    "[claude-agent-sdk], or [hermes]. Then two lines BEFORE the agent "
+    "framework is imported: from trovis import init; "
+    "init(api_key=\"ov_sk_...\", agent_name=\"my-agent\"). platform=\"auto\" "
+    "detects the installed framework.\n"
+    "- Config env vars: TROVIS_API_KEY, TROVIS_ENDPOINT, TROVIS_AGENT_NAME, "
+    "TROVIS_CAPTURE_OUTPUTS (legacy OVERSEE_* names still work).\n"
+    "- The org's API key (ov_sk_...) lives in Settings; it can be revealed "
+    "again after re-entering the password.\n"
+    "- OpenClaw: install the trovis plugin, then in chat /trovis connect "
+    "<endpoint>, /trovis apikey <key>, /trovis capture on, /trovis status — "
+    "or via CLI: openclaw config set plugins.entries.trovis.config.endpoint/"
+    "apiKey.\n"
+    "- Hermes: pip install trovis-agents[hermes], then hermes plugins enable "
+    "trovis.\n"
+    "- Agents appear on the dashboard automatically within seconds of their "
+    "first telemetry — no pre-registration. Message/output content is only "
+    "captured when the user opts in (capture on / TROVIS_CAPTURE_OUTPUTS=true).\n"
+    "- Costs are tracked automatically from token usage across all major "
+    "model providers; Claude Agent SDK runs use the SDK's own reported cost "
+    "(exact). 'Today' is the UTC calendar day. Monthly budget and per-agent "
+    "caps are set on the Cost page (open via the dashboard Cost card).\n"
+    "- Troubleshooting: agent not appearing → check the API key, that init() "
+    "runs before the framework import, and that the agent actually ran. "
+    "Cost showing $0 → the agent's telemetry must include token usage "
+    "(gen_ai.usage.* attributes); the platform integrations above emit this "
+    "automatically.\n"
+)
+
 SYSTEM_FLEET_CONCISE = (
-    "You are an analyst for Trovis, an agent management system. You have "
-    "read access to summaries for every AI agent the user is running. "
-    "Answer the user's question using only the telemetry data provided below.\n"
-    "- Be concise: 2-4 sentences max unless they explicitly ask for detail.\n"
-    "- Use specific numbers from the data, and refer to agents by name.\n"
+    "You are the Trovis assistant — an expert analyst for the user's AI agent "
+    "fleet and their guide to the product. You have read access to telemetry "
+    "summaries for every agent the user runs (provided below), and you know "
+    "how Trovis works end to end.\n"
+    "- Ground every claim about the user's agents in the telemetry data. Use "
+    "specific numbers and refer to agents by name. Never invent data.\n"
+    "- Default to 2-4 sentences. For how-do-I/setup questions, give complete "
+    "step-by-step instructions instead — exact commands and code on their own "
+    "lines (use \\n line breaks; the UI renders plain text, so no markdown "
+    "headers, bullets, or code fences).\n"
     "- If relevant, suggest one concrete action.\n"
     "- If the data doesn't support a confident answer, say so plainly.\n"
-    "- Write in plain prose. Never use markdown headers, bullet points, or lists."
+    "- Be genuinely smart: connect cause and effect across agents, costs, and "
+    "errors; anticipate the user's next question when it's obvious."
+    + _SETUP_KNOWLEDGE
     + _VISUAL_CATALOG
 )
 
@@ -222,10 +269,24 @@ def _format_fleet_context(agents: list[dict[str, Any]]) -> str:
         total_spans = a.get("total_spans") or 0
         total_errors = a.get("total_errors") or 0
         rate = (total_errors / total_spans * 100) if total_spans else 0.0
-        lines.append(f"## {a['service_name']}")
+        name = a["service_name"]
+        display = a.get("display_name")
+        lines.append(
+            f"## {name}" + (f" (display name: {display})" if display else "")
+        )
+        if a.get("platform"):
+            lines.append(f"- platform: {a['platform']}")
         lines.append(
             f"- spans={total_spans} errors={total_errors} "
             f"error_rate={rate:.1f}% avg_duration_ms={a['avg_duration_ms']:.0f}"
+        )
+        # Cost grounding — without this the model would have to guess at
+        # "which agent costs the most" style questions.
+        lines.append(
+            f"- cost: today_utc=${a.get('cost_today') or 0:.4f} "
+            f"last_7d=${a.get('cost_7d') or 0:.4f} "
+            f"all_time=${a.get('estimated_cost_usd') or 0:.4f} "
+            f"total_tokens={a.get('total_tokens') or 0}"
         )
         lines.append(
             f"- first_seen={a.get('first_seen')} last_seen={a.get('last_seen')}"
