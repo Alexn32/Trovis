@@ -191,7 +191,7 @@ _CONNECT_SETUP_EXTRAS = (
     "  \"OTEL_EXPORTER_OTLP_PROTOCOL\": \"http/json\"\n"
     "  \"OTEL_EXPORTER_OTLP_ENDPOINT\": \"TROVIS_ENDPOINT\"\n"
     "  \"OTEL_EXPORTER_OTLP_HEADERS\": \"X-Trovis-Api-Key=TROVIS_API_KEY\"\n"
-    "- OpenClaw: openclaw plugins install clawhub:@alexn32/openclaw-plugin, "
+    "- OpenClaw: openclaw plugins install clawhub:@trovis/openclaw-plugin, "
     "then in any chat: /trovis connect TROVIS_ENDPOINT then /trovis apikey "
     "TROVIS_API_KEY then optionally /trovis capture on, /trovis status. "
     "Terminal alternative: openclaw config set "
