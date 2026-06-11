@@ -193,6 +193,56 @@ def _json_safe(value: Any) -> str:
             return ""
 
 
+def _coerce_int(v: Any) -> int | None:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _usage_field(usage: Any, *names: str) -> int | None:
+    """First present integer field across `names`, reading either a dict or an
+    attribute-style object (the Agents SDK uses both shapes)."""
+    if usage is None:
+        return None
+    for n in names:
+        v = usage.get(n) if isinstance(usage, dict) else getattr(usage, n, None)
+        iv = _coerce_int(v)
+        if iv is not None:
+            return iv
+    return None
+
+
+def _extract_response_usage(sd: Any) -> tuple[int | None, int | None, int | None, str | None]:
+    """Pull token usage + model id off an OpenAI Agents SDK model span.
+
+    ResponseSpanData carries a Responses-API `Response` on `.response`
+    (`.response.usage` → input_tokens / output_tokens / total_tokens, and
+    `.response.model`); GenerationSpanData (chat-completions style) carries
+    `.usage` + `.model` directly, where usage keys may be input/output_tokens
+    or prompt/completion_tokens. Returns (input, output, total, model).
+
+    Note on caching: the Responses API folds cached prompt tokens INTO
+    `input_tokens` (unlike Anthropic, which reports them separately), so we do
+    NOT emit a cache_read attribute — that would double-count. Cached input is
+    therefore priced at the full input rate (slightly conservative).
+    """
+    resp = getattr(sd, "response", None)
+    if resp is not None:
+        usage = getattr(resp, "usage", None)
+        model = getattr(resp, "model", None)
+    else:
+        usage = getattr(sd, "usage", None)
+        model = getattr(sd, "model", None)
+
+    inp = _usage_field(usage, "input_tokens", "prompt_tokens")
+    out = _usage_field(usage, "output_tokens", "completion_tokens")
+    tot = _usage_field(usage, "total_tokens")
+    if tot is None and (inp is not None or out is not None):
+        tot = (inp or 0) + (out or 0)
+    return (inp, out, tot, str(model) if model else None)
+
+
 class CaptureProcessor:
     """OpenAI Agents SDK tracing processor that emits Trovis-named
     OTEL spans carrying actual content when capture-outputs is on.
@@ -219,8 +269,10 @@ class CaptureProcessor:
         pass
 
     def on_span_end(self, span: Any) -> None:
-        if not is_capture_enabled():
-            return
+        # NOTE: we do NOT early-return on capture-disabled here. Token usage +
+        # model id are billing metadata (not content), so cost tracking must
+        # work regardless of the capture-outputs flag — matching the Claude
+        # Agent SDK path. Only message/response/tool *content* is gated below.
         try:
             self._handle(span)
         except Exception as e:  # noqa: BLE001
@@ -239,11 +291,14 @@ class CaptureProcessor:
         if sd is None:
             return
         kind = type(sd).__name__
+        capture = is_capture_enabled()
 
         if kind == "FunctionSpanData":
-            self._emit_tool(sd)
+            # Tool results are content (no tokens) — gated on capture.
+            if capture:
+                self._emit_tool(sd)
         elif kind in ("ResponseSpanData", "GenerationSpanData"):
-            self._emit_model_io(sd, kind)
+            self._emit_model_io(sd, kind, capture)
 
     def _emit_tool(self, sd: Any) -> None:
         name = getattr(sd, "name", "") or ""
@@ -262,20 +317,24 @@ class CaptureProcessor:
                 _truncate(content, _CONTENT_BYTE_LIMIT),
             )
 
-    def _emit_model_io(self, sd: Any, kind: str) -> None:
-        # Inbound user prompt / outbound model response — the SDK
-        # surfaces both on the same span type. We emit two Trovis
-        # spans, one for each direction, to match the OpenClaw
-        # plugin's message_received / message_sending separation.
+    def _emit_model_io(self, sd: Any, kind: str, capture: bool) -> None:
+        # One model call surfaces input + output on the same SDK span. We emit
+        # a `message_received` span for the prompt and an `llm_output` span for
+        # the response (matching the OpenClaw plugin's separation). The
+        # `llm_output` span ALWAYS carries token usage + model id (billing
+        # metadata, so cost tracking works even when capture is off); the
+        # message/response *content* is attached only when capture is on.
+        inp, out, tot, model = _extract_response_usage(sd)
+        has_usage = inp is not None or out is not None or tot is not None
+
         input_value = getattr(sd, "input", None)
         output_value = getattr(sd, "output", None) or getattr(sd, "response", None)
 
-        if input_value is not None:
+        # message_received — prompt content only (no tokens). Capture-gated.
+        if capture and input_value is not None:
             text = _json_safe(input_value)
             if text:
-                with self._tracer.start_as_current_span(
-                    "message_received"
-                ) as s:
+                with self._tracer.start_as_current_span("message_received") as s:
                     s.set_attribute("trovis.event.type", "message_received")
                     s.set_attribute(
                         "trovis.message.content",
@@ -283,13 +342,24 @@ class CaptureProcessor:
                     )
                     s.set_attribute("trovis.message.source", kind)
 
-        if output_value is not None:
-            text = _json_safe(output_value)
-            if text:
-                with self._tracer.start_as_current_span("llm_output") as s:
-                    s.set_attribute("trovis.event.type", "llm_output")
+        # llm_output — usage + model always; response content only when on.
+        out_text = ""
+        if capture and output_value is not None:
+            out_text = _json_safe(output_value)
+        if has_usage or out_text:
+            with self._tracer.start_as_current_span("llm_output") as s:
+                s.set_attribute("trovis.event.type", "llm_output")
+                if model:
+                    s.set_attribute("gen_ai.request.model", model)
+                if inp is not None:
+                    s.set_attribute("gen_ai.usage.input_tokens", inp)
+                if out is not None:
+                    s.set_attribute("gen_ai.usage.output_tokens", out)
+                if tot is not None:
+                    s.set_attribute("gen_ai.usage.total_tokens", tot)
+                if out_text:
                     s.set_attribute(
                         "trovis.response.content",
-                        _truncate(text, _CONTENT_BYTE_LIMIT),
+                        _truncate(out_text, _CONTENT_BYTE_LIMIT),
                     )
                     s.set_attribute("trovis.response.source", kind)
