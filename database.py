@@ -3291,7 +3291,9 @@ def update_workflow_step(
 
 
 def delete_workflow_step(step_id: int, workflow_id: int) -> bool:
-    """Delete one step from a workflow. Returns True when removed."""
+    """Delete one step from a workflow, plus any edges that reference it.
+    Returns True when removed. (FK cascade isn't enabled — PRAGMA
+    foreign_keys is off — so we remove the dependent edges by hand.)"""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             f"DELETE FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
@@ -3299,6 +3301,11 @@ def delete_workflow_step(step_id: int, workflow_id: int) -> bool:
         )
         removed = cur.rowcount > 0
         if removed:
+            cur.execute(
+                f"DELETE FROM workflow_edges WHERE workflow_id = {PH} "
+                f"AND (from_step_id = {PH} OR to_step_id = {PH})",
+                (workflow_id, step_id, step_id),
+            )
             _touch_workflow(cur, workflow_id)
     return removed
 
@@ -3374,23 +3381,55 @@ def add_workflow_participant(
     agent_id: str | None = None,
     role_name: str | None = None,
     team_member_id: int | None = None,
-) -> None:
-    """Add one participant (agent or human role) to a workflow."""
+) -> dict[str, Any]:
+    """Add one participant (agent or human role) to a workflow. Returns the
+    created participant row."""
     ptype = "human" if str(participant_type).strip().lower() == "human" else "agent"
+    vals = (
+        workflow_id,
+        ptype,
+        agent_service_name or None,
+        (agent_id or "main") if ptype == "agent" else None,
+        role_name or None,
+        team_member_id,
+    )
+    cols = (
+        "(workflow_id, participant_type, agent_service_name, agent_id, "
+        "role_name, team_member_id)"
+    )
+    with _connect() as conn, _cursor(conn) as cur:
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO workflow_participants {cols} "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}) RETURNING *",
+                vals,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                f"INSERT INTO workflow_participants {cols} "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                vals,
+            )
+            cur.execute(
+                "SELECT * FROM workflow_participants WHERE id = ?", (cur.lastrowid,)
+            )
+            row = cur.fetchone()
+        _touch_workflow(cur, workflow_id)
+    return _row_to_participant(row)
+
+
+def delete_workflow_participant(participant_id: int, workflow_id: int) -> bool:
+    """Delete one participant from a workflow. Returns True when removed."""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "INSERT INTO workflow_participants (workflow_id, participant_type, "
-            f"agent_service_name, agent_id, role_name, team_member_id) "
-            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-            (
-                workflow_id,
-                ptype,
-                agent_service_name or None,
-                (agent_id or "main") if ptype == "agent" else None,
-                role_name or None,
-                team_member_id,
-            ),
+            f"DELETE FROM workflow_participants WHERE id = {PH} AND workflow_id = {PH}",
+            (participant_id, workflow_id),
         )
+        removed = cur.rowcount > 0
+        if removed:
+            _touch_workflow(cur, workflow_id)
+    return removed
 
 
 def get_workflow_participants(workflow_id: int) -> list[dict[str, Any]]:
@@ -3417,15 +3456,91 @@ def add_workflow_edge(
     to_step_id: int,
     label: str | None = None,
     is_branch: bool = False,
-    edge_order: int = 0,
-) -> None:
+    edge_order: int | None = None,
+) -> dict[str, Any]:
+    """Add one edge to a workflow's graph. `edge_order` is appended (max+1)
+    when omitted. Returns the created edge row. Backward edges (loops) are
+    allowed — the caller validates."""
     branch_val = bool(is_branch) if USE_POSTGRES else (1 if is_branch else 0)
     with _connect() as conn, _cursor(conn) as cur:
+        order = edge_order
+        if order is None:
+            cur.execute(
+                f"SELECT COALESCE(MAX(edge_order), -1) + 1 AS n FROM workflow_edges WHERE workflow_id = {PH}",
+                (workflow_id,),
+            )
+            order = int(cur.fetchone()["n"])
+        cols = "(workflow_id, from_step_id, to_step_id, label, is_branch, edge_order)"
+        vals = (workflow_id, from_step_id, to_step_id, label or None, branch_val, int(order))
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO workflow_edges {cols} "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}) RETURNING *",
+                vals,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                f"INSERT INTO workflow_edges {cols} "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                vals,
+            )
+            cur.execute("SELECT * FROM workflow_edges WHERE id = ?", (cur.lastrowid,))
+            row = cur.fetchone()
+        _touch_workflow(cur, workflow_id)
+    return _row_to_edge(row)
+
+
+def update_workflow_edge(
+    edge_id: int, workflow_id: int, fields: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Patch an edge's label / is_branch, scoped to its workflow. Returns the
+    updated edge or None when not found."""
+    sets = []
+    args: list[Any] = []
+    if "label" in fields:
+        sets.append(f"label = {PH}")
+        args.append(fields["label"] or None)
+    if "is_branch" in fields and fields["is_branch"] is not None:
+        sets.append(f"is_branch = {PH}")
+        args.append(bool(fields["is_branch"]) if USE_POSTGRES else (1 if fields["is_branch"] else 0))
+    if not sets:
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(
+                f"SELECT * FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
+                (edge_id, workflow_id),
+            )
+            row = cur.fetchone()
+        return _row_to_edge(row) if row else None
+    args.extend([edge_id, workflow_id])
+    with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "INSERT INTO workflow_edges (workflow_id, from_step_id, to_step_id, "
-            f"label, is_branch, edge_order) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-            (workflow_id, from_step_id, to_step_id, label or None, branch_val, int(edge_order or 0)),
+            f"UPDATE workflow_edges SET {', '.join(sets)} "
+            f"WHERE id = {PH} AND workflow_id = {PH}",
+            tuple(args),
         )
+        if cur.rowcount == 0:
+            return None
+        _touch_workflow(cur, workflow_id)
+        cur.execute(
+            f"SELECT * FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
+            (edge_id, workflow_id),
+        )
+        row = cur.fetchone()
+    return _row_to_edge(row) if row else None
+
+
+def delete_workflow_edge(edge_id: int, workflow_id: int) -> bool:
+    """Delete one edge from a workflow. Returns True when removed."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
+            (edge_id, workflow_id),
+        )
+        removed = cur.rowcount > 0
+        if removed:
+            _touch_workflow(cur, workflow_id)
+    return removed
 
 
 def get_workflow_edges(workflow_id: int) -> list[dict[str, Any]]:

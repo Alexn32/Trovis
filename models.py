@@ -389,6 +389,37 @@ class WorkflowReorder(BaseModel):
     step_ids: list[int] = Field(default_factory=list)
 
 
+class WorkflowEdgeCreate(BaseModel):
+    """Body for POST /workflows/{id}/edges. `edge_order` is appended
+    (max+1) when omitted. A backward edge (to_step before from_step in
+    flow order) is valid — it renders as a loop."""
+
+    from_step_id: int
+    to_step_id: int
+    label: str | None = None
+    is_branch: bool = False
+    edge_order: int | None = None
+
+
+class WorkflowEdgeUpdate(BaseModel):
+    """Body for PUT /workflows/{id}/edges/{edge_id}. Only label/is_branch
+    are mutable; the endpoints themselves are immutable."""
+
+    label: str | None = None
+    is_branch: bool | None = None
+
+
+class WorkflowParticipantCreate(BaseModel):
+    """Body for POST /workflows/{id}/participants. `type` is 'agent' |
+    'human'. Agents need agent_service_name; humans need role_name."""
+
+    type: str
+    agent_service_name: str | None = None
+    agent_id: str | None = None
+    role_name: str | None = None
+    team_member_id: int | None = None
+
+
 class WorkflowAgentRef(BaseModel):
     """One agent in a multi-agent generate request."""
 
