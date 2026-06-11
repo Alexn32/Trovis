@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
-import { ArrowLeftIcon, ChevronDownIcon } from './Icons.jsx'
+import { ArrowLeftIcon, ChevronDownIcon, PlusIcon, TrashIcon } from './Icons.jsx'
 import { collapseSteps, expandSteps } from './collapseSteps.js'
 import { assignWorkerColors, agentKey, HUMAN_COLOR } from './workerColors.js'
 import WorkflowCreateModal from './WorkflowCreateModal.jsx'
+import WorkflowStepEditor from './WorkflowStepEditor.jsx'
 
 // Workflow canvas at "handoff altitude": consecutive same-agent steps collapse
 // into one block, workers carry identity colors, loops sweep below the flow as
 // dashed under-curves, and live flow is animated. The DB keeps every raw step;
-// the collapse happens here at render time.
+// the collapse happens here at render time. An explicit Edit mode forces the
+// raw "all steps" view (1:1 node↔step) and adds node/edge/roster editing.
 
 const TYPE_LABEL = {
   trigger: 'Trigger',
@@ -97,15 +99,39 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
   })
   const [hoverEdge, setHoverEdge] = useState(null) // edge index for insert "+"
   const [redescribe, setRedescribe] = useState(false)
+  // Editing state.
+  const [editing, setEditing] = useState(false)
+  const [editor, setEditor] = useState(null) // {mode, step?|splice?|afterStepId?}
+  const [edgePop, setEdgePop] = useState(null) // {id, label, is_branch, x, y}
+  const [confirmDel, setConfirmDel] = useState(null) // node id pending delete
+  const [connect, setConnect] = useState(null) // {from, ox, oy, x, y}
+  const [rosterAdd, setRosterAdd] = useState(false)
+  const [toast, setToast] = useState(null)
   const dragRef = useRef(null)
   const draggedSet = useRef(new Set())
+  const innerRef = useRef(null)
+  const prevView = useRef('handoff')
+
+  function refresh() {
+    return api.getWorkflow(workflowId).then((data) => setWf(data))
+  }
 
   useEffect(() => {
     let alive = true
     draggedSet.current = readDragged(workflowId)
     api
       .getWorkflow(workflowId)
-      .then((data) => alive && setWf(data))
+      .then((data) => {
+        if (!alive) return
+        setWf(data)
+        // Seed positions from server-saved coords so dragged nodes render
+        // without a fresh drag and survive refresh().
+        const seed = {}
+        for (const s of data.steps || []) {
+          if (s.pos_x || s.pos_y) seed[s.id] = { x: s.pos_x, y: s.pos_y }
+        }
+        setPositions(seed)
+      })
       .catch((e) => alive && setError(e.message || 'Could not load workflow'))
     api
       .getWorkflowStats(workflowId)
@@ -115,6 +141,13 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
       alive = false
     }
   }, [workflowId])
+
+  // Auto-dismiss toasts.
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   const steps = wf?.steps || []
   let rawEdges = wf?.edges || []
@@ -129,10 +162,7 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
     }))
   }
 
-  const colors = useMemo(
-    () => assignWorkerColors(wf?.participants || []),
-    [wf],
-  )
+  const colors = useMemo(() => assignWorkerColors(wf?.participants || []), [wf])
 
   const { nodes, edges } = useMemo(
     () =>
@@ -141,18 +171,18 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
     [wf, view],
   )
 
-  const scale = view === 'all' ? 0.9 : 1
+  // Edit mode forces the raw "all" representation at full size for comfortable
+  // editing; the read-only "all" view stays at 90%.
+  const scale = view === 'all' && !editing ? 0.9 : 1
   const nodeH = NODE_H * scale
 
-  // Auto-layout: left-to-right, centered on the main row. Drag positions (kept
-  // in localStorage, keyed by the first step id of each node) override.
   const layout = useMemo(() => {
     const out = {}
     let x = START_X
     for (const n of nodes) {
       const w = nodeWidth(n, scale)
       const saved = positions[n.id]
-      const useSaved = draggedSet.current.has(n.id) && saved
+      const useSaved = (draggedSet.current.has(n.id) || saved) && saved
       out[n.id] = useSaved ? { ...saved, w } : { x, y: ROW_TOP, w }
       x += w + GAP * scale
     }
@@ -160,8 +190,6 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, positions, scale])
 
-  // Loop edges (target comes before source in flow order), stacked shortest-span
-  // closest to the row so they never cross.
   const loops = useMemo(() => {
     const ls = edges
       .map((e, i) => ({ e, i }))
@@ -173,7 +201,6 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
 
   const forwardEdges = edges.filter((e) => e.to_order > e.from_order)
 
-  // Canvas content size.
   const dims = useMemo(() => {
     let maxX = 600
     for (const n of nodes) {
@@ -193,6 +220,7 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
   }, [nodes, layout, expanded, loops, nodeH])
 
   function onNodeDown(e, id) {
+    if (editing && e.target.closest('.wf2-port, .wf2-node-del, .wf2-confirm')) return
     e.stopPropagation()
     const p = layout[id]
     if (!p) return
@@ -226,7 +254,12 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
       /* ignore */
     }
     if (!d.moved) {
-      // Click: expand/collapse blocks (and singles with internal detail).
+      if (editing) {
+        // Click opens the step editor for this raw step.
+        setEditor({ mode: 'edit', step: node.step })
+        return
+      }
+      // Read mode: expand/collapse multi-step blocks.
       if (node.kind === 'block' && node.steps.length > 1) {
         setExpanded((prev) => {
           const next = new Set(prev)
@@ -240,10 +273,7 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
     if (p) {
       draggedSet.current.add(id)
       try {
-        localStorage.setItem(
-          draggedKey(workflowId),
-          JSON.stringify([...draggedSet.current]),
-        )
+        localStorage.setItem(draggedKey(workflowId), JSON.stringify([...draggedSet.current]))
       } catch {
         /* ignore */
       }
@@ -261,6 +291,112 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
     } catch {
       /* ignore */
     }
+  }
+
+  function toggleEdit() {
+    if (editing) {
+      setEditing(false)
+      setView(prevView.current)
+      setEditor(null)
+      setEdgePop(null)
+      setConfirmDel(null)
+      setRosterAdd(false)
+      setConnect(null)
+    } else {
+      prevView.current = view
+      setEditing(true)
+      setView('all')
+      setExpanded(new Set())
+    }
+  }
+
+  // ---- editing actions ----
+  function localXY(e) {
+    const r = innerRef.current?.getBoundingClientRect()
+    if (!r) return { x: 0, y: 0 }
+    return { x: e.clientX - r.left, y: e.clientY - r.top }
+  }
+
+  function onPortDown(e, node) {
+    e.stopPropagation()
+    const p = layout[node.id]
+    if (!p) return
+    setConnect({ from: node.id, ox: p.x + p.w, oy: p.y + nodeH / 2, x: p.x + p.w, y: p.y + nodeH / 2 })
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+  }
+  function onPortMove(e) {
+    if (!connect) return
+    const { x, y } = localXY(e)
+    setConnect((c) => (c ? { ...c, x, y } : c))
+  }
+  function onPortUp(e) {
+    if (!connect) return
+    const { x, y } = localXY(e)
+    let target = null
+    for (const n of nodes) {
+      const p = layout[n.id]
+      if (p && x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + nodeH) {
+        target = n.id
+        break
+      }
+    }
+    const from = connect.from
+    setConnect(null)
+    if (target == null || target === from) return
+    api
+      .addWorkflowEdge(workflowId, { from_step_id: from, to_step_id: target })
+      .then(refresh)
+      .catch((err) =>
+        setToast(
+          String(err?.message || '').includes('409')
+            ? 'Those steps are already connected.'
+            : 'Could not connect those steps.',
+        ),
+      )
+  }
+
+  function deleteStep(node) {
+    const id = node.id
+    const preds = [...new Set(rawEdges.filter((e) => e.to_step_id === id).map((e) => e.from_step_id))]
+    const succs = [...new Set(rawEdges.filter((e) => e.from_step_id === id).map((e) => e.to_step_id))]
+    setConfirmDel(null)
+    api
+      .deleteWorkflowStep(workflowId, id)
+      .then(async () => {
+        if (preds.length === 1 && succs.length === 1 && preds[0] !== succs[0]) {
+          try {
+            await api.addWorkflowEdge(workflowId, { from_step_id: preds[0], to_step_id: succs[0] })
+          } catch {
+            /* duplicate/relink failures are non-fatal */
+          }
+        } else if (preds.length + succs.length > 2) {
+          setToast('Step deleted — reconnect the remaining steps as needed.')
+        }
+        return refresh()
+      })
+      .catch(() => setToast('Could not delete the step.'))
+  }
+
+  function saveEdgePop() {
+    const ep = edgePop
+    setEdgePop(null)
+    if (ep?.id == null) return
+    api
+      .updateWorkflowEdge(workflowId, ep.id, { label: ep.label || null, is_branch: !!ep.is_branch })
+      .then(refresh)
+      .catch(() => setToast('Could not update the edge.'))
+  }
+  function deleteEdge(id) {
+    setEdgePop(null)
+    if (id == null) return
+    api
+      .deleteWorkflowEdge(workflowId, id)
+      .then(refresh)
+      .catch(() => setToast('Could not delete the edge.'))
   }
 
   if (error) {
@@ -286,9 +422,8 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
   const perStep = stats?.per_step || {}
   const hasLoops = loops.length > 0
   const loopDerivable = stats?.loop_rate != null
+  const lastNodeId = nodes.length ? nodes[nodes.length - 1].id : null
 
-  // Per-node display stats. Agent block: max runs across internal steps, total
-  // duration (time spent in the block).
   function nodeStats(node) {
     const ids = node.kind === 'block' ? node.steps.map((s) => s.id) : [node.step.id]
     let runs = 0
@@ -306,7 +441,7 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
   }
 
   return (
-    <div className="wf2 wf2-canvas-view">
+    <div className={`wf2 wf2-canvas-view ${editing ? 'is-editing' : ''}`}>
       <div className="wf2-proc-head">
         <div className="wf2-proc-left">
           <button type="button" className="wf2-back" onClick={onBack} aria-label="Back">
@@ -314,25 +449,59 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
           </button>
           <span className="wf2-proc-name">{wf.name}</span>
           <div className="wf2-roster">
-            {(wf.participants || []).map((p, i) =>
+            {(wf.participants || []).map((p) =>
               p.type === 'human' ? (
-                <span key={`h${i}`} className="wf2-chip">
-                  <span
-                    className="wf2-chip-mark is-circle"
-                    style={{ background: HUMAN_COLOR }}
-                  />
+                <span key={`h${p.id}`} className="wf2-chip">
+                  <span className="wf2-chip-mark is-circle" style={{ background: HUMAN_COLOR }} />
                   👤 {p.role_name || 'Human'}
+                  {editing && (
+                    <button
+                      type="button"
+                      className="wf2-chip-del"
+                      onClick={() => removeParticipant(p)}
+                      aria-label="Remove"
+                    >
+                      ×
+                    </button>
+                  )}
                 </span>
               ) : (
-                <span key={`a${i}`} className="wf2-chip">
+                <span key={`a${p.id}`} className="wf2-chip">
                   <span
                     className="wf2-chip-mark is-square"
                     style={{ background: colors[agentKey(p.agent_service_name, p.agent_id)] }}
                   />
                   {p.agent_service_name}
                   {p.agent_id && p.agent_id !== 'main' ? ` · ${p.agent_id}` : ''}
+                  {editing && (
+                    <button
+                      type="button"
+                      className="wf2-chip-del"
+                      onClick={() => removeParticipant(p)}
+                      aria-label="Remove"
+                    >
+                      ×
+                    </button>
+                  )}
                 </span>
               ),
+            )}
+            {editing && (
+              <span className="wf2-roster-add-wrap">
+                <button type="button" className="wf2-roster-add" onClick={() => setRosterAdd((v) => !v)}>
+                  + Worker
+                </button>
+                {rosterAdd && (
+                  <RosterAdd
+                    workflowId={workflowId}
+                    onClose={() => setRosterAdd(false)}
+                    onDone={() => {
+                      setRosterAdd(false)
+                      refresh()
+                    }}
+                  />
+                )}
+              </span>
             )}
           </div>
         </div>
@@ -343,11 +512,7 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
             label="Success"
             value={stats?.success_rate == null ? '—' : `${Math.round(stats.success_rate)}%`}
             tone={
-              stats?.success_rate == null
-                ? undefined
-                : stats.success_rate >= 90
-                  ? 'good'
-                  : 'warn'
+              stats?.success_rate == null ? undefined : stats.success_rate >= 90 ? 'good' : 'warn'
             }
           />
           {loopDerivable && (
@@ -367,26 +532,46 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
           />
         </div>
 
-        <div className="wf2-view-toggle" role="tablist">
+        <div className="wf2-head-controls">
+          {editing && (
+            <button
+              type="button"
+              className="wf2-add-step"
+              onClick={() => setEditor({ mode: 'add', afterStepId: lastNodeId })}
+            >
+              <PlusIcon size={13} /> Add step
+            </button>
+          )}
+          <div className={`wf2-view-toggle ${editing ? 'is-disabled' : ''}`} role="tablist">
+            <button
+              type="button"
+              className={view === 'handoff' ? 'is-on' : ''}
+              onClick={() => !editing && setViewPersist('handoff')}
+              disabled={editing}
+            >
+              Handoffs
+            </button>
+            <button
+              type="button"
+              className={view === 'all' ? 'is-on' : ''}
+              onClick={() => !editing && setViewPersist('all')}
+              disabled={editing}
+            >
+              All steps
+            </button>
+          </div>
           <button
             type="button"
-            className={view === 'handoff' ? 'is-on' : ''}
-            onClick={() => setViewPersist('handoff')}
+            className={`wf2-edit-btn ${editing ? 'is-on' : ''}`}
+            onClick={toggleEdit}
           >
-            Handoffs
-          </button>
-          <button
-            type="button"
-            className={view === 'all' ? 'is-on' : ''}
-            onClick={() => setViewPersist('all')}
-          >
-            All steps
+            {editing ? 'Done' : 'Edit'}
           </button>
         </div>
       </div>
 
-      <div className="wf2-canvas">
-        <div className="wf2-canvas-inner" style={{ width: dims.w, height: dims.h }}>
+      <div className="wf2-canvas" onPointerMove={onPortMove} onPointerUp={onPortUp}>
+        <div className="wf2-canvas-inner" ref={innerRef} style={{ width: dims.w, height: dims.h }}>
           <svg className="wf2-edges" width={dims.w} height={dims.h} aria-hidden="true">
             <defs>
               <marker
@@ -420,14 +605,11 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
               return (
                 <g key={`f${i}`}>
                   <path d={d} className="wf2-fedge" markerEnd="url(#wf2-arrow)" />
-                  <circle className="wf2-flow-dot" r="3">
-                    <animateMotion
-                      dur="1.5s"
-                      begin={`${i * 0.5}s`}
-                      repeatCount="indefinite"
-                      path={d}
-                    />
-                  </circle>
+                  {!editing && (
+                    <circle className="wf2-flow-dot" r="3">
+                      <animateMotion dur="1.5s" begin={`${i * 0.5}s`} repeatCount="indefinite" path={d} />
+                    </circle>
+                  )}
                   {e.label && (
                     <text x={mx} y={my - 7} textAnchor="middle" className="wf2-fedge-label">
                       {e.label}
@@ -451,32 +633,15 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
               const pillX = (srcX + tgtX) / 2
               return (
                 <g key={`l${l.idx}`}>
-                  <path
-                    d={d}
-                    fill="none"
-                    stroke={color}
-                    strokeWidth="1.8"
-                    strokeDasharray="7,5"
-                    opacity="0.8"
-                  />
-                  <circle r="3.5" fill={color}>
-                    <animateMotion dur="4s" repeatCount="indefinite" path={d} />
-                  </circle>
-                  <foreignObject
-                    x={pillX - 80}
-                    y={l.loopY - 12}
-                    width="160"
-                    height="26"
-                    style={{ overflow: 'visible' }}
-                  >
+                  <path d={d} fill="none" stroke={color} strokeWidth="1.8" strokeDasharray="7,5" opacity="0.8" />
+                  {!editing && (
+                    <circle r="3.5" fill={color}>
+                      <animateMotion dur="4s" repeatCount="indefinite" path={d} />
+                    </circle>
+                  )}
+                  <foreignObject x={pillX - 80} y={l.loopY - 12} width="160" height="26" style={{ overflow: 'visible' }}>
                     <div className="wf2-loop-pill-wrap">
-                      <span
-                        className="wf2-loop-pill"
-                        style={{
-                          color,
-                          borderColor: `${color}40`,
-                        }}
-                      >
+                      <span className="wf2-loop-pill" style={{ color, borderColor: `${color}40` }}>
                         ↻ {l.label || 'sent back'}
                       </span>
                     </div>
@@ -484,9 +649,20 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
                 </g>
               )
             })}
+
+            {/* Connect rubber-band */}
+            {connect && (
+              <line
+                x1={connect.ox}
+                y1={connect.oy}
+                x2={connect.x}
+                y2={connect.y}
+                className="wf2-rubber"
+              />
+            )}
           </svg>
 
-          {/* Insert affordances (visual hint only, V1) */}
+          {/* Edge edit / insert affordances */}
           {forwardEdges.map((e, i) => {
             const fp = layout[e.from_id]
             const tp = layout[e.to_id]
@@ -494,20 +670,96 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
             const mx = (fp.x + fp.w + tp.x) / 2
             const my = (fp.y + tp.y) / 2 + nodeH / 2
             return (
-              <button
-                key={`ins${i}`}
-                type="button"
-                className={`wf2-insert ${hoverEdge === i ? 'is-shown' : ''}`}
-                style={{ left: mx - 11, top: my - 11 }}
-                onMouseEnter={() => setHoverEdge(i)}
-                onMouseLeave={() => setHoverEdge((h) => (h === i ? null : h))}
-                onClick={() => setRedescribe(true)}
-                aria-label="Insert step"
-              >
-                +
-              </button>
+              <div key={`tools${i}`} className="wf2-edge-tools-wrap" style={{ left: mx, top: my }}>
+                <button
+                  type="button"
+                  className={`wf2-insert ${hoverEdge === i ? 'is-shown' : ''} ${editing ? 'is-edit' : ''}`}
+                  onMouseEnter={() => setHoverEdge(i)}
+                  onMouseLeave={() => setHoverEdge((h) => (h === i ? null : h))}
+                  onClick={() =>
+                    editing
+                      ? setEditor({
+                          mode: 'add',
+                          splice: {
+                            fromStepId: e.from_step_id,
+                            toStepId: e.to_step_id,
+                            edge: { id: e.id, label: e.label, is_branch: e.is_branch },
+                          },
+                        })
+                      : setRedescribe(true)
+                  }
+                  aria-label="Insert step"
+                >
+                  +
+                </button>
+                {editing && e.id != null && (
+                  <button
+                    type="button"
+                    className="wf2-edge-edit"
+                    onClick={() => setEdgePop({ id: e.id, label: e.label || '', is_branch: !!e.is_branch, x: mx, y: my })}
+                    aria-label="Edit connection"
+                  >
+                    ✎
+                  </button>
+                )}
+              </div>
             )
           })}
+
+          {/* Loop edit affordance */}
+          {editing &&
+            loops.map((l) => {
+              const sp = layout[l.from_id]
+              const tp = layout[l.to_id]
+              if (!sp || !tp || l.id == null) return null
+              const pillX = (sp.x + sp.w / 2 + tp.x + tp.w / 2) / 2
+              return (
+                <button
+                  key={`ledit${l.idx}`}
+                  type="button"
+                  className="wf2-edge-edit on-loop"
+                  style={{ left: pillX + 60, top: l.loopY }}
+                  onClick={() => setEdgePop({ id: l.id, label: l.label || '', is_branch: !!l.is_branch, x: pillX + 60, y: l.loopY })}
+                  aria-label="Edit loop"
+                >
+                  ✎
+                </button>
+              )
+            })}
+
+          {/* Edge popover */}
+          {edgePop && (
+            <div className="wf2-edge-pop" style={{ left: edgePop.x, top: edgePop.y }} onClick={(e) => e.stopPropagation()}>
+              <input
+                className="wf2-input"
+                value={edgePop.label}
+                placeholder="Label (e.g. 14 pass)"
+                onChange={(e) => setEdgePop((p) => ({ ...p, label: e.target.value }))}
+                autoFocus
+              />
+              <label className="wf2-edge-pop-check">
+                <input
+                  type="checkbox"
+                  checked={edgePop.is_branch}
+                  onChange={(e) => setEdgePop((p) => ({ ...p, is_branch: e.target.checked }))}
+                />
+                Branch / decision path
+              </label>
+              <div className="wf2-edge-pop-actions">
+                <button type="button" className="wf2-edge-pop-del" onClick={() => deleteEdge(edgePop.id)}>
+                  <TrashIcon size={12} /> Delete
+                </button>
+                <div className="wf2-edge-pop-right">
+                  <button type="button" className="btn btn-secondary" onClick={() => setEdgePop(null)}>
+                    Cancel
+                  </button>
+                  <button type="button" className="btn btn-primary" onClick={saveEdgePop}>
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Nodes */}
           {nodes.map((node) => {
@@ -517,22 +769,16 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
             const isExpanded = expanded.has(node.id)
             const ns = nodeStats(node)
             const stepCount = node.kind === 'block' ? node.steps.length : 1
-            const canExpand = node.kind === 'block' && stepCount > 1
+            const canExpand = !editing && node.kind === 'block' && stepCount > 1
             const out = edges.filter((x) => x.from_id === node.id)
             const fwd = out.find((x) => x.to_order > x.from_order)
             const back = out.find((x) => x.to_order < x.from_order)
-            const name =
-              node.kind === 'block'
-                ? node.step_type === 'agent'
-                  ? node.steps[0].label
-                  : node.steps[0].label
-                : node.step.label
-            const label =
-              node.step_type === 'human' ? `👤 ${stripPerson(name)}` : name
+            const name = node.kind === 'block' ? node.steps[0].label : node.step.label
+            const label = node.step_type === 'human' ? `👤 ${stripPerson(name)}` : name
             return (
               <div
                 key={node.id}
-                className={`wf2-node2 type-${node.step_type} ${isExpanded ? 'is-expanded' : ''} ${canExpand ? 'can-expand' : ''}`}
+                className={`wf2-node2 type-${node.step_type} ${isExpanded ? 'is-expanded' : ''} ${canExpand ? 'can-expand' : ''} ${editing ? 'is-editable' : ''}`}
                 style={{
                   left: p.x,
                   top: p.y,
@@ -540,19 +786,52 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
                   minHeight: nodeH,
                   borderTopColor: color,
                   zIndex: isExpanded ? 4 : 1,
-                  fontSize: view === 'all' ? '90%' : undefined,
+                  fontSize: view === 'all' && !editing ? '90%' : undefined,
                 }}
                 onPointerDown={(e) => onNodeDown(e, node.id)}
                 onPointerMove={onNodeMove}
                 onPointerUp={(e) => onNodeUp(e, node.id, node)}
               >
+                {editing && (
+                  <>
+                    <button
+                      type="button"
+                      className="wf2-node-del"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setConfirmDel(node.id)
+                      }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      aria-label="Delete step"
+                    >
+                      ×
+                    </button>
+                    <div
+                      className="wf2-port"
+                      onPointerDown={(e) => onPortDown(e, node)}
+                      title="Drag to connect"
+                    />
+                    {confirmDel === node.id && (
+                      <div className="wf2-confirm" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+                        <span>Delete this step?</span>
+                        <div>
+                          <button type="button" onClick={() => setConfirmDel(null)}>
+                            Cancel
+                          </button>
+                          <button type="button" className="is-danger" onClick={() => deleteStep(node)}>
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
                 <div className="wf2-node2-badges">
                   <span className="wf2-type-pill" style={{ background: color }}>
                     {TYPE_LABEL[node.step_type] || 'Step'}
                   </span>
-                  {stepCount > 1 && (
-                    <span className="wf2-count-pill">{stepCount} steps</span>
-                  )}
+                  {stepCount > 1 && <span className="wf2-count-pill">{stepCount} steps</span>}
                   {canExpand && (
                     <span className={`wf2-chev ${isExpanded ? 'is-open' : ''}`}>
                       <ChevronDownIcon size={12} />
@@ -572,13 +851,10 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
                     <span className="dim">— runs</span>
                   ) : null}
 
-                  {node.step_type === 'decision' && (
-                    <DecisionStats fwd={fwd} back={back} />
-                  )}
+                  {node.step_type === 'decision' && <DecisionStats fwd={fwd} back={back} />}
                   {node.step_type === 'human' && (
                     <span className="wf2-wait">
-                      wait{' '}
-                      {stats?.avg_human_wait_ms == null ? '—' : fmtDur(stats.avg_human_wait_ms)}
+                      wait {stats?.avg_human_wait_ms == null ? '—' : fmtDur(stats.avg_human_wait_ms)}
                     </span>
                   )}
                 </div>
@@ -634,13 +910,29 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
           </div>
         )}
         <div className="wf2-insight map">
-          <span className="wf2-insight-label">Reading the map</span>
+          <span className="wf2-insight-label">{editing ? 'Editing' : 'Reading the map'}</span>
           <p>
-            Node top-bars are colored by worker. Dashed curves below are loops. The solid
-            line is the happy path.
+            {editing
+              ? 'Click a node to edit it, drag the right-edge handle to connect steps, use + to insert between steps, and the roster to add workers.'
+              : 'Node top-bars are colored by worker. Dashed curves below are loops. The solid line is the happy path.'}
           </p>
         </div>
       </div>
+
+      {toast && <div className="wf2-toast">{toast}</div>}
+
+      {editor && (
+        <WorkflowStepEditor
+          workflowId={workflowId}
+          placement={editor}
+          participants={wf.participants || []}
+          onClose={() => setEditor(null)}
+          onSaved={() => {
+            setEditor(null)
+            refresh()
+          }}
+        />
+      )}
 
       {redescribe && (
         <WorkflowCreateModal
@@ -657,6 +949,23 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
       )}
     </div>
   )
+
+  function removeParticipant(p) {
+    const stillUsed = (wf.steps || []).some((s) =>
+      p.type === 'human'
+        ? s.step_type === 'human' && ((s.config && s.config.role_name) || '') === (p.role_name || '')
+        : s.step_type === 'agent' &&
+          s.agent_service_name === p.agent_service_name &&
+          (s.agent_id || 'main') === (p.agent_id || 'main'),
+    )
+    if (stillUsed && !window.confirm('A step still uses this worker. Remove from the roster anyway?')) {
+      return
+    }
+    api
+      .deleteWorkflowParticipant(workflowId, p.id)
+      .then(refresh)
+      .catch(() => setToast('Could not remove the worker.'))
+  }
 }
 
 function stripPerson(s) {
@@ -680,6 +989,86 @@ function HeadStat({ label, value, tone }) {
     <div className="wf2-head-stat">
       <span className="wf2-head-stat-label">{label}</span>
       <span className={`wf2-head-stat-value ${tone ? `tone-${tone}` : ''}`}>{value}</span>
+    </div>
+  )
+}
+
+// Small popover for adding an agent or human role to the roster.
+function RosterAdd({ workflowId, onClose, onDone }) {
+  const [mode, setMode] = useState('agent')
+  const [agents, setAgents] = useState([])
+  const [role, setRole] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api.listAgents().then((l) => setAgents(l || [])).catch(() => {})
+  }, [])
+
+  function addAgent(svc) {
+    setBusy(true)
+    api
+      .addWorkflowParticipant(workflowId, { type: 'agent', agent_service_name: svc, agent_id: 'main' })
+      .then(onDone)
+      .catch(() => {
+        setBusy(false)
+        onDone()
+      })
+  }
+  function addHuman() {
+    if (!role.trim()) return
+    setBusy(true)
+    api
+      .addWorkflowParticipant(workflowId, { type: 'human', role_name: role.trim() })
+      .then(onDone)
+      .catch(() => {
+        setBusy(false)
+        onDone()
+      })
+  }
+
+  return (
+    <div className="wf2-roster-pop" onClick={(e) => e.stopPropagation()}>
+      <div className="wf2-roster-tabs">
+        <button type="button" className={mode === 'agent' ? 'is-on' : ''} onClick={() => setMode('agent')}>
+          Agent
+        </button>
+        <button type="button" className={mode === 'human' ? 'is-on' : ''} onClick={() => setMode('human')}>
+          Human role
+        </button>
+      </div>
+      {mode === 'agent' ? (
+        <div className="wf2-agent-pills">
+          {agents.length === 0 && <span className="wf2-hint">No agents reporting telemetry.</span>}
+          {agents.map((g) => (
+            <button
+              key={g.service_name}
+              type="button"
+              className="wf2-agent-pill"
+              disabled={busy}
+              onClick={() => addAgent(g.service_name)}
+            >
+              {g.display_name || g.service_name}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="wf2-roster-human">
+          <input
+            className="wf2-input"
+            value={role}
+            placeholder="e.g. Returns Lead"
+            onChange={(e) => setRole(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && addHuman()}
+            autoFocus
+          />
+          <button type="button" className="btn btn-primary" disabled={busy || !role.trim()} onClick={addHuman}>
+            Add
+          </button>
+        </div>
+      )}
+      <button type="button" className="wf2-roster-pop-close" onClick={onClose} aria-label="Close">
+        ×
+      </button>
     </div>
   )
 }

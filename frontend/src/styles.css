@@ -4368,6 +4368,7 @@ a:hover {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   flex: 1;
 }
 .wf2:not(.wf2-canvas-view) { max-width: 1120px; margin: 0 auto; width: 100%; padding: 24px; gap: 16px; }
@@ -4506,7 +4507,7 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
   flex-wrap: wrap; padding: 14px 24px; background: var(--bg-primary);
   border-bottom: 1px solid var(--border-default);
 }
-.wf2-proc-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.wf2-proc-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 320px; }
 .wf2-proc-name { font-size: 16px; font-weight: 800; color: var(--text-primary); }
 .wf2-proc-parts { display: flex; gap: 6px; flex-wrap: wrap; }
 .wf2-proc-meta { font-size: 11.5px; color: var(--text-muted); }
@@ -4531,7 +4532,7 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .wf2-legend-sq.type-decision { background: var(--node-decision); }
 .wf2-legend-sq.type-output { background: var(--node-output); }
 
-.wf2-canvas { position: relative; flex: 1; overflow: auto; min-height: 60vh;
+.wf2-canvas { position: relative; flex: 1; overflow: auto; min-height: 60vh; min-width: 0;
   background-image: radial-gradient(circle, var(--wf2-grid) 0.75px, transparent 0.75px);
   background-size: 24px 24px;
 }
@@ -4750,10 +4751,131 @@ textarea.wf2-input { resize: vertical; line-height: 1.5; }
   background: var(--warning-faint); padding: 1px 7px; border-radius: 100px;
 }
 
+/* =============================================================================
+   Manual workflow editing — edit mode, ports, edge controls, roster + step
+   editor. Layered on the canvas palette; works light + dark.
+   ============================================================================= */
+.wf2-head-controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.wf2-edit-btn {
+  font-size: 11.5px; font-weight: 700; padding: 6px 14px; border-radius: 8px;
+  border: 1px solid var(--border-hover); background: var(--bg-elevated); color: var(--text-secondary);
+}
+.wf2-edit-btn:hover { border-color: var(--text-primary); color: var(--text-primary); }
+.wf2-edit-btn.is-on { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent-bg); }
+.wf2-view-toggle.is-disabled { opacity: 0.45; pointer-events: none; }
+.wf2-add-step {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; font-weight: 650; padding: 6px 12px; border-radius: 8px;
+  border: 1px dashed var(--border-hover); background: none; color: var(--text-secondary);
+}
+.wf2-add-step:hover { border-color: var(--text-primary); color: var(--text-primary); }
+
+/* Editable nodes: pointer cursor, delete control + connect port. */
+.wf2-node2.is-editable { cursor: pointer; }
+.wf2-node-del {
+  position: absolute; top: -8px; right: -8px; z-index: 5;
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border-hover);
+  background: var(--bg-elevated); color: var(--text-muted); font-size: 13px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.wf2-node-del:hover { background: var(--error); color: #fff; border-color: var(--error); }
+.wf2-port {
+  position: absolute; right: -7px; top: 50%; transform: translateY(-50%); z-index: 5;
+  width: 12px; height: 12px; border-radius: 50%; cursor: crosshair;
+  background: var(--bg-elevated); border: 2px solid var(--text-muted);
+}
+.wf2-port:hover { border-color: var(--accent); background: var(--accent-bg); }
+.wf2-confirm {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 8;
+  background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: 10px;
+  box-shadow: var(--shadow-lg); padding: 10px 12px; width: 180px;
+  display: flex; flex-direction: column; gap: 8px; cursor: default;
+}
+.wf2-confirm > span { font-size: 12px; color: var(--text-primary); }
+.wf2-confirm > div { display: flex; gap: 6px; justify-content: flex-end; }
+.wf2-confirm button { font-size: 11.5px; font-weight: 600; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--border-hover); background: var(--bg-surface); color: var(--text-secondary); }
+.wf2-confirm button.is-danger { background: var(--error); color: #fff; border-color: var(--error); }
+
+/* Connect rubber-band */
+.wf2-rubber { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 4 4; opacity: 0.7; }
+
+/* Edge tools (insert + edit) clustered at the edge midpoint */
+.wf2-edge-tools-wrap {
+  position: absolute; z-index: 3; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; gap: 4px; pointer-events: none;
+}
+.wf2-edge-tools-wrap .wf2-insert { position: static; pointer-events: auto; }
+.wf2-insert.is-edit { opacity: 1; }
+.wf2-edge-edit {
+  pointer-events: auto; width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-surface); border: 1px solid var(--border-hover);
+  color: var(--text-muted); font-size: 10px;
+}
+.wf2-edge-edit:hover { border-color: var(--text-primary); color: var(--text-primary); }
+.wf2-edge-edit.on-loop { position: absolute; z-index: 3; transform: translate(-50%, -50%); }
+
+.wf2-edge-pop {
+  position: absolute; z-index: 9; transform: translate(-50%, 14px); width: 230px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: 12px;
+  box-shadow: var(--shadow-lg); padding: 12px; display: flex; flex-direction: column; gap: 9px;
+}
+.wf2-edge-pop-check { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-secondary); }
+.wf2-edge-pop-actions { display: flex; align-items: center; justify-content: space-between; }
+.wf2-edge-pop-right { display: flex; gap: 6px; }
+.wf2-edge-pop-del {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 600;
+  background: none; border: none; color: var(--error);
+}
+
+/* Roster editing */
+.wf2-chip-del { margin-left: 2px; width: 14px; height: 14px; border-radius: 50%; border: none; background: var(--bg-surface-hover); color: var(--text-muted); font-size: 11px; line-height: 1; }
+.wf2-chip-del:hover { background: var(--error); color: #fff; }
+.wf2-roster-add-wrap { position: relative; display: inline-flex; }
+.wf2-roster-add {
+  font-size: 10.5px; font-weight: 650; padding: 3px 9px; border-radius: 100px;
+  border: 1px dashed var(--border-hover); background: none; color: var(--text-muted);
+}
+.wf2-roster-add:hover { border-color: var(--text-primary); color: var(--text-primary); }
+.wf2-roster-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; width: 280px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: 12px;
+  box-shadow: var(--shadow-lg); padding: 12px; display: flex; flex-direction: column; gap: 9px;
+}
+.wf2-roster-tabs { display: flex; gap: 6px; }
+.wf2-roster-tabs button { font-size: 11.5px; font-weight: 650; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--border-hover); background: var(--bg-surface); color: var(--text-secondary); }
+.wf2-roster-tabs button.is-on { background: var(--accent-bg); color: var(--accent-text); border-color: var(--accent-bg); }
+.wf2-roster-human { display: flex; gap: 6px; }
+.wf2-roster-human .wf2-input { flex: 1; }
+.wf2-roster-pop-close { position: absolute; top: 8px; right: 8px; width: 20px; height: 20px; border-radius: 6px; border: none; background: none; color: var(--text-muted); font-size: 14px; }
+
+/* Step editor panel (right-docked) */
+.wf2-editor-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 340px; z-index: 60;
+  background: var(--bg-elevated); border-left: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg); display: flex; flex-direction: column;
+  animation: wf2-slide-in 0.2s ease;
+}
+.wf2-editor-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--border-default); }
+.wf2-editor-head span { font-size: 15px; font-weight: 800; color: var(--text-primary); }
+.wf2-editor-close { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--border-hover); background: none; color: var(--text-muted); font-size: 16px; line-height: 1; }
+.wf2-editor-body { flex: 1; overflow: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.wf2-editor-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; border-top: 1px solid var(--border-default); }
+.wf2-type-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+select.wf2-input { cursor: pointer; }
+
+/* Toast */
+.wf2-toast {
+  position: fixed; bottom: 76px; left: 50%; transform: translateX(-50%); z-index: 70;
+  background: var(--accent-bg); color: var(--accent-text); font-size: 12.5px; font-weight: 600;
+  padding: 9px 16px; border-radius: 100px; box-shadow: var(--shadow-lg); max-width: 80vw;
+}
+
 @media (max-width: 760px) {
   .wf2-method-grid { grid-template-columns: 1fr; }
   .wf2-detail { width: 100%; }
   .wf2-insights { flex-direction: column; }
+  .wf2-editor-panel { width: 100%; }
 }
 
 /* =============================================================================

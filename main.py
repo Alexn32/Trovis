@@ -93,8 +93,13 @@ from models import (
     Workflow,
     WorkflowCreate,
     WorkflowDescribe,
+    WorkflowEdge,
+    WorkflowEdgeCreate,
+    WorkflowEdgeUpdate,
     WorkflowGenerate,
     WorkflowFromDescription,
+    WorkflowParticipant,
+    WorkflowParticipantCreate,
     WorkflowReorder,
     WorkflowStats,
     WorkflowStep,
@@ -966,6 +971,125 @@ async def reorder_workflow_steps(
         raise HTTPException(status_code=404, detail="workflow not found")
     database.reorder_workflow_steps(workflow_id, body.step_ids)
     return Workflow(**database.get_workflow(workflow_id, account_id=account_id))
+
+
+# ---------------------------------------------------------------------------
+# Graph editing — granular edge + participant CRUD (manual workflow editor).
+# Ownership is gated on the workflow; DB helpers additionally scope by
+# workflow_id so a forged child id from another workflow 404s.
+# ---------------------------------------------------------------------------
+
+
+@app.post(
+    "/workflows/{workflow_id}/edges", response_model=WorkflowEdge, status_code=201
+)
+async def add_workflow_edge(
+    workflow_id: int, request: Request, body: WorkflowEdgeCreate
+) -> WorkflowEdge:
+    account_id = getattr(request.state, "account_id", None)
+    wf = database.get_workflow(workflow_id, account_id=account_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if body.from_step_id == body.to_step_id:
+        raise HTTPException(status_code=400, detail="an edge cannot connect a step to itself")
+    step_ids = {s["id"] for s in wf["steps"]}
+    if body.from_step_id not in step_ids or body.to_step_id not in step_ids:
+        raise HTTPException(status_code=404, detail="from_step_id or to_step_id not in this workflow")
+    for e in wf["edges"]:
+        if e["from_step_id"] == body.from_step_id and e["to_step_id"] == body.to_step_id:
+            raise HTTPException(status_code=409, detail="edge already exists")
+    edge = database.add_workflow_edge(
+        workflow_id,
+        from_step_id=body.from_step_id,
+        to_step_id=body.to_step_id,
+        label=body.label,
+        is_branch=body.is_branch,
+        edge_order=body.edge_order,
+    )
+    return WorkflowEdge(**edge)
+
+
+@app.put(
+    "/workflows/{workflow_id}/edges/{edge_id}", response_model=WorkflowEdge
+)
+async def update_workflow_edge(
+    workflow_id: int, edge_id: int, request: Request, body: WorkflowEdgeUpdate
+) -> WorkflowEdge:
+    account_id = getattr(request.state, "account_id", None)
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    edge = database.update_workflow_edge(
+        edge_id, workflow_id, body.model_dump(exclude_unset=True)
+    )
+    if edge is None:
+        raise HTTPException(status_code=404, detail="edge not found")
+    return WorkflowEdge(**edge)
+
+
+@app.delete("/workflows/{workflow_id}/edges/{edge_id}", status_code=204)
+async def delete_workflow_edge(
+    workflow_id: int, edge_id: int, request: Request
+) -> None:
+    account_id = getattr(request.state, "account_id", None)
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if not database.delete_workflow_edge(edge_id, workflow_id):
+        raise HTTPException(status_code=404, detail="edge not found")
+
+
+@app.post(
+    "/workflows/{workflow_id}/participants",
+    response_model=WorkflowParticipant,
+    status_code=201,
+)
+async def add_workflow_participant(
+    workflow_id: int, request: Request, body: WorkflowParticipantCreate
+) -> WorkflowParticipant:
+    account_id = getattr(request.state, "account_id", None)
+    wf = database.get_workflow(workflow_id, account_id=account_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    ptype = str(body.type or "").strip().lower()
+    if ptype not in ("agent", "human"):
+        raise HTTPException(status_code=400, detail="type must be 'agent' or 'human'")
+    if ptype == "agent" and not body.agent_service_name:
+        raise HTTPException(status_code=400, detail="agent participant requires agent_service_name")
+    if ptype == "human" and not (body.role_name or "").strip():
+        raise HTTPException(status_code=400, detail="human participant requires role_name")
+    # Idempotent dedupe — agents on (service, agent_id), humans on role (lower).
+    aid = (body.agent_id or "main")
+    for p in wf["participants"]:
+        if ptype == "agent" and p["type"] == "agent" and (
+            p["agent_service_name"] == body.agent_service_name
+            and (p["agent_id"] or "main") == aid
+        ):
+            raise HTTPException(status_code=409, detail="agent already a participant")
+        if ptype == "human" and p["type"] == "human" and (
+            (p["role_name"] or "").strip().lower() == body.role_name.strip().lower()
+        ):
+            raise HTTPException(status_code=409, detail="human role already a participant")
+    participant = database.add_workflow_participant(
+        workflow_id,
+        ptype,
+        agent_service_name=body.agent_service_name,
+        agent_id=aid if ptype == "agent" else None,
+        role_name=body.role_name,
+        team_member_id=body.team_member_id,
+    )
+    return WorkflowParticipant(**participant)
+
+
+@app.delete(
+    "/workflows/{workflow_id}/participants/{participant_id}", status_code=204
+)
+async def delete_workflow_participant(
+    workflow_id: int, participant_id: int, request: Request
+) -> None:
+    account_id = getattr(request.state, "account_id", None)
+    if database.get_workflow(workflow_id, account_id=account_id) is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    if not database.delete_workflow_participant(participant_id, workflow_id):
+        raise HTTPException(status_code=404, detail="participant not found")
 
 
 def _build_agents_context(

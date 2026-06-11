@@ -264,6 +264,33 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ step_ids: stepIds }),
     }),
+  // --- workflow graph editing (manual editor) ---
+  // Create an edge. data: { from_step_id, to_step_id, label?, is_branch? }.
+  // A backward edge (target before source in flow order) is a loop.
+  addWorkflowEdge: (workflowId, data) =>
+    request(`/workflows/${workflowId}/edges`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  // Patch an edge's label / is_branch.
+  updateWorkflowEdge: (workflowId, edgeId, data) =>
+    request(`/workflows/${workflowId}/edges/${edgeId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteWorkflowEdge: (workflowId, edgeId) =>
+    request(`/workflows/${workflowId}/edges/${edgeId}`, { method: 'DELETE' }),
+  // Add an agent or human role to the workflow roster. data:
+  // { type:'agent'|'human', agent_service_name?, agent_id?, role_name? }.
+  addWorkflowParticipant: (workflowId, data) =>
+    request(`/workflows/${workflowId}/participants`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  deleteWorkflowParticipant: (workflowId, participantId) =>
+    request(`/workflows/${workflowId}/participants/${participantId}`, {
+      method: 'DELETE',
+    }),
 
   // --- team + ownership ---
   getTeamMembers: () => request('/team'),

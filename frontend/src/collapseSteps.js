@@ -76,8 +76,11 @@ function remapEdges(nodes, edges, stepToNode) {
     if (seenEdge.has(key)) continue
     seenEdge.add(key)
     out.push({
+      id: e.id,
       from_id: fromNode,
       to_id: toNode,
+      from_step_id: e.from_step_id,
+      to_step_id: e.to_step_id,
       from_order: nodeById.get(fromNode).flowIndex,
       to_order: nodeById.get(toNode).flowIndex,
       label: e.label || null,
