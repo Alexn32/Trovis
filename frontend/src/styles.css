@@ -369,6 +369,8 @@ a:hover {
   /* Sit above the fixed paper-grain texture overlay (z-index 0). */
   position: relative;
   z-index: 1;
+  /* Reserve space so the fixed Ask pill never obscures the last row of content. */
+  padding-bottom: 80px;
 }
 
 /* ---------- buttons ---------- */
