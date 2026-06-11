@@ -44,7 +44,7 @@ import * as os from "node:os"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.2.8"
+const PLUGIN_VERSION = "0.3.0"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
