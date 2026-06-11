@@ -1155,7 +1155,7 @@ def recompute_span_costs(account_id: int | None = None) -> dict[str, Any]:
                 attrs = json.loads(r["attributes"] or "{}")
             except (TypeError, ValueError):
                 attrs = {}
-            model = attrs.get("gen_ai.request.model") if isinstance(attrs, dict) else None
+            model = model_from_attrs(attrs)
             new_cost = _compute_cost(
                 model,
                 r["input_tokens"],
@@ -1232,7 +1232,7 @@ def get_pricing_coverage(
                 attrs = json.loads(row["attributes"] or "{}")
             except (TypeError, ValueError):
                 continue
-            model = attrs.get("gen_ai.request.model")
+            model = model_from_attrs(attrs)
             if not model:
                 continue
             agg = seen.setdefault(model, {"spans": 0, "tokens": 0})
@@ -1338,8 +1338,7 @@ def get_cost_audit(
                     attrs = json.loads(row["attributes"] or "{}")
                 except (TypeError, ValueError):
                     attrs = {}
-                model = (attrs.get("gen_ai.request.model") if isinstance(attrs, dict)
-                         else None) or "(no model on span)"
+                model = model_from_attrs(attrs) or "(no model on span)"
                 agg = unpriced.setdefault(model, {"spans": 0, "tokens": 0})
                 agg["spans"] += 1
                 agg["tokens"] += int(tok or 0)
@@ -1434,21 +1433,73 @@ def _to_int(v: Any) -> int | None:
 _RUN_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,128}$")
 
 
+# Token-usage attribute aliases, most-standard first. Trovis is built on the
+# OTEL standard, and the ecosystem spans three generations of naming:
+#   - current GenAI semconv:  gen_ai.usage.input_tokens / output_tokens
+#   - legacy GenAI semconv:   gen_ai.usage.prompt_tokens / completion_tokens
+#     (still emitted by OpenLLMetry/Traceloop and older instrumentations)
+#   - OpenInference (Arize):  llm.token_count.prompt / completion / total
+# Accepting all three means any OTEL-instrumented agent cost-tracks out of the
+# box, not just ones using our SDK.
+_INPUT_TOKEN_KEYS = (
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.prompt_tokens",
+    "llm.token_count.prompt",
+)
+_OUTPUT_TOKEN_KEYS = (
+    "gen_ai.usage.output_tokens",
+    "gen_ai.usage.completion_tokens",
+    "llm.token_count.completion",
+)
+_TOTAL_TOKEN_KEYS = (
+    "gen_ai.usage.total_tokens",
+    "llm.token_count.total",
+)
+
+# Model-id attribute aliases. request.model first (what our SDKs set), then
+# the semconv response model (often the only one set, and more precise — it
+# carries the dated id), then OpenInference's name.
+_MODEL_KEYS = (
+    "gen_ai.request.model",
+    "gen_ai.response.model",
+    "llm.model_name",
+)
+
+
+def _first_int(attrs: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    for k in keys:
+        v = _to_int(attrs.get(k))
+        if v is not None:
+            return v
+    return None
+
+
+def model_from_attrs(attrs: dict[str, Any] | None) -> str | None:
+    """The span's model id, accepting the standard aliases (see _MODEL_KEYS)."""
+    if not isinstance(attrs, dict):
+        return None
+    for k in _MODEL_KEYS:
+        v = attrs.get(k)
+        if v:
+            return str(v)
+    return None
+
+
 def _extract_tokens(
     attrs: dict[str, Any] | None,
 ) -> tuple[int | None, int | None, int | None]:
-    """Pull (input, output, total) token counts from a span's attributes
-    following the OTEL GenAI semantic conventions
-    (`gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens`).
+    """Pull (input, output, total) token counts from a span's attributes,
+    accepting current GenAI semconv, legacy semconv, and OpenInference names
+    (see _INPUT_TOKEN_KEYS et al).
 
     Returns (None, None, None) when no usage data is present. Derives
     `total` from input+output when the SDK only reports the two parts.
     """
     if not attrs:
         return (None, None, None)
-    inp = _to_int(attrs.get("gen_ai.usage.input_tokens"))
-    out = _to_int(attrs.get("gen_ai.usage.output_tokens"))
-    tot = _to_int(attrs.get("gen_ai.usage.total_tokens"))
+    inp = _first_int(attrs, _INPUT_TOKEN_KEYS)
+    out = _first_int(attrs, _OUTPUT_TOKEN_KEYS)
+    tot = _first_int(attrs, _TOTAL_TOKEN_KEYS)
     if tot is None and (inp is not None or out is not None):
         tot = (inp or 0) + (out or 0)
     return (inp, out, tot)
@@ -1475,10 +1526,17 @@ def _normalize_model(model: Any) -> str:
     return str(model).strip().lower().split("/")[-1]
 
 
-# Anthropic prices by tier; OpenAI's 4o family shares a rate. Used by the
-# same-family fallback so a model id we don't explicitly carry still resolves
-# to its tier's rate instead of NULL (which would silently drop its cost).
-_CLAUDE_TIERS = ("opus", "sonnet", "haiku")
+# Model families eligible for same-family price fallback. Providers price by
+# family/tier, so the newest known same-family (and same-tier, when the name
+# carries a tier token like opus/flash/mini) rate is a sound estimate for a
+# brand-new id the table doesn't carry yet. In production the table holds the
+# LiteLLM-synced live list (~2,700 models, refreshed daily), so the fallback
+# anchors to real current rates — and the post-sync recompute retroactively
+# corrects any span priced via fallback once the exact rate lands.
+_FALLBACK_FAMILIES = (
+    "claude", "gpt", "gemini", "grok", "deepseek",
+    "mistral", "mixtral", "llama", "qwen", "command",
+)
 
 
 def _version_tuple(key: str) -> tuple[int, ...]:
@@ -1490,25 +1548,30 @@ def _version_tuple(key: str) -> tuple[int, ...]:
 def _family_fallback(
     norm: str, pricing: dict[str, tuple[float, float]]
 ) -> tuple[float, float] | None:
-    """Estimate a rate for an unknown id by its model family/tier — the newest
-    KNOWN same-tier rate. Returns None when the family is unrecognized (the id
-    still surfaces as unmatched in coverage, but a known-family model never
-    prices as $0)."""
-    parts = set(norm.split("-"))
-    if "claude" in norm:
-        for tier in _CLAUDE_TIERS:
-            if tier in parts:
-                cands = [
-                    k for k in pricing
-                    if k.startswith("claude-") and tier in k.split("-")
-                ]
-                if cands:
-                    return pricing[max(cands, key=_version_tuple)]
-    if norm.startswith("gpt-4o") or norm.startswith("gpt-5") or norm.startswith("gpt-4."):
-        target = "gpt-4o-mini" if "mini" in norm or "nano" in norm else "gpt-4o"
-        if target in pricing:
-            return pricing[target]
-    return None
+    """Estimate a rate for an unknown id from its model family — the known
+    same-family rate sharing the most name tokens (tier words like opus /
+    flash / mini), newest version winning ties. Returns None for unrecognized
+    families (the id surfaces as unmatched in coverage rather than pricing as
+    a wrong guess), but a known-family model never silently prices as $0."""
+    family = norm.split("-", 1)[0].split(".")[0]
+    if family not in _FALLBACK_FAMILIES:
+        return None
+    cands = [k for k in pricing if k == family or k.startswith(family + "-")]
+    if not cands:
+        return None
+    # Tier tokens of the unknown id: its name parts minus the family name and
+    # bare version numbers ('claude-opus-5' → {'opus'}).
+    want = {
+        t for t in norm.split("-")[1:] if t and not t.replace(".", "").isdigit()
+    }
+
+    def score(key: str) -> tuple[int, tuple[int, ...], int]:
+        overlap = len(want & set(key.split("-")))
+        # Prefer: most tier-token overlap, then newest version, then the
+        # shorter (base/flagship) id on ties.
+        return (overlap, _version_tuple(key), -len(key))
+
+    return pricing[max(cands, key=score)]
 
 
 # One trailing date/version token providers append to a base id, e.g.
@@ -1637,7 +1700,7 @@ def insert_spans(
             attrs = s.get("attributes") or {}
             inp, out, tot = _extract_tokens(attrs)
             cc, cr = _extract_cache_tokens(attrs)
-            model = attrs.get("gen_ai.request.model")
+            model = model_from_attrs(attrs)
             has_usage = tot is not None or cc is not None or cr is not None
             # total_tokens counts every billed token, cache included.
             if has_usage:
@@ -3873,7 +3936,7 @@ def get_agent_costs(
         try:
             attrs = json.loads(r["attributes"] or "{}")
             if isinstance(attrs, dict):
-                model = attrs.get("gen_ai.request.model") or "unknown"
+                model = model_from_attrs(attrs) or "unknown"
         except (TypeError, ValueError):
             pass
         if model == "unknown" and _row_get(r, "cost_source") == "reported":
@@ -4037,7 +4100,7 @@ def get_cost_breakdown(account_id: int | None) -> dict[str, Any]:
         try:
             attrs = json.loads(r["attributes"] or "{}")
             if isinstance(attrs, dict):
-                model = attrs.get("gen_ai.request.model") or "unknown"
+                model = model_from_attrs(attrs) or "unknown"
         except (TypeError, ValueError):
             pass
         if model == "unknown" and _row_get(r, "cost_source") == "reported":
