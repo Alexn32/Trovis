@@ -28,12 +28,12 @@ const CLAUDE_VARIANTS = [
 ]
 
 // ============================================================================
-// AddAgent — the three-step onboarding wizard.
+// AddAgent — the onboarding wizard.
 // ----------------------------------------------------------------------------
 // Step 1: choose a platform (always shown).
-// Step 2: choose an LLM provider (skipped for platforms that don't need it).
-// Step 3: platform/provider-specific setup instructions, with an editable
-//         agent name and a copyable Trovis endpoint at the top.
+// Step 2: Claude only — choose the SDK flavor (other platforms skip this).
+// Final step: platform-specific setup instructions, with a copyable Trovis
+//             endpoint and API key at the top.
 //
 // All copy buttons render *already-substituted* code so what you see is
 // exactly what gets copied to the clipboard.
@@ -43,130 +43,18 @@ const CLAUDE_VARIANTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Only the three platforms with first-party Trovis integrations
-// are surfaced for now. Generic Python / Node / framework /
-// no-code-product instruction pages still exist in this file — they
-// just aren't reachable from the picker. Re-adding any tile to this
-// array is enough to bring its page back.
+// Only the platforms with first-party Trovis integrations are surfaced.
+// Every tile maps to an instructions page in InstructionsView below —
+// adding a tile here means adding (or restoring) its page there.
 const PLATFORMS = [
-  { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
-  { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
+  { id: 'openclaw',       label: 'OpenClaw',          subtitle: 'AI agent platform — agents connect themselves' },
+  { id: 'openai-agents',  label: 'OpenAI Agents SDK', subtitle: 'OpenAI native agent framework' },
   // One Claude tile; a sub-step then splits SDK vs Managed Agents.
-  { id: 'claude',         label: 'Claude Agents',             subtitle: 'Claude Agent SDK or Managed Agents',             needsProvider: false },
-  { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
+  { id: 'claude',         label: 'Claude Agents',     subtitle: 'Claude Agent SDK or Managed Agents' },
+  { id: 'hermes',         label: 'Hermes Agent',      subtitle: 'Python agent platform — pip plugin' },
   // ChatGPT is intentionally not in the picker: OpenAI's MCP app registration
   // is pending. The MCP server + OAuth/Actions backend remain live and tested.
 ]
-
-const PROVIDERS = [
-  { id: 'anthropic', label: 'Anthropic (Claude)' },
-  { id: 'openai',    label: 'OpenAI (GPT)' },
-  { id: 'xai',       label: 'xAI (Grok)' },
-  { id: 'google',    label: 'Google (Gemini)' },
-  { id: 'bedrock',   label: 'AWS Bedrock' },
-  { id: 'mistral',   label: 'Mistral' },
-  { id: 'cohere',    label: 'Cohere' },
-  { id: 'groq',      label: 'Groq' },
-  { id: 'ollama',    label: 'Ollama (Local)' },
-  { id: 'together',  label: 'Together AI' },
-  { id: 'deepseek',  label: 'DeepSeek' },
-  { id: 'multiple',  label: 'Multiple providers' },
-  { id: 'other-llm', label: 'Other / Not listed' },
-]
-
-// Per-provider Python OTEL instrumentation package + import lines.
-// Verified against PyPI as of May 2026 (per the build spec).
-const PYTHON_PROVIDERS = {
-  anthropic: {
-    label: 'Anthropic (Claude)',
-    pkg: 'opentelemetry-instrumentation-anthropic',
-    importLines:
-`from opentelemetry.instrumentation.anthropic import AnthropicInstrumentor
-AnthropicInstrumentor().instrument()`,
-  },
-  openai: {
-    label: 'OpenAI (GPT)',
-    pkg: 'opentelemetry-instrumentation-openai',
-    importLines:
-`from opentelemetry.instrumentation.openai import OpenAIInstrumentor
-OpenAIInstrumentor().instrument()`,
-  },
-  google: {
-    label: 'Google (Gemini)',
-    pkg: 'opentelemetry-instrumentation-google-generativeai',
-    importLines:
-`from opentelemetry.instrumentation.google_generativeai import GoogleGenerativeAiInstrumentor
-GoogleGenerativeAiInstrumentor().instrument()`,
-  },
-  bedrock: {
-    label: 'AWS Bedrock',
-    pkg: 'opentelemetry-instrumentation-bedrock',
-    importLines:
-`from opentelemetry.instrumentation.bedrock import BedrockInstrumentor
-BedrockInstrumentor().instrument()`,
-  },
-  mistral: {
-    label: 'Mistral',
-    pkg: 'opentelemetry-instrumentation-mistral',
-    importLines:
-`from opentelemetry.instrumentation.mistral import MistralInstrumentor
-MistralInstrumentor().instrument()`,
-  },
-  cohere: {
-    label: 'Cohere',
-    pkg: 'opentelemetry-instrumentation-cohere',
-    importLines:
-`from opentelemetry.instrumentation.cohere import CohereInstrumentor
-CohereInstrumentor().instrument()`,
-  },
-  groq: {
-    label: 'Groq',
-    pkg: 'opentelemetry-instrumentation-groq',
-    importLines:
-`from opentelemetry.instrumentation.groq import GroqInstrumentor
-GroqInstrumentor().instrument()`,
-  },
-  ollama: {
-    label: 'Ollama (Local)',
-    pkg: 'opentelemetry-instrumentation-ollama',
-    importLines:
-`from opentelemetry.instrumentation.ollama import OllamaInstrumentor
-OllamaInstrumentor().instrument()`,
-  },
-  together: {
-    label: 'Together AI',
-    pkg: 'opentelemetry-instrumentation-together-ai',
-    importLines:
-`from opentelemetry.instrumentation.together_ai import TogetherAiInstrumentor
-TogetherAiInstrumentor().instrument()`,
-  },
-}
-
-// Framework-level instrumentors (CrewAI / LangChain). OpenAI Agents SDK
-// gets its own dedicated onboarding page (OpenAIAgentsInstructions),
-// since the trovis-agents package handles setup in two lines and
-// captures agent identity automatically.
-const FRAMEWORK_INSTRUMENTORS = {
-  crewai: {
-    label: 'CrewAI',
-    title: 'Connect CrewAI agents',
-    pkg: 'openinference-instrumentation-crewai',
-    importLines:
-`from openinference.instrumentation.crewai import CrewAIInstrumentor
-CrewAIInstrumentor().instrument()`,
-    runFile: 'your_crew.py',
-    note: 'If your CrewAI agents use LangChain internally, also install openinference-instrumentation-langchain and add LangChainInstrumentor().instrument().',
-  },
-  langchain: {
-    label: 'LangChain / LangGraph',
-    title: 'Connect LangChain / LangGraph agents',
-    pkg: 'openinference-instrumentation-langchain',
-    importLines:
-`from openinference.instrumentation.langchain import LangChainInstrumentor
-LangChainInstrumentor().instrument()`,
-    runFile: 'your_agent.py',
-  },
-}
 
 // ---------------------------------------------------------------------------
 // Substitution
@@ -204,25 +92,6 @@ function CodeBlock({ code }) {
         {copied ? '✓ Copied' : 'Copy'}
       </button>
       <pre className="code-pre">{code}</pre>
-    </div>
-  )
-}
-
-function AgentMessageBlock({ code }) {
-  const [copied, setCopied] = useState(false)
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(code)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {}
-  }
-  return (
-    <div className="agent-message-block">
-      <button type="button" className="copy-btn copy-btn-light" onClick={copy}>
-        {copied ? '✓ Copied' : 'Copy message'}
-      </button>
-      <pre className="agent-message-pre">{code}</pre>
     </div>
   )
 }
@@ -302,7 +171,7 @@ function WizardHeader({ step, total, onBack, onClose }) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 1 + 2 — selection grids
+// Step 1 — platform picker grid
 // ---------------------------------------------------------------------------
 
 function PlatformStep({ onSelect }) {
@@ -337,285 +206,6 @@ function PlatformStep({ onSelect }) {
         })}
       </div>
     </div>
-  )
-}
-
-function ProviderStep({ onSelect }) {
-  return (
-    <div>
-      <h2 className="wizard-title">What LLM does your agent call?</h2>
-      <p className="wizard-subtitle">
-        We'll show you the exact tracing package for your provider.
-      </p>
-      <div className="platform-grid">
-        {PROVIDERS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            className="platform-card"
-            onClick={() => onSelect(p)}
-          >
-            <span className="platform-card-label">{p.label}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Reusable instruction patterns
-// ---------------------------------------------------------------------------
-
-const QUICK_ENV_TEMPLATE =
-`OTEL_SERVICE_NAME=AGENT_NAME \\
-OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT \\
-OTEL_EXPORTER_OTLP_PROTOCOL=http/json \\
-OTEL_TRACES_EXPORTER=otlp \\
-python {RUN_FILE}`
-
-const EXPLICIT_SETUP_TEMPLATE =
-`from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry import trace
-
-resource = Resource.create({"service.name": "AGENT_NAME"})
-provider = TracerProvider(resource=resource)
-provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="TROVIS_ENDPOINT"))
-)
-trace.set_tracer_provider(provider)
-
-{IMPORT_LINES}`
-
-function pythonQuickEnvCmd(agentName, endpoint, runFile) {
-  return fill(QUICK_ENV_TEMPLATE.replace('{RUN_FILE}', runFile), agentName, endpoint)
-}
-
-function pythonExplicitSetup(importLines, agentName, endpoint) {
-  return fill(
-    EXPLICIT_SETUP_TEMPLATE.replace('{IMPORT_LINES}', importLines),
-    agentName,
-    endpoint,
-  )
-}
-
-// Quick + Explicit tabs for any Python instrumentor-style integration.
-function PythonInstrumentorTabs({
-  pkg,
-  importLines,
-  agentName,
-  endpoint,
-  runFile = 'your_agent.py',
-  preNote,
-}) {
-  const quickInstall = `pip install opentelemetry-distro opentelemetry-exporter-otlp ${pkg}`
-  const explicitInstall = `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http ${pkg}`
-  const envCmd = pythonQuickEnvCmd(agentName, endpoint, runFile)
-  const explicitSetup = pythonExplicitSetup(importLines, agentName, endpoint)
-
-  return (
-    <Tabs
-      tabs={[
-        {
-          label: 'Quick setup',
-          content: (
-            <>
-              {preNote && <Callout variant="info">{preNote}</Callout>}
-              <NumberedStep n={1} title="Install packages">
-                <CodeBlock code={quickInstall} />
-              </NumberedStep>
-              <NumberedStep n={2} title="Add these two lines to the top of your agent's entry file, before any imports">
-                <CodeBlock code={importLines} />
-              </NumberedStep>
-              <NumberedStep n={3} title="Run your agent with these environment variables">
-                <CodeBlock code={envCmd} />
-              </NumberedStep>
-              <NumberedStep n={4} title="Your agent will appear in Trovis within seconds." />
-              <SuccessCallout />
-            </>
-          ),
-        },
-        {
-          label: 'Explicit setup',
-          content: (
-            <>
-              {preNote && <Callout variant="info">{preNote}</Callout>}
-              <NumberedStep n={1} title="Install packages">
-                <CodeBlock code={explicitInstall} />
-              </NumberedStep>
-              <NumberedStep n={2} title="Add this setup block to the top of your agent's entry file">
-                <CodeBlock code={explicitSetup} />
-              </NumberedStep>
-              <NumberedStep n={3} title="Run your agent normally">
-                <CodeBlock code={`python ${runFile}`} />
-              </NumberedStep>
-              <NumberedStep n={4} title="Your agent will appear in Trovis within seconds." />
-              <SuccessCallout />
-            </>
-          ),
-        },
-      ]}
-    />
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Instruction pages — Custom Python
-// ---------------------------------------------------------------------------
-
-function CustomPythonInstructions({ provider, agentName, endpoint }) {
-  // Special cases first.
-  if (provider === 'xai') return <PythonXaiInstructions agentName={agentName} endpoint={endpoint} />
-  if (provider === 'deepseek') return <PythonDeepSeekInstructions agentName={agentName} endpoint={endpoint} />
-  if (provider === 'multiple') return <PythonMultipleInstructions agentName={agentName} endpoint={endpoint} />
-  if (provider === 'other-llm') return <PythonGenericInstructions agentName={agentName} endpoint={endpoint} />
-
-  const cfg = PYTHON_PROVIDERS[provider]
-  return (
-    <>
-      <h2 className="instructions-title">Connect a Python agent using {cfg.label}</h2>
-      <PythonInstrumentorTabs
-        pkg={cfg.pkg}
-        importLines={cfg.importLines}
-        agentName={agentName}
-        endpoint={endpoint}
-      />
-    </>
-  )
-}
-
-function PythonXaiInstructions({ agentName, endpoint }) {
-  const nativeInstall = 'pip install xai-sdk[telemetry-http]'
-  const nativeSetup = fill(
-`from xai_sdk.telemetry import Telemetry
-
-telemetry = Telemetry()
-telemetry.setup_otlp_exporter(
-    endpoint="TROVIS_ENDPOINT"
-)`,
-    agentName, endpoint,
-  )
-
-  return (
-    <>
-      <h2 className="instructions-title">Connect a Python agent using xAI (Grok)</h2>
-      <Tabs tabs={[
-        {
-          label: 'Using xAI SDK (native)',
-          content: (
-            <>
-              <NumberedStep n={1} title="Install packages">
-                <CodeBlock code={nativeInstall} />
-              </NumberedStep>
-              <NumberedStep n={2} title="Add this to your agent before making any Grok calls">
-                <CodeBlock code={nativeSetup} />
-              </NumberedStep>
-              <NumberedStep n={3} title="Run your agent normally. Traces flow automatically." />
-              <SuccessCallout />
-            </>
-          ),
-        },
-        {
-          label: 'Using OpenAI-compatible SDK',
-          content: (
-            <PythonInstrumentorTabs
-              pkg={PYTHON_PROVIDERS.openai.pkg}
-              importLines={PYTHON_PROVIDERS.openai.importLines}
-              agentName={agentName}
-              endpoint={endpoint}
-              preNote={`If you call Grok via the OpenAI SDK with base_url="https://api.x.ai/v1", use these instructions.`}
-            />
-          ),
-        },
-      ]} />
-    </>
-  )
-}
-
-function PythonDeepSeekInstructions({ agentName, endpoint }) {
-  return (
-    <>
-      <h2 className="instructions-title">Connect a Python agent using DeepSeek</h2>
-      <Callout variant="info">
-        DeepSeek uses an OpenAI-compatible API. Use the OpenAI instrumentation package.
-      </Callout>
-      <PythonInstrumentorTabs
-        pkg={PYTHON_PROVIDERS.openai.pkg}
-        importLines={PYTHON_PROVIDERS.openai.importLines}
-        agentName={agentName}
-        endpoint={endpoint}
-      />
-    </>
-  )
-}
-
-function PythonMultipleInstructions({ agentName, endpoint }) {
-  const install = 'pip install opentelemetry-distro opentelemetry-exporter-otlp opentelemetry-instrumentation-anthropic opentelemetry-instrumentation-openai opentelemetry-instrumentation-google-generativeai opentelemetry-instrumentation-bedrock'
-  const setupLines =
-`from opentelemetry.instrumentation.anthropic import AnthropicInstrumentor
-from opentelemetry.instrumentation.openai import OpenAIInstrumentor
-
-AnthropicInstrumentor().instrument()
-OpenAIInstrumentor().instrument()`
-  const envCmd = pythonQuickEnvCmd(agentName, endpoint, 'your_agent.py')
-
-  return (
-    <>
-      <h2 className="instructions-title">Connect a Python agent calling multiple providers</h2>
-      <NumberedStep n={1} title="Install all common instrumentation packages">
-        <CodeBlock code={install} />
-      </NumberedStep>
-      <NumberedStep n={2} title="Add all instrumentor lines to the top of your agent's entry file">
-        <CodeBlock code={setupLines} />
-      </NumberedStep>
-      <NumberedStep n={3} title="Run with OTEL environment variables (same as Quick setup)">
-        <CodeBlock code={envCmd} />
-      </NumberedStep>
-      <Callout variant="info">
-        Only the instrumentors for libraries you have installed will activate. The others are safely ignored.
-      </Callout>
-      <SuccessCallout />
-    </>
-  )
-}
-
-function PythonGenericInstructions({ agentName, endpoint }) {
-  const setup = fill(
-`from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry import trace
-
-resource = Resource.create({"service.name": "AGENT_NAME"})
-provider = TracerProvider(resource=resource)
-provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="TROVIS_ENDPOINT"))
-)
-trace.set_tracer_provider(provider)
-
-# Create spans for your agent's operations
-tracer = trace.get_tracer("AGENT_NAME")
-with tracer.start_as_current_span("my-operation") as span:
-    span.set_attribute("custom.key", "value")
-    # your agent logic here`,
-    agentName, endpoint,
-  )
-
-  return (
-    <>
-      <h2 className="instructions-title">Generic OpenTelemetry setup</h2>
-      <NumberedStep n={1} title="Install packages">
-        <CodeBlock code="pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http" />
-      </NumberedStep>
-      <NumberedStep n={2} title="Add this setup block and instrument your operations">
-        <CodeBlock code={setup} />
-      </NumberedStep>
-      <SuccessCallout />
-    </>
   )
 }
 
@@ -1036,14 +626,13 @@ function HermesAgentsInstructions({ agentName, endpoint }) {
   // Hermes prompts for these env vars at `plugins enable` time per the
   // plugin.yaml `requires_env` declaration; we also surface them here
   // so operators who'd rather set the shell env directly have a clear
-  // recipe with their actual key/endpoint in place.
-  const envExport = fill(
-`export TROVIS_API_KEY="TROVIS_API_KEY"
-export TROVIS_ENDPOINT="TROVIS_ENDPOINT"
-export TROVIS_AGENT_NAME="AGENT_NAME"`,
-    agentName,
-    resolvedEndpoint,
-  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
+  // recipe with their actual key/endpoint in place. Built with template
+  // literals, not fill(): the placeholder names double as the shell
+  // variable names here, so fill() would rewrite the left side of `=`.
+  const envExport =
+`export TROVIS_API_KEY="${apiKey || 'ov_sk_…'}"
+export TROVIS_ENDPOINT="${resolvedEndpoint}"
+export TROVIS_AGENT_NAME="${effectiveAgentName(agentName)}"`
   const chatCmds =
 `/trovis connect ${resolvedEndpoint}
 /trovis apikey ${apiKey || 'ov_sk_…'}
@@ -1256,180 +845,6 @@ function OpenClawTerminalSetup({ endpoint, apiKey, installCmd }) {
 }
 
 // ---------------------------------------------------------------------------
-// Instruction pages — CrewAI / LangChain / OpenAI Agents (same shape)
-// ---------------------------------------------------------------------------
-
-function FrameworkInstructions({ frameworkId, agentName, endpoint }) {
-  const cfg = FRAMEWORK_INSTRUMENTORS[frameworkId]
-  return (
-    <>
-      <h2 className="instructions-title">{cfg.title}</h2>
-      <PythonInstrumentorTabs
-        pkg={cfg.pkg}
-        importLines={cfg.importLines}
-        agentName={agentName}
-        endpoint={endpoint}
-        runFile={cfg.runFile}
-      />
-      {cfg.note && <Callout variant="info">{cfg.note}</Callout>}
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Instruction pages — Claude Cowork & Claude Code (native OTEL)
-// ---------------------------------------------------------------------------
-
-function ClaudeCoworkInstructions({ endpoint }) {
-  return (
-    <>
-      <h2 className="instructions-title">Native OTEL export — no code changes needed</h2>
-      <p className="instructions-subtitle">
-        Claude Cowork has built-in OpenTelemetry support. Just enter your Trovis endpoint.
-      </p>
-      <NumberedStep n={1} title="Open Claude Desktop and go to Organization settings → Cowork (or Settings → Monitoring)." />
-      <NumberedStep n={2} title="Enter your Trovis OTLP endpoint">
-        <CodeBlock code={endpoint} />
-      </NumberedStep>
-      <NumberedStep n={3} title="Select the OTLP protocol: HTTP/JSON." />
-      <NumberedStep n={4} title="Add authentication headers if required by your Trovis deployment." />
-      <NumberedStep n={5} title="Click Save. Events begin flowing immediately." />
-      <Callout variant="info">
-        Requires Claude Team or Enterprise plan. Admin access required.
-      </Callout>
-      <h3 className="section-title section-title-spaced">What you'll see</h3>
-      <p>
-        User prompts, every tool and MCP invocation (server name, tool name,
-        parameters, success/failure, execution time), file access patterns,
-        and cost data.
-      </p>
-      <SuccessCallout />
-    </>
-  )
-}
-
-function ClaudeCodeInstructions({ endpoint }) {
-  const settingsJson = fill(
-`{
-  "env": {
-    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "otlp",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "TROVIS_ENDPOINT"
-  }
-}`,
-    '', endpoint,
-  )
-  return (
-    <>
-      <h2 className="instructions-title">Native OTEL export — no code changes needed</h2>
-      <p className="instructions-subtitle">
-        Claude Code has built-in OpenTelemetry support. Add settings and restart.
-      </p>
-      <NumberedStep n={1} title="Open your Claude Code settings file">
-        <CodeBlock code="~/.claude/settings.json" />
-      </NumberedStep>
-      <NumberedStep n={2} title={`Add or merge this into the "env" section`}>
-        <CodeBlock code={settingsJson} />
-      </NumberedStep>
-      <NumberedStep n={3} title="Restart Claude Code. Telemetry flows immediately." />
-      <h3 className="section-title section-title-spaced">What you'll see</h3>
-      <p>
-        API requests, tool calls, token usage, cost data, and session activity.
-      </p>
-      <SuccessCallout />
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Instruction pages — Node.js / TypeScript (any provider)
-// ---------------------------------------------------------------------------
-
-function NodeInstructions({ agentName, endpoint }) {
-  const install = 'npm install @opentelemetry/api @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http @opentelemetry/auto-instrumentations-node'
-  const tracing = fill(
-`const { NodeSDK } = require('@opentelemetry/sdk-node');
-const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-http');
-const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-
-const sdk = new NodeSDK({
-  traceExporter: new OTLPTraceExporter({
-    url: 'TROVIS_ENDPOINT',
-  }),
-  serviceName: 'AGENT_NAME',
-  instrumentations: [getNodeAutoInstrumentations()],
-});
-
-sdk.start();`,
-    agentName, endpoint,
-  )
-
-  return (
-    <>
-      <h2 className="instructions-title">Connect a Node.js / TypeScript agent</h2>
-      <NumberedStep n={1} title="Install packages">
-        <CodeBlock code={install} />
-      </NumberedStep>
-      <NumberedStep n={2} title="Create tracing.js in your project root">
-        <CodeBlock code={tracing} />
-      </NumberedStep>
-      <NumberedStep n={3} title="Start your agent with this preload">
-        <CodeBlock code="node --require ./tracing.js your-agent.js" />
-      </NumberedStep>
-      <NumberedStep n={4} title="Your agent will appear in Trovis within seconds." />
-      <Callout variant="info">
-        The auto-instrumentations-node package automatically traces HTTP calls,
-        including calls to OpenAI, Anthropic, xAI, and other LLM APIs.
-      </Callout>
-      <SuccessCallout />
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Instruction pages — Other (generic OTEL)
-// ---------------------------------------------------------------------------
-
-function OtherInstructions({ agentName, endpoint }) {
-  const envBlock = fill(
-`OTEL_SERVICE_NAME=AGENT_NAME
-OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT
-OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-OTEL_TRACES_EXPORTER=otlp`,
-    agentName, endpoint,
-  )
-
-  return (
-    <>
-      <h2 className="instructions-title">Generic OpenTelemetry setup</h2>
-      <p>
-        Any application that exports OpenTelemetry traces via HTTP/JSON can connect to Trovis.
-      </p>
-      <NumberedStep n={1} title="Configure your application with these environment variables">
-        <CodeBlock code={envBlock} />
-      </NumberedStep>
-      <p>
-        Configure your application's OTEL exporter to send traces to the endpoint above.
-        See the OpenTelemetry documentation for your language and framework.
-      </p>
-      <p>
-        <a
-          className="external-link"
-          href="https://opentelemetry.io/docs/"
-          target="_blank"
-          rel="noreferrer"
-        >
-          OpenTelemetry Docs →
-        </a>
-      </p>
-      <SuccessCallout />
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Dispatcher — picks the right instructions component
 // ---------------------------------------------------------------------------
 
@@ -1449,9 +864,9 @@ function InstructionsView({ platform, agentName, endpoint }) {
   if (platform === 'hermes') {
     return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
-  // Unreachable from the picker — the platform list above only
-  // contains the live integrations. Returning null is safer than
-  // rendering a stale OtherInstructions page.
+  // Unreachable from the picker — PLATFORMS only contains the live
+  // integrations. Returning null is safer than rendering a wrong page
+  // for an id we don't recognize.
   return null
 }
 
@@ -1460,43 +875,34 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // ---------------------------------------------------------------------------
 
 export default function AddAgent({ onClose, embedded = false }) {
-  const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
-  const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
+  const [platform, setPlatform] = useState(null)   // platform id, e.g. 'openclaw'
   const [claudeVariant, setClaudeVariant] = useState(null) // 'claude-agent-sdk' | 'claude-agents'
   // The ingest endpoint (VITE_API_URL → prod). Agents name themselves on
   // connect and are renamable on the dashboard, so there's no name input.
   const [endpoint] = useState(computeOverseeEndpoint())
 
-  const selectedPlatform = PLATFORMS.find((p) => p.id === platform)
-  const needsProvider = selectedPlatform?.needsProvider ?? false
+  // Claude is the only platform with a sub-step (pick the SDK flavor)
+  // at step 2 before the instructions.
   const needsClaudeVariant = platform === 'claude'
-  // Either kind of sub-selection sits at step 2 before the instructions.
-  const needsSubStep = needsProvider || needsClaudeVariant
-  const subChosen = needsProvider ? !!provider : needsClaudeVariant ? !!claudeVariant : true
-  const totalSteps = selectedPlatform && !needsSubStep ? 2 : 3
+  const totalSteps = platform && !needsClaudeVariant ? 2 : 3
 
   // Derived step:
-  //  - no platform yet                    → 1
+  //  - no platform yet                        → 1
   //  - platform needs a sub-step, none picked → 2
-  //  - everything else                    → final (2 or 3)
+  //  - everything else                        → final (2 or 3)
   let step
   if (!platform) step = 1
-  else if (needsSubStep && !subChosen) step = 2
+  else if (needsClaudeVariant && !claudeVariant) step = 2
   else step = totalSteps
 
   function handleBack() {
     // "Most recent selection wins" — going back unsets the latest pick.
     if (claudeVariant) setClaudeVariant(null)
-    else if (provider) setProvider(null)
     else if (platform) setPlatform(null)
   }
 
   function handlePlatformPick(p) {
     setPlatform(p.id)
-  }
-
-  function handleProviderPick(p) {
-    setProvider(p.id)
   }
 
   const onBack = step > 1 ? handleBack : null
@@ -1516,7 +922,6 @@ export default function AddAgent({ onClose, embedded = false }) {
       />
 
       {step === 1 && <PlatformStep onSelect={handlePlatformPick} />}
-      {step === 2 && needsProvider && <ProviderStep onSelect={handleProviderPick} />}
       {step === 2 && needsClaudeVariant && (
         <ClaudeVariantStep onSelect={(v) => setClaudeVariant(v.id)} />
       )}
