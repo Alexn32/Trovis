@@ -420,6 +420,23 @@ class WorkflowParticipantCreate(BaseModel):
     team_member_id: int | None = None
 
 
+class WorkflowAiEdit(BaseModel):
+    """Body for POST /workflows/{id}/ai-edit — a plain-English instruction
+    describing how to change the existing flow."""
+
+    instruction: str
+
+
+class WorkflowAiEditResult(BaseModel):
+    """Response for POST /workflows/{id}/ai-edit. `summary` is Claude's one-line
+    description of the change, `applied` the number of operations applied, and
+    `workflow` the full updated graph."""
+
+    summary: str = ""
+    applied: int = 0
+    workflow: Workflow
+
+
 class WorkflowAgentRef(BaseModel):
     """One agent in a multi-agent generate request."""
 

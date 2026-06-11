@@ -3659,6 +3659,219 @@ def _replace_workflow_graph(
         _touch_workflow(cur, workflow_id)
 
 
+def apply_workflow_edit_operations(
+    workflow_id: int, operations: list[dict[str, Any]]
+) -> int:
+    """Apply a list of AI-generated edit operations to a workflow in ONE
+    transaction. Operations preserve existing step ids; new steps carry a
+    string `tmp_id` that later edges reference. Invalid/unresolvable ops are
+    skipped (these are best-effort canvas edits, not transactions). Returns the
+    number of operations applied. Ownership must be checked by the caller.
+
+    Op shapes (see describer.workflow_edit_operations):
+      add_step{tmp_id,...}, update_step{step_id,...}, delete_step{step_id},
+      add_edge{from,to,label,is_branch}, delete_edge{edge_id},
+      add_participant{type,...}
+    """
+    branch_true = True if USE_POSTGRES else 1
+    branch_false = False if USE_POSTGRES else 0
+    ops = operations or []
+    applied = 0
+
+    def _insert_step(cur, clean, order):
+        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
+        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
+        vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO workflow_steps {cols} VALUES ({ph}) RETURNING id", vals
+            )
+            return cur.fetchone()["id"]
+        cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
+        return cur.lastrowid
+
+    with _connect() as conn, _cursor(conn) as cur:
+        # Current state inside the txn.
+        cur.execute(
+            f"SELECT id FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
+        )
+        live_ids: set[int] = {r["id"] for r in cur.fetchall()}
+        cur.execute(
+            f"SELECT COALESCE(MAX(step_order), -1) + 1 AS n FROM workflow_steps WHERE workflow_id = {PH}",
+            (workflow_id,),
+        )
+        next_order = int(cur.fetchone()["n"])
+        cur.execute(
+            f"SELECT COALESCE(MAX(edge_order), -1) + 1 AS n FROM workflow_edges WHERE workflow_id = {PH}",
+            (workflow_id,),
+        )
+        next_edge_order = int(cur.fetchone()["n"])
+
+        tmp_to_id: dict[str, int] = {}
+        new_agent_steps: list[tuple[str, str]] = []  # (service, agent_id) added
+
+        def _resolve(ref) -> int | None:
+            if isinstance(ref, str) and ref in tmp_to_id:
+                return tmp_to_id[ref]
+            try:
+                rid = int(ref)
+            except (TypeError, ValueError):
+                return None
+            return rid if rid in live_ids else None
+
+        # 1) add_step (so tmp ids resolve for later edges)
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "add_step":
+                continue
+            clean = _clean_step_values(op)
+            new_id = _insert_step(cur, clean, next_order)
+            next_order += 1
+            live_ids.add(new_id)
+            tmp = op.get("tmp_id")
+            if isinstance(tmp, str) and tmp:
+                tmp_to_id[tmp] = new_id
+            if clean["step_type"] == "agent" and clean["agent_service_name"]:
+                new_agent_steps.append((clean["agent_service_name"], clean["agent_id"] or "main"))
+            applied += 1
+
+        # 2) update_step
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "update_step":
+                continue
+            sid = _resolve(op.get("step_id"))
+            if sid is None:
+                continue
+            clean = _clean_step_values(op)
+            sets, args = [], []
+            for f in _STEP_FIELDS:
+                if f in op:  # only fields the op actually provided
+                    sets.append(f"{f} = {PH}")
+                    args.append(clean[f])
+            if not sets:
+                continue
+            args.extend([sid, workflow_id])
+            cur.execute(
+                f"UPDATE workflow_steps SET {', '.join(sets)} WHERE id = {PH} AND workflow_id = {PH}",
+                tuple(args),
+            )
+            if clean["step_type"] == "agent" and clean["agent_service_name"] and "agent_service_name" in op:
+                new_agent_steps.append((clean["agent_service_name"], clean["agent_id"] or "main"))
+            applied += 1
+
+        # 3) delete_step (+ its edges — SQLite FK cascade is off)
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "delete_step":
+                continue
+            sid = _resolve(op.get("step_id"))
+            if sid is None:
+                continue
+            cur.execute(
+                f"DELETE FROM workflow_edges WHERE workflow_id = {PH} AND (from_step_id = {PH} OR to_step_id = {PH})",
+                (workflow_id, sid, sid),
+            )
+            cur.execute(
+                f"DELETE FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
+                (sid, workflow_id),
+            )
+            live_ids.discard(sid)
+            applied += 1
+
+        # 4) delete_edge
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "delete_edge":
+                continue
+            try:
+                eid = int(op.get("edge_id"))
+            except (TypeError, ValueError):
+                continue
+            cur.execute(
+                f"DELETE FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
+                (eid, workflow_id),
+            )
+            if cur.rowcount > 0:
+                applied += 1
+
+        # 5) add_edge (endpoints resolved against the now-current id set)
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "add_edge":
+                continue
+            fi = _resolve(op.get("from"))
+            ti = _resolve(op.get("to"))
+            if fi is None or ti is None or fi == ti:
+                continue
+            cur.execute(
+                f"SELECT 1 FROM workflow_edges WHERE workflow_id = {PH} AND from_step_id = {PH} AND to_step_id = {PH}",
+                (workflow_id, fi, ti),
+            )
+            if cur.fetchone():
+                continue  # skip duplicates
+            cur.execute(
+                "INSERT INTO workflow_edges (workflow_id, from_step_id, to_step_id, "
+                f"label, is_branch, edge_order) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                (
+                    workflow_id,
+                    fi,
+                    ti,
+                    (op.get("label") or None),
+                    branch_true if op.get("is_branch") else branch_false,
+                    next_edge_order,
+                ),
+            )
+            next_edge_order += 1
+            applied += 1
+
+        # Existing participants (for dedupe of explicit add + auto-add).
+        cur.execute(
+            f"SELECT participant_type, agent_service_name, agent_id, role_name "
+            f"FROM workflow_participants WHERE workflow_id = {PH}",
+            (workflow_id,),
+        )
+        have_agents: set[tuple[str, str]] = set()
+        have_roles: set[str] = set()
+        for r in cur.fetchall():
+            if r["participant_type"] == "human" and r["role_name"]:
+                have_roles.add(r["role_name"].strip().lower())
+            elif r["agent_service_name"]:
+                have_agents.add((r["agent_service_name"], r["agent_id"] or "main"))
+
+        def _add_participant(ptype, svc, aid, role):
+            cur.execute(
+                "INSERT INTO workflow_participants (workflow_id, participant_type, "
+                f"agent_service_name, agent_id, role_name, team_member_id) "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, NULL)",
+                (workflow_id, ptype, svc, aid, role),
+            )
+
+        # 6) explicit add_participant
+        for op in ops:
+            if not isinstance(op, dict) or op.get("op") != "add_participant":
+                continue
+            ptype = "human" if str(op.get("type") or "").strip().lower() == "human" else "agent"
+            if ptype == "human":
+                role = (op.get("role_name") or "").strip()
+                if not role or role.lower() in have_roles:
+                    continue
+                _add_participant("human", None, None, role)
+                have_roles.add(role.lower())
+            else:
+                svc = (op.get("agent_service_name") or "").strip()
+                aid = (op.get("agent_id") or "main")
+                if not svc or (svc, aid) in have_agents:
+                    continue
+                _add_participant("agent", svc, aid, None)
+                have_agents.add((svc, aid))
+            applied += 1
+
+        # Auto-add any agent introduced by a step but not yet on the roster.
+        for svc, aid in new_agent_steps:
+            if (svc, aid) not in have_agents:
+                _add_participant("agent", svc, aid, None)
+                have_agents.add((svc, aid))
+
+        _touch_workflow(cur, workflow_id)
+    return applied
+
+
 def get_workflow_stats(
     workflow_id: int, account_id: int | None
 ) -> dict[str, Any] | None:

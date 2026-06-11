@@ -1186,3 +1186,103 @@ def _parse_workflow_graph(
                 )
 
     return {"participants": participants, "steps": steps, "edges": edges}
+
+
+# ---------------------------------------------------------------------------
+# Conversational workflow editing — turn a plain-English instruction into a
+# minimal set of edit operations against an EXISTING graph (ids preserved).
+# ---------------------------------------------------------------------------
+
+
+WORKFLOW_EDIT_SYSTEM_PROMPT = (
+    "You edit an EXISTING workflow graph from a plain-English instruction. You are "
+    "given the current steps (each with a numeric id), edges (each with a numeric "
+    "id), and participants. Return the MINIMAL list of operations that apply the "
+    "requested change. Do NOT rebuild the graph and do NOT touch steps the "
+    "instruction doesn't mention. Preserve existing step ids. Keep the trigger "
+    "first and the output last. Return ONLY valid JSON, no markdown."
+)
+
+_WORKFLOW_EDIT_OPS_SPEC = (
+    "Return JSON: {\"summary\": \"one sentence describing the change\", "
+    "\"operations\": [ ... ]}. Each operation is one of:\n"
+    '- {"op":"add_step","tmp_id":"t1","step_type":"trigger|agent|human|decision|output",'
+    '"label":"...","description":"...","operation":"tool name or null",'
+    '"agent_service_name":"only for agent steps","agent_id":"main",'
+    '"role_name":"only for human steps"}\n'
+    '- {"op":"update_step","step_id":<existing id>, ...only the fields to change...}\n'
+    '- {"op":"delete_step","step_id":<existing id>}\n'
+    '- {"op":"add_edge","from":<step id or "t1">,"to":<step id or "t1">,'
+    '"label":null,"is_branch":false}\n'
+    '- {"op":"delete_edge","edge_id":<existing edge id>}\n'
+    '- {"op":"add_participant","type":"agent|human","agent_service_name":"...",'
+    '"agent_id":"main","role_name":"..."}\n\n'
+    "Rules:\n"
+    "- Reference existing steps by their numeric id; give NEW steps a string "
+    'tmp_id ("t1","t2",...) and reference them in edges by that tmp_id.\n'
+    "- To INSERT a step between A and B: add_step (with a tmp_id), delete_edge for "
+    "the existing A→B edge, then add_edge A→tmp and add_edge tmp→B (carry the old "
+    "edge's label onto the second new edge when it was a branch label).\n"
+    "- To remove a step from the middle: delete_step, then add_edge from its "
+    "predecessor to its successor so the flow stays connected.\n"
+    "- Loops are allowed: an edge whose target comes earlier in the flow is a "
+    'revision/retry loop — set "is_branch":true and give it a short label.\n'
+    "- For agent steps use ONLY an agent name from the available list. Adding an "
+    "agent step automatically adds that agent to the roster — you need add_participant "
+    "only to add a worker WITHOUT a step.\n"
+    "- Omit operations entirely if the instruction requires no change."
+)
+
+
+def _serialize_workflow_graph(wf: dict[str, Any]) -> str:
+    """Compact, id-annotated rendering of the current graph for the edit prompt."""
+    lines = ["Current steps (in flow order):"]
+    for s in sorted(wf.get("steps") or [], key=lambda x: x.get("step_order", 0)):
+        bits = [f"  id={s['id']} [{s.get('step_type')}] \"{s.get('label')}\""]
+        if s.get("agent_service_name"):
+            bits.append(f"agent={s['agent_service_name']}/{s.get('agent_id') or 'main'}")
+        role = (s.get("config") or {}).get("role_name") if isinstance(s.get("config"), dict) else None
+        if role:
+            bits.append(f"role={role}")
+        if s.get("operation"):
+            bits.append(f"op={s['operation']}")
+        lines.append(" ".join(bits))
+    lines.append("Current edges:")
+    for e in wf.get("edges") or []:
+        tag = " (branch)" if e.get("is_branch") else ""
+        lbl = f' "{e["label"]}"' if e.get("label") else ""
+        lines.append(f"  id={e['id']} {e['from_step_id']}->{e['to_step_id']}{lbl}{tag}")
+    parts = []
+    for p in wf.get("participants") or []:
+        if p.get("type") == "human":
+            parts.append(f"human:{p.get('role_name')}")
+        else:
+            parts.append(f"agent:{p.get('agent_service_name')}/{p.get('agent_id') or 'main'}")
+    lines.append("Participants: " + (", ".join(parts) if parts else "(none)"))
+    return "\n".join(lines)
+
+
+def workflow_edit_operations(
+    wf: dict[str, Any], instruction: str, agents_context: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Ask Claude for a minimal set of edit operations that apply `instruction`
+    to the existing workflow `wf` (as returned by database.get_workflow).
+    Returns {"operations": list, "summary": str}. Raises APIKeyMissingError."""
+    avail = sorted(
+        {
+            (a.get("service_name") or "").strip()
+            for a in (agents_context or [])
+            if a.get("service_name")
+        }
+    )
+    avail_block = ", ".join(avail) if avail else "(no other agents reporting telemetry)"
+    user_prompt = (
+        f"{_serialize_workflow_graph(wf)}\n\n"
+        f"Available agent names you may assign to agent steps: {avail_block}\n\n"
+        f'Instruction: "{(instruction or "").strip()}"\n\n'
+        f"{_WORKFLOW_EDIT_OPS_SPEC}"
+    )
+    parsed = _claude_json(WORKFLOW_EDIT_SYSTEM_PROMPT, user_prompt, max_tokens=2500)
+    ops = parsed.get("operations") if isinstance(parsed, dict) else None
+    summary = str(parsed.get("summary") or "").strip() if isinstance(parsed, dict) else ""
+    return {"operations": ops if isinstance(ops, list) else [], "summary": summary}

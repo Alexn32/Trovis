@@ -291,6 +291,13 @@ export const api = {
     request(`/workflows/${workflowId}/participants/${participantId}`, {
       method: 'DELETE',
     }),
+  // Apply a plain-English edit instruction to a workflow. Returns
+  // { summary, applied, workflow } — the workflow is the full updated graph.
+  aiEditWorkflow: (workflowId, instruction) =>
+    request(`/workflows/${workflowId}/ai-edit`, {
+      method: 'POST',
+      body: JSON.stringify({ instruction }),
+    }),
 
   // --- team + ownership ---
   getTeamMembers: () => request('/team'),

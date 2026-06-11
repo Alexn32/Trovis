@@ -107,6 +107,11 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
   const [connect, setConnect] = useState(null) // {from, ox, oy, x, y}
   const [rosterAdd, setRosterAdd] = useState(false)
   const [toast, setToast] = useState(null)
+  // Conversational AI editing.
+  const [aiText, setAiText] = useState('')
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiError, setAiError] = useState(null)
+  const [aiSummary, setAiSummary] = useState(null)
   const dragRef = useRef(null)
   const draggedSet = useRef(new Set())
   const innerRef = useRef(null)
@@ -302,11 +307,40 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
       setConfirmDel(null)
       setRosterAdd(false)
       setConnect(null)
+      setAiError(null)
+      setAiSummary(null)
     } else {
       prevView.current = view
       setEditing(true)
       setView('all')
       setExpanded(new Set())
+    }
+  }
+
+  async function runAiEdit() {
+    const instruction = aiText.trim()
+    if (!instruction || aiBusy) return
+    setAiBusy(true)
+    setAiError(null)
+    setAiSummary(null)
+    try {
+      const res = await api.aiEditWorkflow(workflowId, instruction)
+      if (res?.workflow) setWf(res.workflow)
+      setAiText('')
+      setAiSummary(
+        res?.applied
+          ? res.summary || `Applied ${res.applied} change${res.applied === 1 ? '' : 's'}.`
+          : 'No changes were needed for that request.',
+      )
+    } catch (e) {
+      const msg = String(e?.message || '')
+      setAiError(
+        msg.includes('503')
+          ? 'AI is unavailable — the backend needs an ANTHROPIC_API_KEY.'
+          : msg || 'Could not apply that edit.',
+      )
+    } finally {
+      setAiBusy(false)
     }
   }
 
@@ -894,6 +928,46 @@ export default function WorkflowCanvas({ workflowId, onBack }) {
           })}
         </div>
       </div>
+
+      {/* Conversational AI editing (edit mode only) */}
+      {editing && (
+        <div className="wf2-ai-bar">
+          <div className="wf2-ai-row">
+            <span className="wf2-ai-spark">✦</span>
+            <input
+              className="wf2-ai-input"
+              value={aiText}
+              onChange={(e) => setAiText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  runAiEdit()
+                }
+              }}
+              placeholder="Describe a change — e.g. “add a QA review by qa-agent after triage, and loop back to triage if it fails”"
+              disabled={aiBusy}
+            />
+            <button
+              type="button"
+              className="btn btn-primary wf2-ai-apply"
+              onClick={runAiEdit}
+              disabled={aiBusy || !aiText.trim()}
+            >
+              {aiBusy ? 'Applying…' : 'Apply'}
+            </button>
+          </div>
+          {aiError ? (
+            <div className="wf2-ai-msg error">{aiError}</div>
+          ) : aiSummary ? (
+            <div className="wf2-ai-msg ok">✓ {aiSummary}</div>
+          ) : (
+            <div className="wf2-ai-msg hint">
+              AI edits the flow in place — add or remove steps, reroute, add agents or
+              human reviewers. Existing steps keep their telemetry.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Insight strip */}
       <div className="wf2-insights">
