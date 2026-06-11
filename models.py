@@ -708,6 +708,25 @@ class AskResponse(BaseModel):
     visual: AskVisual | None = None
 
 
+class ConnectCodeBlock(BaseModel):
+    """One copy-paste setup snippet in a guided-connect reply. `content` may
+    contain the literal placeholders TROVIS_API_KEY / TROVIS_ENDPOINT — the
+    frontend substitutes the org's real values before render."""
+
+    title: str | None = None
+    language: str | None = None
+    content: str
+
+
+class ConnectAskResponse(BaseModel):
+    """A guided add-agent chat turn: short answer, optional quick-reply
+    chips, optional code snippets."""
+
+    answer: str
+    options: list[str] = Field(default_factory=list)
+    code: list[ConnectCodeBlock] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Captured outputs
 # ---------------------------------------------------------------------------

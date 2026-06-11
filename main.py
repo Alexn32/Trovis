@@ -52,6 +52,7 @@ from models import (
     AttentionItem,
     BriefingResponse,
     ClaimRequest,
+    ConnectAskResponse,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
@@ -2532,6 +2533,22 @@ async def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return AskResponse(answer=result["answer"], visual=result.get("visual"))
+
+
+@app.post("/connect/ask", response_model=ConnectAskResponse)
+async def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
+    """The guided add-agent chat ("Set up with AI"). Stateless — the client
+    posts the full thread each turn. Replies carry optional quick-reply
+    chips (`options`) and copy-paste snippets (`code`)."""
+    account_id = getattr(request.state, "account_id", None)
+    msgs = [m.model_dump() for m in body.messages]
+    try:
+        result = asker.ask_connect(account_id, msgs)
+    except asker.AskApiKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ConnectAskResponse(**result)
 
 
 @app.post("/ask", response_model=AskResponse)
