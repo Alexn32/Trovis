@@ -4,7 +4,7 @@ import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
-import Ask from './Ask.jsx'
+import AskPill from './AskPill.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
 import Team from './Team.jsx'
@@ -58,7 +58,7 @@ function AppInner() {
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
   const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken)
-  const [tab, setTab] = useState('dashboard') // 'dashboard' | 'fleet' | 'ask' | 'team' | 'workflows'
+  const [tab, setTab] = useState('dashboard') // 'dashboard' | 'fleet' | 'team' | 'workflows'
   // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'}
   const [overlay, setOverlay] = useState(null)
 
@@ -215,8 +215,6 @@ function AppInner() {
         userName={account.userName}
       />
     )
-  } else if (tab === 'ask') {
-    mainContent = <Ask />
   } else if (tab === 'team' && isBusiness) {
     mainContent = <Team onSelectAgent={openDetail} />
   } else if (tab === 'workflows') {
@@ -240,6 +238,8 @@ function AppInner() {
         onOpenSettings={openSettings}
       />
       <main className="app-main">{mainContent}</main>
+      {/* Global Trovis assistant — floating ⌘K pill, reachable on every page. */}
+      <AskPill />
     </div>
   )
 }
@@ -283,10 +283,10 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
   // The Team tab manages multi-person ownership — only meaningful for
   // Business orgs. Individual accounts own all their agents implicitly.
   const isBusiness = me?.org?.account_type === 'business'
+  // No Ask tab — the global AskPill (⌘K) covers asking from every page.
   const tabs = [
     ['dashboard', 'Dashboard'],
     ['fleet', 'Fleet'],
-    ['ask', 'Ask'],
     ...(isBusiness ? [['team', 'Team']] : []),
     ['workflows', 'Workflows'],
   ]
