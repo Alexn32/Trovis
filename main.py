@@ -1832,6 +1832,22 @@ def _weekly_summary_impl(
     last_week_has_data = last_week["runs"] > 0
     lw_for_trends = last_week if last_week_has_data else None
 
+    # Token + cost totals for the same 7-day window, so the "This week" strip
+    # can show them. get_window_aggregate covers runs/success only; tokens and
+    # cost live on the spans and are summed by get_agent_costs. Defensive —
+    # a costs failure must not break the weekly summary.
+    week_tokens = 0
+    week_cost: float | None = None
+    try:
+        costs = database.get_agent_costs(
+            service_name, account_id=account_id, agent_id=aid, days=7
+        )
+        week_tokens = int(costs.get("total_tokens") or 0)
+        wc = costs.get("estimated_cost_usd")
+        week_cost = float(wc) if wc else None
+    except Exception as e:  # noqa: BLE001 — never 500 the page over a costs sum
+        print(f"[Oversee] Weekly cost sum for '{service_name}/{aid}' failed: {e}")
+
     trends = WeeklyTrends()
     if lw_for_trends:
         trends = WeeklyTrends(
@@ -1900,7 +1916,9 @@ def _weekly_summary_impl(
         avg_duration_ms=this_week["avg_duration_ms"],
         tools_used=this_week["tools_used"],
         operations=this_week["operations"],
-        cost_estimate=None,
+        cost_estimate=week_cost,
+        tokens=week_tokens,
+        cost=week_cost,
         trends=trends,
         summary=summary_text,
         summary_unavailable=summary_unavailable,

@@ -256,6 +256,11 @@ class WeeklySummary(BaseModel):
     tools_used: list[str] = Field(default_factory=list)
     operations: list[str] = Field(default_factory=list)
     cost_estimate: float | None = None
+    # Token + cost totals for the same 7-day window as `runs`, so the
+    # Agent Detail "This week" strip can render them. `cost` is None when
+    # nothing priced (e.g. only token totals, no per-call input/output).
+    tokens: int = 0
+    cost: float | None = None
     trends: WeeklyTrends = Field(default_factory=WeeklyTrends)
     summary: str = ""
     summary_unavailable: bool = False
