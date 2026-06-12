@@ -66153,16 +66153,25 @@ var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
 var ATTR_BYTE_LIMIT = 32 * 1024;
-function transcriptDirCandidates() {
+function transcriptRoots() {
   const out = [];
-  const envDir = process.env.TROVIS_TRANSCRIPT_DIR ?? process.env.OVERSEE_TRANSCRIPT_DIR;
-  if (envDir && envDir.length > 0) out.push(envDir);
-  out.push("/data/.openclaw/sessions");
-  out.push("/data/.openclaw/transcripts");
-  out.push(path.join(os.homedir(), ".openclaw", "sessions"));
-  out.push(path.join(os.homedir(), ".openclaw", "transcripts"));
+  const env = process.env.TROVIS_TRANSCRIPT_DIR ?? process.env.OVERSEE_TRANSCRIPT_DIR;
+  if (env && env.length > 0) out.push(env);
+  out.push("/data/.openclaw");
+  out.push(path.join(os.homedir(), ".openclaw"));
   return out;
 }
+var TRANSCRIPT_SCAN_MAX_DEPTH = 5;
+var TRANSCRIPT_SCAN_MAX_FILES = 2e3;
+var TRANSCRIPT_SKIP_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "cache",
+  ".cache",
+  "tmp",
+  "plugins"
+]);
+var USAGE_MARKER = /"usage"|_tokens|inputTokens|outputTokens|totalTokens|responseUsage/;
 var USAGE_DRAIN_TIMEOUT_MS = 1e4;
 var state = {
   initialized: false,
@@ -66176,7 +66185,8 @@ var state = {
   captureOutputs: false,
   gatewayVersion: "unknown",
   sawConversationHook: false,
-  transcriptDir: null,
+  transcriptFileHint: null,
+  lastUsageSeen: null,
   allowConversationAccess: void 0
 };
 function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
@@ -66432,53 +66442,137 @@ function pickSessionId(ctx) {
   }
   return void 0;
 }
-function resolveTranscriptDir() {
-  if (state.transcriptDir) return state.transcriptDir;
-  for (const dir of transcriptDirCandidates()) {
+function collectJsonl(root) {
+  const found = [];
+  const stack = [{ dir: root, depth: 0 }];
+  while (stack.length > 0 && found.length < TRANSCRIPT_SCAN_MAX_FILES) {
+    const { dir, depth } = stack.pop();
+    let entries;
     try {
-      if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
-        state.transcriptDir = dir;
-        console.log(`${LOG} Transcript directory: ${dir}`);
-        return dir;
-      }
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth < TRANSCRIPT_SCAN_MAX_DEPTH && !TRANSCRIPT_SKIP_DIRS.has(e.name)) {
+          stack.push({ dir: full, depth: depth + 1 });
+        }
+      } else if (e.isFile() && e.name.endsWith(".jsonl")) {
+        found.push(full);
+      }
     }
   }
-  return null;
+  return found;
 }
-function findTranscriptFile(sessionId, dir) {
-  let files;
+function looksLikeTranscript(filePath) {
   try {
-    files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
-  } catch {
-    return null;
-  }
-  if (files.length === 0) return null;
-  if (sessionId) {
-    const match = files.find((f) => f.includes(sessionId));
-    if (match) return path.join(dir, match);
-    if (files.length === 1) return path.join(dir, files[0]);
-    return null;
-  }
-  let newest = null;
-  for (const f of files) {
+    const size = fs.statSync(filePath).size;
+    const start = Math.max(0, size - 16384);
+    const fd = fs.openSync(filePath, "r");
     try {
-      const m = fs.statSync(path.join(dir, f)).mtimeMs;
+      const len = size - start;
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, start);
+      return USAGE_MARKER.test(buf.toString("utf-8"));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+var sessionFileCache = /* @__PURE__ */ new Map();
+function findTranscriptFile(sessionId) {
+  if (sessionId) {
+    const cached = sessionFileCache.get(sessionId);
+    if (cached) return cached;
+  }
+  const all = [];
+  for (const root of transcriptRoots()) {
+    try {
+      const st = fs.statSync(root);
+      if (st.isFile() && root.endsWith(".jsonl")) {
+        all.push(root);
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    for (const f of collectJsonl(root)) all.push(f);
+  }
+  if (all.length === 0) return null;
+  if (sessionId) {
+    const named = all.find((f) => path.basename(f).includes(sessionId));
+    if (named) {
+      sessionFileCache.set(sessionId, named);
+      state.transcriptFileHint = named;
+      return named;
+    }
+  }
+  const transcripts = all.filter(looksLikeTranscript);
+  if (transcripts.length === 0) return null;
+  if (sessionId && transcripts.length > 1) return null;
+  let newest = null;
+  for (const f of transcripts) {
+    try {
+      const m = fs.statSync(f).mtimeMs;
       if (!newest || m > newest.mtime) newest = { f, mtime: m };
     } catch {
     }
   }
-  return newest ? path.join(dir, newest.f) : null;
+  if (!newest) return null;
+  if (sessionId) sessionFileCache.set(sessionId, newest.f);
+  state.transcriptFileHint = newest.f;
+  return newest.f;
 }
 function noteSessionBaseline(ctx) {
-  const dir = resolveTranscriptDir();
-  if (!dir) return;
-  const file = findTranscriptFile(pickSessionId(ctx), dir);
+  const file = findTranscriptFile(pickSessionId(ctx));
   if (!file || transcriptOffsets.has(file)) return;
   try {
     transcriptOffsets.set(file, fs.statSync(file).size);
   } catch {
   }
+}
+function deepFindUsage(root) {
+  const queue = [{ v: root, depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0 && visited < 200) {
+    const { v, depth } = queue.shift();
+    visited++;
+    if (!v || typeof v !== "object") continue;
+    const u = normalizeUsageObject(v);
+    if (u.input !== void 0 || u.output !== void 0 || u.total !== void 0) {
+      return u;
+    }
+    if (depth < 5) {
+      for (const val of Object.values(v)) {
+        if (val && typeof val === "object") queue.push({ v: val, depth: depth + 1 });
+      }
+    }
+  }
+  return {};
+}
+function deepFindStr(root, keys) {
+  const queue = [{ v: root, depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0 && visited < 200) {
+    const { v, depth } = queue.shift();
+    visited++;
+    if (!v || typeof v !== "object") continue;
+    const obj = v;
+    for (const k of keys) {
+      const s = pickStr(obj[k]);
+      if (s) return s;
+    }
+    if (depth < 5) {
+      for (const val of Object.values(obj)) {
+        if (val && typeof val === "object") queue.push({ v: val, depth: depth + 1 });
+      }
+    }
+  }
+  return void 0;
 }
 function readNewUsageEntries(filePath) {
   let size;
@@ -66527,18 +66621,29 @@ function readNewUsageEntries(filePath) {
     }
     const msg = entry.message;
     const usageObj = entry.usage ?? entry.responseUsage ?? msg?.usage;
-    const usage = normalizeUsageObject(usageObj);
+    let usage = normalizeUsageObject(usageObj);
+    if (usage.input === void 0 && usage.output === void 0 && usage.total === void 0) {
+      usage = deepFindUsage(entry);
+    }
     if (usage.input === void 0 && usage.output === void 0 && usage.total === void 0) {
       continue;
     }
     out.push({
       usage,
-      model: pickStr(entry.model) ?? pickStr(msg?.model),
-      provider: pickStr(entry.provider) ?? pickStr(msg?.provider),
+      model: pickStr(entry.model) ?? pickStr(msg?.model) ?? deepFindStr(entry, ["model", "modelId", "model_id"]),
+      provider: pickStr(entry.provider) ?? pickStr(msg?.provider) ?? deepFindStr(entry, ["provider", "system"]),
       callId: pickStr(entry.callId ?? entry.call_id)
     });
   }
   return out;
+}
+function recordUsageSeen(usage, model) {
+  const parts = [];
+  if (usage.input !== void 0) parts.push(`in:${usage.input}`);
+  if (usage.output !== void 0) parts.push(`out:${usage.output}`);
+  if (usage.total !== void 0) parts.push(`total:${usage.total}`);
+  if (model) parts.push(`@${model}`);
+  if (parts.length > 0) state.lastUsageSeen = parts.join(" ");
 }
 function applyUsageAndEnd(e, usage, model, provider) {
   if (e.done) return;
@@ -66554,6 +66659,7 @@ function applyUsageAndEnd(e, usage, model, provider) {
   setIfPresent(e.span, "gen_ai.request.model", model);
   setIfPresent(e.span, "gen_ai.system", provider);
   e.span.setAttribute("trovis.model.usage_source", "transcript");
+  recordUsageSeen(usage, model);
   e.done = true;
   e.span.end(e.endedAtMs);
 }
@@ -66587,13 +66693,11 @@ function emitStandaloneUsageSpan(tracer, entry, sessionKey) {
     entry.usage.cacheRead
   );
   if (sessionKey) span.setAttribute("trovis.agent.id", pickAgentId({ sessionKey }));
+  recordUsageSeen(entry.usage, entry.model);
   span.end();
 }
 function drainSessionUsage(tracer, ctx) {
-  const dir = resolveTranscriptDir();
-  if (!dir) return;
-  const sessionId = pickSessionId(ctx);
-  const file = findTranscriptFile(sessionId, dir);
+  const file = findTranscriptFile(pickSessionId(ctx));
   if (!file) return;
   const entries = readNewUsageEntries(file);
   if (entries.length === 0) return;
@@ -66932,10 +67036,64 @@ USER.md and MEMORY.md are read at gateway start during agent registration, so **
           `\u2022 Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
           `\u2022 User data: **${state.readUserData ? "on" : "off"}**`,
           `\u2022 Conversation access: **${state.allowConversationAccess === true ? "on" : "off"}** (required for tokens, cost & model)`,
-          `\u2022 Transcript dir: \`${state.transcriptDir ?? "(not located)"}\``,
+          `\u2022 Transcript file: \`${state.transcriptFileHint ?? "(not located)"}\``,
+          `\u2022 Last usage read: ${state.lastUsageSeen ?? "(none yet)"}`,
           `\u2022 Telemetry: ${state.initialized ? "flowing" : "not initialized"}`
         ];
         return reply(lines.join("\n"));
+      }
+      if (sub === "debug") {
+        const file = findTranscriptFile(void 0);
+        if (!file) {
+          return reply(
+            `\u{1F50E} **Trovis token debug**
+
+No transcript file found under the scanned roots (\`~/.openclaw\`, \`/data/.openclaw\`).
+
+If OpenClaw stores session logs elsewhere, set \`TROVIS_TRANSCRIPT_DIR\` to that directory (or the exact \`.jsonl\` file) and restart the gateway.`
+          );
+        }
+        let sample = "(no usage entry found in the file tail)";
+        try {
+          const size = fs.statSync(file).size;
+          const start = Math.max(0, size - 65536);
+          const fd = fs.openSync(file, "r");
+          let text = "";
+          try {
+            const buf = Buffer.alloc(size - start);
+            fs.readSync(fd, buf, 0, buf.length, start);
+            text = buf.toString("utf-8");
+          } finally {
+            fs.closeSync(fd);
+          }
+          const lines2 = text.split("\n").filter((l) => l.trim().length > 0);
+          for (let i = lines2.length - 1; i >= 0; i--) {
+            let entry;
+            try {
+              entry = JSON.parse(lines2[i]);
+            } catch {
+              continue;
+            }
+            const u = deepFindUsage(entry);
+            if (u.input !== void 0 || u.output !== void 0 || u.total !== void 0) {
+              const model = deepFindStr(entry, ["model", "modelId", "model_id"]);
+              sample = `in:${u.input ?? "?"} out:${u.output ?? "?"} total:${u.total ?? "?"}` + (u.cacheRead !== void 0 ? ` cacheRead:${u.cacheRead}` : "") + (model ? ` @${model}` : "");
+              break;
+            }
+          }
+        } catch {
+          sample = "(could not read the transcript file)";
+        }
+        return reply(
+          `\u{1F50E} **Trovis token debug**
+
+\u2022 Transcript file: \`${file}\`
+\u2022 Parsed usage from tail: ${sample}
+\u2022 Last usage attached to a span: ${state.lastUsageSeen ?? "(none yet)"}
+\u2022 Conversation access: **${state.allowConversationAccess === true ? "on" : "off"}**
+
+` + (sample.startsWith("in:") ? `\u2705 Token parsing works. New model calls will report these to Trovis (cost is computed there from tokens + model).` : `\u26A0\uFE0F Couldn't parse token counts from this file. Reply with a sample line (token fields only) and we'll add the field names.`)
+        );
       }
       if (sub === "status") {
         if (!state.initialized) {
@@ -66975,6 +67133,7 @@ then restart the gateway.` : ``;
 **Inspect**
 \u2022 \`/trovis settings\` \u2014 show all current config
 \u2022 \`/trovis status\` \u2014 connection state + telemetry flowing or not
+\u2022 \`/trovis debug\` \u2014 locate the transcript & verify token parsing
 
 Setting commands update in-memory state immediately. To make permanent, run \`openclaw config set plugins.entries.trovis.config.<key> <value>\`. \`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`
       );

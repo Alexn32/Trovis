@@ -72,21 +72,35 @@ const ATTR_BYTE_LIMIT = 32 * 1024
 // overridable via env. Confirm them against a live gateway (see README →
 // "Token usage"): `find ~/.openclaw -name '*.jsonl'` then inspect one entry.
 
-// Candidate directories that hold session transcript JSONL files, in
-// priority order. `TROVIS_TRANSCRIPT_DIR` overrides everything. Mirrors the
-// resolution style of loadConfigFromDisk()/resolveDefaultWorkspace().
-function transcriptDirCandidates(): string[] {
+// Roots to scan for session transcripts. `TROVIS_TRANSCRIPT_DIR` (a dir or a
+// single file) overrides everything. We DON'T hardcode the sub-path because
+// OpenClaw's layout isn't documented and varies — instead we walk these
+// roots and content-sniff for transcript files (see findTranscriptFile).
+function transcriptRoots(): string[] {
   const out: string[] = []
-  const envDir =
+  const env =
     process.env.TROVIS_TRANSCRIPT_DIR ?? process.env.OVERSEE_TRANSCRIPT_DIR
-  if (envDir && envDir.length > 0) out.push(envDir)
-  // Common locations observed for the OpenClaw session store.
-  out.push("/data/.openclaw/sessions")
-  out.push("/data/.openclaw/transcripts")
-  out.push(path.join(os.homedir(), ".openclaw", "sessions"))
-  out.push(path.join(os.homedir(), ".openclaw", "transcripts"))
+  if (env && env.length > 0) out.push(env)
+  out.push("/data/.openclaw")
+  out.push(path.join(os.homedir(), ".openclaw"))
   return out
 }
+
+// Bounds for the recursive transcript scan — keeps startup cheap and avoids
+// pathological directory trees. Dirs unlikely to hold transcripts are skipped.
+const TRANSCRIPT_SCAN_MAX_DEPTH = 5
+const TRANSCRIPT_SCAN_MAX_FILES = 2000
+const TRANSCRIPT_SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "cache",
+  ".cache",
+  "tmp",
+  "plugins",
+])
+// Substrings that mark a JSONL file as a usage-bearing transcript (used to
+// tell real transcripts apart from config-audit / other logs).
+const USAGE_MARKER = /"usage"|_tokens|inputTokens|outputTokens|totalTokens|responseUsage/
 
 // How long (ms) a `model_call` span is held open waiting for its usage
 // entry to land in the transcript before we give up and export it without
@@ -294,9 +308,11 @@ const state: {
   // operator almost certainly hasn't set hooks.allowConversationAccess and
   // is getting no tokens/cost/model — surfaced in `/trovis status`.
   sawConversationHook: boolean
-  // Resolved transcript directory (null = not found / not yet looked up;
-  // false would re-search). Cached after first successful resolution.
-  transcriptDir: string | null
+  // Most recently resolved transcript file, for `/trovis settings` display.
+  transcriptFileHint: string | null
+  // Human-readable summary of the last usage entry we parsed, e.g.
+  // "in:4 out:151 total:155 @claude-sonnet-4-6", for chat-based verification.
+  lastUsageSeen: string | null
   // The flag as configured, for `/trovis status` reporting only.
   allowConversationAccess: boolean | undefined
 } = {
@@ -311,7 +327,8 @@ const state: {
   captureOutputs: false,
   gatewayVersion: "unknown",
   sawConversationHook: false,
-  transcriptDir: null,
+  transcriptFileHint: null,
+  lastUsageSeen: null,
   allowConversationAccess: undefined,
 }
 
@@ -823,61 +840,115 @@ function pickSessionId(ctx: OpenClawContext | undefined): string | undefined {
   return undefined
 }
 
-/** First existing candidate transcript directory; cached after success. */
-function resolveTranscriptDir(): string | null {
-  if (state.transcriptDir) return state.transcriptDir
-  for (const dir of transcriptDirCandidates()) {
+/** Recursively collect `*.jsonl` paths under `root`, bounded by depth and
+ * count, skipping noise directories. Iterative to avoid deep recursion. */
+function collectJsonl(root: string): string[] {
+  const found: string[] = []
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }]
+  while (stack.length > 0 && found.length < TRANSCRIPT_SCAN_MAX_FILES) {
+    const { dir, depth } = stack.pop() as { dir: string; depth: number }
+    let entries: fs.Dirent[]
     try {
-      if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
-        state.transcriptDir = dir
-        console.log(`${LOG} Transcript directory: ${dir}`)
-        return dir
-      }
+      entries = fs.readdirSync(dir, { withFileTypes: true })
     } catch {
-      // unreadable — try the next candidate
+      continue
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) {
+        if (depth < TRANSCRIPT_SCAN_MAX_DEPTH && !TRANSCRIPT_SKIP_DIRS.has(e.name)) {
+          stack.push({ dir: full, depth: depth + 1 })
+        }
+      } else if (e.isFile() && e.name.endsWith(".jsonl")) {
+        found.push(full)
+      }
     }
   }
-  return null
+  return found
 }
 
-/**
- * Locate the transcript file for a session. Resolution order:
- *  1. a `*.jsonl` whose name contains the sessionId (the normal case);
- *  2. if exactly one `*.jsonl` exists, use it (single-session gateway whose
- *     filenames don't embed the sessionId);
- *  3. if the sessionId is unknown, the most-recently-modified `*.jsonl`.
- * Returns null when the sessionId is known but can't be disambiguated among
- * multiple files — we never guess and risk attaching another session's
- * tokens to this session's spans.
- */
-function findTranscriptFile(
-  sessionId: string | undefined,
-  dir: string,
-): string | null {
-  let files: string[]
+/** True if the file's tail contains a usage marker — i.e. it's a real
+ * transcript, not a config-audit or other log. Reads only the last 16 KB. */
+function looksLikeTranscript(filePath: string): boolean {
   try {
-    files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"))
-  } catch {
-    return null
-  }
-  if (files.length === 0) return null
-  if (sessionId) {
-    const match = files.find((f) => f.includes(sessionId))
-    if (match) return path.join(dir, match)
-    if (files.length === 1) return path.join(dir, files[0])
-    return null // ambiguous — don't risk cross-session attribution
-  }
-  // sessionId unknown — newest file is the best single guess.
-  let newest: { f: string; mtime: number } | null = null
-  for (const f of files) {
+    const size = fs.statSync(filePath).size
+    const start = Math.max(0, size - 16_384)
+    const fd = fs.openSync(filePath, "r")
     try {
-      const m = fs.statSync(path.join(dir, f)).mtimeMs
-      if (!newest || m > newest.mtime) newest = { f, mtime: m }
+      const len = size - start
+      const buf = Buffer.alloc(len)
+      fs.readSync(fd, buf, 0, len, start)
+      return USAGE_MARKER.test(buf.toString("utf-8"))
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return false
+  }
+}
+
+// Per-session resolved transcript path — found once, then reused.
+const sessionFileCache = new Map<string, string>()
+
+/**
+ * Auto-locate the transcript file for a session. We do NOT assume a fixed
+ * directory (OpenClaw's layout is undocumented and varies): scan the roots
+ * for every `*.jsonl`, then choose:
+ *  1. a file whose name contains the sessionId (the normal per-session case);
+ *  2. otherwise, among files that actually contain usage data, the most
+ *     recently modified one (single-session gateways, opaque filenames).
+ * Returns null when the sessionId is known but several usage-bearing files
+ * exist and none matches — we never guess and risk cross-session attribution.
+ */
+function findTranscriptFile(sessionId: string | undefined): string | null {
+  if (sessionId) {
+    const cached = sessionFileCache.get(sessionId)
+    if (cached) return cached
+  }
+
+  const all: string[] = []
+  for (const root of transcriptRoots()) {
+    // A root may itself be a single file (TROVIS_TRANSCRIPT_DIR=/path/x.jsonl).
+    try {
+      const st = fs.statSync(root)
+      if (st.isFile() && root.endsWith(".jsonl")) {
+        all.push(root)
+        continue
+      }
     } catch {
-      // skip unreadable file
+      continue
+    }
+    for (const f of collectJsonl(root)) all.push(f)
+  }
+  if (all.length === 0) return null
+
+  if (sessionId) {
+    const named = all.find((f) => path.basename(f).includes(sessionId))
+    if (named) {
+      sessionFileCache.set(sessionId, named)
+      state.transcriptFileHint = named
+      return named
     }
   }
-  return newest ? path.join(dir, newest.f) : null
+
+  // Fall back to usage-bearing files, newest first.
+  const transcripts = all.filter(looksLikeTranscript)
+  if (transcripts.length === 0) return null
+  if (sessionId && transcripts.length > 1) return null // ambiguous — don't guess
+
+  let newest: { f: string; mtime: number } | null = null
+  for (const f of transcripts) {
+    try {
+      const m = fs.statSync(f).mtimeMs
+      if (!newest || m > newest.mtime) newest = { f, mtime: m }
+    } catch {
+      // skip
+    }
+  }
+  if (!newest) return null
+  if (sessionId) sessionFileCache.set(sessionId, newest.f)
+  state.transcriptFileHint = newest.f
+  return newest.f
 }
 
 /**
@@ -891,15 +962,62 @@ function findTranscriptFile(
  * history is never replayed).
  */
 function noteSessionBaseline(ctx: OpenClawContext | undefined): void {
-  const dir = resolveTranscriptDir()
-  if (!dir) return
-  const file = findTranscriptFile(pickSessionId(ctx), dir)
+  const file = findTranscriptFile(pickSessionId(ctx))
   if (!file || transcriptOffsets.has(file)) return
   try {
     transcriptOffsets.set(file, fs.statSync(file).size)
   } catch {
     // unreadable — let readNewUsageEntries handle first-sight later
   }
+}
+
+
+/**
+ * Schema-agnostic fallback: walk a parsed entry (bounded breadth/depth) and
+ * return the first nested object that normalizes to real token usage. Lets
+ * us capture usage even when OpenClaw nests it under an unexpected key.
+ */
+function deepFindUsage(root: unknown): TokenUsage {
+  const queue: Array<{ v: unknown; depth: number }> = [{ v: root, depth: 0 }]
+  let visited = 0
+  while (queue.length > 0 && visited < 200) {
+    const { v, depth } = queue.shift() as { v: unknown; depth: number }
+    visited++
+    if (!v || typeof v !== "object") continue
+    const u = normalizeUsageObject(v)
+    if (u.input !== undefined || u.output !== undefined || u.total !== undefined) {
+      return u
+    }
+    if (depth < 5) {
+      for (const val of Object.values(v as Record<string, unknown>)) {
+        if (val && typeof val === "object") queue.push({ v: val, depth: depth + 1 })
+      }
+    }
+  }
+  return {}
+}
+
+/** Schema-agnostic string lookup: first string value found under any of the
+ * given keys, searching nested objects (bounded). */
+function deepFindStr(root: unknown, keys: string[]): string | undefined {
+  const queue: Array<{ v: unknown; depth: number }> = [{ v: root, depth: 0 }]
+  let visited = 0
+  while (queue.length > 0 && visited < 200) {
+    const { v, depth } = queue.shift() as { v: unknown; depth: number }
+    visited++
+    if (!v || typeof v !== "object") continue
+    const obj = v as Record<string, unknown>
+    for (const k of keys) {
+      const s = pickStr(obj[k])
+      if (s) return s
+    }
+    if (depth < 5) {
+      for (const val of Object.values(obj)) {
+        if (val && typeof val === "object") queue.push({ v: val, depth: depth + 1 })
+      }
+    }
+  }
+  return undefined
 }
 
 /**
@@ -958,12 +1076,20 @@ function readNewUsageEntries(filePath: string): TranscriptUsageEntry[] {
       continue
     }
     const msg = entry.message as Record<string, unknown> | undefined
-    // Usage may live at entry.usage, entry.responseUsage, or entry.message.usage.
+    // Usage may live at entry.usage, entry.responseUsage, or entry.message.usage;
+    // fall back to a bounded deep search for any unexpected nesting.
     const usageObj =
       (entry.usage as unknown) ??
       (entry.responseUsage as unknown) ??
       (msg?.usage as unknown)
-    const usage = normalizeUsageObject(usageObj)
+    let usage = normalizeUsageObject(usageObj)
+    if (
+      usage.input === undefined &&
+      usage.output === undefined &&
+      usage.total === undefined
+    ) {
+      usage = deepFindUsage(entry)
+    }
     if (
       usage.input === undefined &&
       usage.output === undefined &&
@@ -973,12 +1099,29 @@ function readNewUsageEntries(filePath: string): TranscriptUsageEntry[] {
     }
     out.push({
       usage,
-      model: pickStr(entry.model) ?? pickStr(msg?.model),
-      provider: pickStr(entry.provider) ?? pickStr(msg?.provider),
+      model:
+        pickStr(entry.model) ??
+        pickStr(msg?.model) ??
+        deepFindStr(entry, ["model", "modelId", "model_id"]),
+      provider:
+        pickStr(entry.provider) ??
+        pickStr(msg?.provider) ??
+        deepFindStr(entry, ["provider", "system"]),
       callId: pickStr(entry.callId ?? entry.call_id),
     })
   }
   return out
+}
+
+/** Remember the latest usage we parsed, as a one-line summary surfaced by
+ * `/trovis status` so an operator can confirm capture from chat alone. */
+function recordUsageSeen(usage: TokenUsage, model?: string): void {
+  const parts: string[] = []
+  if (usage.input !== undefined) parts.push(`in:${usage.input}`)
+  if (usage.output !== undefined) parts.push(`out:${usage.output}`)
+  if (usage.total !== undefined) parts.push(`total:${usage.total}`)
+  if (model) parts.push(`@${model}`)
+  if (parts.length > 0) state.lastUsageSeen = parts.join(" ")
 }
 
 /** Attach token counts to an open model_call span and end it (preserving
@@ -1004,6 +1147,7 @@ function applyUsageAndEnd(
   setIfPresent(e.span, "gen_ai.request.model", model)
   setIfPresent(e.span, "gen_ai.system", provider)
   e.span.setAttribute("trovis.model.usage_source", "transcript")
+  recordUsageSeen(usage, model)
   e.done = true
   e.span.end(e.endedAtMs)
 }
@@ -1046,6 +1190,7 @@ function emitStandaloneUsageSpan(
     entry.usage.cacheRead,
   )
   if (sessionKey) span.setAttribute("trovis.agent.id", pickAgentId({ sessionKey }))
+  recordUsageSeen(entry.usage, entry.model)
   span.end()
 }
 
@@ -1060,10 +1205,7 @@ function drainSessionUsage(
   tracer: Tracer | null,
   ctx: OpenClawContext | undefined,
 ): void {
-  const dir = resolveTranscriptDir()
-  if (!dir) return
-  const sessionId = pickSessionId(ctx)
-  const file = findTranscriptFile(sessionId, dir)
+  const file = findTranscriptFile(pickSessionId(ctx))
   if (!file) return
   const entries = readNewUsageEntries(file)
   if (entries.length === 0) return
@@ -1541,10 +1683,80 @@ function wireCommands(api: OpenClawApi): void {
           `• Conversation access: **${
             state.allowConversationAccess === true ? "on" : "off"
           }** (required for tokens, cost & model)`,
-          `• Transcript dir: \`${state.transcriptDir ?? "(not located)"}\``,
+          `• Transcript file: \`${state.transcriptFileHint ?? "(not located)"}\``,
+          `• Last usage read: ${state.lastUsageSeen ?? "(none yet)"}`,
           `• Telemetry: ${state.initialized ? "flowing" : "not initialized"}`,
         ]
         return reply(lines.join("\n"))
+      }
+
+      // --- debug ---------------------------------------------------------
+      // Scans for the transcript, parses the most recent usage entry, and
+      // reports what it found — so token capture can be verified from chat
+      // alone (no gateway shell access needed).
+      if (sub === "debug") {
+        const file = findTranscriptFile(undefined)
+        if (!file) {
+          return reply(
+            `🔎 **Trovis token debug**\n\n` +
+              `No transcript file found under the scanned roots ` +
+              `(\`~/.openclaw\`, \`/data/.openclaw\`).\n\n` +
+              `If OpenClaw stores session logs elsewhere, set ` +
+              `\`TROVIS_TRANSCRIPT_DIR\` to that directory (or the exact ` +
+              `\`.jsonl\` file) and restart the gateway.`,
+          )
+        }
+        // Parse the last usage-bearing entry without disturbing the live
+        // tail offset (use a temporary read from a generous look-back).
+        let sample = "(no usage entry found in the file tail)"
+        try {
+          const size = fs.statSync(file).size
+          const start = Math.max(0, size - 65_536)
+          const fd = fs.openSync(file, "r")
+          let text = ""
+          try {
+            const buf = Buffer.alloc(size - start)
+            fs.readSync(fd, buf, 0, buf.length, start)
+            text = buf.toString("utf-8")
+          } finally {
+            fs.closeSync(fd)
+          }
+          const lines2 = text.split("\n").filter((l) => l.trim().length > 0)
+          for (let i = lines2.length - 1; i >= 0; i--) {
+            let entry: Record<string, unknown>
+            try {
+              entry = JSON.parse(lines2[i]) as Record<string, unknown>
+            } catch {
+              continue
+            }
+            const u = deepFindUsage(entry)
+            if (u.input !== undefined || u.output !== undefined || u.total !== undefined) {
+              const model = deepFindStr(entry, ["model", "modelId", "model_id"])
+              sample =
+                `in:${u.input ?? "?"} out:${u.output ?? "?"} ` +
+                `total:${u.total ?? "?"}` +
+                (u.cacheRead !== undefined ? ` cacheRead:${u.cacheRead}` : "") +
+                (model ? ` @${model}` : "")
+              break
+            }
+          }
+        } catch {
+          sample = "(could not read the transcript file)"
+        }
+        return reply(
+          `🔎 **Trovis token debug**\n\n` +
+            `• Transcript file: \`${file}\`\n` +
+            `• Parsed usage from tail: ${sample}\n` +
+            `• Last usage attached to a span: ${state.lastUsageSeen ?? "(none yet)"}\n` +
+            `• Conversation access: **${
+              state.allowConversationAccess === true ? "on" : "off"
+            }**\n\n` +
+            (sample.startsWith("in:")
+              ? `✅ Token parsing works. New model calls will report these to ` +
+                `Trovis (cost is computed there from tokens + model).`
+              : `⚠️ Couldn't parse token counts from this file. Reply with a ` +
+                `sample line (token fields only) and we'll add the field names.`),
+        )
       }
 
       // --- status --------------------------------------------------------
@@ -1589,7 +1801,8 @@ function wireCommands(api: OpenClawApi): void {
           `• \`/trovis userdata on\` / \`off\` — USER.md + MEMORY.md in registration (default off)\n\n` +
           `**Inspect**\n` +
           `• \`/trovis settings\` — show all current config\n` +
-          `• \`/trovis status\` — connection state + telemetry flowing or not\n\n` +
+          `• \`/trovis status\` — connection state + telemetry flowing or not\n` +
+          `• \`/trovis debug\` — locate the transcript & verify token parsing\n\n` +
           `Setting commands update in-memory state immediately. To make ` +
           `permanent, run \`openclaw config set plugins.entries.trovis.config.<key> <value>\`. ` +
           `\`connect\` and \`apikey\` need a gateway restart to re-init the OTLP exporter.`,
