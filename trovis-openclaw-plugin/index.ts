@@ -44,7 +44,7 @@ import * as os from "node:os"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.4.0"
+const PLUGIN_VERSION = "0.4.1"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
@@ -972,29 +972,48 @@ function noteSessionBaseline(ctx: OpenClawContext | undefined): void {
 }
 
 
+/** Richness score — prefer usage with an input/output split (needed for
+ * cost) over a total-only object. input+output > either alone > total-only. */
+function usageScore(u: TokenUsage): number {
+  return (
+    (u.input !== undefined ? 2 : 0) +
+    (u.output !== undefined ? 2 : 0) +
+    (u.total !== undefined ? 1 : 0) +
+    (u.cacheRead !== undefined || u.cacheCreation !== undefined ? 1 : 0)
+  )
+}
+
 /**
- * Schema-agnostic fallback: walk a parsed entry (bounded breadth/depth) and
- * return the first nested object that normalizes to real token usage. Lets
- * us capture usage even when OpenClaw nests it under an unexpected key.
+ * Schema-agnostic: walk a parsed entry (bounded breadth/depth) and return
+ * the RICHEST nested object that normalizes to token usage. "Richest" so we
+ * don't stop at a total-only summary object when a sibling has the
+ * input/output split we need to price the call. Lets us capture usage even
+ * when OpenClaw nests it under an unexpected key.
  */
 function deepFindUsage(root: unknown): TokenUsage {
   const queue: Array<{ v: unknown; depth: number }> = [{ v: root, depth: 0 }]
   let visited = 0
-  while (queue.length > 0 && visited < 200) {
+  let best: TokenUsage = {}
+  let bestScore = 0
+  while (queue.length > 0 && visited < 400) {
     const { v, depth } = queue.shift() as { v: unknown; depth: number }
     visited++
     if (!v || typeof v !== "object") continue
     const u = normalizeUsageObject(v)
-    if (u.input !== undefined || u.output !== undefined || u.total !== undefined) {
-      return u
+    const s = usageScore(u)
+    if (s > bestScore) {
+      best = u
+      bestScore = s
     }
+    // input+output is as rich as it gets — stop early.
+    if (u.input !== undefined && u.output !== undefined) break
     if (depth < 5) {
       for (const val of Object.values(v as Record<string, unknown>)) {
         if (val && typeof val === "object") queue.push({ v: val, depth: depth + 1 })
       }
     }
   }
-  return {}
+  return best
 }
 
 /** Schema-agnostic string lookup: first string value found under any of the
@@ -1076,19 +1095,21 @@ function readNewUsageEntries(filePath: string): TranscriptUsageEntry[] {
       continue
     }
     const msg = entry.message as Record<string, unknown> | undefined
-    // Usage may live at entry.usage, entry.responseUsage, or entry.message.usage;
-    // fall back to a bounded deep search for any unexpected nesting.
-    const usageObj =
-      (entry.usage as unknown) ??
-      (entry.responseUsage as unknown) ??
-      (msg?.usage as unknown)
-    let usage = normalizeUsageObject(usageObj)
-    if (
-      usage.input === undefined &&
-      usage.output === undefined &&
-      usage.total === undefined
-    ) {
-      usage = deepFindUsage(entry)
+    // Usage may live at entry.usage, entry.responseUsage, or entry.message.usage.
+    // A response often carries BOTH a per-call usage (with input/output) and a
+    // running session total (total-only) — pick the richest so we keep the
+    // input/output split needed to price the call, not just a bare total.
+    const candidates = [
+      normalizeUsageObject(entry.usage),
+      normalizeUsageObject(entry.responseUsage),
+      normalizeUsageObject(msg?.usage),
+    ]
+    let usage: TokenUsage = {}
+    for (const c of candidates) if (usageScore(c) > usageScore(usage)) usage = c
+    // If no known path had an input/output split, deep-search for a richer one.
+    if (usage.input === undefined || usage.output === undefined) {
+      const deep = deepFindUsage(entry)
+      if (usageScore(deep) > usageScore(usage)) usage = deep
     }
     if (
       usage.input === undefined &&
@@ -1709,6 +1730,9 @@ function wireCommands(api: OpenClawApi): void {
         // Parse the last usage-bearing entry without disturbing the live
         // tail offset (use a temporary read from a generous look-back).
         let sample = "(no usage entry found in the file tail)"
+        // Field-name diagnostics (key names only, no content) so we can wire
+        // up input/output for cost if they're under names we don't yet map.
+        let diag = ""
         try {
           const size = fs.statSync(file).size
           const start = Math.max(0, size - 65_536)
@@ -1737,6 +1761,18 @@ function wireCommands(api: OpenClawApi): void {
                 `total:${u.total ?? "?"}` +
                 (u.cacheRead !== undefined ? ` cacheRead:${u.cacheRead}` : "") +
                 (model ? ` @${model}` : "")
+              // If we couldn't get an input/output split, surface the entry's
+              // field names so we can map the right keys for cost.
+              if (u.input === undefined || u.output === undefined) {
+                const usageObjRaw =
+                  (entry.usage as Record<string, unknown>) ??
+                  ((entry.message as Record<string, unknown> | undefined)
+                    ?.usage as Record<string, unknown>) ??
+                  {}
+                diag =
+                  `\n• Entry keys: \`${Object.keys(entry).join(", ")}\`` +
+                  `\n• usage keys: \`${Object.keys(usageObjRaw).join(", ") || "(none at entry.usage/message.usage)"}\``
+              }
               break
             }
           }
@@ -1746,8 +1782,9 @@ function wireCommands(api: OpenClawApi): void {
         return reply(
           `🔎 **Trovis token debug**\n\n` +
             `• Transcript file: \`${file}\`\n` +
-            `• Parsed usage from tail: ${sample}\n` +
-            `• Last usage attached to a span: ${state.lastUsageSeen ?? "(none yet)"}\n` +
+            `• Parsed usage from tail: ${sample}` +
+            diag +
+            `\n• Last usage attached to a span: ${state.lastUsageSeen ?? "(none yet)"}\n` +
             `• Conversation access: **${
               state.allowConversationAccess === true ? "on" : "off"
             }**\n\n` +

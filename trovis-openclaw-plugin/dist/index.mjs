@@ -66148,7 +66148,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.4.0";
+var PLUGIN_VERSION = "0.4.1";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
@@ -66535,24 +66535,32 @@ function noteSessionBaseline(ctx) {
   } catch {
   }
 }
+function usageScore(u) {
+  return (u.input !== void 0 ? 2 : 0) + (u.output !== void 0 ? 2 : 0) + (u.total !== void 0 ? 1 : 0) + (u.cacheRead !== void 0 || u.cacheCreation !== void 0 ? 1 : 0);
+}
 function deepFindUsage(root) {
   const queue = [{ v: root, depth: 0 }];
   let visited = 0;
-  while (queue.length > 0 && visited < 200) {
+  let best = {};
+  let bestScore = 0;
+  while (queue.length > 0 && visited < 400) {
     const { v, depth } = queue.shift();
     visited++;
     if (!v || typeof v !== "object") continue;
     const u = normalizeUsageObject(v);
-    if (u.input !== void 0 || u.output !== void 0 || u.total !== void 0) {
-      return u;
+    const s = usageScore(u);
+    if (s > bestScore) {
+      best = u;
+      bestScore = s;
     }
+    if (u.input !== void 0 && u.output !== void 0) break;
     if (depth < 5) {
       for (const val of Object.values(v)) {
         if (val && typeof val === "object") queue.push({ v: val, depth: depth + 1 });
       }
     }
   }
-  return {};
+  return best;
 }
 function deepFindStr(root, keys) {
   const queue = [{ v: root, depth: 0 }];
@@ -66620,10 +66628,16 @@ function readNewUsageEntries(filePath) {
       continue;
     }
     const msg = entry.message;
-    const usageObj = entry.usage ?? entry.responseUsage ?? msg?.usage;
-    let usage = normalizeUsageObject(usageObj);
-    if (usage.input === void 0 && usage.output === void 0 && usage.total === void 0) {
-      usage = deepFindUsage(entry);
+    const candidates = [
+      normalizeUsageObject(entry.usage),
+      normalizeUsageObject(entry.responseUsage),
+      normalizeUsageObject(msg?.usage)
+    ];
+    let usage = {};
+    for (const c of candidates) if (usageScore(c) > usageScore(usage)) usage = c;
+    if (usage.input === void 0 || usage.output === void 0) {
+      const deep = deepFindUsage(entry);
+      if (usageScore(deep) > usageScore(usage)) usage = deep;
     }
     if (usage.input === void 0 && usage.output === void 0 && usage.total === void 0) {
       continue;
@@ -67054,6 +67068,7 @@ If OpenClaw stores session logs elsewhere, set \`TROVIS_TRANSCRIPT_DIR\` to that
           );
         }
         let sample = "(no usage entry found in the file tail)";
+        let diag3 = "";
         try {
           const size = fs.statSync(file).size;
           const start = Math.max(0, size - 65536);
@@ -67078,6 +67093,12 @@ If OpenClaw stores session logs elsewhere, set \`TROVIS_TRANSCRIPT_DIR\` to that
             if (u.input !== void 0 || u.output !== void 0 || u.total !== void 0) {
               const model = deepFindStr(entry, ["model", "modelId", "model_id"]);
               sample = `in:${u.input ?? "?"} out:${u.output ?? "?"} total:${u.total ?? "?"}` + (u.cacheRead !== void 0 ? ` cacheRead:${u.cacheRead}` : "") + (model ? ` @${model}` : "");
+              if (u.input === void 0 || u.output === void 0) {
+                const usageObjRaw = entry.usage ?? entry.message?.usage ?? {};
+                diag3 = `
+\u2022 Entry keys: \`${Object.keys(entry).join(", ")}\`
+\u2022 usage keys: \`${Object.keys(usageObjRaw).join(", ") || "(none at entry.usage/message.usage)"}\``;
+              }
               break;
             }
           }
@@ -67088,7 +67109,7 @@ If OpenClaw stores session logs elsewhere, set \`TROVIS_TRANSCRIPT_DIR\` to that
           `\u{1F50E} **Trovis token debug**
 
 \u2022 Transcript file: \`${file}\`
-\u2022 Parsed usage from tail: ${sample}
+\u2022 Parsed usage from tail: ${sample}` + diag3 + `
 \u2022 Last usage attached to a span: ${state.lastUsageSeen ?? "(none yet)"}
 \u2022 Conversation access: **${state.allowConversationAccess === true ? "on" : "off"}**
 
