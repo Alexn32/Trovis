@@ -578,7 +578,10 @@ export default function AgentDetail({ serviceName, agentId, account, onBack }) {
 
   function Shell({ children }) {
     return (
-      <div style={{ minHeight: '100vh', background: C.linen, fontFamily: F.body, color: C.ink }}>
+      // flex:1 + width:100% so this fills .app-main (a flex row) edge-to-edge —
+      // the linen background spans the full window and the inner column below
+      // centers via margin:auto instead of hugging the left.
+      <div style={{ flex: 1, width: '100%', minHeight: '100vh', background: C.linen, fontFamily: F.body, color: C.ink }}>
         <div style={{ maxWidth: 980, margin: '0 auto', padding: '28px 24px 64px' }}>{children}</div>
       </div>
     )
