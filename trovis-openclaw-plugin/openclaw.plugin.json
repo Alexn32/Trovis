@@ -2,7 +2,7 @@
   "id": "trovis",
   "name": "Trovis Agent Management",
   "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Trovis dashboard.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": "Trovis",
   "homepage": "https://oversee.dev",
   "activation": {
@@ -40,6 +40,17 @@
         "type": "boolean",
         "description": "Capture message content and tool outputs for richer dashboard insights. Default: false.",
         "default": false
+      },
+      "hooks": {
+        "type": "object",
+        "description": "Conversation-hook opt-in. allowConversationAccess must be true to capture LLM-call telemetry: tokens, cost, and per-call model.",
+        "properties": {
+          "allowConversationAccess": {
+            "type": "boolean",
+            "description": "Allow model_call_*, llm_output, and agent_end hooks. Required for tokens/cost/model. Default: false.",
+            "default": false
+          }
+        }
       }
     }
   }

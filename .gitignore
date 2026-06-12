@@ -50,8 +50,8 @@ trovis.db-wal
 
 # The OpenClaw plugin ships pre-compiled, so its dist/ is tracked even
 # though the generic `dist/` rule above would otherwise hide it.
-!oversee-openclaw-plugin/dist/
-!oversee-openclaw-plugin/dist/**
+!trovis-openclaw-plugin/dist/
+!trovis-openclaw-plugin/dist/**
 
 # Local environment
 .env

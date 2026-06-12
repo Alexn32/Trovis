@@ -65,15 +65,21 @@ Add an `trovis` entry under `plugins.entries` in your `openclaw.json`:
 | `captureOutputs` | boolean | no       | `false`          | When `true`, include message text and tool results in spans (see [Output capture](#output-capture)). Off by default.                          |
 | `readUserData`   | boolean | no       | `false`          | When `true`, include `USER.md` and `MEMORY.md` in the startup registration. May contain personal data — opt-in only.                          |
 
-Each field can also be supplied via environment variables for containerized deployments: `TROVIS_ENDPOINT`, `TROVIS_AGENT_NAME`, `TROVIS_API_KEY`, `TROVIS_ENABLED`, `TROVIS_CAPTURE_OUTPUTS`.
+Each field can also be supplied via environment variables for containerized deployments: `TROVIS_ENDPOINT`, `TROVIS_AGENT_NAME`, `TROVIS_API_KEY`, `TROVIS_ENABLED`, `TROVIS_CAPTURE_OUTPUTS`, `TROVIS_TRANSCRIPT_DIR` (override the auto-detected session-transcript directory).
 
 ### API key handling
 
 Store your Trovis API key as a secret — in your secret manager, an environment variable injected by your deployment system, or your platform's encrypted-config feature. Scope it to telemetry use only (one key per gateway is a reasonable default). **Rotate immediately if exposed.** The plugin masks the key in `/trovis settings` output (`ov_sk_AB…YZ12`) but the full key is in the `X-Trovis-Api-Key` header on every export — anyone who can intercept your egress traffic can read it.
 
-### `hooks.allowConversationAccess` is required
+### `hooks.allowConversationAccess` is required for tokens, cost & model
 
-This plugin registers handlers for `model_call_started`, `model_call_ended`, and `agent_end` — OpenClaw's conversation-adjacent hooks. Per the plugin SDK, conversation-adjacent hooks require an explicit opt-in via `hooks.allowConversationAccess: true`. Without this flag, those hooks won't fire and you'll only get telemetry for `message_received`, `message_sent`, `before_tool_call`, and `after_tool_call`. The plugin is still safe to use without it — you just lose LLM call and run-completion visibility.
+This plugin registers handlers for `model_call_started`, `model_call_ended`, `llm_output`, and `agent_end` — OpenClaw's conversation-adjacent hooks. Per the plugin SDK, conversation-adjacent hooks require an explicit opt-in via `hooks.allowConversationAccess: true`. Without this flag, those hooks won't fire and you'll only get telemetry for `message_received`, `message_sent`, `before_tool_call`, and `after_tool_call` — **no token counts, no cost, and no per-call model**. The plugin is still safe to use without it; you just lose LLM-call visibility. Run `/trovis status` — it warns when LLM-call telemetry hasn't been seen.
+
+### Token usage comes from the session transcript, not the hooks
+
+OpenClaw's `model_call_ended` hook carries the model, provider, duration, and outcome — but **not token usage** (the request to add it, [openclaw#21184](https://github.com/openclaw/openclaw/issues/21184), was closed as not planned). OpenClaw does persist per-response usage (input/output/total/cache tokens, and its own cost) to per-session **transcript JSONL files**. This plugin reads those files and attaches the token counts to the matching `model_call` span. It reads **only the usage object** (token counts) — never prompt or response content. Cost is then computed by Trovis from tokens + model (its pricing table), so the cost basis is consistent across every agent regardless of platform.
+
+The transcript directory is auto-detected (`~/.openclaw/sessions`, `~/.openclaw/transcripts`, and the `/data` equivalents). If your gateway stores them elsewhere, set `TROVIS_TRANSCRIPT_DIR` to the directory. `/trovis settings` shows the directory the plugin resolved. If tokens still read zero with conversation access enabled, confirm the directory and that transcript entries carry a `usage` object — file an issue with a sample entry (token fields only) and we'll add the field aliases.
 
 ## What data is captured
 
@@ -107,7 +113,7 @@ Per-span attributes. The defaults are **metadata only** — no message bodies, n
 
 **`tool_call`** (combined from `before_tool_call` + `after_tool_call`) — `trovis.event.type`, `trovis.tool.name`, `trovis.tool.call_id`, `trovis.tool.param_keys` (JSON array of parameter **names**, never values), `trovis.tool.success`, `trovis.tool.duration_ms`, `trovis.agent.id`, `trovis.run.id`.
 
-**`model_call`** (combined from `model_call_started` + `model_call_ended`) — `trovis.event.type`, `gen_ai.system`, `gen_ai.request.model`, `trovis.model.call_id`, `trovis.model.duration_ms`, `trovis.model.outcome`, `trovis.run.id`.
+**`model_call`** (combined from `model_call_started` + `model_call_ended`, enriched from the transcript) — `trovis.event.type`, `gen_ai.system`, `gen_ai.request.model`, `trovis.model.call_id`, `trovis.model.duration_ms`, `trovis.model.outcome`, `trovis.run.id`, and the token counts `gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` (token **counts** only — read from the session transcript, never prompt/response content). `trovis.model.usage_source=transcript` marks spans whose tokens came from the transcript.
 
 **`agent_run_complete`** (from `agent_end`) — `trovis.event.type`, `trovis.run.id`, `trovis.run.success`, `trovis.run.message_provider`, `trovis.run.channel_id`, `trovis.run.job_id`.
 

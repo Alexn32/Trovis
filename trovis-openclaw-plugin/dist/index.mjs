@@ -66148,11 +66148,22 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.3.1";
+var PLUGIN_VERSION = "0.4.0";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
 var ATTR_BYTE_LIMIT = 32 * 1024;
+function transcriptDirCandidates() {
+  const out = [];
+  const envDir = process.env.TROVIS_TRANSCRIPT_DIR ?? process.env.OVERSEE_TRANSCRIPT_DIR;
+  if (envDir && envDir.length > 0) out.push(envDir);
+  out.push("/data/.openclaw/sessions");
+  out.push("/data/.openclaw/transcripts");
+  out.push(path.join(os.homedir(), ".openclaw", "sessions"));
+  out.push(path.join(os.homedir(), ".openclaw", "transcripts"));
+  return out;
+}
+var USAGE_DRAIN_TIMEOUT_MS = 1e4;
 var state = {
   initialized: false,
   disabled: false,
@@ -66163,7 +66174,10 @@ var state = {
   apiKey: void 0,
   readUserData: false,
   captureOutputs: false,
-  gatewayVersion: "unknown"
+  gatewayVersion: "unknown",
+  sawConversationHook: false,
+  transcriptDir: null,
+  allowConversationAccess: void 0
 };
 function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
   const resource = new import_resources.Resource({
@@ -66225,6 +66239,7 @@ function ensureInit(ctx) {
   state.captureOutputs = Boolean(
     pluginConfig?.captureOutputs ?? (process.env.TROVIS_CAPTURE_OUTPUTS ?? process.env.OVERSEE_CAPTURE_OUTPUTS) === "true"
   );
+  state.allowConversationAccess = pluginConfig?.hooks?.allowConversationAccess;
   state.tracer = initTelemetry(
     state.endpoint,
     state.agentName,
@@ -66360,42 +66375,249 @@ function pickAgentId(event, ctx) {
   const direct = typeof ev.context?.agentId === "string" && ev.context.agentId || typeof c.agentId === "string" && c.agentId || typeof ev.agentId === "string" && ev.agentId || "";
   return direct || "main";
 }
-function pickTokenUsage(event) {
-  const ev = event ?? {};
+function normalizeUsageObject(container) {
+  const c = container ?? {};
   const num = (v) => {
     const n = typeof v === "string" ? Number(v) : v;
     return typeof n === "number" && Number.isFinite(n) ? n : void 0;
   };
+  const input = num(
+    c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens
+  );
+  const output = num(
+    c.output_tokens ?? c.completion_tokens ?? c.outputTokens ?? c.completionTokens
+  );
+  const cacheCreation = num(
+    c.cache_creation_input_tokens ?? c.cacheCreationInputTokens ?? c.cacheWrite
+  );
+  const cacheRead = num(
+    c.cache_read_input_tokens ?? c.cacheReadInputTokens ?? c.cacheRead
+  );
+  const cost = num(c.cost ?? c.cost_usd ?? c.costUsd ?? c.usd);
+  let total = num(c.total_tokens ?? c.totalTokens);
+  if (total === void 0 && (input !== void 0 || output !== void 0 || cacheCreation !== void 0 || cacheRead !== void 0)) {
+    total = (input ?? 0) + (output ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0);
+  }
+  if (input !== void 0 || output !== void 0 || total !== void 0 || cacheCreation !== void 0 || cacheRead !== void 0) {
+    return { input, output, total, cacheCreation, cacheRead, cost };
+  }
+  return {};
+}
+function pickTokenUsage(event) {
+  const ev = event ?? {};
   const containers = [];
-  if (ev.usage && typeof ev.usage === "object")
-    containers.push(ev.usage);
-  if (ev.tokens && typeof ev.tokens === "object")
-    containers.push(ev.tokens);
+  if (ev.usage && typeof ev.usage === "object") containers.push(ev.usage);
+  if (ev.tokens && typeof ev.tokens === "object") containers.push(ev.tokens);
   containers.push(ev);
   for (const c of containers) {
-    const input = num(
-      c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens
-    );
-    const output = num(
-      c.output_tokens ?? c.completion_tokens ?? c.outputTokens ?? c.completionTokens
-    );
-    const cacheCreation = num(
-      c.cache_creation_input_tokens ?? c.cacheCreationInputTokens
-    );
-    const cacheRead = num(c.cache_read_input_tokens ?? c.cacheReadInputTokens);
-    let total = num(c.total_tokens ?? c.totalTokens);
-    if (total === void 0 && (input !== void 0 || output !== void 0 || cacheCreation !== void 0 || cacheRead !== void 0)) {
-      total = (input ?? 0) + (output ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0);
-    }
-    if (input !== void 0 || output !== void 0 || total !== void 0 || cacheCreation !== void 0 || cacheRead !== void 0) {
-      return { input, output, total, cacheCreation, cacheRead };
+    const u = normalizeUsageObject(c);
+    if (Object.keys(u).some((k) => u[k] !== void 0)) {
+      return u;
     }
   }
   return {};
 }
+var openModelSpans = /* @__PURE__ */ new Map();
+var sessionOpenOrder = /* @__PURE__ */ new Map();
+var transcriptOffsets = /* @__PURE__ */ new Map();
+function pickStr(v) {
+  return typeof v === "string" && v.length > 0 ? v : void 0;
+}
+function pickSessionId(ctx) {
+  if (ctx?.sessionId) return ctx.sessionId;
+  const sk = ctx?.sessionKey;
+  if (typeof sk === "string" && sk.startsWith("agent:")) {
+    const parts = sk.split(":");
+    if (parts.length >= 3 && parts[2]) return parts[2];
+  }
+  return void 0;
+}
+function resolveTranscriptDir() {
+  if (state.transcriptDir) return state.transcriptDir;
+  for (const dir of transcriptDirCandidates()) {
+    try {
+      if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+        state.transcriptDir = dir;
+        console.log(`${LOG} Transcript directory: ${dir}`);
+        return dir;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function findTranscriptFile(sessionId, dir) {
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    return null;
+  }
+  if (files.length === 0) return null;
+  if (sessionId) {
+    const match = files.find((f) => f.includes(sessionId));
+    if (match) return path.join(dir, match);
+    if (files.length === 1) return path.join(dir, files[0]);
+    return null;
+  }
+  let newest = null;
+  for (const f of files) {
+    try {
+      const m = fs.statSync(path.join(dir, f)).mtimeMs;
+      if (!newest || m > newest.mtime) newest = { f, mtime: m };
+    } catch {
+    }
+  }
+  return newest ? path.join(dir, newest.f) : null;
+}
+function noteSessionBaseline(ctx) {
+  const dir = resolveTranscriptDir();
+  if (!dir) return;
+  const file = findTranscriptFile(pickSessionId(ctx), dir);
+  if (!file || transcriptOffsets.has(file)) return;
+  try {
+    transcriptOffsets.set(file, fs.statSync(file).size);
+  } catch {
+  }
+}
+function readNewUsageEntries(filePath) {
+  let size;
+  try {
+    size = fs.statSync(filePath).size;
+  } catch {
+    return [];
+  }
+  const prev = transcriptOffsets.get(filePath);
+  if (prev === void 0) {
+    transcriptOffsets.set(filePath, size);
+    return [];
+  }
+  if (size <= prev) {
+    if (size < prev) transcriptOffsets.set(filePath, size);
+    return [];
+  }
+  let chunk = "";
+  try {
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buf = Buffer.alloc(size - prev);
+      fs.readSync(fd, buf, 0, buf.length, prev);
+      chunk = buf.toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+  const lastNl = chunk.lastIndexOf("\n");
+  if (lastNl === -1) return [];
+  transcriptOffsets.set(
+    filePath,
+    prev + Buffer.byteLength(chunk.slice(0, lastNl + 1), "utf-8")
+  );
+  const out = [];
+  for (const line of chunk.slice(0, lastNl).split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let entry;
+    try {
+      entry = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    const msg = entry.message;
+    const usageObj = entry.usage ?? entry.responseUsage ?? msg?.usage;
+    const usage = normalizeUsageObject(usageObj);
+    if (usage.input === void 0 && usage.output === void 0 && usage.total === void 0) {
+      continue;
+    }
+    out.push({
+      usage,
+      model: pickStr(entry.model) ?? pickStr(msg?.model),
+      provider: pickStr(entry.provider) ?? pickStr(msg?.provider),
+      callId: pickStr(entry.callId ?? entry.call_id)
+    });
+  }
+  return out;
+}
+function applyUsageAndEnd(e, usage, model, provider) {
+  if (e.done) return;
+  setIfPresent(e.span, "gen_ai.usage.input_tokens", usage.input);
+  setIfPresent(e.span, "gen_ai.usage.output_tokens", usage.output);
+  setIfPresent(e.span, "gen_ai.usage.total_tokens", usage.total);
+  setIfPresent(
+    e.span,
+    "gen_ai.usage.cache_creation_input_tokens",
+    usage.cacheCreation
+  );
+  setIfPresent(e.span, "gen_ai.usage.cache_read_input_tokens", usage.cacheRead);
+  setIfPresent(e.span, "gen_ai.request.model", model);
+  setIfPresent(e.span, "gen_ai.system", provider);
+  e.span.setAttribute("trovis.model.usage_source", "transcript");
+  e.done = true;
+  e.span.end(e.endedAtMs);
+}
+function forgetOpenSpan(callId, sessionKey) {
+  openModelSpans.delete(callId);
+  if (sessionKey) {
+    const order = sessionOpenOrder.get(sessionKey);
+    if (order) {
+      const i = order.indexOf(callId);
+      if (i >= 0) order.splice(i, 1);
+    }
+  }
+}
+function emitStandaloneUsageSpan(tracer, entry, sessionKey) {
+  const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT });
+  span.setAttribute("trovis.event.type", "model_call");
+  span.setAttribute("trovis.model.usage_source", "transcript");
+  setIfPresent(span, "gen_ai.request.model", entry.model);
+  setIfPresent(span, "gen_ai.system", entry.provider);
+  setIfPresent(span, "gen_ai.usage.input_tokens", entry.usage.input);
+  setIfPresent(span, "gen_ai.usage.output_tokens", entry.usage.output);
+  setIfPresent(span, "gen_ai.usage.total_tokens", entry.usage.total);
+  setIfPresent(
+    span,
+    "gen_ai.usage.cache_creation_input_tokens",
+    entry.usage.cacheCreation
+  );
+  setIfPresent(
+    span,
+    "gen_ai.usage.cache_read_input_tokens",
+    entry.usage.cacheRead
+  );
+  if (sessionKey) span.setAttribute("trovis.agent.id", pickAgentId({ sessionKey }));
+  span.end();
+}
+function drainSessionUsage(tracer, ctx) {
+  const dir = resolveTranscriptDir();
+  if (!dir) return;
+  const sessionId = pickSessionId(ctx);
+  const file = findTranscriptFile(sessionId, dir);
+  if (!file) return;
+  const entries = readNewUsageEntries(file);
+  if (entries.length === 0) return;
+  const sessionKey = ctx?.sessionKey;
+  const order = sessionKey ? sessionOpenOrder.get(sessionKey) ?? [] : [];
+  for (const entry of entries) {
+    let callId;
+    if (entry.callId && openModelSpans.has(entry.callId)) {
+      callId = entry.callId;
+    } else {
+      while (order.length > 0 && !openModelSpans.has(order[0])) order.shift();
+      callId = order[0];
+    }
+    if (callId && openModelSpans.has(callId)) {
+      const e = openModelSpans.get(callId);
+      applyUsageAndEnd(e, entry.usage, entry.model, entry.provider);
+      forgetOpenSpan(callId, e.sessionKey);
+    } else if (tracer) {
+      emitStandaloneUsageSpan(tracer, entry, sessionKey);
+    }
+  }
+}
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
-  const modelSpans = /* @__PURE__ */ new Map();
   safeOn(api, "gateway_start", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
@@ -66522,6 +66744,7 @@ function wireEvents(api) {
   safeOn(api, "model_call_started", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
+    state.sawConversationHook = true;
     const ctx = hookCtx ?? event?.context ?? {};
     const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT });
     span.setAttribute("trovis.event.type", "model_call");
@@ -66530,38 +66753,55 @@ function wireEvents(api) {
     span.setAttribute("trovis.model.call_id", event.callId);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
     setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId);
-    modelSpans.set(event.callId, { span, startedAt: Date.now() });
+    noteSessionBaseline(ctx);
+    openModelSpans.set(event.callId, {
+      span,
+      startedAtMs: Date.now(),
+      sessionKey: ctx.sessionKey,
+      done: false
+    });
+    if (ctx.sessionKey) {
+      const order = sessionOpenOrder.get(ctx.sessionKey) ?? [];
+      order.push(event.callId);
+      sessionOpenOrder.set(ctx.sessionKey, order);
+    }
   });
   safeOn(api, "model_call_ended", (event, hookCtx) => {
-    ensureInit(hookCtx ?? event?.context);
-    const entry = modelSpans.get(event.callId);
+    const tracer = ensureInit(hookCtx ?? event?.context);
+    state.sawConversationHook = true;
+    const ctx = hookCtx ?? event?.context ?? {};
+    const entry = openModelSpans.get(event.callId);
     if (!entry) return;
-    modelSpans.delete(event.callId);
+    entry.endedAtMs = Date.now();
     entry.span.setAttribute("trovis.model.duration_ms", event.durationMs);
     setIfPresent(entry.span, "trovis.model.outcome", event.outcome);
-    const usage = pickTokenUsage(event);
-    setIfPresent(entry.span, "gen_ai.usage.input_tokens", usage.input);
-    setIfPresent(entry.span, "gen_ai.usage.output_tokens", usage.output);
-    setIfPresent(entry.span, "gen_ai.usage.total_tokens", usage.total);
-    setIfPresent(
-      entry.span,
-      "gen_ai.usage.cache_creation_input_tokens",
-      usage.cacheCreation
-    );
-    setIfPresent(
-      entry.span,
-      "gen_ai.usage.cache_read_input_tokens",
-      usage.cacheRead
-    );
     if (typeof event.outcome === "string" && event.outcome !== "ok" && event.outcome !== "success") {
       entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome });
     }
-    entry.span.end();
+    const usage = pickTokenUsage(event);
+    if (usage.total !== void 0 || usage.input !== void 0) {
+      applyUsageAndEnd(entry, usage, event?.model, event?.provider);
+      forgetOpenSpan(event.callId, entry.sessionKey);
+      return;
+    }
+    drainSessionUsage(tracer, ctx);
+    if (openModelSpans.has(event.callId)) {
+      const timer = setTimeout(() => {
+        const e = openModelSpans.get(event.callId);
+        if (e && !e.done) {
+          e.span.end(e.endedAtMs);
+          forgetOpenSpan(event.callId, e.sessionKey);
+        }
+      }, USAGE_DRAIN_TIMEOUT_MS);
+      if (typeof timer.unref === "function") timer.unref();
+    }
   });
   safeOn(api, "llm_output", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
+    state.sawConversationHook = true;
     const ctx = hookCtx ?? event?.context ?? {};
+    drainSessionUsage(tracer, ctx);
     const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL });
     span.setAttribute("trovis.event.type", "llm_output");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
@@ -66587,7 +66827,9 @@ function wireEvents(api) {
   safeOn(api, "agent_end", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
+    state.sawConversationHook = true;
     const ctx = hookCtx ?? event?.context ?? {};
+    drainSessionUsage(tracer, ctx);
     const span = tracer.startSpan("agent_run_complete", {
       kind: SpanKind.INTERNAL
     });
@@ -66689,22 +66931,34 @@ USER.md and MEMORY.md are read at gateway start during agent registration, so **
           `\u2022 Agent name: \`${state.agentName}\``,
           `\u2022 Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
           `\u2022 User data: **${state.readUserData ? "on" : "off"}**`,
+          `\u2022 Conversation access: **${state.allowConversationAccess === true ? "on" : "off"}** (required for tokens, cost & model)`,
+          `\u2022 Transcript dir: \`${state.transcriptDir ?? "(not located)"}\``,
           `\u2022 Telemetry: ${state.initialized ? "flowing" : "not initialized"}`
         ];
         return reply(lines.join("\n"));
       }
       if (sub === "status") {
-        const enabled = state.initialized;
-        return reply(
-          enabled ? `\u2705 Trovis is active.
-
-\u2022 Endpoint: \`${state.endpoint}\`
-\u2022 Agent: \`${state.agentName}\`
-\u2022 Telemetry: flowing` : `\u26A0\uFE0F Trovis is not connected.
+        if (!state.initialized) {
+          return reply(
+            `\u26A0\uFE0F Trovis is not connected.
 
 Get your endpoint URL from your Trovis dashboard (Add Agent \u2192 OpenClaw), then run:
 
 \`/trovis connect <your-endpoint-url>\``
+          );
+        }
+        const convoWarning = !state.sawConversationHook ? `
+
+\u26A0\uFE0F No LLM-call telemetry yet \u2014 **tokens, cost, and model won't be captured.** Enable conversation access:
+\`openclaw config set plugins.entries.trovis.config.hooks.allowConversationAccess true\`
+then restart the gateway.` : ``;
+        return reply(
+          `\u2705 Trovis is active.
+
+\u2022 Endpoint: \`${state.endpoint}\`
+\u2022 Agent: \`${state.agentName}\`
+\u2022 Telemetry: flowing
+\u2022 LLM-call telemetry: ${state.sawConversationHook ? "active" : "none seen"}` + convoWarning
         );
       }
       return reply(

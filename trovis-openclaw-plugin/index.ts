@@ -44,7 +44,7 @@ import * as os from "node:os"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.3.1"
+const PLUGIN_VERSION = "0.4.0"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
@@ -53,6 +53,45 @@ const OBSERVATION_PRIORITY = 0
 // OTLP backends typically cap individual attribute values; 32 KB keeps us
 // well inside Trovis's TEXT column and most other backends' limits.
 const ATTR_BYTE_LIMIT = 32 * 1024
+
+// ---------------------------------------------------------------------------
+// Transcript usage sourcing
+// ---------------------------------------------------------------------------
+//
+// OpenClaw's plugin hooks do NOT carry token usage — `model_call_ended`
+// exposes model/provider/duration/outcome only (the request to add usage,
+// openclaw#21184, was closed as not planned). The real per-response usage
+// (input/output/total/cache tokens + OpenClaw's own cost) is persisted to
+// per-session transcript JSONL files on disk. We read those and attach the
+// token counts to the matching `model_call` span so the backend can price
+// it. Privacy posture is unchanged: we read ONLY the usage object (token
+// counts + cost), never prompt/response content from the transcript.
+//
+// The directory layout and per-entry schema are NOT published in the
+// OpenClaw docs, so the two gateway-specific knobs below are isolated and
+// overridable via env. Confirm them against a live gateway (see README →
+// "Token usage"): `find ~/.openclaw -name '*.jsonl'` then inspect one entry.
+
+// Candidate directories that hold session transcript JSONL files, in
+// priority order. `TROVIS_TRANSCRIPT_DIR` overrides everything. Mirrors the
+// resolution style of loadConfigFromDisk()/resolveDefaultWorkspace().
+function transcriptDirCandidates(): string[] {
+  const out: string[] = []
+  const envDir =
+    process.env.TROVIS_TRANSCRIPT_DIR ?? process.env.OVERSEE_TRANSCRIPT_DIR
+  if (envDir && envDir.length > 0) out.push(envDir)
+  // Common locations observed for the OpenClaw session store.
+  out.push("/data/.openclaw/sessions")
+  out.push("/data/.openclaw/transcripts")
+  out.push(path.join(os.homedir(), ".openclaw", "sessions"))
+  out.push(path.join(os.homedir(), ".openclaw", "transcripts"))
+  return out
+}
+
+// How long (ms) a `model_call` span is held open waiting for its usage
+// entry to land in the transcript before we give up and export it without
+// tokens. A run normally completes (agent_end) well within this window.
+const USAGE_DRAIN_TIMEOUT_MS = 10_000
 
 // ---------------------------------------------------------------------------
 // Types
@@ -65,6 +104,11 @@ interface PluginConfig {
   enabled?: boolean
   readUserData?: boolean
   captureOutputs?: boolean
+  // Conversation-adjacent hooks (model_call_*, llm_output, agent_end) only
+  // fire when OpenClaw is told they're allowed. Tokens + per-call model
+  // depend on these — we read the flag purely to give a precise warning in
+  // `/trovis status` when it's off; OpenClaw itself enforces the gating.
+  hooks?: { allowConversationAccess?: boolean }
 }
 
 interface OpenClawContext {
@@ -245,6 +289,16 @@ const state: {
   readUserData: boolean
   captureOutputs: boolean
   gatewayVersion: string
+  // True once any conversation-adjacent hook (model_call_*, llm_output,
+  // agent_end) has fired. If telemetry is flowing but this stays false, the
+  // operator almost certainly hasn't set hooks.allowConversationAccess and
+  // is getting no tokens/cost/model — surfaced in `/trovis status`.
+  sawConversationHook: boolean
+  // Resolved transcript directory (null = not found / not yet looked up;
+  // false would re-search). Cached after first successful resolution.
+  transcriptDir: string | null
+  // The flag as configured, for `/trovis status` reporting only.
+  allowConversationAccess: boolean | undefined
 } = {
   initialized: false,
   disabled: false,
@@ -256,6 +310,9 @@ const state: {
   readUserData: false,
   captureOutputs: false,
   gatewayVersion: "unknown",
+  sawConversationHook: false,
+  transcriptDir: null,
+  allowConversationAccess: undefined,
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +424,9 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
     pluginConfig?.captureOutputs ??
       ((process.env.TROVIS_CAPTURE_OUTPUTS ?? process.env.OVERSEE_CAPTURE_OUTPUTS) === "true"),
   )
+  // Recorded for `/trovis status` diagnostics only — OpenClaw enforces the
+  // actual gating. undefined = not present in config (treated as off).
+  state.allowConversationAccess = pluginConfig?.hooks?.allowConversationAccess
 
   state.tracer = initTelemetry(
     state.endpoint,
@@ -626,73 +686,407 @@ interface TokenUsage {
   total?: number
   cacheCreation?: number
   cacheRead?: number
+  // OpenClaw's own computed cost when present. We do NOT forward it to the
+  // backend (Trovis recomputes cost from tokens+model for a single
+  // cost basis across all agents) — kept only for logging/diagnostics.
+  cost?: number
 }
 
 /**
- * Best-effort token-usage extraction from a model_call_ended event.
- * Provider adapters disagree on the shape, so we probe the common
- * ones and normalize to {input, output, total}. Returns an empty
- * object when nothing usable is present.
+ * Normalize a single usage-bearing object into {input, output, total,
+ * cache*, cost}. Provider adapters and OpenClaw transcripts disagree on
+ * field names, so every common alias is probed. Returns an empty object
+ * when nothing usable is present.
  *
- * Shapes probed (in order):
- *   event.usage.{input_tokens, output_tokens, total_tokens}   (OTEL / Anthropic)
- *   event.usage.{prompt_tokens, completion_tokens, total_tokens}  (OpenAI)
- *   event.usage.{inputTokens, outputTokens, totalTokens}      (camelCase)
- *   event.tokens.{...}  (same keys, alternate container)
- *   event.{inputTokens, outputTokens, totalTokens}            (flat)
+ * Aliases probed:
+ *   input  : input_tokens | prompt_tokens | inputTokens | promptTokens
+ *   output : output_tokens | completion_tokens | outputTokens | completionTokens
+ *   total  : total_tokens | totalTokens  (derived from the parts if absent)
+ *   cacheCreation : cache_creation_input_tokens | cacheCreationInputTokens | cacheWrite
+ *   cacheRead     : cache_read_input_tokens | cacheReadInputTokens | cacheRead
+ *   cost   : cost | cost_usd | costUsd | usd
  */
-function pickTokenUsage(event: unknown): TokenUsage {
-  const ev = (event ?? {}) as Record<string, unknown>
+function normalizeUsageObject(container: unknown): TokenUsage {
+  const c = (container ?? {}) as Record<string, unknown>
   const num = (v: unknown): number | undefined => {
     const n = typeof v === "string" ? Number(v) : v
     return typeof n === "number" && Number.isFinite(n) ? n : undefined
   }
 
-  // Candidate containers that might hold the usage object.
-  const containers: Record<string, unknown>[] = []
-  if (ev.usage && typeof ev.usage === "object")
-    containers.push(ev.usage as Record<string, unknown>)
-  if (ev.tokens && typeof ev.tokens === "object")
-    containers.push(ev.tokens as Record<string, unknown>)
-  containers.push(ev) // flat fields on the event itself
-
-  for (const c of containers) {
-    const input = num(
-      c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens,
-    )
-    const output = num(
-      c.output_tokens ??
-        c.completion_tokens ??
-        c.outputTokens ??
-        c.completionTokens,
-    )
-    // Anthropic prompt-caching tokens — billed separately (creation 1.25x,
-    // read 0.1x of base input) and NOT included in input_tokens.
-    const cacheCreation = num(
-      c.cache_creation_input_tokens ?? c.cacheCreationInputTokens,
-    )
-    const cacheRead = num(c.cache_read_input_tokens ?? c.cacheReadInputTokens)
-    let total = num(c.total_tokens ?? c.totalTokens)
-    if (
-      total === undefined &&
-      (input !== undefined ||
-        output !== undefined ||
-        cacheCreation !== undefined ||
-        cacheRead !== undefined)
-    ) {
-      total = (input ?? 0) + (output ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0)
-    }
-    if (
-      input !== undefined ||
+  const input = num(
+    c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens,
+  )
+  const output = num(
+    c.output_tokens ??
+      c.completion_tokens ??
+      c.outputTokens ??
+      c.completionTokens,
+  )
+  // Anthropic prompt-caching tokens — billed separately (creation 1.25x,
+  // read 0.1x of base input) and NOT included in input_tokens.
+  const cacheCreation = num(
+    c.cache_creation_input_tokens ?? c.cacheCreationInputTokens ?? c.cacheWrite,
+  )
+  const cacheRead = num(
+    c.cache_read_input_tokens ?? c.cacheReadInputTokens ?? c.cacheRead,
+  )
+  const cost = num(c.cost ?? c.cost_usd ?? c.costUsd ?? c.usd)
+  let total = num(c.total_tokens ?? c.totalTokens)
+  if (
+    total === undefined &&
+    (input !== undefined ||
       output !== undefined ||
-      total !== undefined ||
       cacheCreation !== undefined ||
-      cacheRead !== undefined
-    ) {
-      return { input, output, total, cacheCreation, cacheRead }
+      cacheRead !== undefined)
+  ) {
+    total = (input ?? 0) + (output ?? 0) + (cacheCreation ?? 0) + (cacheRead ?? 0)
+  }
+  if (
+    input !== undefined ||
+    output !== undefined ||
+    total !== undefined ||
+    cacheCreation !== undefined ||
+    cacheRead !== undefined
+  ) {
+    return { input, output, total, cacheCreation, cacheRead, cost }
+  }
+  return {}
+}
+
+/**
+ * Best-effort token-usage extraction from an event payload. Kept for the
+ * (unlikely) case a future gateway DOES put usage on model_call_ended; in
+ * practice OpenClaw hooks carry no usage, which is why we also read
+ * transcripts. Probes event.usage, then event.tokens, then flat fields.
+ */
+function pickTokenUsage(event: unknown): TokenUsage {
+  const ev = (event ?? {}) as Record<string, unknown>
+  const containers: unknown[] = []
+  if (ev.usage && typeof ev.usage === "object") containers.push(ev.usage)
+  if (ev.tokens && typeof ev.tokens === "object") containers.push(ev.tokens)
+  containers.push(ev) // flat fields on the event itself
+  for (const c of containers) {
+    const u = normalizeUsageObject(c)
+    if (Object.keys(u).some((k) => u[k as keyof TokenUsage] !== undefined)) {
+      return u
     }
   }
   return {}
+}
+
+// ---------------------------------------------------------------------------
+// Transcript usage reader
+// ---------------------------------------------------------------------------
+//
+// OpenClaw hooks carry no tokens, but the per-session transcript does. We
+// tail each session's transcript, parse the per-response usage object, and
+// attach the token counts to the matching (still-open) `model_call` span —
+// see the design note at the top of this file.
+
+interface OpenModelSpan {
+  span: Span
+  startedAtMs: number
+  endedAtMs?: number // wall-clock when model_call_ended fired; used as the
+  // explicit span end time so deferring the end() doesn't inflate duration
+  sessionKey?: string
+  done: boolean
+}
+
+interface TranscriptUsageEntry {
+  usage: TokenUsage
+  model?: string
+  provider?: string
+  callId?: string
+}
+
+// callId -> open model_call span awaiting its usage entry.
+const openModelSpans = new Map<string, OpenModelSpan>()
+// sessionKey -> callIds in start order, for FIFO matching when the
+// transcript entry doesn't carry a callId.
+const sessionOpenOrder = new Map<string, string[]>()
+// transcript file path -> bytes already consumed. First sight seeks to EOF
+// so we never replay history; only appended bytes are processed thereafter.
+const transcriptOffsets = new Map<string, number>()
+
+function pickStr(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined
+}
+
+/** Session id, preferred from ctx, else parsed from `agent:<id>:<session>`. */
+function pickSessionId(ctx: OpenClawContext | undefined): string | undefined {
+  if (ctx?.sessionId) return ctx.sessionId
+  const sk = ctx?.sessionKey
+  if (typeof sk === "string" && sk.startsWith("agent:")) {
+    const parts = sk.split(":")
+    if (parts.length >= 3 && parts[2]) return parts[2]
+  }
+  return undefined
+}
+
+/** First existing candidate transcript directory; cached after success. */
+function resolveTranscriptDir(): string | null {
+  if (state.transcriptDir) return state.transcriptDir
+  for (const dir of transcriptDirCandidates()) {
+    try {
+      if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+        state.transcriptDir = dir
+        console.log(`${LOG} Transcript directory: ${dir}`)
+        return dir
+      }
+    } catch {
+      // unreadable — try the next candidate
+    }
+  }
+  return null
+}
+
+/**
+ * Locate the transcript file for a session. Resolution order:
+ *  1. a `*.jsonl` whose name contains the sessionId (the normal case);
+ *  2. if exactly one `*.jsonl` exists, use it (single-session gateway whose
+ *     filenames don't embed the sessionId);
+ *  3. if the sessionId is unknown, the most-recently-modified `*.jsonl`.
+ * Returns null when the sessionId is known but can't be disambiguated among
+ * multiple files — we never guess and risk attaching another session's
+ * tokens to this session's spans.
+ */
+function findTranscriptFile(
+  sessionId: string | undefined,
+  dir: string,
+): string | null {
+  let files: string[]
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl"))
+  } catch {
+    return null
+  }
+  if (files.length === 0) return null
+  if (sessionId) {
+    const match = files.find((f) => f.includes(sessionId))
+    if (match) return path.join(dir, match)
+    if (files.length === 1) return path.join(dir, files[0])
+    return null // ambiguous — don't risk cross-session attribution
+  }
+  // sessionId unknown — newest file is the best single guess.
+  let newest: { f: string; mtime: number } | null = null
+  for (const f of files) {
+    try {
+      const m = fs.statSync(path.join(dir, f)).mtimeMs
+      if (!newest || m > newest.mtime) newest = { f, mtime: m }
+    } catch {
+      // skip unreadable file
+    }
+  }
+  return newest ? path.join(dir, newest.f) : null
+}
+
+/**
+ * Anchor the read offset for a session's transcript at the file's current
+ * size, called when a tracked model call STARTS — i.e. before that call's
+ * usage line is appended. This is what lets the first call of a session get
+ * its tokens: without it, the first drain would "seek to EOF" and skip the
+ * line that was just written. No-op if we've already anchored this file or
+ * the file doesn't exist yet (a brand-new session's first call falls back to
+ * the EOF-seek in readNewUsageEntries — one call's tokens may be missed, but
+ * history is never replayed).
+ */
+function noteSessionBaseline(ctx: OpenClawContext | undefined): void {
+  const dir = resolveTranscriptDir()
+  if (!dir) return
+  const file = findTranscriptFile(pickSessionId(ctx), dir)
+  if (!file || transcriptOffsets.has(file)) return
+  try {
+    transcriptOffsets.set(file, fs.statSync(file).size)
+  } catch {
+    // unreadable — let readNewUsageEntries handle first-sight later
+  }
+}
+
+/**
+ * Read newly-appended JSONL lines and return parsed usage entries. Advances
+ * the per-file offset, keeping any trailing partial line for the next read.
+ * Returns [] on first sight of a file (seeks to EOF to avoid replaying
+ * history) and on any read/parse trouble.
+ */
+function readNewUsageEntries(filePath: string): TranscriptUsageEntry[] {
+  let size: number
+  try {
+    size = fs.statSync(filePath).size
+  } catch {
+    return []
+  }
+  const prev = transcriptOffsets.get(filePath)
+  if (prev === undefined) {
+    transcriptOffsets.set(filePath, size) // first sight — tail from EOF
+    return []
+  }
+  if (size <= prev) {
+    if (size < prev) transcriptOffsets.set(filePath, size) // truncated/rotated
+    return []
+  }
+
+  let chunk = ""
+  try {
+    const fd = fs.openSync(filePath, "r")
+    try {
+      const buf = Buffer.alloc(size - prev)
+      fs.readSync(fd, buf, 0, buf.length, prev)
+      chunk = buf.toString("utf-8")
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return []
+  }
+
+  const lastNl = chunk.lastIndexOf("\n")
+  if (lastNl === -1) return [] // no complete line yet — wait for more
+  // Advance only past whole lines (byte-accurate for multi-byte UTF-8).
+  transcriptOffsets.set(
+    filePath,
+    prev + Buffer.byteLength(chunk.slice(0, lastNl + 1), "utf-8"),
+  )
+
+  const out: TranscriptUsageEntry[] = []
+  for (const line of chunk.slice(0, lastNl).split("\n")) {
+    const t = line.trim()
+    if (!t) continue
+    let entry: Record<string, unknown>
+    try {
+      entry = JSON.parse(t) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const msg = entry.message as Record<string, unknown> | undefined
+    // Usage may live at entry.usage, entry.responseUsage, or entry.message.usage.
+    const usageObj =
+      (entry.usage as unknown) ??
+      (entry.responseUsage as unknown) ??
+      (msg?.usage as unknown)
+    const usage = normalizeUsageObject(usageObj)
+    if (
+      usage.input === undefined &&
+      usage.output === undefined &&
+      usage.total === undefined
+    ) {
+      continue // not a usage-bearing entry
+    }
+    out.push({
+      usage,
+      model: pickStr(entry.model) ?? pickStr(msg?.model),
+      provider: pickStr(entry.provider) ?? pickStr(msg?.provider),
+      callId: pickStr(entry.callId ?? entry.call_id),
+    })
+  }
+  return out
+}
+
+/** Attach token counts to an open model_call span and end it (preserving
+ * the original call duration via the recorded end time). */
+function applyUsageAndEnd(
+  e: OpenModelSpan,
+  usage: TokenUsage,
+  model?: string,
+  provider?: string,
+): void {
+  if (e.done) return
+  setIfPresent(e.span, "gen_ai.usage.input_tokens", usage.input)
+  setIfPresent(e.span, "gen_ai.usage.output_tokens", usage.output)
+  setIfPresent(e.span, "gen_ai.usage.total_tokens", usage.total)
+  setIfPresent(
+    e.span,
+    "gen_ai.usage.cache_creation_input_tokens",
+    usage.cacheCreation,
+  )
+  setIfPresent(e.span, "gen_ai.usage.cache_read_input_tokens", usage.cacheRead)
+  // Transcript may carry a more precise model id / provider than the start
+  // hook; setIfPresent leaves the start value in place when absent.
+  setIfPresent(e.span, "gen_ai.request.model", model)
+  setIfPresent(e.span, "gen_ai.system", provider)
+  e.span.setAttribute("trovis.model.usage_source", "transcript")
+  e.done = true
+  e.span.end(e.endedAtMs)
+}
+
+/** Forget an open span (already ended elsewhere, or timed out). */
+function forgetOpenSpan(callId: string, sessionKey?: string): void {
+  openModelSpans.delete(callId)
+  if (sessionKey) {
+    const order = sessionOpenOrder.get(sessionKey)
+    if (order) {
+      const i = order.indexOf(callId)
+      if (i >= 0) order.splice(i, 1)
+    }
+  }
+}
+
+/** Standalone usage span for a transcript entry with no open span to
+ * attach to (e.g. conversation hooks disabled, or correlation drift). */
+function emitStandaloneUsageSpan(
+  tracer: Tracer,
+  entry: TranscriptUsageEntry,
+  sessionKey: string | undefined,
+): void {
+  const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT })
+  span.setAttribute("trovis.event.type", "model_call")
+  span.setAttribute("trovis.model.usage_source", "transcript")
+  setIfPresent(span, "gen_ai.request.model", entry.model)
+  setIfPresent(span, "gen_ai.system", entry.provider)
+  setIfPresent(span, "gen_ai.usage.input_tokens", entry.usage.input)
+  setIfPresent(span, "gen_ai.usage.output_tokens", entry.usage.output)
+  setIfPresent(span, "gen_ai.usage.total_tokens", entry.usage.total)
+  setIfPresent(
+    span,
+    "gen_ai.usage.cache_creation_input_tokens",
+    entry.usage.cacheCreation,
+  )
+  setIfPresent(
+    span,
+    "gen_ai.usage.cache_read_input_tokens",
+    entry.usage.cacheRead,
+  )
+  if (sessionKey) span.setAttribute("trovis.agent.id", pickAgentId({ sessionKey }))
+  span.end()
+}
+
+/**
+ * Read any newly-written usage entries for a session and reconcile them
+ * against that session's open model_call spans. Matches by callId when the
+ * transcript provides one, else FIFO (calls complete in order within a
+ * session). Idempotent: offset tracking means repeat calls are cheap and
+ * never double-count.
+ */
+function drainSessionUsage(
+  tracer: Tracer | null,
+  ctx: OpenClawContext | undefined,
+): void {
+  const dir = resolveTranscriptDir()
+  if (!dir) return
+  const sessionId = pickSessionId(ctx)
+  const file = findTranscriptFile(sessionId, dir)
+  if (!file) return
+  const entries = readNewUsageEntries(file)
+  if (entries.length === 0) return
+
+  const sessionKey = ctx?.sessionKey
+  const order = sessionKey ? sessionOpenOrder.get(sessionKey) ?? [] : []
+
+  for (const entry of entries) {
+    let callId: string | undefined
+    if (entry.callId && openModelSpans.has(entry.callId)) {
+      callId = entry.callId
+    } else {
+      while (order.length > 0 && !openModelSpans.has(order[0])) order.shift()
+      callId = order[0]
+    }
+    if (callId && openModelSpans.has(callId)) {
+      const e = openModelSpans.get(callId)!
+      applyUsageAndEnd(e, entry.usage, entry.model, entry.provider)
+      forgetOpenSpan(callId, e.sessionKey)
+    } else if (tracer) {
+      emitStandaloneUsageSpan(tracer, entry, sessionKey)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -700,9 +1094,9 @@ function pickTokenUsage(event: unknown): TokenUsage {
 // ---------------------------------------------------------------------------
 
 function wireEvents(api: OpenClawApi): void {
-  // Correlation maps for start/end event pairs.
+  // Tool start/end correlation. Model-call spans live in module-scope
+  // `openModelSpans` because they're enriched later from transcript usage.
   const toolSpans = new Map<string, { span: Span; startedAt: number }>()
-  const modelSpans = new Map<string, { span: Span; startedAt: number }>()
 
   // -- Gateway start: init OTEL + read agent identity files --
   safeOn<GatewayStartEvent>(api, "gateway_start", (event, hookCtx) => {
@@ -872,9 +1266,14 @@ function wireEvents(api: OpenClawApi): void {
   })
 
   // -- Model calls (started / ended pair) --
+  // The span is NOT ended in model_call_ended: OpenClaw hooks carry no
+  // tokens, so we keep it open and attach token counts once they land in
+  // the transcript (drained on llm_output / agent_end). The end time is
+  // recorded so deferring end() preserves the true call duration.
   safeOn<ModelCallStartedEvent>(api, "model_call_started", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
+    state.sawConversationHook = true
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
     const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT })
     span.setAttribute("trovis.event.type", "model_call")
@@ -884,34 +1283,33 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
     setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
 
-    modelSpans.set(event.callId, { span, startedAt: Date.now() })
+    // Anchor the transcript read position BEFORE this call's usage line is
+    // written, so the first call of a session isn't skipped on first sight.
+    noteSessionBaseline(ctx)
+
+    openModelSpans.set(event.callId, {
+      span,
+      startedAtMs: Date.now(),
+      sessionKey: ctx.sessionKey,
+      done: false,
+    })
+    if (ctx.sessionKey) {
+      const order = sessionOpenOrder.get(ctx.sessionKey) ?? []
+      order.push(event.callId)
+      sessionOpenOrder.set(ctx.sessionKey, order)
+    }
   })
 
   safeOn<ModelCallEndedEvent>(api, "model_call_ended", (event, hookCtx) => {
-    ensureInit(hookCtx ?? event?.context)
-    const entry = modelSpans.get(event.callId)
+    const tracer = ensureInit(hookCtx ?? event?.context)
+    state.sawConversationHook = true
+    const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
+    const entry = openModelSpans.get(event.callId)
     if (!entry) return
-    modelSpans.delete(event.callId)
 
+    entry.endedAtMs = Date.now()
     entry.span.setAttribute("trovis.model.duration_ms", event.durationMs)
     setIfPresent(entry.span, "trovis.model.outcome", event.outcome)
-    // Token usage → OTEL GenAI semantic conventions. The backend reads
-    // these attribute names to compute cost. Only set what we actually
-    // found; absent fields stay off the span so the backend records NULL.
-    const usage = pickTokenUsage(event)
-    setIfPresent(entry.span, "gen_ai.usage.input_tokens", usage.input)
-    setIfPresent(entry.span, "gen_ai.usage.output_tokens", usage.output)
-    setIfPresent(entry.span, "gen_ai.usage.total_tokens", usage.total)
-    setIfPresent(
-      entry.span,
-      "gen_ai.usage.cache_creation_input_tokens",
-      usage.cacheCreation,
-    )
-    setIfPresent(
-      entry.span,
-      "gen_ai.usage.cache_read_input_tokens",
-      usage.cacheRead,
-    )
     if (
       typeof event.outcome === "string" &&
       event.outcome !== "ok" &&
@@ -919,7 +1317,30 @@ function wireEvents(api: OpenClawApi): void {
     ) {
       entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome })
     }
-    entry.span.end()
+
+    // If a future gateway DOES carry usage on the event, use it and end now.
+    const usage = pickTokenUsage(event)
+    if (usage.total !== undefined || usage.input !== undefined) {
+      applyUsageAndEnd(entry, usage, event?.model, event?.provider)
+      forgetOpenSpan(event.callId, entry.sessionKey)
+      return
+    }
+
+    // Otherwise try to drain the transcript right away (the usage entry may
+    // already be written), then arm a safety timeout so the span is always
+    // exported even if no later drain matches it.
+    drainSessionUsage(tracer, ctx)
+    if (openModelSpans.has(event.callId)) {
+      const timer = setTimeout(() => {
+        const e = openModelSpans.get(event.callId)
+        if (e && !e.done) {
+          e.span.end(e.endedAtMs) // export without tokens — better than leaking
+          forgetOpenSpan(event.callId, e.sessionKey)
+        }
+      }, USAGE_DRAIN_TIMEOUT_MS)
+      // Don't keep the gateway process alive just for this timer.
+      if (typeof timer.unref === "function") timer.unref()
+    }
   })
 
   // -- Raw LLM output (channel-agnostic) --
@@ -931,7 +1352,11 @@ function wireEvents(api: OpenClawApi): void {
   safeOn<LlmOutputEvent>(api, "llm_output", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
+    state.sawConversationHook = true
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
+    // A response just landed → its usage line is likely written. Reconcile
+    // open model_call spans for this session against the transcript.
+    drainSessionUsage(tracer, ctx)
     const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL })
     span.setAttribute("trovis.event.type", "llm_output")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
@@ -963,7 +1388,11 @@ function wireEvents(api: OpenClawApi): void {
   safeOn<AgentEndEvent>(api, "agent_end", (event, hookCtx) => {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
+    state.sawConversationHook = true
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
+    // Run finished → all of its usage lines are written. Final reconcile so
+    // every model_call span in this session gets its tokens before export.
+    drainSessionUsage(tracer, ctx)
     const span = tracer.startSpan("agent_run_complete", {
       kind: SpanKind.INTERNAL,
     })
@@ -1109,6 +1538,10 @@ function wireCommands(api: OpenClawApi): void {
           `• Agent name: \`${state.agentName}\``,
           `• Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
           `• User data: **${state.readUserData ? "on" : "off"}**`,
+          `• Conversation access: **${
+            state.allowConversationAccess === true ? "on" : "off"
+          }** (required for tokens, cost & model)`,
+          `• Transcript dir: \`${state.transcriptDir ?? "(not located)"}\``,
           `• Telemetry: ${state.initialized ? "flowing" : "not initialized"}`,
         ]
         return reply(lines.join("\n"))
@@ -1116,17 +1549,32 @@ function wireCommands(api: OpenClawApi): void {
 
       // --- status --------------------------------------------------------
       if (sub === "status") {
-        const enabled = state.initialized
+        if (!state.initialized) {
+          return reply(
+            `⚠️ Trovis is not connected.\n\n` +
+              `Get your endpoint URL from your Trovis dashboard ` +
+              `(Add Agent → OpenClaw), then run:\n\n` +
+              `\`/trovis connect <your-endpoint-url>\``,
+          )
+        }
+        // Initialized but no conversation hook has fired → tokens, cost and
+        // per-call model can't be captured. Almost always a missing flag.
+        const convoWarning = !state.sawConversationHook
+          ? `\n\n⚠️ No LLM-call telemetry yet — **tokens, cost, and model ` +
+            `won't be captured.** Enable conversation access:\n` +
+            `\`openclaw config set ` +
+            `plugins.entries.trovis.config.hooks.allowConversationAccess ` +
+            `true\`\nthen restart the gateway.`
+          : ``
         return reply(
-          enabled
-            ? `✅ Trovis is active.\n\n` +
-                `• Endpoint: \`${state.endpoint}\`\n` +
-                `• Agent: \`${state.agentName}\`\n` +
-                `• Telemetry: flowing`
-            : `⚠️ Trovis is not connected.\n\n` +
-                `Get your endpoint URL from your Trovis dashboard ` +
-                `(Add Agent → OpenClaw), then run:\n\n` +
-                `\`/trovis connect <your-endpoint-url>\``,
+          `✅ Trovis is active.\n\n` +
+            `• Endpoint: \`${state.endpoint}\`\n` +
+            `• Agent: \`${state.agentName}\`\n` +
+            `• Telemetry: flowing\n` +
+            `• LLM-call telemetry: ${
+              state.sawConversationHook ? "active" : "none seen"
+            }` +
+            convoWarning,
         )
       }
 
