@@ -93,6 +93,7 @@ from models import (
     TeamMember,
     TeamMemberCreate,
     WaitlistCountResponse,
+    WaitlistDeleteResponse,
     WaitlistRequest,
     WaitlistResponse,
     WeeklySummary,
@@ -1567,6 +1568,19 @@ async def join_waitlist(body: WaitlistRequest) -> WaitlistResponse:
 async def get_waitlist_count() -> WaitlistCountResponse:
     """Public count of waitlist signups (for display on the marketing site)."""
     return WaitlistCountResponse(count=database.get_waitlist_count())
+
+
+@app.delete("/waitlist/{email}", response_model=WaitlistDeleteResponse)
+async def delete_waitlist(email: str, request: Request) -> WaitlistDeleteResponse:
+    """Remove a waitlist signup — operator-only. Unlike POST/GET /waitlist this
+    path is NOT in _OPEN_PATHS, so the auth middleware requires a valid Trovis
+    credential (session or API key). Used to clear test/bogus entries so they
+    don't skew the marketing-site count."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    deleted = database.delete_waitlist_signup(email)
+    return WaitlistDeleteResponse(deleted=deleted > 0, email=(email or "").strip().lower())
 
 
 @app.delete("/team/{member_id}", status_code=204)

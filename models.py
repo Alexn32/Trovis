@@ -222,6 +222,14 @@ class WaitlistCountResponse(BaseModel):
     count: int
 
 
+class WaitlistDeleteResponse(BaseModel):
+    """Result of an operator deleting a waitlist signup. `deleted` is False
+    when no row matched the email."""
+
+    deleted: bool = False
+    email: str
+
+
 class WeeklyTrends(BaseModel):
     """Week-over-week percent deltas. Each field is None when there's
     no previous-week data to compare against. Positive = up, negative

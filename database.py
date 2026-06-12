@@ -3088,6 +3088,18 @@ def get_waitlist_count() -> int:
     return int(row["n"])
 
 
+def delete_waitlist_signup(email: str) -> int:
+    """Remove a waitlist signup by email (lowercased + trimmed to match how
+    add_waitlist_signup stores it). Returns rows deleted (0 or 1). Operator
+    tool — e.g. to clear a test/bogus signup so it doesn't skew the count."""
+    clean = (email or "").strip().lower()
+    if not clean:
+        return 0
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"DELETE FROM waitlist_signups WHERE email = {PH}", (clean,))
+        return cur.rowcount or 0
+
+
 def delete_team_member(account_id: int | None, member_id: int) -> bool:
     """Delete a team member and clear any agent assignments that
     pointed to them. SQLite's FK enforcement requires PRAGMA
