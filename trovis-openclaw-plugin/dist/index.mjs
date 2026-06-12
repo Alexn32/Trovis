@@ -66148,7 +66148,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.4.1";
+var PLUGIN_VERSION = "0.4.2";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
@@ -66392,10 +66392,12 @@ function normalizeUsageObject(container) {
     return typeof n === "number" && Number.isFinite(n) ? n : void 0;
   };
   const input = num(
-    c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens
+    c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens ?? // OpenClaw trajectory usage uses bare `input`/`output` alongside
+    // `totalTokens`/`cacheRead`; cover those plus common count variants.
+    c.input ?? c.inputTokenCount ?? c.promptTokenCount ?? c.tokensIn
   );
   const output = num(
-    c.output_tokens ?? c.completion_tokens ?? c.outputTokens ?? c.completionTokens
+    c.output_tokens ?? c.completion_tokens ?? c.outputTokens ?? c.completionTokens ?? c.output ?? c.outputTokenCount ?? c.completionTokenCount ?? c.candidatesTokenCount ?? c.tokensOut
   );
   const cacheCreation = num(
     c.cache_creation_input_tokens ?? c.cacheCreationInputTokens ?? c.cacheWrite
@@ -66581,6 +66583,29 @@ function deepFindStr(root, keys) {
     }
   }
   return void 0;
+}
+var TOKEN_FIELD_RE = /token|cache|input|output|prompt|completion|usage|cost/i;
+function dumpNumericTokenFields(root, limit = 24) {
+  const out = [];
+  const queue = [
+    { v: root, path: "", depth: 0 }
+  ];
+  let visited = 0;
+  while (queue.length > 0 && visited < 400 && out.length < limit) {
+    const { v, path: p, depth } = queue.shift();
+    visited++;
+    if (!v || typeof v !== "object") continue;
+    for (const [k, val] of Object.entries(v)) {
+      const childPath = p ? `${p}.${k}` : k;
+      const n = typeof val === "string" ? Number(val) : val;
+      if (typeof n === "number" && Number.isFinite(n)) {
+        if (TOKEN_FIELD_RE.test(k)) out.push(`${childPath}=${n}`);
+      } else if (val && typeof val === "object" && depth < 5) {
+        queue.push({ v: val, path: childPath, depth: depth + 1 });
+      }
+    }
+  }
+  return out;
 }
 function readNewUsageEntries(filePath) {
   let size;
@@ -67094,10 +67119,10 @@ If OpenClaw stores session logs elsewhere, set \`TROVIS_TRANSCRIPT_DIR\` to that
               const model = deepFindStr(entry, ["model", "modelId", "model_id"]);
               sample = `in:${u.input ?? "?"} out:${u.output ?? "?"} total:${u.total ?? "?"}` + (u.cacheRead !== void 0 ? ` cacheRead:${u.cacheRead}` : "") + (model ? ` @${model}` : "");
               if (u.input === void 0 || u.output === void 0) {
-                const usageObjRaw = entry.usage ?? entry.message?.usage ?? {};
+                const numeric = dumpNumericTokenFields(entry.data ?? entry);
                 diag3 = `
 \u2022 Entry keys: \`${Object.keys(entry).join(", ")}\`
-\u2022 usage keys: \`${Object.keys(usageObjRaw).join(", ") || "(none at entry.usage/message.usage)"}\``;
+\u2022 Numeric token fields: \`${numeric.join(", ") || "(none found)"}\``;
               }
               break;
             }

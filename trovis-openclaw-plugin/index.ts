@@ -44,7 +44,7 @@ import * as os from "node:os"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.4.1"
+const PLUGIN_VERSION = "0.4.2"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
@@ -716,8 +716,8 @@ interface TokenUsage {
  * when nothing usable is present.
  *
  * Aliases probed:
- *   input  : input_tokens | prompt_tokens | inputTokens | promptTokens
- *   output : output_tokens | completion_tokens | outputTokens | completionTokens
+ *   input  : input_tokens | prompt_tokens | inputTokens | promptTokens | input | inputTokenCount | promptTokenCount | tokensIn
+ *   output : output_tokens | completion_tokens | outputTokens | completionTokens | output | outputTokenCount | completionTokenCount | candidatesTokenCount | tokensOut
  *   total  : total_tokens | totalTokens  (derived from the parts if absent)
  *   cacheCreation : cache_creation_input_tokens | cacheCreationInputTokens | cacheWrite
  *   cacheRead     : cache_read_input_tokens | cacheReadInputTokens | cacheRead
@@ -731,13 +731,27 @@ function normalizeUsageObject(container: unknown): TokenUsage {
   }
 
   const input = num(
-    c.input_tokens ?? c.prompt_tokens ?? c.inputTokens ?? c.promptTokens,
+    c.input_tokens ??
+      c.prompt_tokens ??
+      c.inputTokens ??
+      c.promptTokens ??
+      // OpenClaw trajectory usage uses bare `input`/`output` alongside
+      // `totalTokens`/`cacheRead`; cover those plus common count variants.
+      c.input ??
+      c.inputTokenCount ??
+      c.promptTokenCount ??
+      c.tokensIn,
   )
   const output = num(
     c.output_tokens ??
       c.completion_tokens ??
       c.outputTokens ??
-      c.completionTokens,
+      c.completionTokens ??
+      c.output ??
+      c.outputTokenCount ??
+      c.completionTokenCount ??
+      c.candidatesTokenCount ??
+      c.tokensOut,
   )
   // Anthropic prompt-caching tokens — billed separately (creation 1.25x,
   // read 0.1x of base input) and NOT included in input_tokens.
@@ -1037,6 +1051,43 @@ function deepFindStr(root: unknown, keys: string[]): string | undefined {
     }
   }
   return undefined
+}
+
+// Token-ish field-name matcher for the debug dumper below.
+const TOKEN_FIELD_RE = /token|cache|input|output|prompt|completion|usage|cost/i
+
+/**
+ * Diagnostic: walk a parsed entry and collect NUMERIC leaf fields whose key
+ * looks token-related, as `path=value` strings. Numbers only — never strings
+ * — so this can't leak prompt/response content. Powers `/trovis debug` when
+ * the input/output split can't be found, revealing OpenClaw's real field
+ * names so we can map them without another guess.
+ */
+function dumpNumericTokenFields(root: unknown, limit = 24): string[] {
+  const out: string[] = []
+  const queue: Array<{ v: unknown; path: string; depth: number }> = [
+    { v: root, path: "", depth: 0 },
+  ]
+  let visited = 0
+  while (queue.length > 0 && visited < 400 && out.length < limit) {
+    const { v, path: p, depth } = queue.shift() as {
+      v: unknown
+      path: string
+      depth: number
+    }
+    visited++
+    if (!v || typeof v !== "object") continue
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const childPath = p ? `${p}.${k}` : k
+      const n = typeof val === "string" ? Number(val) : val
+      if (typeof n === "number" && Number.isFinite(n)) {
+        if (TOKEN_FIELD_RE.test(k)) out.push(`${childPath}=${n}`)
+      } else if (val && typeof val === "object" && depth < 5) {
+        queue.push({ v: val, path: childPath, depth: depth + 1 })
+      }
+    }
+  }
+  return out
 }
 
 /**
@@ -1764,14 +1815,14 @@ function wireCommands(api: OpenClawApi): void {
               // If we couldn't get an input/output split, surface the entry's
               // field names so we can map the right keys for cost.
               if (u.input === undefined || u.output === undefined) {
-                const usageObjRaw =
-                  (entry.usage as Record<string, unknown>) ??
-                  ((entry.message as Record<string, unknown> | undefined)
-                    ?.usage as Record<string, unknown>) ??
-                  {}
+                // Dump the actual numeric token fields (names + numbers only,
+                // no content) so we can map OpenClaw's exact input/output keys.
+                const numeric = dumpNumericTokenFields(entry.data ?? entry)
                 diag =
                   `\n• Entry keys: \`${Object.keys(entry).join(", ")}\`` +
-                  `\n• usage keys: \`${Object.keys(usageObjRaw).join(", ") || "(none at entry.usage/message.usage)"}\``
+                  `\n• Numeric token fields: \`${
+                    numeric.join(", ") || "(none found)"
+                  }\``
               }
               break
             }
