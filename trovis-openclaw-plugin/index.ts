@@ -44,7 +44,7 @@ import * as os from "node:os"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.3.0"
+const PLUGIN_VERSION = "0.3.1"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
@@ -330,7 +330,7 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
     return null
   }
 
-  const pluginConfig = ctx?.pluginConfig
+  const pluginConfig = ctx?.pluginConfig ?? readPluginConfigFromDisk()
 
   // Disabled via openclaw.json takes precedence over any other config.
   if (pluginConfig?.enabled === false) {
@@ -486,6 +486,20 @@ function loadConfigFromDisk(): unknown {
     }
   }
   return null
+}
+
+// The OpenClaw gateway doesn't populate ctx.pluginConfig in hook contexts
+// for community / non-bundled plugins — it's always undefined there. So we
+// fall back to reading openclaw.json from disk and pulling out our own
+// config slice, mirroring how registerAgents() falls back to
+// loadConfigFromDisk() for ctx.config. Without this, endpoint/apiKey/etc.
+// stored in openclaw.json are never read and telemetry never fires.
+function readPluginConfigFromDisk(): PluginConfig | null {
+  const parsed = loadConfigFromDisk()
+  return (
+    (parsed as { plugins?: { entries?: { trovis?: { config?: PluginConfig } } } })
+      ?.plugins?.entries?.trovis?.config ?? null
+  )
 }
 
 function registerAgents(tracer: Tracer, ctx: OpenClawContext): void {

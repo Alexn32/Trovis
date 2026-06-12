@@ -66148,7 +66148,7 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
@@ -66204,7 +66204,7 @@ function ensureInit(ctx) {
     console.log(`${LOG} Plugin disabled via TROVIS_ENABLED=false`);
     return null;
   }
-  const pluginConfig = ctx?.pluginConfig;
+  const pluginConfig = ctx?.pluginConfig ?? readPluginConfigFromDisk();
   if (pluginConfig?.enabled === false) {
     state.disabled = true;
     console.log(`${LOG} Plugin disabled via config.`);
@@ -66299,6 +66299,10 @@ function loadConfigFromDisk() {
     }
   }
   return null;
+}
+function readPluginConfigFromDisk() {
+  const parsed = loadConfigFromDisk();
+  return parsed?.plugins?.entries?.trovis?.config ?? null;
 }
 function registerAgents(tracer, ctx) {
   let cfg = ctx?.config;
