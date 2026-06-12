@@ -1306,7 +1306,8 @@ function DangerZone({ summary, agentId, onDeleted }) {
             <p className="danger-headline">Delete this agent</p>
             <p className="danger-help">
               Removes all telemetry, descriptions, owner assignment,
-              and any cached insights. This cannot be undone.
+              cached insights, budgets, connections, and any workflows
+              this agent owns. This cannot be undone.
             </p>
           </div>
           <button
@@ -1323,9 +1324,10 @@ function DangerZone({ summary, agentId, onDeleted }) {
             Delete <strong>{friendlyName}</strong>?
           </p>
           <p className="danger-help">
-            This removes all telemetry, descriptions, and settings for
-            this {isSubScoped ? 'sub-agent' : 'instance'}. This cannot
-            be undone.
+            This removes all telemetry, descriptions, settings, budgets,
+            connections, and owned workflows for this{' '}
+            {isSubScoped ? 'sub-agent' : 'instance'}. This cannot be
+            undone.
           </p>
           {error && <p className="form-error">{error}</p>}
           <div className="danger-confirm-actions">

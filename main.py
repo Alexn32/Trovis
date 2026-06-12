@@ -752,7 +752,8 @@ async def delete_agent(
 ) -> AgentDeleteResponse:
     """Hard-delete an agent. Sweeps every per-agent table — spans,
     descriptions, registrations, display names, owner assignments,
-    cached insights.
+    cached insights, budgets — plus the agent's connection edges and
+    any workflows it owns (with their steps, participants, and edges).
 
     Without `?agent_id=`, deletes the entire service (every sub-agent).
     With it, scopes to one sub-agent. The two cases differ only in

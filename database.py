@@ -4711,6 +4711,12 @@ def get_insight(
 # foreign key) don't trip — agent_owners has the FK, but the join
 # direction (owner row references team_member) means deleting owners
 # is safe at any point. Order is otherwise irrelevant.
+#
+# All of these share the same `(service_name, account_id, agent_id)`
+# column shape, so the simple loop in delete_agent handles them. Tables
+# with a different shape — agent_connections (source/target pairs) and
+# workflows (+ their step/participant/edge children) — are swept
+# separately below.
 _PER_AGENT_TABLES = (
     "spans",
     "descriptions",
@@ -4718,6 +4724,7 @@ _PER_AGENT_TABLES = (
     "agent_display_names",
     "agent_owners",
     "agent_insights",
+    "agent_budgets",
 )
 
 
@@ -4731,6 +4738,21 @@ def delete_agent(
     When `agent_id` is provided, scopes to that sub-agent only
     (matches via `COALESCE(agent_id, 'main') = ?`). When omitted,
     drops the whole `service_name` — every sub-agent under it.
+
+    The sweep covers the per-agent tables (spans, descriptions,
+    registrations, display names, owners, cached insights, budgets),
+    plus two tables with a different key shape:
+
+      * `agent_connections` — edges where the agent is the *source* or
+        the *target* of a detected agent→agent call.
+      * `workflows` owned by the agent (`agent_service_name`/`agent_id`),
+        cascading to their `workflow_steps`, `workflow_participants`,
+        and `workflow_edges` (SQLite doesn't enforce the FK cascade, so
+        children are dropped explicitly — mirrors `delete_workflow`).
+
+    Workflows merely *referencing* the agent as a step/participant while
+    owned by a different agent are left intact; only workflows the agent
+    owns are removed.
 
     Account-scoped: NULL-account rows (pre-multi-tenant local dev) are
     only touched when `account_id` is None. Cross-tenant safety
@@ -4769,6 +4791,60 @@ def delete_agent(
             )
             cur.execute(sql, args)
             summary[table] = cur.rowcount
+
+        # agent_connections: the agent can sit on either end of an edge,
+        # and the columns are source_*/target_* rather than service_name,
+        # so it needs its own WHERE. Drop any edge touching the agent.
+        conn_where = [
+            "account_id = " + PH if account_id is not None else "account_id IS NULL"
+        ]
+        conn_args: list[Any] = [account_id] if account_id is not None else []
+        if agent_id is not None:
+            conn_where.append(
+                f"((source_service = {PH} AND COALESCE(source_agent_id, 'main') = {PH})"
+                f" OR (target_service = {PH} AND COALESCE(target_agent_id, 'main') = {PH}))"
+            )
+            conn_args += [service_name, agent_id, service_name, agent_id]
+        else:
+            conn_where.append(
+                f"(source_service = {PH} OR target_service = {PH})"
+            )
+            conn_args += [service_name, service_name]
+        cur.execute(
+            "DELETE FROM agent_connections WHERE " + " AND ".join(conn_where),
+            tuple(conn_args),
+        )
+        summary["agent_connections"] = cur.rowcount
+
+        # workflows owned by the agent, plus their step/participant/edge
+        # children. workflows key on agent_service_name (value is the same
+        # service_name) + agent_id, so the existing account/agent clauses
+        # and `args` apply unchanged.
+        cur.execute(
+            f"SELECT id FROM workflows "
+            f"WHERE agent_service_name = {PH} {account_clause} {agent_clause}",
+            args,
+        )
+        wf_ids = [row["id"] for row in cur.fetchall()]
+        wf_children = {
+            "workflow_edges": 0,
+            "workflow_participants": 0,
+            "workflow_steps": 0,
+        }
+        for wf_id in wf_ids:
+            # Edges reference steps, so drop edges + participants first.
+            for child in wf_children:
+                cur.execute(
+                    f"DELETE FROM {child} WHERE workflow_id = {PH}", (wf_id,)
+                )
+                wf_children[child] += cur.rowcount
+        cur.execute(
+            f"DELETE FROM workflows "
+            f"WHERE agent_service_name = {PH} {account_clause} {agent_clause}",
+            args,
+        )
+        summary["workflows"] = cur.rowcount
+        summary.update(wf_children)
     return summary
 
 
