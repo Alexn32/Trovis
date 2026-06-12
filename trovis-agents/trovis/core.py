@@ -46,6 +46,33 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     working. The fallback is permanent."""
     return os.environ.get(f"TROVIS_{name}", os.environ.get(f"OVERSEE_{name}", default))
 
+
+def _probe_endpoint(
+    endpoint: str, api_key: Optional[str], timeout: float = 5.0
+) -> tuple[bool, Optional[str]]:
+    """Verify the telemetry endpoint is actually reachable, BEFORE claiming
+    we're connected. Posts an empty OTLP batch (`{"resourceSpans": []}`) to the
+    exact ingest URL with the same auth header the exporter uses — so it tests
+    DNS, TCP, TLS, the path, AND the API key in one shot. Returns
+    (ok, reason_if_not). Never raises — a probe failure must never break the
+    agent; it just means we warn loudly instead of lying that we're connected."""
+    try:
+        import requests
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-Trovis-Api-Key"] = api_key
+        resp = requests.post(
+            endpoint, json={"resourceSpans": []}, headers=headers, timeout=timeout
+        )
+    except Exception as e:  # noqa: BLE001 — any failure → not reachable, no raise
+        return (False, f"cannot reach it ({type(e).__name__}) — check the URL/network")
+    if resp.status_code == 401:
+        return (False, "reached it, but the API key was rejected (401) — check your key")
+    if 200 <= resp.status_code < 300:
+        return (True, None)
+    return (False, f"reached it, but it returned HTTP {resp.status_code}")
+
 # Module-level state. The init() call is safe to repeat — we only set
 # up the tracer provider on the first call.
 _INITIALIZED = False
@@ -240,10 +267,23 @@ def init(
 
     _INITIALIZED = True
 
-    print(
-        f"[Trovis] Connected. Sending telemetry to {resolved_endpoint} "
-        f"as '{resolved_agent_name}'"
-    )
+    # Actually verify the endpoint before claiming we're connected. The old
+    # code printed "Connected" unconditionally — so a dead/misconfigured
+    # endpoint still looked fine and telemetry vanished silently. Now we probe
+    # and tell the truth.
+    ok, reason = _probe_endpoint(resolved_endpoint, resolved_api_key)
+    if ok:
+        print(
+            f"[Trovis] ✓ Connected — sending telemetry to {resolved_endpoint} "
+            f"as '{resolved_agent_name}'"
+        )
+    else:
+        print(
+            f"[Trovis] ⚠ NOT connected — {reason}.\n"
+            f"[Trovis]   Endpoint: {resolved_endpoint}\n"
+            f"[Trovis]   Telemetry will be dropped until this is fixed. "
+            f"Set TROVIS_ENDPOINT / TROVIS_API_KEY or pass endpoint=/api_key= to init()."
+        )
     if resolved_capture:
         print("[Trovis] Output capture: enabled")
     if active:

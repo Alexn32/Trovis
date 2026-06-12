@@ -161,6 +161,21 @@ class OTLPJsonSpanExporter(SpanExporter):
             self._headers.update(headers)
         self._timeout_sec = timeout_sec
         self._shutdown = False
+        # Print the FIRST export failure prominently (logging may not be
+        # configured in the agent's process); quieter logger.warning after,
+        # so a span batch never drops silently but we don't spam.
+        self._warned_once = False
+
+    def _on_failure(self, detail: str) -> None:
+        if not self._warned_once:
+            self._warned_once = True
+            print(
+                f"[Trovis] ⚠ Failed to send telemetry to {self._endpoint}: "
+                f"{detail}. Spans are being dropped. (Further failures are "
+                f"logged, not printed.)"
+            )
+        else:
+            logger.warning(f"[Trovis] export failed: {detail}")
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         if self._shutdown:
@@ -171,7 +186,7 @@ class OTLPJsonSpanExporter(SpanExporter):
         try:
             payload = _encode(spans)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[Trovis] OTLP/JSON encode failed: {e}")
+            self._on_failure(f"could not encode spans ({e})")
             return SpanExportResult.FAILURE
 
         try:
@@ -182,15 +197,12 @@ class OTLPJsonSpanExporter(SpanExporter):
                 timeout=self._timeout_sec,
             )
         except requests.RequestException as e:
-            logger.warning(f"[Trovis] OTLP/JSON HTTP error: {e}")
+            self._on_failure(f"HTTP error ({type(e).__name__})")
             return SpanExportResult.FAILURE
 
         if 200 <= resp.status_code < 300:
             return SpanExportResult.SUCCESS
-        logger.warning(
-            f"[Trovis] OTLP/JSON export rejected: {resp.status_code} "
-            f"{resp.text[:200]}"
-        )
+        self._on_failure(f"rejected with HTTP {resp.status_code} {resp.text[:160]}")
         return SpanExportResult.FAILURE
 
     def shutdown(self) -> None:
