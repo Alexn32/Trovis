@@ -298,6 +298,21 @@ function FeedItem({ r }) {
   const [depth, setDepth] = useState(0) // 0 collapsed · 1 exchange · 2 spans
   const isSystem = r.kind === 'system' || !r.exchange
   const dot = r.error ? C.err : isSystem ? C.faint : C.ok
+  // A small type tag so each row reads at a glance — and its color matches the
+  // status dot, so the dot's meaning is self-explanatory. Errors win; then
+  // system events; then the interaction's direction (both sides, agent-only,
+  // or user-only).
+  const tag = r.error
+    ? { label: 'Error', color: C.err }
+    : isSystem
+      ? { label: 'System', color: C.muted }
+      : r.exchange?.user && r.exchange?.agent
+        ? { label: 'Interaction', color: C.teal }
+        : r.exchange?.agent
+          ? { label: 'Agent output', color: C.teal }
+          : r.exchange?.user
+            ? { label: 'Message received', color: C.muted }
+            : { label: 'Activity', color: C.muted }
   return (
     <div style={{ borderTop: `1px solid ${C.subtle}` }}>
       <button onClick={() => setDepth(depth === 0 ? 1 : 0)} style={{
@@ -306,6 +321,11 @@ function FeedItem({ r }) {
       }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: dot }} />
         <span style={{ fontSize: 14.5, color: C.ink, flex: 1, minWidth: 0 }}>{r.summary}</span>
+        <span style={{
+          fontFamily: F.mono, fontSize: 10, fontWeight: 500, letterSpacing: '0.04em',
+          textTransform: 'uppercase', color: tag.color, background: C.subtle,
+          padding: '2px 8px', borderRadius: 6, flexShrink: 0, whiteSpace: 'nowrap',
+        }}>{tag.label}</span>
         <span style={{ fontFamily: F.mono, fontSize: 12, color: C.muted, flexShrink: 0 }}>{fmtCost(r.cost_usd)}</span>
         <span style={{ fontFamily: F.mono, fontSize: 12, color: C.muted, flexShrink: 0 }}>{fmtRel(r.time)}</span>
         <span style={{ color: C.faint, fontSize: 12, transform: depth > 0 ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>›</span>
