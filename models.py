@@ -201,6 +201,27 @@ class AgentOwnerSet(BaseModel):
     team_member_id: int
 
 
+class WaitlistRequest(BaseModel):
+    """Body for POST /waitlist (public marketing-site signup)."""
+
+    email: str
+    source: str | None = None
+    runtime_interest: str | None = None
+
+
+class WaitlistResponse(BaseModel):
+    """Result of a waitlist signup. `status` is "joined" for a new entry or
+    "already_joined" when the email was already on the list (idempotent)."""
+
+    status: str
+
+
+class WaitlistCountResponse(BaseModel):
+    """Public count of waitlist signups."""
+
+    count: int
+
+
 class WeeklyTrends(BaseModel):
     """Week-over-week percent deltas. Each field is None when there's
     no previous-week data to compare against. Positive = up, negative

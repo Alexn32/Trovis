@@ -685,6 +685,29 @@ CREATE TABLE IF NOT EXISTS agent_owners (
 )
 """
 
+# Public marketing-site waitlist. No account scoping — this is the pre-signup
+# funnel, captured before a tenant exists. Email is the natural key (UNIQUE,
+# stored lowercased + trimmed by the writer) so re-submits are idempotent.
+_WAITLIST_DDL_PG = """
+CREATE TABLE IF NOT EXISTS waitlist_signups (
+    id               SERIAL    PRIMARY KEY,
+    email            TEXT      NOT NULL UNIQUE,
+    source           TEXT,
+    runtime_interest TEXT,
+    created_at       TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_WAITLIST_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS waitlist_signups (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    email            TEXT    NOT NULL UNIQUE,
+    source           TEXT,
+    runtime_interest TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 # Cache table for Claude-generated insights (weekly summaries,
 # capability maps, …). Polymorphic on `kind` so both insight types
 # share one table; `data` is a JSON blob whose shape is determined
@@ -972,6 +995,8 @@ def init_db() -> None:
             _CONNECTIONS_DDL_PG,
             _AGENT_BUDGETS_DDL_PG,
             _OAUTH_CODES_DDL_PG,
+            # Standalone (no FKs, no account scoping) — order doesn't matter.
+            _WAITLIST_DDL_PG,
         ]
     else:
         ddls = [
@@ -995,6 +1020,7 @@ def init_db() -> None:
             _CONNECTIONS_DDL_SQLITE,
             _AGENT_BUDGETS_DDL_SQLITE,
             _OAUTH_CODES_DDL_SQLITE,
+            _WAITLIST_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -3004,6 +3030,62 @@ def get_team_members(account_id: int | None) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Waitlist (public marketing-site funnel — no auth, no account scoping)
+# ---------------------------------------------------------------------------
+
+
+def add_waitlist_signup(
+    email: str,
+    source: str | None = None,
+    runtime_interest: str | None = None,
+) -> str:
+    """Record a waitlist signup. Email is lowercased + trimmed before insert.
+
+    Idempotent: a repeat email is success, not an error — we swallow the
+    UNIQUE violation and report it. Returns "joined" for a new signup or
+    "already_joined" when the email is already on the list.
+    """
+    clean_email = (email or "").strip().lower()
+    if not clean_email:
+        raise ValueError("email is required")
+    clean_source = (source or "").strip() or None
+    clean_interest = (runtime_interest or "").strip() or None
+
+    if USE_POSTGRES:
+        sql = """
+            INSERT INTO waitlist_signups (email, source, runtime_interest)
+            VALUES (%s, %s, %s)
+        """
+        try:
+            with _connect() as conn, _cursor(conn) as cur:
+                cur.execute(sql, (clean_email, clean_source, clean_interest))
+        except psycopg2.errors.UniqueViolation:
+            return "already_joined"
+    else:
+        sql = """
+            INSERT INTO waitlist_signups (email, source, runtime_interest)
+            VALUES (?, ?, ?)
+        """
+        try:
+            with _connect() as conn, _cursor(conn) as cur:
+                cur.execute(sql, (clean_email, clean_source, clean_interest))
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE" in str(e):
+                return "already_joined"
+            raise
+
+    return "joined"
+
+
+def get_waitlist_count() -> int:
+    """Return the total number of waitlist signups."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM waitlist_signups")
+        row = cur.fetchone()
+    return int(row["n"])
 
 
 def delete_team_member(account_id: int | None, member_id: int) -> bool:

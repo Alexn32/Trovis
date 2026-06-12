@@ -23,6 +23,7 @@ load_dotenv(override=True)
 import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -91,6 +92,9 @@ from models import (
     SpanRecord,
     TeamMember,
     TeamMemberCreate,
+    WaitlistCountResponse,
+    WaitlistRequest,
+    WaitlistResponse,
     WeeklySummary,
     WeeklyTrends,
     WorkFeedItem,
@@ -131,6 +135,8 @@ _OPEN_PATHS = {
     "/oauth/authorize/submit",  # OAuth consent form submission
     "/oauth/token",              # OAuth token exchange (ChatGPT server-to-server)
     "/actions/openapi.json",     # OpenAPI spec (public, no auth)
+    "/waitlist",                 # public marketing-site signup
+    "/waitlist/count",           # public signup count for the marketing site
 }
 
 
@@ -290,12 +296,24 @@ def _require_owner(request: Request) -> int:
 # any website make credentialed requests — a real hole, and invalid per the CORS
 # spec.) To lock origins down further, set TROVIS_CORS_ORIGINS (legacy:
 # OVERSEE_CORS_ORIGINS) to a comma list.
+# The marketing site (trovisai.com) and local dev must always be able to call
+# the public /waitlist endpoint from the browser. These origins are guaranteed
+# allowed even when CORS_ORIGINS is set to a lock-down list — the default stays
+# fully open ("*"), so existing clients (dashboard, agents) are unaffected.
+_REQUIRED_CORS_ORIGINS = [
+    "https://trovisai.com",
+    "https://www.trovisai.com",
+    "http://localhost:5173",   # Vite dev server
+    "http://localhost:3000",
+]
 _cors_origins_env = (database.env("CORS_ORIGINS", "") or "").strip()
-_cors_origins = (
-    [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
-    if _cors_origins_env
-    else ["*"]
-)
+if _cors_origins_env:
+    _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    for _o in _REQUIRED_CORS_ORIGINS:
+        if _o not in _cors_origins:
+            _cors_origins.append(_o)
+else:
+    _cors_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -1518,6 +1536,37 @@ async def add_team_member(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return TeamMember(**m)
+
+
+# ---------------------------------------------------------------------------
+# Waitlist (public — no auth; see _OPEN_PATHS)
+# ---------------------------------------------------------------------------
+
+# Pragmatic email shape check (a non-empty local part, an @, and a dotted
+# domain). Matches the client-side regex on the marketing site — we don't
+# pull in a full RFC-5322 validator for a marketing funnel.
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+@app.post("/waitlist", response_model=WaitlistResponse)
+async def join_waitlist(body: WaitlistRequest) -> WaitlistResponse:
+    """Public marketing-site signup. No auth. Idempotent: a repeat email
+    returns {"status": "already_joined"} with 200 rather than erroring."""
+    email = (body.email or "").strip()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Please enter a valid email address.")
+    status = database.add_waitlist_signup(
+        email=email,
+        source=body.source,
+        runtime_interest=body.runtime_interest,
+    )
+    return WaitlistResponse(status=status)
+
+
+@app.get("/waitlist/count", response_model=WaitlistCountResponse)
+async def get_waitlist_count() -> WaitlistCountResponse:
+    """Public count of waitlist signups (for display on the marketing site)."""
+    return WaitlistCountResponse(count=database.get_waitlist_count())
 
 
 @app.delete("/team/{member_id}", status_code=204)
