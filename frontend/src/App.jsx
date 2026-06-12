@@ -46,6 +46,35 @@ function readInviteToken() {
   return null
 }
 
+// The current view (tab + overlay) lives in React state, not the URL — so a
+// browser reload would otherwise reset to the Dashboard. Persist it to
+// sessionStorage and restore on mount so reload keeps you on the page you were
+// on. sessionStorage (not local) so it's scoped to the tab and cleared on
+// logout; the URL is intentionally left unchanged (no router).
+const VIEW_KEY = 'trovis_view'
+function readPersistedView() {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(VIEW_KEY) || '{}')
+    return v && typeof v === 'object' ? v : {}
+  } catch {
+    return {}
+  }
+}
+function persistView(view) {
+  try {
+    sessionStorage.setItem(VIEW_KEY, JSON.stringify(view))
+  } catch {
+    /* ignore */
+  }
+}
+function clearPersistedView() {
+  try {
+    sessionStorage.removeItem(VIEW_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -59,9 +88,17 @@ function AppInner() {
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
   const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken)
-  const [tab, setTab] = useState('dashboard') // 'dashboard' | 'fleet' | 'team' | 'workflows'
-  // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'}
-  const [overlay, setOverlay] = useState(null)
+  // Restore the last view on mount so a browser reload stays put (see VIEW_KEY).
+  const persistedView = useRef(readPersistedView()).current
+  const [tab, setTab] = useState(persistedView.tab || 'dashboard') // 'dashboard' | 'fleet' | 'team' | 'workflows'
+  // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'} | {kind:'cost'} | {kind:'workfeed'}
+  const [overlay, setOverlay] = useState(persistedView.overlay || null)
+
+  // Persist the current view (tab + overlay) on every change so a reload
+  // returns here instead of the Dashboard.
+  useEffect(() => {
+    persistView({ tab, overlay })
+  }, [tab, overlay])
 
   // Validate the saved credential on first mount (skip when landing on an
   // invite link — the visitor should see the accept form first).
@@ -108,8 +145,9 @@ function AppInner() {
     }
     clearSessionToken()
     clearApiKey()
+    clearPersistedView()
     setMe(null)
-    setTab('fleet')
+    setTab('dashboard')
     setOverlay(null)
   }
 
