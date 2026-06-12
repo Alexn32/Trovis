@@ -8,6 +8,7 @@ and immediately understand each agent's job.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -37,6 +38,31 @@ REGISTRATION_SYSTEM_PROMPT = (
     "data for operational details like frequency, performance, and error "
     "rates. Write a clear, confident description for a non-technical "
     "operations manager. One paragraph, 3-5 sentences."
+)
+
+# Two-field description contract (the redesigned Agent Detail header shows the
+# short line, with the long form behind a "More" toggle). Appended to whichever
+# system prompt is used so the model returns structured JSON instead of prose.
+_DESC_JSON_RULES = (
+    "\n\nReturn ONLY a JSON object, nothing else:\n"
+    '{"short": "...", "long": "..."}\n'
+    "- short: ONE declarative sentence, max 20 words, present tense, describing "
+    "what the agent does. No hedging words (appears, seems, likely, may, "
+    "probably). Never mention telemetry, spans, span counts, runs, tokens, cost, "
+    "or data volume.\n"
+    "- long: 2-3 sentences of additional context about how it works and its "
+    "role. Same rules — present tense, declarative, no hedging, no telemetry "
+    "references."
+)
+
+# One-line, past-tense summary of a single interaction for the Work Feed.
+RECORD_SUMMARY_SYSTEM_PROMPT = (
+    "You summarize one interaction an AI agent had, for a non-technical reader. "
+    "Given the user's message and the agent's response, write ONE sentence, "
+    "max 12 words, past tense, starting with a verb — e.g. 'Answered a question "
+    "about pricing', 'Drafted a reply about refunds', 'Rejected an off-brand "
+    "post'. Never include IDs, span names, token counts, or quotes. Return ONLY "
+    "the sentence, no quotes, no JSON, no trailing period required."
 )
 
 
@@ -247,11 +273,11 @@ def describe_agent(
     )
 
     if has_registration_content:
-        system_prompt = REGISTRATION_SYSTEM_PROMPT
+        system_prompt = REGISTRATION_SYSTEM_PROMPT + _DESC_JSON_RULES
         user_prompt = _build_registration_prompt(summary, registration, outputs)
         source = "registration"
     else:
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = SYSTEM_PROMPT + _DESC_JSON_RULES
         user_prompt = _build_prompt(summary, spans, outputs)
         source = "telemetry_only"
 
@@ -263,17 +289,74 @@ def describe_agent(
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    description = "".join(
+    raw = "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
+    short, long = _parse_two_field_description(raw)
 
     return {
         "service_name": service_name,
-        "description": description,
+        # `description` stays the canonical field (= short) so every existing
+        # reader keeps working; `description_long` carries the extended context.
+        "description": short,
+        "description_long": long,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "span_count_analyzed": len(spans),
         "source": source,
     }
+
+
+def _parse_two_field_description(raw: str) -> tuple[str, str]:
+    """Parse the model's `{"short","long"}` reply, tolerant of ``` fences and
+    plain prose. On any failure, fall back to treating the whole reply as the
+    short field with an empty long. Never raises."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and isinstance(parsed.get("short"), str):
+            short = parsed["short"].strip()
+            long = parsed.get("long")
+            return short, (long.strip() if isinstance(long, str) else "")
+    except (ValueError, TypeError):
+        pass
+    return (raw or "").strip(), ""
+
+
+def record_summary(
+    user_text: str | None, agent_text: str | None
+) -> str:
+    """One-sentence, past-tense, verb-first summary of a single interaction for
+    the Work Feed. Returns "" when nothing usable / no API key (the caller then
+    falls back to a generic label). Records are immutable, so the caller caches
+    this permanently by record id and never regenerates."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return ""
+    u = (user_text or "").strip()
+    a = (agent_text or "").strip()
+    if not u and not a:
+        return ""
+    user_prompt = f"USER: {u[:1500]}\n\nAGENT: {a[:1500]}"
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=40,
+            system=RECORD_SUMMARY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        text = "".join(
+            b.text for b in response.content if getattr(b, "type", None) == "text"
+        ).strip()
+    except Exception:  # noqa: BLE001 — summary is best-effort, never break the feed
+        return ""
+    # Strip stray wrapping quotes / trailing period the model sometimes adds.
+    return text.strip().strip('"').rstrip(".").strip()
 
 
 # ---------------------------------------------------------------------------

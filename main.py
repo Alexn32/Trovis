@@ -41,6 +41,8 @@ from models import (
     AgentCosts,
     AgentDeleteResponse,
     AgentDescription,
+    AgentRecord,
+    AgentRecordsResponse,
     AgentGroup,
     AgentOutput,
     AgentOwnerSet,
@@ -635,19 +637,104 @@ async def list_agents(request: Request) -> list[AgentGroup]:
     return [AgentGroup(**a) for a in database.get_agents(account_id=account_id)]
 
 
+def _humanize_seconds(s: float) -> str:
+    """Compact human duration: 45s / 12m / 3h / 2d."""
+    s = max(0, int(s))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def _humanize_cadence(seconds: float | None) -> str:
+    """Turn a median run-interval into a cadence phrase: hourly / daily / every 15m."""
+    if not seconds or seconds <= 0:
+        return "regularly"
+    if seconds < 90:
+        return "about every minute"
+    if seconds < 3600:
+        return f"about every {int(round(seconds / 60))}m"
+    if seconds < 5400:
+        return "hourly"
+    if seconds < 86400:
+        return f"about every {int(round(seconds / 3600))}h"
+    if seconds < 129600:
+        return "daily"
+    return f"about every {int(round(seconds / 86400))}d"
+
+
+def _detail_status(stats: dict) -> tuple[str, str]:
+    """Derive the Agent Detail status + a human reason (never a dot without a
+    reason). error → latest record errored; attention → quiet beyond the agent's
+    usual cadence; healthy → recently active."""
+    from time import time as _time
+
+    last_ns = stats.get("last_record_ns")
+    if stats.get("last_record_errored") and last_ns:
+        rel = _humanize_seconds(_time() - last_ns / 1_000_000_000)
+        op = stats.get("last_error_op") or "the last run"
+        return "error", f"Last run failed — {op} errored {rel} ago"
+    if last_ns is None:
+        # Connected (maybe a registration span) but no real interaction yet.
+        return "healthy", "Connected — waiting for its first run"
+    age_s = _time() - last_ns / 1_000_000_000
+    cadence_s = stats.get("cadence_seconds")
+    # Quiet beyond ~2× the usual interval (or >24h when cadence is unknown).
+    threshold = (cadence_s * 2) if cadence_s else 86400.0
+    if age_s > threshold:
+        return (
+            "attention",
+            f"No runs for {_humanize_seconds(age_s)}; this agent usually runs "
+            f"{_humanize_cadence(cadence_s)}",
+        )
+    return "healthy", f"Active — last run {_humanize_seconds(age_s)} ago"
+
+
 @app.get("/agents/{service_name}/summary", response_model=AgentSummary)
 async def agent_summary(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
 ) -> AgentSummary:
-    """Per-instance summary by default; per-agent when `?agent_id=` is set."""
+    """Per-instance summary by default; per-agent when `?agent_id=` is set.
+    Adds status-with-reason and (regenerating once if missing) the two-field
+    description the redesigned detail page renders."""
     account_id = getattr(request.state, "account_id", None)
     summary = database.get_agent_summary(
         service_name, account_id=account_id, agent_id=agent_id
     )
     if summary is None:
         raise HTTPException(status_code=404, detail=f"agent '{service_name}' not found")
+
+    # Status + reason from record-level stats (trace-grouped, registration excluded).
+    stats = database.get_agent_record_stats(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
+    summary["status"], summary["status_reason"] = _detail_status(stats)
+
+    # Description v2: regenerate once if the short/long pair is missing (pre-v2
+    # rows have no description_long). Best-effort — never fail the page.
+    if not summary.get("description_long"):
+        try:
+            result = describer.describe_agent(
+                service_name, account_id=account_id, agent_id=agent_id
+            )
+            database.save_description(
+                service_name=result["service_name"],
+                description=result["description"],
+                span_count_analyzed=result["span_count_analyzed"],
+                account_id=account_id,
+                agent_id=agent_id or "main",
+                description_long=result.get("description_long"),
+            )
+            summary["description"] = result["description"]
+            summary["description_long"] = result.get("description_long")
+        except (describer.APIKeyMissingError, describer.AgentNotFoundError, Exception):
+            pass  # keep whatever description we already had
+
     return AgentSummary(**summary)
 
 
@@ -665,6 +752,86 @@ async def agent_spans(
             service_name, limit, account_id=account_id, agent_id=agent_id
         )
     ]
+
+
+_REGISTRATION_SUMMARY = "Registered with the fleet and declared its identity"
+
+
+@app.get("/agents/{service_name}/records", response_model=AgentRecordsResponse)
+async def agent_records(
+    service_name: str,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+) -> AgentRecordsResponse:
+    """The Work Feed: interactions (one per trace_id), newest first, cursor-
+    paginated. Each record's plain-English `summary` is generated by Claude
+    once and cached permanently by record id (records are immutable). System
+    records (registration / no exchange) get a fixed summary — no Claude call."""
+    account_id = getattr(request.state, "account_id", None)
+    before_ns = None
+    if cursor:
+        try:
+            before_ns = int(cursor)
+        except (TypeError, ValueError):
+            before_ns = None
+
+    rows, next_cursor = database.get_agent_records(
+        service_name,
+        account_id=account_id,
+        agent_id=agent_id,
+        limit=limit,
+        before_ns=before_ns,
+    )
+
+    out: list[AgentRecord] = []
+    for r in rows:
+        exchange = r.get("exchange")
+        is_system = bool(r.get("is_registration")) or exchange is None
+        if is_system:
+            summary = _REGISTRATION_SUMMARY
+        else:
+            # Cache permanently by the immutable record id (trace_id).
+            cache_kind = f"record:{r['id']}"
+            cached = database.get_insight(
+                account_id, service_name, agent_id or "main", cache_kind
+            )
+            if cached and cached.get("data", {}).get("summary"):
+                summary = cached["data"]["summary"]
+            else:
+                summary = ""
+                try:
+                    summary = describer.record_summary(
+                        exchange.get("user"), exchange.get("agent")
+                    )
+                except Exception:  # noqa: BLE001 — best-effort
+                    summary = ""
+                if summary:
+                    database.save_insight(
+                        account_id,
+                        service_name,
+                        agent_id or "main",
+                        cache_kind,
+                        {"summary": summary},
+                    )
+            if not summary:
+                summary = "Handled an interaction"  # graceful fallback
+        out.append(
+            AgentRecord(
+                id=r["id"],
+                summary=summary,
+                time=r.get("time"),
+                cost_usd=r.get("cost_usd"),
+                duration_ms=r.get("duration_ms", 0.0),
+                tokens=r.get("tokens", 0),
+                kind="system" if is_system else "interaction",
+                error=bool(r.get("error")),
+                exchange=(None if is_system else exchange),
+                spans=r.get("spans", []),
+            )
+        )
+    return AgentRecordsResponse(records=out, next_cursor=next_cursor)
 
 
 @app.post("/agents/{service_name}/describe", response_model=AgentDescription)
@@ -695,6 +862,7 @@ async def generate_description(
         span_count_analyzed=result["span_count_analyzed"],
         account_id=account_id,
         agent_id=agent_id or "main",
+        description_long=result.get("description_long"),
     )
     return AgentDescription(**result)
 

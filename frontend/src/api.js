@@ -344,6 +344,14 @@ export const api = {
       },
     ),
 
+  // Work Feed: trace-grouped interaction records, newest first.
+  // Returns { records: [...], next_cursor }. Pass next_cursor back as `cursor`.
+  getAgentRecords: (name, { limit = 20, cursor = null, agentId = null } = {}) => {
+    let path = `/agents/${encodeURIComponent(name)}/records?limit=${limit}`
+    if (cursor) path += `&cursor=${encodeURIComponent(cursor)}`
+    return request(_withAgent(path, agentId))
+  },
+
   // --- dashboard (daily briefing) ---
   getBriefing: () => request('/dashboard/briefing'),
   getAttention: () => request('/dashboard/attention'),

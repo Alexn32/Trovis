@@ -146,6 +146,14 @@ def _ns_to_iso(ns: int | None) -> str | None:
     return datetime.fromtimestamp(int(ns) / 1_000_000_000, tz=timezone.utc).isoformat()
 
 
+# "First seen" floor: 2025-01-01 UTC in ns. Trovis didn't exist before this, so
+# any span timestamped earlier is a bad-clock / wrong-epoch artifact (e.g. an
+# agent host with a skewed clock). MIN(start_time_unix) would otherwise surface
+# that as a bogus "first seen" date (the 11/14/2023 bug). We exclude pre-floor
+# timestamps from first-seen computations at the source.
+_FIRST_SEEN_FLOOR_NS = 1_735_689_600_000_000_000  # 2025-01-01T00:00:00Z
+
+
 # ---------------------------------------------------------------------------
 # Password hashing + opaque tokens (stdlib only — no bcrypt/passlib dep)
 # ---------------------------------------------------------------------------
@@ -1004,6 +1012,11 @@ def init_db() -> None:
         # Same backfill for descriptions — pre-multi-agent rows were
         # generated from main's SOUL.md, so 'main' is the correct tag.
         _try_add_column(cur, "descriptions", "agent_id", "TEXT DEFAULT 'main'")
+        # Two-field descriptions (redesigned Agent Detail header): `description`
+        # holds the short declarative line; `description_long` the 2-3 sentence
+        # context shown behind "More". NULL on pre-v2 rows → the detail endpoint
+        # treats a NULL long as "regenerate this description on next read".
+        _try_add_column(cur, "descriptions", "description_long", "TEXT DEFAULT NULL")
         # Token + cost columns on spans. NULL on existing rows (we never
         # captured tokens before), which the cost aggregates treat as
         # "no usage data" — they SUM only non-NULL rows.
@@ -1809,17 +1822,19 @@ def save_description(
     span_count_analyzed: int,
     account_id: int | None = None,
     agent_id: str | None = None,
+    description_long: str | None = None,
 ) -> None:
     """Persist a newly generated description (append-only — history kept).
 
-    `agent_id` scopes the description to one sub-agent within an
-    instance. Passing None defaults to 'main' — pre-multi-agent
-    descriptions were always for the lone 'main' agent, so this keeps
-    backwards-compat for callers that don't pass agent_id.
+    `description` is the short declarative line; `description_long` is the
+    optional 2-3 sentence context. `agent_id` scopes the description to one
+    sub-agent within an instance. Passing None defaults to 'main' — pre-
+    multi-agent descriptions were always for the lone 'main' agent, so this
+    keeps backwards-compat for callers that don't pass agent_id.
     """
     sql = f"""
-        INSERT INTO descriptions (service_name, agent_id, description, span_count_analyzed, account_id)
-        VALUES ({PH}, {PH}, {PH}, {PH}, {PH})
+        INSERT INTO descriptions (service_name, agent_id, description, description_long, span_count_analyzed, account_id)
+        VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})
     """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
@@ -1828,6 +1843,7 @@ def save_description(
                 service_name,
                 agent_id or "main",
                 description,
+                description_long,
                 span_count_analyzed,
                 account_id,
             ),
@@ -1911,7 +1927,7 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             COUNT(*)                                         AS span_count,
             SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
-            MIN(start_time_unix)                             AS first_seen_ns,
+            MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS} THEN start_time_unix END) AS first_seen_ns,
             MAX(start_time_unix)                             AS last_seen_ns,
             SUM(total_tokens)                                AS total_tokens,
             SUM(estimated_cost_usd)                          AS estimated_cost_usd,
@@ -2196,6 +2212,297 @@ def get_agent_spans(
     return spans
 
 
+# Span names that mark a record as a "system" event (no real exchange).
+_SYSTEM_SPAN_NAMES = {"agent_registration", "heartbeat"}
+
+
+def _fmt_dur_ns(ns: int | None) -> str:
+    """Human duration from a nanosecond delta: 38µs / 51ms / 8.85s."""
+    if not ns or ns < 0:
+        return "0ms"
+    if ns < 1_000_000:  # < 1ms
+        return f"{int(ns / 1000)}µs"
+    if ns < 1_000_000_000:  # < 1s
+        return f"{int(ns / 1_000_000)}ms"
+    return f"{ns / 1_000_000_000:.2f}s"
+
+
+def _clean_msg(v: Any) -> str | None:
+    """Best-effort clean human text from a captured message/response value.
+
+    Captured content can arrive wrapped: an OpenAI `Response(...)` repr, a JSON
+    envelope (`{"role":...,"content":...}` or a list of message dicts), or plain
+    text. Pull the readable text out; return None when there's nothing usable so
+    the caller can fall back to a system record. Never raises."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    # Unwrap an OpenAI Responses/Generation repr: Response(... output_text='...')
+    if "Response(" in s[:40] or "output_text=" in s or "ResponseOutput" in s:
+        m = re.search(r"(?:output_text|text|content)=['\"](.+?)['\"](?:[,)\]]|$)", s, re.S)
+        if m:
+            s = m.group(1)
+    # JSON envelope: dict with content/text, or a list of message dicts.
+    if s[:1] in "{[":
+        try:
+            parsed = json.loads(s)
+        except (ValueError, TypeError):
+            parsed = None
+        text = _text_from_json(parsed)
+        if text:
+            s = text
+    # Decode escaped sequences left behind by a repr/JSON unwrap.
+    s = s.replace("\\n", "\n").replace('\\"', '"').strip()
+    return s or None
+
+
+def _text_from_json(parsed: Any) -> str | None:
+    """Pull readable text from a parsed JSON message / list of messages."""
+    if isinstance(parsed, str):
+        return parsed.strip() or None
+    if isinstance(parsed, dict):
+        for k in ("content", "text", "output_text", "message"):
+            val = parsed.get(k)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if isinstance(val, (list, dict)):
+                inner = _text_from_json(val)
+                if inner:
+                    return inner
+        return None
+    if isinstance(parsed, list):
+        parts = [_text_from_json(x) for x in parsed]
+        parts = [p for p in parts if p]
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def _extract_exchange(span_attrs: list[dict[str, Any]]) -> dict[str, str] | None:
+    """From a trace's spans (parsed attribute dicts, in time order), pull the
+    user prompt and agent response as clean text. Returns {"user","agent"} or
+    None when neither side is recoverable (→ a system record)."""
+    user = None
+    agent = None
+    for attrs in span_attrs:
+        if user is None:
+            user = _clean_msg(attr(attrs, "message.content"))
+        if agent is None:
+            agent = _clean_msg(
+                attr(attrs, "response.content") or attr(attrs, "tool.result")
+            )
+    if user is None and agent is None:
+        return None
+    return {"user": user or "", "agent": agent or ""}
+
+
+def get_agent_records(
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
+    limit: int = 20,
+    before_ns: int | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """One "record" = one interaction = all spans sharing a trace_id, newest
+    first. Returns (records, next_cursor). Cursor is the record-start ns of the
+    last row; pass it back as `before_ns` to page. Pure DB — the plain-English
+    `summary` is generated + cached by the caller (keyed by the immutable
+    record id = trace_id)."""
+    limit = max(1, min(100, int(limit)))
+    acct = f"AND account_id = {PH}" if account_id is not None else ""
+    agent = f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    having = f"HAVING MIN(start_time_unix) < {PH}" if before_ns is not None else ""
+
+    page_sql = f"""
+        SELECT trace_id,
+               MIN(start_time_unix)                            AS rec_start_ns,
+               MAX(end_time_unix)                              AS rec_end_ns,
+               SUM(total_tokens)                               AS tokens,
+               SUM(estimated_cost_usd)                         AS cost,
+               SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_spans,
+               COUNT(*)                                        AS span_count
+        FROM spans
+        WHERE service_name = {PH} {acct} {agent}
+        GROUP BY trace_id
+        {having}
+        ORDER BY rec_start_ns DESC
+        LIMIT {PH}
+    """
+    page_args: list[Any] = [service_name]
+    if account_id is not None:
+        page_args.append(account_id)
+    if agent_id is not None:
+        page_args.append(agent_id)
+    if before_ns is not None:
+        page_args.append(int(before_ns))
+    page_args.append(limit)
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(page_sql, tuple(page_args))
+        page = cur.fetchall()
+        if not page:
+            return [], None
+        trace_ids = [r["trace_id"] for r in page]
+
+        # Fetch every span for this page's traces in one round-trip.
+        in_ph = ", ".join([PH] * len(trace_ids))
+        span_sql = f"""
+            SELECT trace_id, span_name, start_time_unix, end_time_unix,
+                   status_code, attributes
+            FROM spans
+            WHERE service_name = {PH} {acct} {agent}
+              AND trace_id IN ({in_ph})
+            ORDER BY start_time_unix ASC
+        """
+        span_args: list[Any] = [service_name]
+        if account_id is not None:
+            span_args.append(account_id)
+        if agent_id is not None:
+            span_args.append(agent_id)
+        span_args.extend(trace_ids)
+        cur.execute(span_sql, tuple(span_args))
+        span_rows = cur.fetchall()
+
+    # Group spans by trace.
+    by_trace: dict[str, list[Any]] = {}
+    for sr in span_rows:
+        by_trace.setdefault(sr["trace_id"], []).append(sr)
+
+    records: list[dict[str, Any]] = []
+    for prow in page:
+        tid = prow["trace_id"]
+        srows = by_trace.get(tid, [])
+        span_list = []
+        attrs_list = []
+        only_system = True
+        for sr in srows:
+            try:
+                a = json.loads(sr["attributes"] or "{}")
+            except (ValueError, TypeError):
+                a = {}
+            attrs_list.append(a if isinstance(a, dict) else {})
+            if sr["span_name"] not in _SYSTEM_SPAN_NAMES:
+                only_system = False
+            span_list.append(
+                {
+                    "operation": sr["span_name"],
+                    "duration": _fmt_dur_ns(
+                        (sr["end_time_unix"] or 0) - (sr["start_time_unix"] or 0)
+                    ),
+                    "status": "error" if sr["status_code"] == 2 else "ok",
+                }
+            )
+        exchange = None if only_system else _extract_exchange(attrs_list)
+        is_registration = only_system or exchange is None
+        rec_start = prow["rec_start_ns"]
+        records.append(
+            {
+                "id": tid,
+                "time": _ns_to_iso(rec_start),
+                "cost_usd": (
+                    round(float(prow["cost"]), 6) if prow["cost"] is not None else None
+                ),
+                "duration_ms": max(
+                    0.0, ((prow["rec_end_ns"] or 0) - (rec_start or 0)) / 1_000_000.0
+                ),
+                "tokens": int(prow["tokens"] or 0),
+                "error": (prow["error_spans"] or 0) > 0,
+                "is_registration": bool(is_registration),
+                "exchange": exchange,
+                "spans": span_list,
+                "_start_ns": rec_start,  # internal: cursor source
+            }
+        )
+
+    next_cursor = str(records[-1]["_start_ns"]) if len(records) == limit else None
+    for r in records:
+        r.pop("_start_ns", None)
+    return records, next_cursor
+
+
+def get_agent_record_stats(
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Record-level stats for the detail page's status pill + This Week strip:
+    total records, records in the last 7d, the latest record's time + whether
+    it errored + its dominant operation, and the agent's typical run cadence
+    (median gap between recent records; None when <5 records)."""
+    acct = f"AND account_id = {PH}" if account_id is not None else ""
+    agent = f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    base_args: list[Any] = [service_name]
+    if account_id is not None:
+        base_args.append(account_id)
+    if agent_id is not None:
+        base_args.append(agent_id)
+
+    recent_sql = f"""
+        SELECT trace_id,
+               MIN(start_time_unix)                            AS rec_start_ns,
+               SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_spans
+        FROM spans
+        WHERE service_name = {PH} {acct} {agent}
+          AND span_name NOT IN ('agent_registration', 'heartbeat')
+        GROUP BY trace_id
+        ORDER BY rec_start_ns DESC
+        LIMIT 50
+    """
+    total_sql = f"""
+        SELECT COUNT(DISTINCT trace_id) AS n
+        FROM spans
+        WHERE service_name = {PH} {acct} {agent}
+          AND span_name NOT IN ('agent_registration', 'heartbeat')
+    """
+    from time import time as _time
+
+    week_ns = int(_time() * 1_000_000_000) - 7 * 24 * 60 * 60 * 1_000_000_000
+    week_sql = f"""
+        SELECT COUNT(DISTINCT trace_id) AS n
+        FROM spans
+        WHERE service_name = {PH} {acct} {agent}
+          AND span_name NOT IN ('agent_registration', 'heartbeat')
+          AND start_time_unix >= {PH}
+    """
+    last_err_sql = f"""
+        SELECT span_name
+        FROM spans
+        WHERE service_name = {PH} {acct} {agent}
+          AND status_code = 2
+        ORDER BY start_time_unix DESC
+        LIMIT 1
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(recent_sql, tuple(base_args))
+        recent = cur.fetchall()
+        cur.execute(total_sql, tuple(base_args))
+        total = cur.fetchone()
+        cur.execute(week_sql, tuple([*base_args, week_ns]))
+        week = cur.fetchone()
+        cur.execute(last_err_sql, tuple(base_args))
+        last_err = cur.fetchone()
+
+    starts = [r["rec_start_ns"] for r in recent if r["rec_start_ns"]]
+    last_ns = starts[0] if starts else None
+    last_errored = bool(recent[0]["error_spans"]) if recent else False
+    # Median gap between consecutive recent records (newest-first → diffs).
+    cadence_s = None
+    if len(starts) >= 5:
+        gaps = sorted(starts[i] - starts[i + 1] for i in range(len(starts) - 1))
+        if gaps:
+            mid = gaps[len(gaps) // 2] / 1_000_000_000.0
+            cadence_s = mid if mid > 0 else None
+    return {
+        "total_records": int(total["n"]) if total else 0,
+        "records_7d": int(week["n"]) if week else 0,
+        "last_record_ns": last_ns,
+        "last_record_errored": last_errored,
+        "last_error_op": last_err["span_name"] if last_err else None,
+        "cadence_seconds": cadence_s,
+    }
+
+
 def get_agent_summary(
     service_name: str,
     account_id: int | None = None,
@@ -2223,7 +2530,7 @@ def get_agent_summary(
             COUNT(*)                                       AS span_count,
             SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
-            MIN(start_time_unix)                           AS first_seen_ns,
+            MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS} THEN start_time_unix END) AS first_seen_ns,
             MAX(start_time_unix)                           AS last_seen_ns,
             SUM(total_tokens)                              AS total_tokens,
             SUM(estimated_cost_usd)                        AS estimated_cost_usd
@@ -2250,7 +2557,7 @@ def get_agent_summary(
         f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
     )
     desc_sql = f"""
-        SELECT description
+        SELECT description, description_long
         FROM descriptions
         WHERE service_name = {PH}
           {desc_account_filter}
@@ -2343,6 +2650,9 @@ def get_agent_summary(
         "last_seen": _ns_to_iso(row["last_seen_ns"]),
         "top_operations": [r["span_name"] for r in top_ops_rows],
         "description": desc_row["description"] if desc_row else None,
+        "description_long": (
+            desc_row["description_long"] if desc_row else None
+        ),
         "platform": _detect_platform(
             sample_row["resource_attributes"] if sample_row else None
         ),
@@ -2373,7 +2683,7 @@ def get_latest_description(
         f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
     )
     sql = f"""
-        SELECT service_name, agent_id, description, span_count_analyzed, generated_at
+        SELECT service_name, agent_id, description, description_long, span_count_analyzed, generated_at
         FROM descriptions
         WHERE service_name = {PH}
           {account_filter}
@@ -2396,6 +2706,7 @@ def get_latest_description(
         "service_name": row["service_name"],
         "agent_id": row["agent_id"] or "main",
         "description": row["description"],
+        "description_long": row["description_long"],
         "span_count_analyzed": row["span_count_analyzed"],
         "generated_at": _ts_to_str(row["generated_at"]),
     }
