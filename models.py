@@ -42,6 +42,9 @@ class AgentSummary(BaseModel):
     last_seen: str | None = None
     top_operations: list[str] = Field(default_factory=list)
     description: str | None = None
+    # The 2-3 sentence extended description (shown behind the header "More"
+    # toggle). None on pre-v2 rows → the detail endpoint regenerates on read.
+    description_long: str | None = None
     has_registration: bool = False
     # Best-effort label inferred from resource attributes
     # (e.g. "OpenClaw Agent", "Python Agent"). None when no
@@ -53,6 +56,10 @@ class AgentSummary(BaseModel):
     owner_role: str | None = None
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    # Detail-page status with a human reason (never a dot without a reason):
+    # 'healthy' | 'attention' | 'error', plus the one-line explanation.
+    status: str = "healthy"
+    status_reason: str = ""
 
 
 class AgentInstance(BaseModel):
@@ -573,6 +580,7 @@ class AgentDescription(BaseModel):
 
     service_name: str
     description: str
+    description_long: str | None = None
     span_count_analyzed: int | None = None
     generated_at: str
     source: str | None = None
@@ -816,6 +824,50 @@ class SpanRecord(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     resource_attributes: dict[str, Any] = Field(default_factory=dict)
     created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Work Feed records (Agent Detail — one record == one trace == one interaction)
+# ---------------------------------------------------------------------------
+
+
+class RecordSpanItem(BaseModel):
+    """A single span inside a record, shown in the deepest Work Feed view."""
+
+    operation: str
+    duration: str  # pre-formatted, e.g. "8.85s" / "38µs"
+    status: str = "ok"  # 'ok' | 'error'
+
+
+class RecordExchange(BaseModel):
+    """The cleaned user prompt + agent response for an interaction record.
+    None on system records (no exchange to show)."""
+
+    user: str = ""
+    agent: str = ""
+
+
+class AgentRecord(BaseModel):
+    """One Work Feed record. `kind` is 'interaction' (has an exchange) or
+    'system' (registration/heartbeat — fixed summary, no exchange)."""
+
+    id: str  # the trace_id (immutable → summary cache key)
+    summary: str = ""
+    time: str | None = None
+    cost_usd: float | None = None
+    duration_ms: float = 0.0
+    tokens: int = 0
+    kind: str = "interaction"
+    error: bool = False
+    exchange: RecordExchange | None = None
+    spans: list[RecordSpanItem] = Field(default_factory=list)
+
+
+class AgentRecordsResponse(BaseModel):
+    """Cursor-paginated page of Work Feed records, newest first."""
+
+    records: list[AgentRecord] = Field(default_factory=list)
+    next_cursor: str | None = None
 
 
 class IngestResponse(BaseModel):
