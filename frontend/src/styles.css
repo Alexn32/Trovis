@@ -4621,6 +4621,13 @@ a:hover {
 textarea.wf2-input { resize: vertical; line-height: 1.5; }
 .wf2-hint { font-size: 11px; color: var(--text-muted); }
 
+.wf2-agent-groups { display: flex; flex-direction: column; gap: 12px; }
+.wf2-agent-group { display: flex; flex-direction: column; gap: 6px; }
+.wf2-agent-group-label {
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.wf2-agent-group-label small { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-dim); }
 .wf2-agent-pills { display: flex; flex-wrap: wrap; gap: 6px; }
 .wf2-agent-pill {
   font-size: 12px; font-weight: 500; padding: 6px 12px; border-radius: 100px;

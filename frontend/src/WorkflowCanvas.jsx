@@ -1067,6 +1067,29 @@ function HeadStat({ label, value, tone }) {
   )
 }
 
+// Flatten one /agents group into selectable units. A flat group (single
+// 'main' sub-agent) yields one unit labeled by the service; a multi-agent
+// group yields one unit per sub-agent so a specific sub-agent can be
+// dropped into the workflow roster.
+function selectableAgents(group) {
+  const list = group.agents || []
+  const isFlat = list.length <= 1 && (list[0]?.agent_id ?? 'main') === 'main'
+  if (isFlat) {
+    return [
+      {
+        service_name: group.service_name,
+        agent_id: 'main',
+        label: group.display_name || group.service_name,
+      },
+    ]
+  }
+  return list.map((a) => ({
+    service_name: group.service_name,
+    agent_id: a.agent_id,
+    label: a.display_name || a.agent_id,
+  }))
+}
+
 // Small popover for adding an agent or human role to the roster.
 function RosterAdd({ workflowId, onClose, onDone }) {
   const [mode, setMode] = useState('agent')
@@ -1078,10 +1101,14 @@ function RosterAdd({ workflowId, onClose, onDone }) {
     api.listAgents().then((l) => setAgents(l || [])).catch(() => {})
   }, [])
 
-  function addAgent(svc) {
+  function addAgent(svc, aid) {
     setBusy(true)
     api
-      .addWorkflowParticipant(workflowId, { type: 'agent', agent_service_name: svc, agent_id: 'main' })
+      .addWorkflowParticipant(workflowId, {
+        type: 'agent',
+        agent_service_name: svc,
+        agent_id: aid || 'main',
+      })
       .then(onDone)
       .catch(() => {
         setBusy(false)
@@ -1111,19 +1138,55 @@ function RosterAdd({ workflowId, onClose, onDone }) {
         </button>
       </div>
       {mode === 'agent' ? (
-        <div className="wf2-agent-pills">
+        <div className="wf2-agent-groups">
           {agents.length === 0 && <span className="wf2-hint">No agents reporting telemetry.</span>}
-          {agents.map((g) => (
-            <button
-              key={g.service_name}
-              type="button"
-              className="wf2-agent-pill"
-              disabled={busy}
-              onClick={() => addAgent(g.service_name)}
-            >
-              {g.display_name || g.service_name}
-            </button>
-          ))}
+          {(() => {
+            const flat = agents.filter((g) => selectableAgents(g).length === 1)
+            const grouped = agents.filter((g) => selectableAgents(g).length > 1)
+            return (
+              <>
+                {flat.length > 0 && (
+                  <div className="wf2-agent-pills">
+                    {flat.map((g) => {
+                      const u = selectableAgents(g)[0]
+                      return (
+                        <button
+                          key={g.service_name}
+                          type="button"
+                          className="wf2-agent-pill"
+                          disabled={busy}
+                          onClick={() => addAgent(u.service_name, u.agent_id)}
+                        >
+                          {u.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {grouped.map((g) => (
+                  <div className="wf2-agent-group" key={g.service_name}>
+                    <span className="wf2-agent-group-label">
+                      {g.display_name || g.service_name}
+                      <small> · sub-agents</small>
+                    </span>
+                    <div className="wf2-agent-pills">
+                      {selectableAgents(g).map((u) => (
+                        <button
+                          key={u.agent_id}
+                          type="button"
+                          className="wf2-agent-pill"
+                          disabled={busy}
+                          onClick={() => addAgent(u.service_name, u.agent_id)}
+                        >
+                          {u.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )
+          })()}
         </div>
       ) : (
         <div className="wf2-roster-human">
