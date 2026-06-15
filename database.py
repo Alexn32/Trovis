@@ -1077,6 +1077,9 @@ def init_db() -> None:
         # Set when the owner finishes (or skips) the post-signup onboarding
         # wizard. NULL → wizard still shows for the owner.
         _try_add_column(cur, "accounts", "onboarded_at", "TIMESTAMP")
+        # Plan tier gates how many agents are *viewable* (never how many are
+        # recorded). Default 'free'. See _AGENT_LIMIT_BY_PLAN / agent_limit().
+        _try_add_column(cur, "accounts", "plan", "TEXT DEFAULT 'free'")
         # Connection edges gained "what's transferred" metrics post-launch.
         _try_add_column(cur, "agent_connections", "via_operations", "TEXT")
         _try_add_column(cur, "agent_connections", "total_tokens", "INTEGER DEFAULT 0")
@@ -2052,6 +2055,10 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
     # round-trip is enough.
     groups: dict[str, dict[str, Any]] = {}
 
+    # View-lock state under the account's plan (telemetry is never gated).
+    lock = get_locked_state(account_id)
+    locked_keys = lock["locked"]
+
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(agg_sql, agg_args)
         agg_rows = cur.fetchall()
@@ -2083,6 +2090,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
                 "cost_today": round(float(row["cost_today"] or 0.0), 6),
                 "cost_7d": round(float(row["cost_7d"] or 0.0), 6),
+                # View-locked when this agent's first-seen position exceeds the
+                # plan's agent limit. Its telemetry is still fully recorded.
+                "locked": (sn, row["agent_id"] or "main") in locked_keys,
             }
             if sn not in groups:
                 groups[sn] = {
@@ -2113,6 +2123,9 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                     "estimated_cost_usd": 0.0,
                     "cost_today": 0.0,
                     "cost_7d": 0.0,
+                    # Set in the finalize loop from the sub-agents' locked flags.
+                    "locked": False,
+                    "locked_count": 0,
                 }
             g = groups[sn]
             g["agents"].append(agent_record)
@@ -2163,6 +2176,10 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             g["estimated_cost_usd"] = round(g["estimated_cost_usd"], 6)
             g["cost_today"] = round(g["cost_today"], 6)
             g["cost_7d"] = round(g["cost_7d"], 6)
+            # The instance card is locked only when every sub-agent is locked;
+            # locked_count drives the "N recording" hint.
+            g["locked_count"] = sum(1 for a in g["agents"] if a["locked"])
+            g["locked"] = bool(g["agents"]) and all(a["locked"] for a in g["agents"])
 
     # Sort instances by their most recent span across any agent.
     return sorted(
@@ -2321,6 +2338,32 @@ def _extract_exchange(span_attrs: list[dict[str, Any]]) -> dict[str, str] | None
     if user is None and agent is None:
         return None
     return {"user": user or "", "agent": agent or ""}
+
+
+def count_agent_records(
+    service_name: str,
+    account_id: int | None = None,
+    agent_id: str | None = None,
+) -> int:
+    """Total record count for an agent = distinct trace_ids. Used to prove a
+    locked agent's data exists ("N records recorded since …") without exposing
+    any of it."""
+    acct = f"AND account_id = {PH}" if account_id is not None else ""
+    agent = f"AND COALESCE(agent_id, 'main') = {PH}" if agent_id is not None else ""
+    sql = f"""
+        SELECT COUNT(DISTINCT trace_id) AS n
+        FROM spans
+        WHERE service_name = {PH} {acct} {agent}
+    """
+    args: list[Any] = [service_name]
+    if account_id is not None:
+        args.append(account_id)
+    if agent_id is not None:
+        args.append(agent_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+    return int(row["n"]) if row else 0
 
 
 def get_agent_records(
@@ -5315,12 +5358,28 @@ def create_account(
     }
 
 
+# Plan → number of *viewable* agents. None = unlimited. The single
+# server-side source of truth for the limit (the cardinal rule of this
+# feature is that ingestion is NEVER gated — only the view is).
+_AGENT_LIMIT_BY_PLAN: dict[str, int | None] = {
+    "free": 5,
+    "starter": 15,
+    "pro": 50,
+    "enterprise": None,  # unlimited
+}
+
+
+def agent_limit(plan: str | None) -> int | None:
+    """Viewable-agent cap for a plan. None = unlimited. Unknown/None → free."""
+    return _AGENT_LIMIT_BY_PLAN.get((plan or "free"), _AGENT_LIMIT_BY_PLAN["free"])
+
+
 def get_account(account_id: int) -> dict[str, Any] | None:
     """Return an org by id: {id, email, name, account_type, created_at,
-    onboarded_at}."""
+    onboarded_at, plan}."""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, email, account_type, name, created_at, onboarded_at "
+            "SELECT id, email, account_type, name, created_at, onboarded_at, plan "
             f"FROM accounts WHERE id = {PH}",
             (account_id,),
         )
@@ -5334,6 +5393,71 @@ def get_account(account_id: int) -> dict[str, Any] | None:
         "name": row["name"],
         "created_at": _ts_to_str(row["created_at"]),
         "onboarded_at": _ts_to_str(_row_get(row, "onboarded_at")),
+        "plan": _row_get(row, "plan") or "free",
+    }
+
+
+def set_account_plan(account_id: int, plan: str) -> None:
+    """Set an account's plan tier. No public endpoint yet — a future billing
+    webhook (or admin tool) calls this; raising the plan unlocks previously
+    locked agents instantly because their telemetry was never gated."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE accounts SET plan = {PH} WHERE id = {PH}",
+            ((plan or "free"), account_id),
+        )
+
+
+def get_locked_state(account_id: int | None) -> dict[str, Any]:
+    """Which agents are *view-locked* for this account under its plan.
+
+    Distinct agents (service_name + agent_id) are ordered by first_seen
+    ascending; the first `limit` are unlocked, the rest locked. Unlimited
+    plans (limit None) lock nothing. This informs the VIEW only — telemetry
+    is never gated, so locked agents still have every span recorded.
+
+    Returns {plan, limit, agent_count, locked_count,
+             locked: set[(service_name, agent_id)],
+             first_seen: {(service_name, agent_id): iso}}.
+    """
+    plan = "free"
+    if account_id is not None:
+        acct = get_account(account_id)
+        if acct:
+            plan = acct.get("plan", "free")
+    limit = agent_limit(plan)
+
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    sql = f"""
+        SELECT service_name,
+               COALESCE(agent_id, 'main') AS agent_id,
+               MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS}
+                        THEN start_time_unix END) AS first_seen_ns
+        FROM spans
+        WHERE 1=1 {account_filter}
+        GROUP BY service_name, COALESCE(agent_id, 'main')
+    """
+    args = (account_id,) if account_id is not None else ()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+
+    # Oldest first. Agents with no valid (post-floor) first_seen sort last, so
+    # an undated/garbage-timestamp agent never preempts an established one.
+    items = [(r["service_name"], r["agent_id"], r["first_seen_ns"]) for r in rows]
+    items.sort(key=lambda t: (t[2] is None, t[2] or 0))
+
+    first_seen = {(s, a): _ns_to_iso(ns) for (s, a, ns) in items}
+    locked: set[tuple[str, str]] = set()
+    if limit is not None:
+        locked = {(s, a) for (s, a, _ns) in items[limit:]}
+    return {
+        "plan": plan,
+        "limit": limit,
+        "agent_count": len(items),
+        "locked_count": len(locked),
+        "locked": locked,
+        "first_seen": first_seen,
     }
 
 

@@ -60,6 +60,12 @@ class AgentSummary(BaseModel):
     # 'healthy' | 'attention' | 'error', plus the one-line explanation.
     status: str = "healthy"
     status_reason: str = ""
+    # View-lock by plan. When locked, the detail page shows the "recording"
+    # panel in place of the Work Feed. records_count + recording_since prove
+    # the data exists; telemetry was never gated.
+    locked: bool = False
+    records_count: int | None = None
+    recording_since: str | None = None
 
 
 class AgentInstance(BaseModel):
@@ -88,6 +94,9 @@ class AgentInstance(BaseModel):
     estimated_cost_usd: float = 0.0
     cost_today: float = 0.0
     cost_7d: float = 0.0
+    # View-locked when this sub-agent's first-seen position exceeds the plan
+    # limit. Telemetry is still fully recorded.
+    locked: bool = False
 
 
 class AgentGroup(BaseModel):
@@ -120,6 +129,19 @@ class AgentGroup(BaseModel):
     estimated_cost_usd: float = 0.0
     cost_today: float = 0.0
     cost_7d: float = 0.0
+    # The instance card is locked only when every sub-agent is locked;
+    # locked_count drives the "N recording" hint on a partially-locked group.
+    locked: bool = False
+    locked_count: int = 0
+
+
+class AccountUsage(BaseModel):
+    """GET /account/usage — drives the Fleet header + upgrade prompts."""
+
+    plan: str = "free"
+    agent_count: int = 0
+    agent_limit: int | None = None  # None = unlimited
+    locked_count: int = 0
 
 
 class CostByDay(BaseModel):
@@ -662,6 +684,8 @@ class OrgPublic(BaseModel):
     created_at: str | None = None
     # Set when the owner finishes/skips onboarding; null → wizard still shows.
     onboarded_at: str | None = None
+    # Plan tier — gates how many agents are viewable, never how many record.
+    plan: str = "free"
 
 
 class OrgProfileUpdate(BaseModel):
@@ -898,10 +922,18 @@ class AgentRecord(BaseModel):
 
 
 class AgentRecordsResponse(BaseModel):
-    """Cursor-paginated page of Work Feed records, newest first."""
+    """Cursor-paginated page of Work Feed records, newest first.
+
+    When the agent is view-locked by plan, `locked` is true, `records` is empty
+    (bodies/exchanges/spans withheld), and `records_count` + `recording_since`
+    prove the data exists and is still being recorded — it just unlocks on
+    upgrade."""
 
     records: list[AgentRecord] = Field(default_factory=list)
     next_cursor: str | None = None
+    locked: bool = False
+    records_count: int | None = None
+    recording_since: str | None = None
 
 
 class IngestResponse(BaseModel):

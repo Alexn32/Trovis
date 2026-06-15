@@ -160,6 +160,12 @@ function AppInner() {
   function openSettings() {
     setOverlay({ kind: 'settings' })
   }
+  // STUB: billing/payments aren't built yet. The "Upgrade to view" buttons send
+  // users to the pricing page; swap this for the real upgrade route when billing
+  // lands (plan changes flow through database.set_account_plan).
+  function openUpgrade() {
+    window.open('https://trovisai.com/#pricing', '_blank', 'noopener')
+  }
   function closeOverlay() {
     setOverlay(null)
   }
@@ -237,6 +243,7 @@ function AppInner() {
         agentId={overlay.agentId}
         account={account}
         onBack={closeOverlay}
+        onUpgrade={openUpgrade}
       />
     )
   } else if (overlay?.kind === 'add') {
@@ -262,7 +269,9 @@ function AppInner() {
   } else if (tab === 'workflows') {
     mainContent = <Workflows onSelectAgent={openDetail} />
   } else {
-    mainContent = <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} />
+    mainContent = (
+      <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} onUpgrade={openUpgrade} />
+    )
   }
 
   return (

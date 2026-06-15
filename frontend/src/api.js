@@ -352,6 +352,10 @@ export const api = {
     return request(_withAgent(path, agentId))
   },
 
+  // Plan usage for the Fleet header + upgrade prompts:
+  // { plan, agent_count, agent_limit (null=unlimited), locked_count }.
+  getAccountUsage: () => request('/account/usage'),
+
   // --- dashboard (daily briefing) ---
   getBriefing: () => request('/dashboard/briefing'),
   getAttention: () => request('/dashboard/attention'),

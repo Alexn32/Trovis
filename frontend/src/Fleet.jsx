@@ -18,6 +18,7 @@ import {
   ChevronRightIcon,
   ClipboardIcon,
   LightbulbIcon,
+  LockIcon,
   TrashIcon,
 } from './Icons.jsx'
 
@@ -29,10 +30,11 @@ import {
 // is called with (serviceName, agentId?) so AgentDetail can scope its
 // fetches via the ?agent_id= query param.
 
-export default function Fleet({ onSelectAgent, onAddAgent }) {
+export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
   const [groups, setGroups] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [usage, setUsage] = useState(null) // {plan, agent_count, agent_limit, locked_count}
 
   useEffect(() => {
     let cancelled = false
@@ -50,6 +52,10 @@ export default function Fleet({ onSelectAgent, onAddAgent }) {
           setLoading(false)
         }
       })
+    api
+      .getAccountUsage()
+      .then((u) => !cancelled && setUsage(u))
+      .catch(() => {})
     return () => {
       cancelled = true
     }
@@ -115,6 +121,8 @@ export default function Fleet({ onSelectAgent, onAddAgent }) {
             avgMs: weightedAvgMs,
             costToday: fleetCostToday,
           }}
+          usage={usage}
+          onUpgrade={onUpgrade}
         />
         <section className="agents-section">
           <div className="agents-section-header">
@@ -177,15 +185,28 @@ function CardCostLine({ group }) {
   )
 }
 
-function FleetSummary({ counts }) {
+function FleetSummary({ counts, usage, onUpgrade }) {
+  // Plan usage: "used of limit" agents, with a calm upgrade nudge when some are
+  // locked. Unlimited plans show just the count.
+  const agentsValue =
+    usage && usage.agent_limit != null
+      ? `${usage.agent_count} of ${usage.agent_limit}`
+      : counts.subAgents > counts.total
+        ? `${counts.total} (${counts.subAgents} sub)`
+        : counts.total
+  const overLimit = usage && usage.locked_count > 0
   return (
     <div className="fleet-summary">
       <Stat
-        label="Total agents"
-        value={
-          counts.subAgents > counts.total
-            ? `${counts.total} (${counts.subAgents} sub)`
-            : counts.total
+        label="Agents"
+        value={agentsValue}
+        tone={overLimit ? 'warn' : undefined}
+        sub={
+          overLimit ? (
+            <button type="button" className="fleet-upgrade-link" onClick={onUpgrade}>
+              {usage.locked_count} recording · upgrade to view
+            </button>
+          ) : undefined
         }
       />
       <Stat
@@ -264,6 +285,26 @@ function AgentCard({ group, onSelect }) {
   const status = statusFor(groupForStatus(group))
   const compat = groupForStatus(group)
   const errRate = errorRatePercent(compat)
+
+  // Locked agents stay in the list (not hidden), muted, with a lock + a calm
+  // line. Still clickable — opens the detail page in its locked state. Its
+  // telemetry is recorded; we just don't surface it until the plan covers it.
+  if (group.locked) {
+    return (
+      <button type="button" className="agent-card locked" onClick={onSelect}>
+        <div className="agent-card-title">
+          <span className="agent-lock"><LockIcon size={13} /></span>
+          <span className="agent-name" title={group.service_name}>
+            {group.display_name || group.service_name}
+          </span>
+          {group.display_name && (
+            <span className="agent-name-secondary">{group.service_name}</span>
+          )}
+        </div>
+        <p className="agent-locked-line">Recording — upgrade to view</p>
+      </button>
+    )
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -366,6 +407,24 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
   const status = statusFor(groupForStatus(group))
   const compat = groupForStatus(group)
   const errRate = errorRatePercent(compat)
+
+  // Fully-locked instance (every sub-agent beyond the plan limit): muted card,
+  // still clickable into its locked detail. Telemetry is recorded regardless.
+  if (group.locked) {
+    return (
+      <button type="button" className="agent-card locked" onClick={onSelectInstance}>
+        <div className="agent-card-title">
+          <span className="agent-lock"><LockIcon size={13} /></span>
+          <span className="agent-name" title={group.service_name}>
+            {group.display_name || group.service_name}
+          </span>
+        </div>
+        <p className="agent-locked-line">
+          Recording {group.agents.length} agents — upgrade to view
+        </p>
+      </button>
+    )
+  }
 
   useEffect(() => {
     let cancelled = false

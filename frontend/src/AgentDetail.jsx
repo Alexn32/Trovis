@@ -566,7 +566,59 @@ function DangerZone({ serviceName, agentId, onDeleted }) {
 }
 
 /* ── page ── */
-export default function AgentDetail({ serviceName, agentId, account, onBack }) {
+// Plan-locked agents show this calm panel instead of the Work Feed — a record
+// waiting to be opened, never an error. Pulls account usage to state the count
+// and the plan's limit; records_count + recording_since prove the data exists.
+function LockedPanel({ summary, onUpgrade }) {
+  const [usage, setUsage] = useState(null)
+  useEffect(() => {
+    let alive = true
+    api.getAccountUsage().then((u) => alive && setUsage(u)).catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
+  const name = summary.display_name || summary.service_name
+  const n = summary.records_count || 0
+  const since = summary.recording_since
+    ? new Date(summary.recording_since).toLocaleDateString(undefined, {
+        month: 'short', day: 'numeric', year: 'numeric',
+      })
+    : null
+  const limitText = usage ? (usage.agent_limit == null ? 'unlimited' : usage.agent_limit) : null
+  return (
+    <div style={{
+      background: C.cream, border: `1px solid ${C.border}`, borderRadius: 14,
+      padding: '36px 28px', marginTop: 16, textAlign: 'center',
+    }}>
+      <div style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 44, height: 44, borderRadius: 12, background: C.subtle, marginBottom: 16,
+      }}>
+        <svg width={20} height={20} viewBox="0 0 24 24" fill="none"
+          stroke={C.teal} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="5" y="11" width="14" height="9" rx="2" />
+          <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+        </svg>
+      </div>
+      <h2 style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 20, color: C.ink, margin: '0 0 10px', letterSpacing: '-0.01em' }}>
+        Trovis is recording this agent.
+      </h2>
+      <p style={{ fontFamily: F.body, fontSize: 14.5, lineHeight: 1.6, color: C.body, maxWidth: 520, margin: '0 auto 22px' }}>
+        {usage ? `You've connected ${usage.agent_count} agents. Your plan covers ${limitText}. ` : ''}
+        {name}'s full record{n ? ` — ${n} record${n === 1 ? '' : 's'}${since ? ` since ${since}` : ''} —` : ''} unlocks the moment you upgrade.
+      </p>
+      <button type="button" onClick={onUpgrade} style={{
+        padding: '11px 22px', background: C.teal, color: C.cream, border: 'none',
+        borderRadius: 10, fontFamily: F.disp, fontWeight: 600, fontSize: 14.5, cursor: 'pointer',
+      }}>
+        Upgrade to view
+      </button>
+    </div>
+  )
+}
+
+export default function AgentDetail({ serviceName, agentId, account, onBack, onUpgrade }) {
   const [summary, setSummary] = useState(null)
   const [registration, setRegistration] = useState(null)
   const [weekly, setWeekly] = useState(null)
@@ -626,11 +678,19 @@ export default function AgentDetail({ serviceName, agentId, account, onBack }) {
   return (
     <Shell>
       <Header summary={summary} registration={registration} account={account} onBack={onBack} />
-      <AskBar serviceName={summary.service_name} agentId={agentId} />
-      <WeekStrip weekly={weekly} costDays={costDays} />
-      <WorkFeed serviceName={summary.service_name} agentId={agentId} />
-      <IdentityCard summary={summary} capabilities={capabilities} registration={registration} />
-      <DangerZone serviceName={summary.service_name} agentId={agentId} onDeleted={onBack} />
+      {summary.locked ? (
+        // Locked: header + a single "recording" panel. No Ask/WeekStrip/Identity/
+        // Danger — we don't surface this agent's data until the plan covers it.
+        <LockedPanel summary={summary} onUpgrade={onUpgrade} />
+      ) : (
+        <>
+          <AskBar serviceName={summary.service_name} agentId={agentId} />
+          <WeekStrip weekly={weekly} costDays={costDays} />
+          <WorkFeed serviceName={summary.service_name} agentId={agentId} />
+          <IdentityCard summary={summary} capabilities={capabilities} registration={registration} />
+          <DangerZone serviceName={summary.service_name} agentId={agentId} onDeleted={onBack} />
+        </>
+      )}
     </Shell>
   )
 }

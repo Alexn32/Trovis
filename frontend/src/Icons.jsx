@@ -10,6 +10,16 @@ const stroke = {
   strokeLinejoin: 'round',
 }
 
+// Padlock — marks a plan-locked (recording-but-not-viewable) agent.
+export function LockIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>
+      <rect x="5" y="11" width="14" height="9" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </svg>
+  )
+}
+
 export function MonitorIcon({ size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...stroke}>

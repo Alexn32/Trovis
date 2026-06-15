@@ -595,6 +595,46 @@ a:hover {
   color: var(--error);
 }
 
+/* Secondary line under a Stat value (e.g. the Fleet "upgrade to view" nudge). */
+.stat-box-sub {
+  margin-top: 3px;
+  font-size: 11.5px;
+}
+.fleet-upgrade-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--brand-accent);
+}
+.fleet-upgrade-link:hover {
+  text-decoration: underline;
+}
+
+/* Plan-locked agent card: present in the grid, muted, still clickable. */
+.agent-card.locked {
+  opacity: 0.72;
+}
+.agent-card.locked:hover {
+  opacity: 1;
+}
+.agent-card.locked .agent-name {
+  color: var(--text-muted);
+}
+.agent-lock {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.agent-locked-line {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 @media (max-width: 900px) {
   .fleet-summary {
     grid-template-columns: repeat(2, 1fr);
