@@ -44,6 +44,7 @@ from models import (
     AgentDescription,
     AgentRecord,
     AccountUsage,
+    AccountPlanUpdate,
     AgentRecordsResponse,
     AgentGroup,
     AgentOutput,
@@ -2242,6 +2243,34 @@ async def account_usage(request: Request) -> AccountUsage:
     upgrade prompts. Agent count is distinct (service_name, agent_id); limit is
     None for unlimited plans."""
     account_id = getattr(request.state, "account_id", None)
+    lock = database.get_locked_state(account_id)
+    return AccountUsage(
+        plan=lock["plan"],
+        agent_count=lock["agent_count"],
+        agent_limit=lock["limit"],
+        locked_count=lock["locked_count"],
+    )
+
+
+@app.put("/account/plan", response_model=AccountUsage)
+async def set_plan(request: Request, body: AccountPlanUpdate) -> AccountUsage:
+    """Set the caller's own plan tier and return refreshed usage. Raising the
+    plan unlocks previously locked agents instantly (their telemetry was never
+    gated — only the view). Account-scoped: it can only change the
+    authenticated caller's account, never another tenant's.
+
+    Pre-billing stub: there is NO payment check yet, so this is effectively a
+    free self-upgrade. That's fine before launch (no paying customers, billing
+    not wired) and is the hook the 'Upgrade to view' button will call — but it
+    MUST be gated behind a real payment/entitlement check before launch."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    plan = (body.plan or "").strip().lower()
+    if plan not in database._AGENT_LIMIT_BY_PLAN:
+        valid = ", ".join(sorted(database._AGENT_LIMIT_BY_PLAN))
+        raise HTTPException(status_code=400, detail=f"unknown plan; expected one of: {valid}")
+    database.set_account_plan(account_id, plan)
     lock = database.get_locked_state(account_id)
     return AccountUsage(
         plan=lock["plan"],

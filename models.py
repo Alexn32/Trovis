@@ -144,6 +144,14 @@ class AccountUsage(BaseModel):
     locked_count: int = 0
 
 
+class AccountPlanUpdate(BaseModel):
+    """PUT /account/plan — set the caller's own plan tier. Pre-billing: this is
+    the wiring the 'Upgrade to view' flow needs; a real payment check will gate
+    it before launch. Validated server-side against the known plan tiers."""
+
+    plan: str
+
+
 class CostByDay(BaseModel):
     date: str
     tokens: int
