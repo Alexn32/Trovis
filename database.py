@@ -1080,6 +1080,9 @@ def init_db() -> None:
         # Plan tier gates how many agents are *viewable* (never how many are
         # recorded). Default 'free'. See _AGENT_LIMIT_BY_PLAN / agent_limit().
         _try_add_column(cur, "accounts", "plan", "TEXT DEFAULT 'free'")
+        # Stripe customer id, captured from the first completed checkout. Needed
+        # to open the Stripe Customer Portal (manage/cancel/invoices).
+        _try_add_column(cur, "accounts", "stripe_customer_id", "TEXT")
         # Connection edges gained "what's transferred" metrics post-launch.
         _try_add_column(cur, "agent_connections", "via_operations", "TEXT")
         _try_add_column(cur, "agent_connections", "total_tokens", "INTEGER DEFAULT 0")
@@ -5409,6 +5412,30 @@ def set_account_plan(account_id: int, plan: str) -> None:
             f"UPDATE accounts SET plan = {PH} WHERE id = {PH}",
             ((plan or "free"), account_id),
         )
+
+
+def set_account_stripe_customer(account_id: int, customer_id: str | None) -> None:
+    """Record the account's Stripe customer id (from a completed checkout) so we
+    can later open the Stripe Customer Portal for them. No-op on a blank id."""
+    if not customer_id:
+        return
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE accounts SET stripe_customer_id = {PH} WHERE id = {PH}",
+            (customer_id, account_id),
+        )
+
+
+def get_account_stripe_customer(account_id: int) -> str | None:
+    """Return the account's stored Stripe customer id, or None if it has never
+    completed a checkout."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT stripe_customer_id FROM accounts WHERE id = {PH}",
+            (account_id,),
+        )
+        row = cur.fetchone()
+    return (_row_get(row, "stripe_customer_id") if row else None) or None
 
 
 def get_locked_state(account_id: int | None) -> dict[str, Any]:

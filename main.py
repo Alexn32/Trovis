@@ -2414,6 +2414,33 @@ async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResul
     return PlanChangeResult(status="checkout_required", plan=plan, checkout_url=checkout_url)
 
 
+@app.post("/account/billing-portal")
+async def billing_portal_session(request: Request) -> dict:
+    """Open a Stripe Customer Portal session for the caller's own account and
+    return its URL — where they upgrade/downgrade, update payment, see invoices,
+    and cancel (Stripe hosts it). 400 when the account has no Stripe customer yet
+    (never subscribed → there's nothing to manage; send them to checkout
+    instead); 503 when billing isn't configured."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    customer = database.get_account_stripe_customer(account_id)
+    if not customer:
+        raise HTTPException(
+            status_code=400, detail="no active subscription to manage"
+        )
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    try:
+        url = billing.create_portal_session(
+            customer_id=customer, return_url=f"{base}/?billing=managed"
+        )
+    except billing.BillingNotConfigured:
+        raise HTTPException(status_code=503, detail="billing is not configured")
+    except billing.BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"portal_url": url}
+
+
 @app.post("/billing/webhook")
 async def billing_webhook(request: Request) -> dict:
     """Stripe webhook receiver — the ONLY path that raises an account to a paid
@@ -2434,20 +2461,27 @@ async def billing_webhook(request: Request) -> dict:
     except billing.BillingError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
+    etype = event["type"]
+    obj = event["data"]["object"]
+
+    def _account_id_from(meta_obj, fallback=None):
+        meta = (meta_obj.get("metadata") or {}) if hasattr(meta_obj, "get") else {}
+        raw = meta.get("account_id") or fallback
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    if etype == "checkout.session.completed":
         # Only act once actually paid. subscription/payment modes set "paid";
         # "no_payment_required" covers a 100%-off coupon.
-        if session.get("payment_status") in ("paid", "no_payment_required"):
-            meta = session.get("metadata") or {}
-            plan = (meta.get("plan") or "").strip().lower()
-            raw_account = meta.get("account_id") or session.get("client_reference_id")
-            try:
-                account_id = int(raw_account)
-            except (TypeError, ValueError):
-                account_id = None
+        if obj.get("payment_status") in ("paid", "no_payment_required"):
+            account_id = _account_id_from(obj, obj.get("client_reference_id"))
+            plan = ((obj.get("metadata") or {}).get("plan") or "").strip().lower()
             if account_id is not None and plan in database._AGENT_LIMIT_BY_PLAN:
                 database.set_account_plan(account_id, plan)
+                # Remember the Stripe customer so we can open the portal later.
+                database.set_account_stripe_customer(account_id, obj.get("customer"))
                 logger.info(
                     "[billing] applied plan=%s to account=%s via checkout",
                     plan, account_id,
@@ -2456,8 +2490,33 @@ async def billing_webhook(request: Request) -> dict:
                 logger.warning(
                     "[billing] checkout.session.completed with bad metadata: "
                     "account=%r plan=%r",
-                    raw_account, plan,
+                    obj.get("client_reference_id"), plan,
                 )
+
+    elif etype == "customer.subscription.deleted":
+        # Subscription fully ended (a cancellation took effect) → drop to free.
+        # account_id rides on the subscription metadata (set at checkout).
+        account_id = _account_id_from(obj)
+        if account_id is not None:
+            database.set_account_plan(account_id, "free")
+            logger.info("[billing] subscription ended → free for account=%s", account_id)
+
+    elif etype == "customer.subscription.updated":
+        # Plan switch in the Customer Portal → map the active price back to a
+        # tier. Idempotent; benign no-op events just re-assert the same plan.
+        account_id = _account_id_from(obj)
+        if account_id is not None and obj.get("status") in ("active", "trialing"):
+            items = (obj.get("items") or {}).get("data") or []
+            price = (items[0].get("price") or {}) if items else {}
+            new_plan = billing.plan_for_price(price.get("id"))
+            if new_plan:
+                database.set_account_plan(account_id, new_plan)
+                database.set_account_stripe_customer(account_id, obj.get("customer"))
+                logger.info(
+                    "[billing] subscription updated → plan=%s account=%s",
+                    new_plan, account_id,
+                )
+
     return {"received": True}
 
 

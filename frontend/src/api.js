@@ -369,6 +369,9 @@ export const api = {
   // Stripe webhook confirms payment. A no-op/downgrade returns { status:'applied' }.
   setPlan: (plan, cycle = 'monthly') =>
     request('/account/plan', { method: 'PUT', body: JSON.stringify({ plan, cycle }) }),
+  // Opens a Stripe Customer Portal session → { portal_url }. 400 when the
+  // account has never subscribed (no Stripe customer yet).
+  billingPortal: () => request('/account/billing-portal', { method: 'POST' }),
 
   // --- dashboard (daily briefing) ---
   getBriefing: () => request('/dashboard/briefing'),

@@ -8,7 +8,7 @@ import { ArrowLeftIcon, TrashIcon } from './Icons.jsx'
 //   - Everyone: org info + change-password.
 //   - Business owners: members list, invite links, remove members.
 
-export default function Settings({ me, onClose, onUpdated }) {
+export default function Settings({ me, onClose, onUpdated, onUpgrade }) {
   const user = me?.user
   const org = me?.org
   const isOwner = user?.role === 'owner'
@@ -34,6 +34,8 @@ export default function Settings({ me, onClose, onUpdated }) {
           <Row label="Owner email" value={org?.email} />
         </div>
       </section>
+
+      <BillingCard onUpgrade={onUpgrade} />
 
       {user && <PasswordCard onUpdated={onUpdated} />}
 
@@ -62,6 +64,82 @@ function Row({ label, value }) {
       <span className="settings-row-label">{label}</span>
       <span className="settings-row-value">{value}</span>
     </div>
+  )
+}
+
+// Billing & plan: current tier + agent usage. Free accounts get an "Upgrade"
+// button (opens the plan-picker modal → Stripe Checkout). Paid accounts get
+// "Manage billing" → the Stripe Customer Portal (upgrade/downgrade/cancel/
+// invoices/payment method — all hosted by Stripe).
+function BillingCard({ onUpgrade }) {
+  const [usage, setUsage] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    api.getAccountUsage().then((u) => alive && setUsage(u)).catch(() => {})
+    return () => { alive = false }
+  }, [])
+
+  const plan = usage?.plan || 'free'
+  const isFree = plan === 'free'
+  const limit = usage?.agent_limit
+  const count = usage?.agent_count ?? 0
+  const usageText = limit == null ? `${count} agents · unlimited` : `${count} of ${limit} agents`
+
+  async function manage() {
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await api.billingPortal()
+      if (res?.portal_url) {
+        window.location.href = res.portal_url
+        return
+      }
+      setError('Could not open the billing portal.')
+    } catch (e) {
+      const msg = String(e?.message || '')
+      if (msg.includes('400')) {
+        // No Stripe customer yet → there's nothing to manage; go to checkout.
+        onUpgrade?.()
+      } else if (msg.includes('503') || /not configured/i.test(msg)) {
+        setError('Billing isn’t available just yet.')
+      } else {
+        setError('Could not open the billing portal. Please try again.')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">Billing &amp; plan</h3>
+      <div className="settings-rows">
+        <Row label="Plan" value={<span className="org-type-badge">{plan}</span>} />
+        <Row label="Agents" value={usage ? usageText : '…'} />
+      </div>
+      <p className="settings-note">
+        {isFree
+          ? 'You’re on the Free plan. Upgrade to view more of your fleet — every agent keeps recording regardless of plan.'
+          : 'Manage your subscription, payment method, and invoices, or cancel anytime.'}
+      </p>
+      <div style={{ marginTop: 12 }}>
+        {isFree ? (
+          <button type="button" className="btn btn-primary" onClick={() => onUpgrade?.()}>
+            Upgrade plan
+          </button>
+        ) : (
+          <button type="button" className="btn btn-secondary" onClick={manage} disabled={busy}>
+            {busy ? 'Opening…' : 'Manage billing'}
+          </button>
+        )}
+      </div>
+      {error && (
+        <p className="settings-note" style={{ color: 'var(--error)', marginTop: 10 }}>{error}</p>
+      )}
+    </section>
   )
 }
 

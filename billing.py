@@ -146,6 +146,43 @@ def create_checkout_session(
     return url
 
 
+def plan_for_price(price_id: str | None) -> str | None:
+    """Reverse of price_id_for: given a Stripe Price id, return the plan tier it
+    maps to (across monthly + annual), or None. Used by subscription webhooks to
+    reflect a portal-driven plan change back into Trovis."""
+    if not price_id:
+        return None
+    for table in (_PRICE_ENV, _PRICE_ENV_ANNUAL):
+        for plan, env_name in table.items():
+            if os.getenv(env_name) == price_id:
+                return plan
+    return None
+
+
+def create_portal_session(*, customer_id: str, return_url: str) -> str:
+    """Open a Stripe Customer Portal session for an existing customer and return
+    its URL. The portal is where customers upgrade/downgrade, update payment
+    methods, see invoices, and cancel — Stripe hosts all of it. Raises
+    BillingNotConfigured when Stripe isn't wired, BillingError on a missing
+    customer or API failure."""
+    stripe = _stripe()
+    if stripe is None or not secret_key():
+        raise BillingNotConfigured("Stripe is not configured; cannot open the billing portal")
+    if not customer_id:
+        raise BillingError("no Stripe customer on file for this account")
+    stripe.api_key = secret_key()
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id, return_url=return_url
+        )
+    except Exception as e:
+        raise BillingError(f"Stripe portal session failed: {e}") from e
+    url = session.get("url") if hasattr(session, "get") else getattr(session, "url", None)
+    if not url:
+        raise BillingError("Stripe returned no portal URL")
+    return url
+
+
 def parse_webhook_event(payload: bytes, sig_header: str | None):
     """Verify the Stripe signature over the RAW body and return the event
     (a dict-accessible Stripe object).
