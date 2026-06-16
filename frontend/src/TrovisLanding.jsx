@@ -365,9 +365,9 @@ function VisionBand({ onGetStarted }) {
 /* ── Pricing ── */
 function Pricing({ onGetStarted }) {
   const tiers = [
-    { name: "Free", price: "$0", per: "forever", agents: "5 agents", cta: "Create your account", highlight: false },
-    { name: "Starter", price: "$49", per: "/month", agents: "15 agents", cta: "Start with Starter", highlight: false },
-    { name: "Pro", price: "$199", per: "/month", agents: "50 agents", cta: "Start with Pro", highlight: true },
+    { name: "Free", price: "$0", per: "forever", agents: "Up to 5 agents", cta: "Create your account", highlight: false },
+    { name: "Starter", price: "$49", per: "/month", agents: "Up to 15 agents", cta: "Start with Starter", highlight: false },
+    { name: "Pro", price: "$199", per: "/month", agents: "Up to 50 agents", cta: "Start with Pro", highlight: true },
     { name: "Enterprise", price: "Custom", per: "", agents: "Unlimited agents", cta: "Talk to us", highlight: false },
   ];
   const ctaStyle = (t) => ({
