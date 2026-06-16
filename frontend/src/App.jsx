@@ -264,7 +264,7 @@ function AppInner() {
       />
     )
   } else if (overlay?.kind === 'add') {
-    mainContent = <AddAgent onClose={closeOverlay} />
+    mainContent = <AddAgent onClose={closeOverlay} onUpgrade={openUpgrade} />
   } else if (overlay?.kind === 'settings') {
     mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} onUpgrade={openUpgrade} />
   } else if (overlay?.kind === 'cost') {

@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { getApiKey } from './api.js'
+import { useEffect, useState } from 'react'
+import { api, getApiKey } from './api.js'
 import {
   OpenAIIcon,
   AnthropicIcon,
@@ -1487,14 +1487,42 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // Top-level shell — landing → AI guide | manual wizard
 // ---------------------------------------------------------------------------
 
-export default function AddAgent({ onClose, embedded = false }) {
+export default function AddAgent({ onClose, embedded = false, onUpgrade }) {
   const [view, setView] = useState('landing') // 'landing' | 'guide' | 'manual'
   // Once visited, the guide stays MOUNTED (hidden) across guide↔manual
   // switches so the chat history and connect-poll baseline survive a detour.
   const [guideVisited, setGuideVisited] = useState(false)
 
+  // At-limit awareness: a non-blocking nudge when the account is already at its
+  // plan's agent cap. Telemetry is NEVER blocked (cardinal rule) — connecting
+  // still works; the new agent just lands view-locked until they upgrade.
+  // Skipped when embedded (onboarding starts at 0 agents, owns its own chrome).
+  const [usage, setUsage] = useState(null)
+  useEffect(() => {
+    if (embedded) return undefined
+    let alive = true
+    api.getAccountUsage().then((u) => alive && setUsage(u)).catch(() => {})
+    return () => { alive = false }
+  }, [embedded])
+  const atLimit =
+    !embedded && usage?.agent_limit != null && usage.agent_count >= usage.agent_limit
+
   return (
     <div className="add-agent">
+      {atLimit && (
+        <div className="aa-limit-banner">
+          <div className="aa-limit-text">
+            <strong>You’re at your plan’s limit ({usage.agent_count} of {usage.agent_limit} agents).</strong>{' '}
+            You can still connect this one — it’s recorded immediately — but it stays
+            locked until you upgrade.
+          </div>
+          {onUpgrade && (
+            <button type="button" className="btn btn-primary aa-limit-cta" onClick={onUpgrade}>
+              Upgrade plan
+            </button>
+          )}
+        </div>
+      )}
       {view === 'landing' && (
         <AddAgentLanding
           onStartGuide={() => {
@@ -1512,6 +1540,7 @@ export default function AddAgent({ onClose, embedded = false }) {
             onBack={() => setView('landing')}
             onClose={embedded ? null : onClose}
             onSkipToManual={() => setView('manual')}
+            onUpgrade={onUpgrade}
           />
         </div>
       )}

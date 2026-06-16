@@ -46,7 +46,7 @@ function flattenAssistant(m) {
   return codeText ? `${m.content}\n\n${codeText}` : m.content
 }
 
-export default function ConnectGuide({ active, onBack, onClose, onSkipToManual }) {
+export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, onUpgrade }) {
   const [messages, setMessages] = useState([OPENING_TURN])
   const [input, setInput] = useState('')
   const [pending, setPending] = useState(false)
@@ -97,7 +97,19 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual }
           if (!name || baseline.has(name) || announced.has(name)) continue
           announced.add(name)
           const label = a.display_name || name
-          setMessages((prev) => [...prev, { kind: 'connected', name: label }])
+          // If this new agent pushed the account past its plan cap, it lands
+          // view-locked — celebrate the connection but nudge to upgrade.
+          let overLimit = false
+          try {
+            const u = await api.getAccountUsage()
+            overLimit =
+              !!u && u.agent_limit != null &&
+              (u.locked_count > 0 || u.agent_count > u.agent_limit)
+          } catch {
+            /* best-effort — fall back to the plain "connected" banner */
+          }
+          if (!alive) return
+          setMessages((prev) => [...prev, { kind: 'connected', name: label, overLimit }])
         }
       } catch {
         /* ignore — polling is best-effort */
@@ -203,7 +215,7 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual }
       <div className="connect-thread" ref={threadRef}>
         {messages.map((m, i) =>
           m.kind === 'connected' ? (
-            <ConnectedBanner key={i} name={m.name} />
+            <ConnectedBanner key={i} name={m.name} overLimit={m.overLimit} onUpgrade={onUpgrade} />
           ) : (
             <GuideBubble
               key={i}
@@ -308,7 +320,24 @@ function GuideBubble({ m, orgKey, endpoint, chipsEnabled, onPick }) {
   )
 }
 
-function ConnectedBanner({ name }) {
+function ConnectedBanner({ name, overLimit, onUpgrade }) {
+  if (overLimit) {
+    // The new agent pushed the account past its plan cap — it's recording, but
+    // view-locked until they upgrade. Celebrate the connection, nudge to upgrade.
+    return (
+      <div className="connect-banner is-upgrade">
+        <CheckCircleIcon size={15} />
+        <span>
+          <strong>{name}</strong> connected — it’s recording, but locked on your plan.{' '}
+          {onUpgrade && (
+            <button type="button" className="connect-banner-upgrade" onClick={onUpgrade}>
+              Upgrade to view
+            </button>
+          )}
+        </span>
+      </div>
+    )
+  }
   return (
     <div className="connect-banner">
       <CheckCircleIcon size={15} />

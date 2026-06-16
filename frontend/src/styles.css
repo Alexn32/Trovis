@@ -4495,7 +4495,28 @@ a:hover {
   background: var(--success-faint); color: var(--success);
   font-size: 13px; padding: 8px 14px; border-radius: 8px;
 }
+/* Connected, but the new agent landed over the plan cap → nudge to upgrade. */
+.connect-banner.is-upgrade {
+  background: var(--accent-faint); color: var(--text-secondary);
+  align-items: flex-start; text-align: left; max-width: 460px;
+}
+.connect-banner-upgrade {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font: inherit; font-weight: 600; color: var(--accent);
+  text-decoration: underline; text-underline-offset: 2px;
+}
 .connect-input-row { padding-top: 12px; }
+
+/* At-limit nudge at the top of the Add Agent flow (non-blocking). */
+.aa-limit-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  flex-wrap: wrap;
+  background: var(--accent-faint); border: 1px solid var(--border-default);
+  border-radius: 12px; padding: 14px 18px; margin-bottom: 20px;
+}
+.aa-limit-text { font-size: 13.5px; line-height: 1.5; color: var(--text-secondary); }
+.aa-limit-text strong { color: var(--text-primary); }
+.aa-limit-cta { white-space: nowrap; flex-shrink: 0; }
 .connect-skip {
   align-self: center; margin-top: 12px; padding-top: 12px;
   background: none; border: none; cursor: pointer;
