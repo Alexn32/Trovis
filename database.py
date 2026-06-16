@@ -5398,8 +5398,11 @@ def get_account(account_id: int) -> dict[str, Any] | None:
 
 
 def set_account_plan(account_id: int, plan: str) -> None:
-    """Set an account's plan tier. No public endpoint yet — a future billing
-    webhook (or admin tool) calls this; raising the plan unlocks previously
+    """Set an account's plan tier. Paid tiers are written ONLY by the verified
+    Stripe webhook (main.billing_webhook → see billing.py); a downgrade to
+    'free' may also be applied directly by PUT /account/plan. Never call this
+    from a client-facing path for a paid tier without a payment check, or you
+    reopen the free self-upgrade hole. Raising the plan unlocks previously
     locked agents instantly because their telemetry was never gated."""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(

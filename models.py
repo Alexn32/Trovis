@@ -145,11 +145,26 @@ class AccountUsage(BaseModel):
 
 
 class AccountPlanUpdate(BaseModel):
-    """PUT /account/plan — set the caller's own plan tier. Pre-billing: this is
-    the wiring the 'Upgrade to view' flow needs; a real payment check will gate
-    it before launch. Validated server-side against the known plan tiers."""
+    """PUT /account/plan — request a plan change for the caller's own account.
+    Reaching a paid tier is gated behind Stripe Checkout (see PlanChangeResult);
+    only a no-op or a downgrade to 'free' applies directly. Validated
+    server-side against the known plan tiers."""
 
     plan: str
+
+
+class PlanChangeResult(BaseModel):
+    """PUT /account/plan response. Either the change applied immediately
+    (status='applied', `usage` populated) — only for a no-op or a downgrade to
+    'free', which need no payment — or payment is required
+    (status='checkout_required', `checkout_url` points at Stripe Checkout). In
+    the checkout case the plan changes only once the signed
+    `checkout.session.completed` webhook fires, never from this call."""
+
+    status: str  # "applied" | "checkout_required"
+    plan: str  # applied plan (status=applied) or requested tier (checkout_required)
+    checkout_url: str | None = None
+    usage: AccountUsage | None = None
 
 
 class CostByDay(BaseModel):

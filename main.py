@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import asker
+import billing
 import database
 import describer
 import pricing_sync
@@ -45,6 +46,7 @@ from models import (
     AgentRecord,
     AccountUsage,
     AccountPlanUpdate,
+    PlanChangeResult,
     AgentRecordsResponse,
     AgentGroup,
     AgentOutput,
@@ -140,6 +142,7 @@ _OPEN_PATHS = {
     "/actions/openapi.json",     # OpenAPI spec (public, no auth)
     "/waitlist",                 # public marketing-site signup
     "/waitlist/count",           # public signup count for the marketing site
+    "/billing/webhook",          # Stripe webhook — authenticated by signature, not a Trovis key
 }
 
 
@@ -2252,17 +2255,27 @@ async def account_usage(request: Request) -> AccountUsage:
     )
 
 
-@app.put("/account/plan", response_model=AccountUsage)
-async def set_plan(request: Request, body: AccountPlanUpdate) -> AccountUsage:
-    """Set the caller's own plan tier and return refreshed usage. Raising the
-    plan unlocks previously locked agents instantly (their telemetry was never
-    gated — only the view). Account-scoped: it can only change the
-    authenticated caller's account, never another tenant's.
+@app.put("/account/plan", response_model=PlanChangeResult)
+async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResult:
+    """Initiate a plan change for the caller's OWN account.
 
-    Pre-billing stub: there is NO payment check yet, so this is effectively a
-    free self-upgrade. That's fine before launch (no paying customers, billing
-    not wired) and is the hook the 'Upgrade to view' button will call — but it
-    MUST be gated behind a real payment/entitlement check before launch."""
+    The payment gate: a paid tier (starter/pro/enterprise) can only be reached
+    through a completed Stripe Checkout, so this endpoint merely *starts* a
+    checkout session and returns its URL — the plan is applied later by the
+    signed `checkout.session.completed` webhook (`/billing/webhook`), which is
+    the sole writer of paid tiers. A no-op (already on that plan) or a downgrade
+    to 'free' needs no payment and is applied immediately.
+
+    Fails CLOSED: if billing isn't configured, paid upgrades return 503 rather
+    than silently applying — absent a working payment path nobody can
+    self-upgrade. Account-scoped: only ever changes request.state.account_id's
+    account. Raising the plan unlocks view-locked agents instantly; telemetry is
+    never gated — only the view (see database.get_locked_state).
+
+    Known limitation: a paid→paid *downgrade* (e.g. pro→starter) also routes
+    through checkout rather than amending the existing subscription. That is
+    safe (it never grants a higher tier for free); proper subscription
+    management is a post-launch follow-up."""
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
@@ -2270,14 +2283,100 @@ async def set_plan(request: Request, body: AccountPlanUpdate) -> AccountUsage:
     if plan not in database._AGENT_LIMIT_BY_PLAN:
         valid = ", ".join(sorted(database._AGENT_LIMIT_BY_PLAN))
         raise HTTPException(status_code=400, detail=f"unknown plan; expected one of: {valid}")
-    database.set_account_plan(account_id, plan)
-    lock = database.get_locked_state(account_id)
-    return AccountUsage(
-        plan=lock["plan"],
-        agent_count=lock["agent_count"],
-        agent_limit=lock["limit"],
-        locked_count=lock["locked_count"],
-    )
+
+    acct = database.get_account(account_id)
+    current = (acct or {}).get("plan", "free")
+
+    def _applied() -> PlanChangeResult:
+        lock = database.get_locked_state(account_id)
+        return PlanChangeResult(
+            status="applied",
+            plan=lock["plan"],
+            usage=AccountUsage(
+                plan=lock["plan"],
+                agent_count=lock["agent_count"],
+                agent_limit=lock["limit"],
+                locked_count=lock["locked_count"],
+            ),
+        )
+
+    # No payment needed: re-requesting the current plan, or dropping to the
+    # free floor (a downgrade gives up entitlements — never a security risk).
+    if plan == current:
+        return _applied()
+    if plan == "free":
+        database.set_account_plan(account_id, "free")
+        return _applied()
+
+    # Paid tier → must go through Stripe. Fail closed when billing isn't wired.
+    if not billing.is_configured(plan):
+        raise HTTPException(
+            status_code=503,
+            detail="billing is not configured; plan upgrades are unavailable",
+        )
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    try:
+        checkout_url = billing.create_checkout_session(
+            account_id=account_id,
+            plan=plan,
+            success_url=f"{base}/?upgraded={plan}",
+            cancel_url=f"{base}/?upgrade_cancelled=1",
+        )
+    except billing.BillingNotConfigured:
+        raise HTTPException(
+            status_code=503,
+            detail="billing is not configured; plan upgrades are unavailable",
+        )
+    except billing.BillingError as e:
+        raise HTTPException(status_code=502, detail=f"could not start checkout: {e}")
+    return PlanChangeResult(status="checkout_required", plan=plan, checkout_url=checkout_url)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request) -> dict:
+    """Stripe webhook receiver — the ONLY path that raises an account to a paid
+    plan. Authenticated by the Stripe signature over the raw body (not a Trovis
+    credential), so it lives in _OPEN_PATHS. On a verified, *paid*
+    `checkout.session.completed` we read the account + plan from the session
+    metadata and apply it via set_account_plan, which unlocks any view-locked
+    agents instantly. set_account_plan is idempotent, so event replays are
+    harmless. Every other event type is acknowledged and ignored."""
+    payload = await request.body()
+    sig = request.headers.get("Stripe-Signature")
+    try:
+        event = billing.parse_webhook_event(payload, sig)
+    except billing.BillingNotConfigured as e:
+        # Our misconfiguration, not the caller's fault. 503 → Stripe retries
+        # once we're configured, so a paid upgrade is never silently dropped.
+        raise HTTPException(status_code=503, detail=str(e))
+    except billing.BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        # Only act once actually paid. subscription/payment modes set "paid";
+        # "no_payment_required" covers a 100%-off coupon.
+        if session.get("payment_status") in ("paid", "no_payment_required"):
+            meta = session.get("metadata") or {}
+            plan = (meta.get("plan") or "").strip().lower()
+            raw_account = meta.get("account_id") or session.get("client_reference_id")
+            try:
+                account_id = int(raw_account)
+            except (TypeError, ValueError):
+                account_id = None
+            if account_id is not None and plan in database._AGENT_LIMIT_BY_PLAN:
+                database.set_account_plan(account_id, plan)
+                logger.info(
+                    "[billing] applied plan=%s to account=%s via checkout",
+                    plan, account_id,
+                )
+            else:
+                logger.warning(
+                    "[billing] checkout.session.completed with bad metadata: "
+                    "account=%r plan=%r",
+                    raw_account, plan,
+                )
+    return {"received": True}
 
 
 @app.put("/org", response_model=OrgPublic)
