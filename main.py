@@ -831,9 +831,10 @@ async def agent_drift(
         )
     except Exception as e:  # noqa: BLE001 — never 500 the detail page on a verdict
         print(f"[Trovis] /drift failed: {type(e).__name__}: {e}")
+        import traceback as _tb
         return DriftReport(
             status="unknown",
-            headline="Drift could not be assessed right now — try again shortly.",
+            headline=f"DIAG {type(e).__name__}: {str(e)[:160]} @ {_tb.format_exc().splitlines()[-2][-120:] if len(_tb.format_exc().splitlines())>1 else ''}",
         )
     # Cache only real verdicts (incl. the no-identity 'unknown'); error fallbacks
     # above return without caching so a transient failure isn't pinned for 6h.
