@@ -136,12 +136,13 @@ with TestClient(main.app) as c:
     # 6. With billing CONFIGURED, the endpoint returns a checkout URL and STILL
     #    does not change the plan (monkeypatch the Stripe boundary).
     billing_calls = {}
-    def _fake_checkout(*, account_id, plan, success_url, cancel_url):
+    def _fake_checkout(*, account_id, plan, success_url, cancel_url, cycle="monthly"):
         billing_calls["args"] = (account_id, plan, success_url, cancel_url)
+        billing_calls["cycle"] = cycle
         return "https://checkout.stripe.test/c/session_abc123"
     _real_is_configured = billing.is_configured
     _real_create = billing.create_checkout_session
-    billing.is_configured = lambda plan=None: True
+    billing.is_configured = lambda plan=None, cycle="monthly": True
     billing.create_checkout_session = _fake_checkout
     try:
         r = c.put("/account/plan", json={"plan": "pro"}, headers=H)

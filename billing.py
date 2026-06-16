@@ -19,9 +19,12 @@ restart, and so a half-configured deploy is caught per request.
 Env vars (Stripe's own naming, so dashboard values paste straight in):
   STRIPE_SECRET_KEY        sk_live_... / sk_test_...  — server API key
   STRIPE_WEBHOOK_SECRET    whsec_...                  — webhook signing secret
-  STRIPE_PRICE_STARTER     price_...                  — recurring Price for each
+  STRIPE_PRICE_STARTER     price_...                  — monthly Price for each
   STRIPE_PRICE_PRO         price_...                    paid tier
   STRIPE_PRICE_ENTERPRISE  price_...
+  STRIPE_PRICE_STARTER_ANNUAL   price_...             — annual Price (20% off)
+  STRIPE_PRICE_PRO_ANNUAL       price_...               for each paid tier;
+  STRIPE_PRICE_ENTERPRISE_ANNUAL price_...              used when cycle='annual'
 """
 from __future__ import annotations
 
@@ -37,11 +40,19 @@ PAID_PLANS = frozenset(
 
 # plan -> env var holding its Stripe Price ID. A paid tier with no configured
 # price isn't checkout-able (``is_configured(plan)`` returns False for it).
+# Annual prices live in separate env vars (the 20%-off yearly Price); the
+# monthly/annual choice rides on the `cycle` argument throughout.
 _PRICE_ENV = {
     "starter": "STRIPE_PRICE_STARTER",
     "pro": "STRIPE_PRICE_PRO",
     "enterprise": "STRIPE_PRICE_ENTERPRISE",
 }
+_PRICE_ENV_ANNUAL = {
+    "starter": "STRIPE_PRICE_STARTER_ANNUAL",
+    "pro": "STRIPE_PRICE_PRO_ANNUAL",
+    "enterprise": "STRIPE_PRICE_ENTERPRISE_ANNUAL",
+}
+BILLING_CYCLES = frozenset({"monthly", "annual"})
 
 
 class BillingError(RuntimeError):
@@ -69,17 +80,19 @@ def webhook_secret() -> str | None:
     return os.getenv("STRIPE_WEBHOOK_SECRET") or None
 
 
-def price_id_for(plan: str | None) -> str | None:
-    env_name = _PRICE_ENV.get((plan or "").strip().lower())
+def price_id_for(plan: str | None, cycle: str = "monthly") -> str | None:
+    table = _PRICE_ENV_ANNUAL if cycle == "annual" else _PRICE_ENV
+    env_name = table.get((plan or "").strip().lower())
     return (os.getenv(env_name) if env_name else None) or None
 
 
-def is_configured(plan: str | None = None) -> bool:
+def is_configured(plan: str | None = None, cycle: str = "monthly") -> bool:
     """True if checkout can run: SDK installed and a secret key set. When
-    ``plan`` is given, also require that tier's Price ID."""
+    ``plan`` is given, also require that tier's Price ID for the given cycle
+    ('monthly' | 'annual')."""
     if _stripe() is None or not secret_key():
         return False
-    if plan is not None and not price_id_for(plan):
+    if plan is not None and not price_id_for(plan, cycle):
         return False
     return True
 
@@ -90,26 +103,29 @@ def webhook_configured() -> bool:
 
 
 def create_checkout_session(
-    *, account_id: int, plan: str, success_url: str, cancel_url: str
+    *, account_id: int, plan: str, success_url: str, cancel_url: str,
+    cycle: str = "monthly",
 ) -> str:
     """Create a Stripe Checkout session for ``account_id`` to subscribe to
-    ``plan`` and return the hosted checkout URL.
+    ``plan`` on ``cycle`` ('monthly' | 'annual') and return the hosted checkout
+    URL.
 
-    The account and plan ride along in ``client_reference_id`` and ``metadata``
-    so the webhook knows what to apply once payment completes. This NEVER
-    changes the plan — that happens only in the verified webhook handler.
+    The account, plan, and cycle ride along in ``client_reference_id`` and
+    ``metadata`` so the webhook knows what to apply once payment completes. This
+    NEVER changes the plan — that happens only in the verified webhook handler.
     """
     plan = (plan or "").strip().lower()
+    cycle = cycle if cycle in BILLING_CYCLES else "monthly"
     if plan not in PAID_PLANS:
         raise BillingError(f"{plan!r} is not a paid tier; nothing to check out")
     stripe = _stripe()
-    price = price_id_for(plan)
+    price = price_id_for(plan, cycle)
     if stripe is None or not secret_key() or not price:
         raise BillingNotConfigured(
             "Stripe is not configured for this tier; cannot start checkout"
         )
     stripe.api_key = secret_key()
-    meta = {"account_id": str(account_id), "plan": plan}
+    meta = {"account_id": str(account_id), "plan": plan, "cycle": cycle}
     try:
         session = stripe.checkout.Session.create(
             mode="subscription",

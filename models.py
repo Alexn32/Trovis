@@ -68,6 +68,27 @@ class AgentSummary(BaseModel):
     recording_since: str | None = None
 
 
+class DriftFinding(BaseModel):
+    """One drift concern: declared identity vs. an observed behavior."""
+
+    title: str
+    evidence: str = ""
+    severity: str = "low"  # 'low' | 'medium' | 'high'
+
+
+class DriftReport(BaseModel):
+    """GET /agents/{service}/drift — Claude's verdict on whether the agent's
+    observed behavior stays within its declared job. `status` is
+    'aligned' | 'minor' | 'drift' | 'unknown' ('unknown' = no declared identity
+    on record, or the check couldn't run). `generated_at` is when the verdict
+    was computed (it's cached server-side)."""
+
+    status: str = "unknown"
+    headline: str = ""
+    findings: list[DriftFinding] = Field(default_factory=list)
+    generated_at: str | None = None
+
+
 class AgentInstance(BaseModel):
     """One sub-agent inside an `AgentGroup`. A flat single-agent instance
     still emits one of these (with `agent_id='main'`) so the response
@@ -148,9 +169,11 @@ class AccountPlanUpdate(BaseModel):
     """PUT /account/plan — request a plan change for the caller's own account.
     Reaching a paid tier is gated behind Stripe Checkout (see PlanChangeResult);
     only a no-op or a downgrade to 'free' applies directly. Validated
-    server-side against the known plan tiers."""
+    server-side against the known plan tiers. `cycle` selects the monthly or
+    annual (20%-off) price for paid upgrades."""
 
     plan: str
+    cycle: str = "monthly"  # 'monthly' | 'annual'
 
 
 class PlanChangeResult(BaseModel):

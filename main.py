@@ -46,6 +46,7 @@ from models import (
     AgentRecord,
     AccountUsage,
     AccountPlanUpdate,
+    DriftReport,
     PlanChangeResult,
     AgentRecordsResponse,
     AgentGroup,
@@ -772,6 +773,74 @@ async def agent_summary(
         summary["recording_since"] = lock["first_seen"].get(key) or summary.get("first_seen")
 
     return AgentSummary(**summary)
+
+
+@app.get("/agents/{service_name}/drift", response_model=DriftReport)
+async def agent_drift(
+    service_name: str,
+    request: Request,
+    agent_id: str | None = Query(default=None),
+    refresh: bool = Query(default=False),
+) -> DriftReport:
+    """Drift verdict: does this agent's observed behavior stay within its
+    declared job? One Claude call, cached for 6h (set `?refresh=true` to force a
+    re-check). Returns status 'unknown' when there's no declared identity to
+    compare against, or when AI isn't configured (503 only on a hard failure)."""
+    account_id = getattr(request.state, "account_id", None)
+
+    # Honor the plan view-lock — a locked agent withholds its detail body, so it
+    # withholds the drift analysis too (telemetry was still recorded).
+    lock = database.get_locked_state(account_id)
+    if (service_name, agent_id or "main") in lock["locked"]:
+        return DriftReport(
+            status="unknown",
+            headline="Upgrade to view this agent's drift analysis.",
+        )
+
+    if not refresh:
+        cached = database.get_insight(
+            account_id=account_id,
+            service_name=service_name,
+            agent_id=agent_id or "main",
+            kind="drift",
+            max_age_seconds=_DRIFT_TTL_SECONDS,
+        )
+        if cached and cached.get("data"):
+            d = cached["data"]
+            return DriftReport(
+                status=d.get("status", "unknown"),
+                headline=d.get("headline", ""),
+                findings=d.get("findings", []),
+                generated_at=cached.get("generated_at"),
+            )
+
+    registration = database.get_latest_registration(
+        service_name, account_id=account_id, agent_id=agent_id
+    )
+    spans = database.get_agent_spans(
+        service_name, limit=60, account_id=account_id, agent_id=agent_id
+    )
+    outputs = database.get_agent_outputs(
+        service_name, account_id=account_id, limit=15, agent_id=agent_id
+    )
+    try:
+        report = describer.detect_drift(registration, spans, outputs)
+    except describer.APIKeyMissingError:
+        raise HTTPException(
+            status_code=503, detail="drift analysis unavailable (AI not configured)"
+        )
+    database.save_insight(
+        account_id=account_id,
+        service_name=service_name,
+        agent_id=agent_id or "main",
+        kind="drift",
+        data=report,
+    )
+    return DriftReport(
+        status=report["status"],
+        headline=report["headline"],
+        findings=report["findings"],
+    )
 
 
 @app.get("/agents/{service_name}/spans", response_model=list[SpanRecord])
@@ -1779,6 +1848,7 @@ async def recompute_costs_now(request: Request) -> dict[str, Any]:
 _WEEKLY_SUMMARY_TTL_SECONDS = 60 * 60  # 1 hour
 _CAPABILITIES_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 _DASHBOARD_TTL_SECONDS = 60 * 60  # 1 hour — briefing/attention/work-feed
+_DRIFT_TTL_SECONDS = 6 * 60 * 60  # 6 hours — drift verdict (one Claude call/agent)
 # Sentinel service_name for account-level (not per-agent) cached insights.
 _DASHBOARD_SENTINEL = "__dashboard__"
 _NS_PER_DAY = 24 * 60 * 60 * 1_000_000_000
@@ -2283,6 +2353,9 @@ async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResul
     if plan not in database._AGENT_LIMIT_BY_PLAN:
         valid = ", ".join(sorted(database._AGENT_LIMIT_BY_PLAN))
         raise HTTPException(status_code=400, detail=f"unknown plan; expected one of: {valid}")
+    cycle = (body.cycle or "monthly").strip().lower()
+    if cycle not in billing.BILLING_CYCLES:
+        cycle = "monthly"
 
     acct = database.get_account(account_id)
     current = (acct or {}).get("plan", "free")
@@ -2309,7 +2382,7 @@ async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResul
         return _applied()
 
     # Paid tier → must go through Stripe. Fail closed when billing isn't wired.
-    if not billing.is_configured(plan):
+    if not billing.is_configured(plan, cycle):
         raise HTTPException(
             status_code=503,
             detail="billing is not configured; plan upgrades are unavailable",
@@ -2319,6 +2392,7 @@ async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResul
         checkout_url = billing.create_checkout_session(
             account_id=account_id,
             plan=plan,
+            cycle=cycle,
             success_url=f"{base}/?upgraded={plan}",
             cancel_url=f"{base}/?upgrade_cancelled=1",
         )
@@ -2828,15 +2902,53 @@ async def dashboard_briefing(request: Request) -> BriefingResponse:
     )
 
 
+def _drift_attention_items(agents: list[dict], account_id: int | None) -> list[dict]:
+    """Surface already-computed drift verdicts (status 'drift') as attention rows.
+    Read-only: reads each agent's cached drift insight — NEVER triggers a new
+    Claude call. Agents whose drift hasn't been computed yet (detail not opened)
+    simply don't appear here."""
+    items: list[dict] = []
+    for a in agents:
+        service = a.get("service_name")
+        if not service:
+            continue
+        cached = database.get_insight(
+            account_id=account_id,
+            service_name=service,
+            agent_id="main",
+            kind="drift",
+        )
+        data = (cached or {}).get("data") or {}
+        if data.get("status") != "drift":
+            continue
+        findings = data.get("findings") or []
+        first = findings[0] if findings else {}
+        items.append(
+            {
+                "severity": "warning",
+                "agent": a.get("display_name") or service,
+                "title": data.get("headline") or "Behavior drifted from its declared job",
+                "detail": first.get("evidence") or "",
+                "recommendation": "Open this agent and review the drift findings against its declared identity.",
+                "impact": "",
+                "last_seen": a.get("last_seen"),
+            }
+        )
+    return items
+
+
 @app.get("/dashboard/attention", response_model=list[AttentionItem])
 async def dashboard_attention(request: Request) -> list[AttentionItem]:
-    """Needs-attention rows, derived from fleet health and enriched by Claude
-    (cached an hour, keyed on the current flag set). Empty list when all clear."""
+    """Needs-attention rows: genuine behavioral drift (from cached verdicts) plus
+    fleet-health flags enriched by Claude (cached an hour, keyed on the current
+    flag set). Empty list when all clear."""
     account_id = getattr(request.state, "account_id", None)
     agents = database.get_agents(account_id=account_id)
+    # Drift first — it's the product's headline signal, and it's read-only here.
+    drift_items = _drift_attention_items(agents, account_id)
     flagged = _flag_attention(agents)
     if not flagged:
-        return []
+        return [AttentionItem(**it) for it in drift_items]
 
     import hashlib
     import json as _json
@@ -2856,7 +2968,7 @@ async def dashboard_attention(request: Request) -> list[AttentionItem]:
         and cached["data"].get("fingerprint") == fingerprint
         and cached["data"].get("items")
     ):
-        return [AttentionItem(**it) for it in cached["data"]["items"]]
+        return [AttentionItem(**it) for it in (drift_items + cached["data"]["items"])]
 
     try:
         items = describer.attention_items(flagged)
@@ -2873,7 +2985,7 @@ async def dashboard_attention(request: Request) -> list[AttentionItem]:
     except Exception as e:  # noqa: BLE001
         print(f"[Oversee] /dashboard/attention claude failed: {type(e).__name__}: {e}")
         items = _attention_fallback(flagged)
-    return [AttentionItem(**it) for it in items]
+    return [AttentionItem(**it) for it in (drift_items + items)]
 
 
 def _agent_cost_trend(a: dict) -> str:
