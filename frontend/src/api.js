@@ -364,6 +364,11 @@ export const api = {
   // Plan usage for the Fleet header + upgrade prompts:
   // { plan, agent_count, agent_limit (null=unlimited), locked_count }.
   getAccountUsage: () => request('/account/usage'),
+  // Request a plan change. Paid tiers return { status:'checkout_required',
+  // checkout_url } — redirect the browser there; the plan only flips after the
+  // Stripe webhook confirms payment. A no-op/downgrade returns { status:'applied' }.
+  setPlan: (plan, cycle = 'monthly') =>
+    request('/account/plan', { method: 'PUT', body: JSON.stringify({ plan, cycle }) }),
 
   // --- dashboard (daily briefing) ---
   getBriefing: () => request('/dashboard/briefing'),

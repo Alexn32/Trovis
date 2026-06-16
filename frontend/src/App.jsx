@@ -9,6 +9,7 @@ import AskPill from './AskPill.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
 import TrovisLanding from './TrovisLanding.jsx'
+import UpgradeModal from './UpgradeModal.jsx'
 import Team from './Team.jsx'
 import Workflows from './Workflows.jsx'
 import Settings from './Settings.jsx'
@@ -92,6 +93,7 @@ function AppInner() {
   // Logged-out front door: show the marketing landing first, then the Login
   // flow when the visitor clicks a CTA. authMode picks which Login panel opens.
   const [authView, setAuthView] = useState('landing') // 'landing' | 'auth'
+  const [upgradeOpen, setUpgradeOpen] = useState(false) // plan-picker → Stripe
   const [authMode, setAuthMode] = useState('signup')  // 'signup' | 'login'
   // Restore the last view on mount so a browser reload stays put (see VIEW_KEY).
   const persistedView = useRef(readPersistedView()).current
@@ -165,11 +167,10 @@ function AppInner() {
   function openSettings() {
     setOverlay({ kind: 'settings' })
   }
-  // STUB: billing/payments aren't built yet. The "Upgrade to view" buttons send
-  // users to the pricing page; swap this for the real upgrade route when billing
-  // lands (plan changes flow through database.set_account_plan).
+  // Opens the plan-picker modal → PUT /account/plan → Stripe Checkout. The plan
+  // flips only after Stripe's webhook confirms payment (see billing.py).
   function openUpgrade() {
-    window.open('https://trovisai.com/#pricing', '_blank', 'noopener')
+    setUpgradeOpen(true)
   }
   function closeOverlay() {
     setOverlay(null)
@@ -307,6 +308,12 @@ function AppInner() {
       <main className="app-main">{mainContent}</main>
       {/* Global Trovis assistant — floating ⌘K pill, reachable on every page. */}
       <AskPill />
+      <UpgradeModal
+        open={upgradeOpen}
+        me={me}
+        onClose={() => setUpgradeOpen(false)}
+        onApplied={refreshMe}
+      />
     </div>
   )
 }
