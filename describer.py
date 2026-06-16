@@ -733,7 +733,15 @@ def detect_drift(
         identity_parts.append("## User context\n" + context[:800])
     identity_block = "\n\n".join(identity_parts)
 
-    analysis = _analyze_telemetry(spans or [])
+    # _analyze_telemetry subtracts start/end timings directly, so drop spans
+    # with missing/non-numeric timestamps (real fleets have some — synthesized
+    # action/MCP spans, legacy rows) before analyzing.
+    timed = [
+        s for s in (spans or [])
+        if isinstance(s.get("start_time_unix"), (int, float))
+        and isinstance(s.get("end_time_unix"), (int, float))
+    ]
+    analysis = _analyze_telemetry(timed)
     ops = analysis.get("operations") or []
     ops_block = (
         ", ".join(f"{o['operation']} (×{o['calls']})" for o in ops[:20])

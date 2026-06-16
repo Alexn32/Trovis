@@ -829,6 +829,14 @@ async def agent_drift(
         raise HTTPException(
             status_code=503, detail="drift analysis unavailable (AI not configured)"
         )
+    except Exception as e:  # noqa: BLE001 — never 500 the detail page on a verdict
+        print(f"[Trovis] /drift failed: {type(e).__name__}: {e}")
+        return DriftReport(
+            status="unknown",
+            headline="Drift could not be assessed right now — try again shortly.",
+        )
+    # Cache only real verdicts (incl. the no-identity 'unknown'); error fallbacks
+    # above return without caching so a transient failure isn't pinned for 6h.
     database.save_insight(
         account_id=account_id,
         service_name=service_name,
