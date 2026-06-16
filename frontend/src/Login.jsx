@@ -10,7 +10,7 @@ import { TrovisLogo } from './Icons.jsx'
 // On success we call onAuthed({ user, org, auth }) after the api client has
 // the session token set.
 
-export default function Login({ onAuthed, initialMode = 'choose', inviteToken = null }) {
+export default function Login({ onAuthed, initialMode = 'choose', inviteToken = null, onBackToLanding = null }) {
   const [mode, setMode] = useState(initialMode)
   const [fresh, setFresh] = useState(null) // { email, apiKey, me } after signup
 
@@ -30,6 +30,15 @@ export default function Login({ onAuthed, initialMode = 'choose', inviteToken = 
   return (
     <div className="login-shell">
       <div className="login-card">
+        {onBackToLanding && mode !== 'show-key' && (
+          <button
+            type="button"
+            className="btn btn-link login-back-home"
+            onClick={onBackToLanding}
+          >
+            ← Back to home
+          </button>
+        )}
         <header className="login-header">
           <TrovisLogo />
         </header>

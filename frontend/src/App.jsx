@@ -8,6 +8,7 @@ import AgentDetail from './AgentDetail.jsx'
 import AskPill from './AskPill.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
+import TrovisLanding from './TrovisLanding.jsx'
 import Team from './Team.jsx'
 import Workflows from './Workflows.jsx'
 import Settings from './Settings.jsx'
@@ -88,6 +89,10 @@ function AppInner() {
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
   const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken)
+  // Logged-out front door: show the marketing landing first, then the Login
+  // flow when the visitor clicks a CTA. authMode picks which Login panel opens.
+  const [authView, setAuthView] = useState('landing') // 'landing' | 'auth'
+  const [authMode, setAuthMode] = useState('signup')  // 'signup' | 'login'
   // Restore the last view on mount so a browser reload stays put (see VIEW_KEY).
   const persistedView = useRef(readPersistedView()).current
   const [tab, setTab] = useState(persistedView.tab || 'dashboard') // 'dashboard' | 'fleet' | 'team' | 'workflows'
@@ -191,11 +196,22 @@ function AppInner() {
   }
 
   if (!me) {
+    // An invite link goes straight to the accept-invite flow (skip the landing).
+    // Otherwise: the landing page is the front door; its CTAs open Login.
+    if (!inviteToken && authView === 'landing') {
+      return (
+        <TrovisLanding
+          onGetStarted={() => { setAuthMode('signup'); setAuthView('auth') }}
+          onSignIn={() => { setAuthMode('login'); setAuthView('auth') }}
+        />
+      )
+    }
     return (
       <Login
         onAuthed={handleAuthed}
-        initialMode={inviteToken ? 'accept-invite' : 'choose'}
+        initialMode={inviteToken ? 'accept-invite' : authMode}
         inviteToken={inviteToken}
+        onBackToLanding={inviteToken ? undefined : () => setAuthView('landing')}
       />
     )
   }

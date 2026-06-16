@@ -2263,6 +2263,13 @@ a:hover {
   max-width: 440px;
 }
 
+.login-back-home {
+  display: inline-block;
+  margin: -8px 0 16px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
 .login-header {
   margin-bottom: 24px;
 }
