@@ -138,6 +138,15 @@ export const api = {
   listAgents: () => request('/agents'),
   getAgentSummary: (name, agentId) =>
     request(_withAgent(`/agents/${encodeURIComponent(name)}/summary`, agentId)),
+  // Drift verdict (declared identity vs. observed behavior). Cached server-side;
+  // pass refresh=true to force a re-check.
+  getDrift: (name, agentId, refresh = false) =>
+    request(
+      _withAgent(
+        `/agents/${encodeURIComponent(name)}/drift${refresh ? '?refresh=true' : ''}`,
+        agentId,
+      ),
+    ),
   getAgentSpans: (name, limit = 50, agentId) =>
     request(
       _withAgent(

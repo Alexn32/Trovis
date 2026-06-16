@@ -471,6 +471,14 @@ function WorkFeed({ serviceName, agentId }) {
 }
 
 /* ── 5. Identity & Drift ── */
+const _DRIFT_UI = {
+  aligned: { color: C.ok, label: 'Behaving as declared' },
+  minor: { color: C.warn, label: 'Minor notes' },
+  drift: { color: C.err, label: 'Drifted from its job' },
+  unknown: { color: C.muted, label: 'Not assessed' },
+}
+const _SEV_COLOR = { high: C.err, medium: C.warn, low: C.muted }
+
 function IdentityCard({ summary, capabilities, registration }) {
   const [soulOpen, setSoulOpen] = useState(false)
   const soul = registration?.soul || registration?.identity || registration?.operating_manual || ''
@@ -478,16 +486,78 @@ function IdentityCard({ summary, capabilities, registration }) {
   const writes = capabilities?.writes_to || []
   const cando = capabilities?.can_do || []
   const hasCaps = reads.length || writes.length || cando.length
-  // No drift engine yet — report the honest default, consistent with status.
-  const drifting = summary.status === 'error'
+
+  // Real drift verdict — Claude compares declared identity vs. observed
+  // behavior (fetched lazily, cached server-side). status: aligned | minor |
+  // drift | unknown. We never fabricate "no drift": until it actually runs the
+  // pill reads "Checking…", and 'unknown' is shown honestly.
+  const [drift, setDrift] = useState(null)
+  const [driftLoading, setDriftLoading] = useState(true)
+  const [rechecking, setRechecking] = useState(false)
+  useEffect(() => {
+    let alive = true
+    setDriftLoading(true)
+    api
+      .getDrift(summary.service_name, summary.agent_id)
+      .then((d) => { if (alive) setDrift(d) })
+      .catch(() => { if (alive) setDrift({ status: 'unknown', headline: 'Drift analysis is unavailable right now.', findings: [] }) })
+      .finally(() => { if (alive) setDriftLoading(false) })
+    return () => { alive = false }
+  }, [summary.service_name, summary.agent_id])
+
+  async function recheck() {
+    setRechecking(true)
+    try {
+      const d = await api.getDrift(summary.service_name, summary.agent_id, true)
+      setDrift(d)
+    } catch {
+      /* keep the prior verdict */
+    } finally {
+      setRechecking(false)
+    }
+  }
+
+  const ui = _DRIFT_UI[drift?.status] || _DRIFT_UI.unknown
+  const findings = drift?.findings || []
+
   return (
     <Card style={{ padding: '18px 20px', marginTop: 16 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
         <Label>Identity &amp; drift</Label>
-        <Pill color={drifting ? C.warn : C.ok}>
-          {drifting ? 'Recent failure — review against declared behavior' : 'Behaving as declared — no drift events this week'}
+        <Pill color={driftLoading ? C.muted : ui.color}>
+          {driftLoading ? 'Checking…' : ui.label}
         </Pill>
       </div>
+
+      {!driftLoading && (
+        <div style={{ marginTop: 12 }}>
+          {drift?.headline && (
+            <div style={{ fontSize: 14, lineHeight: 1.55, color: C.body, fontFamily: F.body }}>{drift.headline}</div>
+          )}
+          {findings.length > 0 && (
+            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {findings.map((f, i) => (
+                <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', marginTop: 6, flexShrink: 0, background: _SEV_COLOR[f.severity] || C.muted }} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: C.ink, fontFamily: F.body }}>{f.title}</div>
+                    {f.evidence && <div style={{ fontSize: 13, color: C.muted, fontFamily: F.body, lineHeight: 1.5 }}>{f.evidence}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ marginTop: 10, display: 'flex', gap: 12, alignItems: 'center' }}>
+            <button onClick={recheck} disabled={rechecking} style={{
+              background: 'none', border: 'none', color: C.teal, fontSize: 12.5, fontFamily: F.body,
+              cursor: rechecking ? 'default' : 'pointer', padding: 0, opacity: rechecking ? 0.6 : 1,
+            }}>{rechecking ? 'Re-checking…' : 'Re-check drift'}</button>
+            {drift?.generated_at && (
+              <span style={{ fontSize: 12, color: C.faint, fontFamily: F.body }}>checked {fmtRel(drift.generated_at)}</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {soul ? (
         <>

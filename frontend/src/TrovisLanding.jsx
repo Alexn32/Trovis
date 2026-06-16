@@ -213,7 +213,7 @@ function HowItWorks() {
     {
       n: "1", title: "Connect an agent",
       body: "Install the SDK, add two lines to your agent. Telemetry starts flowing immediately — identity, actions, tokens, costs.",
-      code: "pip install trovis",
+      code: "pip install trovis-agents",
     },
     {
       n: "2", title: "Trovis records everything",
@@ -275,8 +275,8 @@ function Features() {
       body: "\"What did my agents do today?\" \"Why is this one flagged?\" Ask in plain language, get answers built from the record — charts, comparisons, timelines.",
     },
     {
-      title: "Handoff tracking",
-      body: "Every handoff between a human and an agent — and back — is a recorded, attributed event. See where work actually flows, not where the diagram says it should.",
+      title: "Workflow & handoffs",
+      body: "See how work flows between your agents — Trovis detects when one agent hands off to another, and workflow maps place the humans in the loop. Follow the real path, not the diagram.",
     },
   ];
   return (
@@ -298,8 +298,8 @@ function Features() {
 function Runtimes({ onGetStarted }) {
   const rts = [
     { name: "OpenClaw", status: "live" },
-    { name: "OpenAI Agents SDK", status: "soon" },
-    { name: "Claude Agent SDK", status: "soon" },
+    { name: "OpenAI Agents SDK", status: "live" },
+    { name: "Claude Agent SDK", status: "live" },
     { name: "Your runtime", status: "request" },
   ];
   return (
@@ -364,12 +364,20 @@ function VisionBand({ onGetStarted }) {
 
 /* ── Pricing ── */
 function Pricing({ onGetStarted }) {
+  const [cycle, setCycle] = useState("monthly");
   const tiers = [
-    { name: "Free", price: "$0", per: "forever", agents: "Up to 5 agents", cta: "Create your account", highlight: false },
-    { name: "Starter", price: "$49", per: "/month", agents: "Up to 15 agents", cta: "Start with Starter", highlight: false },
-    { name: "Pro", price: "$199", per: "/month", agents: "Up to 50 agents", cta: "Start with Pro", highlight: true },
-    { name: "Enterprise", price: "Custom", per: "", agents: "Unlimited agents", cta: "Talk to us", highlight: false },
+    { name: "Free", monthly: 0, agents: "Up to 5 agents", cta: "Create your account", highlight: false },
+    { name: "Starter", monthly: 49, agents: "Up to 15 agents", cta: "Start with Starter", highlight: false },
+    { name: "Pro", monthly: 199, agents: "Up to 50 agents", cta: "Start with Pro", highlight: true },
+    { name: "Enterprise", monthly: null, agents: "Unlimited agents", cta: "Talk to us", highlight: false },
   ];
+  // Numbers are ceilings; annual = 20% off the monthly rate, shown per-month.
+  const priceFor = (t) => {
+    if (t.monthly === null) return { big: "Custom", small: "" };
+    if (t.monthly === 0) return { big: "$0", small: "forever" };
+    const m = cycle === "annual" ? Math.round(t.monthly * 0.8) : t.monthly;
+    return { big: `$${m}`, small: cycle === "annual" ? "/mo · billed annually" : "/month" };
+  };
   const ctaStyle = (t) => ({
     marginTop: "auto", textAlign: "center", padding: "11px 0", borderRadius: 10,
     fontFamily: F.disp, fontWeight: 600, fontSize: 14, textDecoration: "none", cursor: "pointer",
@@ -377,33 +385,55 @@ function Pricing({ onGetStarted }) {
     color: t.highlight ? C.cream : C.body,
     border: t.highlight ? "none" : `1.5px solid ${C.border}`,
   });
+  const tab = (c, label) => (
+    <button
+      type="button"
+      onClick={() => setCycle(c)}
+      style={{
+        padding: "8px 18px", border: "none", cursor: "pointer", fontFamily: F.body,
+        fontSize: 13.5, fontWeight: 500,
+        background: cycle === c ? C.teal : "transparent",
+        color: cycle === c ? C.cream : C.body,
+      }}
+    >{label}</button>
+  );
   return (
     <section id="pricing" style={{ padding: "0 0 80px" }}>
       <SectionLabel>Pricing</SectionLabel>
       <h2 style={{ fontFamily: F.disp, fontWeight: 700, fontSize: "clamp(24px, 3vw, 32px)", letterSpacing: "-0.02em", color: C.ink, margin: "0 0 8px" }}>
         Every feature at every tier. Pay for agents, nothing else.
       </h2>
-      <p style={{ fontFamily: F.body, fontSize: 14.5, color: C.muted, margin: "0 0 28px" }}>20% off with annual billing.</p>
+      <p style={{ fontFamily: F.body, fontSize: 14.5, color: C.muted, margin: "0 0 20px" }}>Save 20% with annual billing.</p>
+      <div style={{
+        display: "inline-flex", border: `1px solid ${C.border}`, borderRadius: 10,
+        overflow: "hidden", marginBottom: 26,
+      }}>
+        {tab("monthly", "Monthly")}
+        {tab("annual", "Annual − 20%")}
+      </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
-        {tiers.map((t) => (
-          <div key={t.name} style={{
-            background: C.cream, borderRadius: 14, padding: "26px 24px",
-            border: t.highlight ? `2px solid ${C.teal}` : `1px solid ${C.border}`,
-            display: "flex", flexDirection: "column", gap: 0,
-          }}>
-            <div style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 16, color: C.ink, marginBottom: 14 }}>{t.name}</div>
-            <div style={{ marginBottom: 6 }}>
-              <span style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 32, color: C.ink, letterSpacing: "-0.02em" }}>{t.price}</span>
-              <span style={{ fontFamily: F.body, fontSize: 14, color: C.muted }}> {t.per}</span>
+        {tiers.map((t) => {
+          const p = priceFor(t);
+          return (
+            <div key={t.name} style={{
+              background: C.cream, borderRadius: 14, padding: "26px 24px",
+              border: t.highlight ? `2px solid ${C.teal}` : `1px solid ${C.border}`,
+              display: "flex", flexDirection: "column", gap: 0,
+            }}>
+              <div style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 16, color: C.ink, marginBottom: 14 }}>{t.name}</div>
+              <div style={{ marginBottom: 6 }}>
+                <span style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 32, color: C.ink, letterSpacing: "-0.02em" }}>{p.big}</span>
+                <span style={{ fontFamily: F.body, fontSize: 14, color: C.muted }}> {p.small}</span>
+              </div>
+              <div style={{ fontFamily: F.body, fontSize: 14.5, color: C.body, marginBottom: 22 }}>{t.agents} · all features</div>
+              {t.name === "Enterprise" ? (
+                <a href="mailto:hello@trovisai.com" style={ctaStyle(t)}>{t.cta}</a>
+              ) : (
+                <button type="button" onClick={onGetStarted} style={ctaStyle(t)}>{t.cta}</button>
+              )}
             </div>
-            <div style={{ fontFamily: F.body, fontSize: 14.5, color: C.body, marginBottom: 22 }}>{t.agents} · all features</div>
-            {t.name === "Enterprise" ? (
-              <a href="mailto:hello@trovisai.com" style={ctaStyle(t)}>{t.cta}</a>
-            ) : (
-              <button type="button" onClick={onGetStarted} style={ctaStyle(t)}>{t.cta}</button>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
