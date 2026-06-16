@@ -24,7 +24,7 @@ import database
 
 # The Ask assistant is a primary product surface (global ⌘K pill) — use the
 # most capable model. Setup walkthroughs need more room than quick answers.
-MODEL = "claude-opus-4-7"
+MODEL = "claude-opus-4-8"
 MAX_TOKENS = 1500
 
 # How many recent spans to include in the per-agent context. 30 covers the

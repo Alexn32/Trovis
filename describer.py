@@ -17,7 +17,7 @@ import anthropic
 
 import database
 
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1024
 
 SYSTEM_PROMPT = (
