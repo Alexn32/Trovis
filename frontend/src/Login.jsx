@@ -10,7 +10,7 @@ import { TrovisLogo } from './Icons.jsx'
 // On success we call onAuthed({ user, org, auth }) after the api client has
 // the session token set.
 
-export default function Login({ onAuthed, initialMode = 'choose', inviteToken = null, onBackToLanding = null }) {
+export default function Login({ onAuthed, initialMode = 'choose', inviteToken = null, resetToken = null, onBackToLanding = null }) {
   const [mode, setMode] = useState(initialMode)
   const [fresh, setFresh] = useState(null) // { email, apiKey, me } after signup
 
@@ -51,7 +51,17 @@ export default function Login({ onAuthed, initialMode = 'choose', inviteToken = 
           />
         )}
         {mode === 'login' && (
-          <LoginPanel onSuccess={finish} onBack={() => setMode('choose')} />
+          <LoginPanel
+            onSuccess={finish}
+            onBack={() => setMode('choose')}
+            onForgot={() => setMode('forgot')}
+          />
+        )}
+        {mode === 'forgot' && (
+          <ForgotPanel onBack={() => setMode('login')} />
+        )}
+        {mode === 'reset' && (
+          <ResetPanel token={resetToken} onSuccess={finish} />
         )}
         {mode === 'signup' && (
           <SignupPanel onSuccess={handleSignup} onBack={() => setMode('choose')} />
@@ -95,7 +105,7 @@ function ChoosePanel({ onLogin, onSignup, onClaim }) {
   )
 }
 
-function LoginPanel({ onSuccess, onBack }) {
+function LoginPanel({ onSuccess, onBack, onForgot }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -139,8 +149,129 @@ function LoginPanel({ onSuccess, onBack }) {
         <button type="submit" className="btn btn-primary btn-block" disabled={submitting || !email.trim() || !password}>
           {submitting ? <><Spinner /> Logging in…</> : 'Log in'}
         </button>
+        {onForgot && (
+          <button type="button" className="btn btn-link" onClick={onForgot} disabled={submitting}>
+            Forgot password?
+          </button>
+        )}
         <button type="button" className="btn btn-link" onClick={onBack} disabled={submitting}>
           ← Back
+        </button>
+      </div>
+    </form>
+  )
+}
+
+// Request a reset link. We show the same calm confirmation regardless of
+// whether the email exists (the backend never reveals it either).
+function ForgotPanel({ onBack }) {
+  const [email, setEmail] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [sent, setSent] = useState(false)
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    setSubmitting(true)
+    try {
+      await api.forgotPassword(email.trim())
+    } catch {
+      /* ignore — never leak; always show the same confirmation */
+    }
+    setSent(true)
+    setSubmitting(false)
+  }
+
+  if (sent) {
+    return (
+      <div className="login-body">
+        <p className="login-prompt">Check your email.</p>
+        <p className="login-note">
+          If an account exists for <strong>{email.trim()}</strong>, we’ve sent a link to
+          reset your password. It expires in 1 hour.
+        </p>
+        <div className="login-actions">
+          <button type="button" className="btn btn-secondary btn-block" onClick={onBack}>
+            ← Back to log in
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <form className="login-body" onSubmit={handleSubmit}>
+      <p className="login-prompt">Reset your password.</p>
+      <p className="login-note">Enter your email and we’ll send you a reset link.</p>
+      <label className="field-label">Email</label>
+      <input
+        className="text-input"
+        type="email"
+        placeholder="you@company.com"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        autoFocus
+        required
+      />
+      <div className="login-actions">
+        <button type="submit" className="btn btn-primary btn-block" disabled={submitting || !email.trim()}>
+          {submitting ? <><Spinner /> Sending…</> : 'Send reset link'}
+        </button>
+        <button type="button" className="btn btn-link" onClick={onBack} disabled={submitting}>
+          ← Back
+        </button>
+      </div>
+    </form>
+  )
+}
+
+// Reached from the emailed link (?reset=<token>). Sets a new password and
+// signs the user in on success.
+function ResetPanel({ token, onSuccess }) {
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    if (password !== confirm) {
+      setError('Passwords don’t match.')
+      return
+    }
+    setSubmitting(true)
+    setError(null)
+    try {
+      onSuccess(await api.resetPassword(token, password))
+    } catch (err) {
+      setError(err.message)
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form className="login-body" onSubmit={handleSubmit}>
+      <p className="login-prompt">Choose a new password.</p>
+      <label className="field-label">New password</label>
+      <input
+        className="text-input"
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        autoFocus
+        required
+      />
+      <label className="field-label">Confirm password</label>
+      <input
+        className="text-input"
+        type="password"
+        value={confirm}
+        onChange={(e) => setConfirm(e.target.value)}
+        required
+      />
+      {error && <p className="form-error">{error}</p>}
+      <div className="login-actions">
+        <button type="submit" className="btn btn-primary btn-block" disabled={submitting || !password || !confirm}>
+          {submitting ? <><Spinner /> Updating…</> : 'Update password'}
         </button>
       </div>
     </form>

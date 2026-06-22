@@ -428,6 +428,10 @@ export const api = {
     request('/auth/claim', { method: 'POST', body: JSON.stringify(data) }),
   setPassword: (data) =>
     request('/auth/set-password', { method: 'POST', body: JSON.stringify(data) }),
+  forgotPassword: (email) =>
+    request('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }),
+  resetPassword: (token, new_password) =>
+    request('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, new_password }) }),
   acceptInvite: (data) =>
     request('/auth/accept-invite', { method: 'POST', body: JSON.stringify(data) }),
 

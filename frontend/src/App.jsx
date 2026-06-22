@@ -48,6 +48,16 @@ function readInviteToken() {
   return null
 }
 
+// A password-reset link lands at `/?reset=<token>` (see main.forgot_password).
+// Read it once at mount; presence routes straight to the reset form.
+function readResetToken() {
+  try {
+    return new URL(window.location.href).searchParams.get('reset')
+  } catch {
+    return null
+  }
+}
+
 // The current view (tab + overlay) lives in React state, not the URL — so a
 // browser reload would otherwise reset to the Dashboard. Persist it to
 // sessionStorage and restore on mount so reload keeps you on the page you were
@@ -87,9 +97,10 @@ export default function App() {
 
 function AppInner() {
   const inviteToken = useRef(readInviteToken()).current
+  const resetToken = useRef(readResetToken()).current
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
-  const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken)
+  const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken && !resetToken)
   // Logged-out front door: show the marketing landing first, then the Login
   // flow when the visitor clicks a CTA. authMode picks which Login panel opens.
   const [authView, setAuthView] = useState('landing') // 'landing' | 'auth'
@@ -197,9 +208,10 @@ function AppInner() {
   }
 
   if (!me) {
-    // An invite link goes straight to the accept-invite flow (skip the landing).
-    // Otherwise: the landing page is the front door; its CTAs open Login.
-    if (!inviteToken && authView === 'landing') {
+    // An invite or password-reset link goes straight to its flow (skip the
+    // landing). Otherwise: the landing page is the front door; its CTAs open Login.
+    const deepLink = inviteToken || resetToken
+    if (!deepLink && authView === 'landing') {
       return (
         <TrovisLanding
           onGetStarted={() => { setAuthMode('signup'); setAuthView('auth') }}
@@ -207,12 +219,18 @@ function AppInner() {
         />
       )
     }
+    const initialMode = inviteToken
+      ? 'accept-invite'
+      : resetToken
+        ? 'reset'
+        : authMode
     return (
       <Login
         onAuthed={handleAuthed}
-        initialMode={inviteToken ? 'accept-invite' : authMode}
+        initialMode={initialMode}
         inviteToken={inviteToken}
-        onBackToLanding={inviteToken ? undefined : () => setAuthView('landing')}
+        resetToken={resetToken}
+        onBackToLanding={deepLink ? undefined : () => setAuthView('landing')}
       />
     )
   }

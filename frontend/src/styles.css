@@ -2291,6 +2291,13 @@ a:hover {
   line-height: 1.55;
 }
 
+.login-note {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 14px;
+  line-height: 1.55;
+}
+
 .login-actions {
   display: flex;
   flex-direction: column;
