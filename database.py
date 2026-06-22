@@ -580,6 +580,30 @@ CREATE TABLE IF NOT EXISTS invites (
 )
 """
 
+# One-time password-reset tokens. Only the token hash is stored; single-use
+# (used_at) + short expiry enforced on read. Mirrors the invites table.
+_PW_RESET_DDL_PG = """
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id         SERIAL    PRIMARY KEY,
+    token_hash TEXT      NOT NULL UNIQUE,
+    user_id    INTEGER   NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW(),
+    expires_at TIMESTAMP NOT NULL,
+    used_at    TIMESTAMP
+)
+"""
+
+_PW_RESET_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT    NOT NULL UNIQUE,
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    used_at    TIMESTAMP
+)
+"""
+
 # Per-model token pricing. Global (not account-scoped) — these are
 # published list prices, the same for everyone. Costs are per 1,000
 # tokens. Seeded at init from _PRICING_SEED below; re-seeding is an
@@ -953,6 +977,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_invites_token_hash ON invites(token_hash)",
     "CREATE INDEX IF NOT EXISTS idx_invites_account_id ON invites(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_pw_reset_token_hash ON password_reset_tokens(token_hash)",
     # Trace-grouping for agent-to-agent connection detection.
     "CREATE INDEX IF NOT EXISTS idx_spans_account_trace ON spans(account_id, trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_connections_account_id ON agent_connections(account_id)",
@@ -992,6 +1017,7 @@ def init_db() -> None:
             _USERS_DDL_PG,
             _SESSIONS_DDL_PG,
             _INVITES_DDL_PG,
+            _PW_RESET_DDL_PG,
             _CONNECTIONS_DDL_PG,
             _AGENT_BUDGETS_DDL_PG,
             _OAUTH_CODES_DDL_PG,
@@ -1017,6 +1043,7 @@ def init_db() -> None:
             _USERS_DDL_SQLITE,
             _SESSIONS_DDL_SQLITE,
             _INVITES_DDL_SQLITE,
+            _PW_RESET_DDL_SQLITE,
             _CONNECTIONS_DDL_SQLITE,
             _AGENT_BUDGETS_DDL_SQLITE,
             _OAUTH_CODES_DDL_SQLITE,
@@ -5718,6 +5745,51 @@ def set_user_password(user_id: int, password_hash: str) -> None:
             f"UPDATE users SET password_hash = {PH} WHERE id = {PH}",
             (password_hash, user_id),
         )
+
+
+_PW_RESET_TTL_SECONDS = 3600  # 1 hour — short by design for a reset link
+
+
+def create_password_reset(user_id: int, ttl_seconds: int = _PW_RESET_TTL_SECONDS) -> str:
+    """Mint a one-time password-reset token for a user; returns the raw token
+    (shown once, embedded in the emailed link). Only its hash is stored."""
+    raw, token_hash = _new_token()
+    expires_at = (_utcnow() + timedelta(seconds=ttl_seconds)).isoformat()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) "
+            f"VALUES ({PH}, {PH}, {PH})",
+            (token_hash, user_id, expires_at),
+        )
+    return raw
+
+
+def consume_password_reset(raw_token: str | None) -> int | None:
+    """Validate + single-use-consume a reset token. Returns the user_id when
+    the token exists, is unexpired, and is unused (atomically marking it used);
+    otherwise None. Reuse/expired/invalid all return None."""
+    if not raw_token:
+        return None
+    token_hash = _hash_token(raw_token)
+    now_iso = _utcnow().isoformat()
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, user_id FROM password_reset_tokens "
+            f"WHERE token_hash = {PH} AND used_at IS NULL AND expires_at > {PH}",
+            (token_hash, now_iso),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        # Mark used in the same connection; the UNIQUE token_hash + used_at
+        # guard makes a double-spend a no-op.
+        cur.execute(
+            f"UPDATE password_reset_tokens SET used_at = {now_sql} "
+            f"WHERE id = {PH} AND used_at IS NULL",
+            (row["id"],),
+        )
+        return row["user_id"]
 
 
 def touch_user_login(user_id: int) -> None:

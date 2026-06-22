@@ -790,6 +790,15 @@ class SetPasswordRequest(BaseModel):
     current_password: str | None = None
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
 class InviteCreate(BaseModel):
     email: str
     role: str = "member"

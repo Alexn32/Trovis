@@ -6,3 +6,5 @@ psycopg2-binary
 python-dotenv
 mcp
 stripe
+resend
+sentry-sdk[fastapi]

@@ -21,9 +21,11 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import asyncio
+import json
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -35,6 +37,7 @@ import asker
 import billing
 import database
 import describer
+import email_send
 import pricing_sync
 # MCP server for ChatGPT agents. Two transports: Streamable HTTP (/mcp) for
 # standard MCP clients, SSE (/mcp/sse + /mcp/messages/) for ChatGPT Custom MCP.
@@ -89,6 +92,8 @@ from models import (
     RevealKeysRequest,
     RevealKeysResponse,
     SetPasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
     SignupRequest,
     SignupResponse,
     UserPublic,
@@ -137,6 +142,8 @@ _OPEN_PATHS = {
     "/auth/login",
     "/auth/claim",
     "/auth/accept-invite",
+    "/auth/forgot-password",     # request a reset link (always 204, no enumeration)
+    "/auth/reset-password",      # consume a reset token + set a new password
     "/oauth/authorize",         # OAuth consent page (user authenticates there)
     "/oauth/authorize/submit",  # OAuth consent form submission
     "/oauth/token",              # OAuth token exchange (ChatGPT server-to-server)
@@ -148,6 +155,58 @@ _OPEN_PATHS = {
 
 
 logger = logging.getLogger("oversee")
+
+# ---------------------------------------------------------------------------
+# Ingest abuse protection (NOT plan-gating)
+# ---------------------------------------------------------------------------
+# /v1/traces is public (key-authed) and the hot path, so it needs a guard
+# against runaway/abusive clients — distinct from the plan gate, which only
+# limits the VIEW and NEVER drops telemetry. These limits are deliberately far
+# above any real agent's volume, so normal telemetry is never throttled.
+#
+# The limiter is in-memory (per-process): a fixed window per account. Fine for
+# a single Railway instance; a multi-instance deploy would move this to Redis.
+_INGEST_MAX_BODY_BYTES = 5 * 1024 * 1024  # 5 MB — generous for an OTLP batch
+_INGEST_RATE_MAX = 600                    # requests per window per account
+_INGEST_RATE_WINDOW_S = 60
+_ingest_hits: dict[str, tuple[int, float]] = {}  # key -> (count, window_start)
+
+
+def _ingest_rate_key(request: Request, account_id: int | None) -> str:
+    """Bucket key: per-account when authed, else per-api-key/IP so an
+    unauthenticated flood can't escape the limit by omitting the key."""
+    if account_id is not None:
+        return f"acct:{account_id}"
+    key = request.headers.get("X-Trovis-Api-Key") or request.headers.get("X-Oversee-Api-Key")
+    if key:
+        return f"key:{key[:16]}"
+    client = request.client
+    return f"ip:{client.host if client else 'unknown'}"
+
+
+def _check_ingest_rate_limit(request: Request, account_id: int | None) -> None:
+    """Fixed-window per-account rate limit. Raises 429 (+ Retry-After) when a
+    caller exceeds _INGEST_RATE_MAX in the window. Generous by design — abuse
+    protection, not plan-gating."""
+    now = time.monotonic()
+    bkey = _ingest_rate_key(request, account_id)
+    count, start = _ingest_hits.get(bkey, (0, now))
+    if now - start >= _INGEST_RATE_WINDOW_S:
+        count, start = 0, now  # window rolled over
+    count += 1
+    _ingest_hits[bkey] = (count, start)
+    # Opportunistic prune so the dict can't grow unbounded across many keys.
+    if len(_ingest_hits) > 10_000:
+        cutoff = now - _INGEST_RATE_WINDOW_S
+        for k in [k for k, (_, s) in _ingest_hits.items() if s < cutoff]:
+            _ingest_hits.pop(k, None)
+    if count > _INGEST_RATE_MAX:
+        retry = max(1, int(_INGEST_RATE_WINDOW_S - (now - start)) + 1)
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded — slow down and retry",
+            headers={"Retry-After": str(retry)},
+        )
 
 # How often to pull fresh model prices from the LiteLLM list. Daily is
 # plenty — published list prices change on the order of weeks.
@@ -198,6 +257,25 @@ async def lifespan(app: FastAPI):
             refresh_task.cancel()
         database.shutdown_db()
 
+
+# Error monitoring — fail-soft. Only initializes when SENTRY_DSN is set (and
+# the SDK is installed); otherwise it's a no-op, so dev/test and unconfigured
+# deploys run untouched. We don't attach request bodies (spans can carry
+# customer content); Sentry's default PII scrubbing handles the rest.
+_SENTRY_DSN = database.env("SENTRY_DSN")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk  # noqa: PLC0415
+
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            environment=database.env("SENTRY_ENVIRONMENT", "production"),
+            traces_sample_rate=float(database.env("SENTRY_TRACES_SAMPLE_RATE", "0.0") or 0.0),
+            send_default_pii=False,
+        )
+        logger.info("[sentry] error monitoring enabled")
+    except Exception as exc:  # noqa: BLE001 — never let monitoring break boot
+        logger.warning("[sentry] init skipped: %s", exc)
 
 app = FastAPI(title="Trovis", version=VERSION, lifespan=lifespan)
 
@@ -564,18 +642,26 @@ def _extract_registrations(
 
 @app.post("/v1/traces", response_model=IngestResponse)
 async def ingest_traces(request: Request) -> IngestResponse:
+    account_id = getattr(request.state, "account_id", None)
+    # Abuse protection (never plan-gating): throttle runaway callers and cap
+    # body size before doing any work. Generous limits — normal telemetry from
+    # real agents stays well under them.
+    _check_ingest_rate_limit(request, account_id)
+
     # We accept the raw JSON body rather than a Pydantic-modeled one — see
     # models.py for why. The OTLP/JSON schema is too loose to model strictly
     # without rejecting valid traffic from real agent SDKs.
+    raw_body = await request.body()
+    if len(raw_body) > _INGEST_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large")
     try:
-        payload = await request.json()
+        payload = json.loads(raw_body)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"invalid JSON body: {e}")
 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
 
-    account_id = getattr(request.state, "account_id", None)
     spans = _parse_otlp_json(payload)
 
     # Snapshot which (service, agent) pairs in this batch are
@@ -2212,6 +2298,48 @@ async def login(body: LoginRequest) -> LoginResponse:
     return LoginResponse(token=token, user=UserPublic(**public), org=OrgPublic(**org))
 
 
+@app.post("/auth/forgot-password", status_code=204)
+async def forgot_password(request: Request, body: ForgotPasswordRequest) -> None:
+    """Request a password-reset link. ALWAYS returns 204 — we never reveal
+    whether an email is registered (no account enumeration). When the email
+    matches a user we mint a one-time token and email the reset link; if email
+    isn't configured the send is a no-op (logged) and the response is unchanged."""
+    user = database.get_user_by_email(body.email)
+    if user is not None:
+        raw = database.create_password_reset(user["id"])
+        base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+        link = f"{base}/?reset={raw}"
+        email_send.send_email(
+            to=user["email"],
+            subject="Reset your Trovis password",
+            html=(
+                "<p>We received a request to reset your Trovis password.</p>"
+                f'<p><a href="{link}">Reset your password</a> — this link expires in 1 hour.</p>'
+                "<p>If you didn't request this, you can safely ignore this email.</p>"
+            ),
+        )
+    return None
+
+
+@app.post("/auth/reset-password", response_model=LoginResponse)
+async def reset_password(body: ResetPasswordRequest) -> LoginResponse:
+    """Consume a reset token and set a new password. Invalidates the user's
+    existing sessions, then signs them in with a fresh session. 400 on an
+    invalid / expired / already-used token."""
+    _validate_password(body.new_password)
+    user_id = database.consume_password_reset(body.token)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="invalid or expired reset link")
+    database.set_user_password(user_id, database.hash_password(body.new_password))
+    database.delete_sessions_for_user(user_id)
+    user = database.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=400, detail="invalid or expired reset link")
+    org = database.get_account(user["account_id"])
+    token = database.create_session(user_id, user["account_id"])
+    return LoginResponse(token=token, user=UserPublic(**user), org=OrgPublic(**org))
+
+
 @app.post("/auth/logout", status_code=204)
 async def logout(request: Request) -> None:
     """Invalidate the caller's session token."""
@@ -2565,8 +2693,20 @@ async def create_invite(request: Request, body: InviteCreate) -> InviteCreateRes
         account_id, body.email, role, inviter["id"] if inviter else None
     )
     base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    invite_url = f"{base}/accept-invite?token={inv['token']}"
+    # Email the invite too (fail-soft); the copyable link is still returned so
+    # invites work even when email isn't configured.
+    org_name = org.get("name") or "your team"
+    email_send.send_email(
+        to=inv["email"],
+        subject=f"You're invited to {org_name} on Trovis",
+        html=(
+            f"<p>You've been invited to join <strong>{org_name}</strong> on Trovis.</p>"
+            f'<p><a href="{invite_url}">Accept your invitation</a> to get started.</p>'
+        ),
+    )
     return InviteCreateResponse(
-        invite_url=f"{base}/accept-invite?token={inv['token']}",
+        invite_url=invite_url,
         email=inv["email"],
         role=inv["role"],
         expires_at=inv["expires_at"],
