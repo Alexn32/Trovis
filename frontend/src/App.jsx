@@ -9,6 +9,7 @@ import AskPill from './AskPill.jsx'
 import AddAgent from './AddAgent.jsx'
 import Login from './Login.jsx'
 import TrovisLanding from './TrovisLanding.jsx'
+import TrovisLegal from './TrovisLegal.jsx'
 import UpgradeModal from './UpgradeModal.jsx'
 import Team from './Team.jsx'
 import Workflows from './Workflows.jsx'
@@ -58,6 +59,19 @@ function readResetToken() {
   }
 }
 
+// Public legal pages served at /terms and /privacy (no auth). The app has no
+// router, so we detect the path at mount and short-circuit to the legal view.
+function readLegalPath() {
+  try {
+    const p = new URL(window.location.href).pathname.replace(/\/+$/, '')
+    if (p === '/terms') return 'terms'
+    if (p === '/privacy') return 'privacy'
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
 // The current view (tab + overlay) lives in React state, not the URL — so a
 // browser reload would otherwise reset to the Dashboard. Persist it to
 // sessionStorage and restore on mount so reload keeps you on the page you were
@@ -98,6 +112,7 @@ export default function App() {
 function AppInner() {
   const inviteToken = useRef(readInviteToken()).current
   const resetToken = useRef(readResetToken()).current
+  const legalPath = useRef(readLegalPath()).current
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
   const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken && !resetToken)
@@ -190,6 +205,11 @@ function AppInner() {
   async function refreshMe() {
     const payload = await api.validateSession()
     if (payload) setMe(payload)
+  }
+
+  // Public legal pages (/terms, /privacy) — no auth, no session restore.
+  if (legalPath) {
+    return <TrovisLegal page={legalPath} />
   }
 
   if (restoring) {

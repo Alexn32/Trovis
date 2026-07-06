@@ -466,8 +466,8 @@ function Footer() {
       </div>
       <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
         <a href="#pricing" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Pricing</a>
-        <a href="https://trovisai.com/terms" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Terms</a>
-        <a href="https://trovisai.com/privacy" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Privacy</a>
+        <a href="/terms" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Terms</a>
+        <a href="/privacy" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Privacy</a>
         <a href="mailto:hello@trovisai.com" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Contact</a>
         <a href="https://x.com/tryTrovis" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>X</a>
         <span style={{ fontFamily: F.body, fontSize: 13, color: C.faint }}>© 2026 Trovis · Omaha, NE</span>
