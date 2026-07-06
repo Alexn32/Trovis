@@ -15,6 +15,7 @@ Config (read live, never cached):
 from __future__ import annotations
 
 import logging
+import os
 
 import database
 
@@ -36,11 +37,14 @@ def _resend():
 
 
 def api_key() -> str | None:
-    return database.env("RESEND_API_KEY") or None
+    # Prefer the plain, conventional name (RESEND_API_KEY — matches Resend's
+    # docs and how Stripe keys are read); also accept the TROVIS_/OVERSEE_-
+    # prefixed variants so either works.
+    return os.getenv("RESEND_API_KEY") or database.env("RESEND_API_KEY") or None
 
 
 def from_address() -> str:
-    return database.env("EMAIL_FROM", _DEFAULT_FROM) or _DEFAULT_FROM
+    return os.getenv("EMAIL_FROM") or database.env("EMAIL_FROM") or _DEFAULT_FROM
 
 
 def is_configured() -> bool:
