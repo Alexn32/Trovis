@@ -18,6 +18,7 @@ const PLATFORM_LOGOS = {
   'openai-agents': { Icon: OpenAIIcon,    color: '#10a37f' },
   claude:          { Icon: AnthropicIcon, color: '#d97757' },
   hermes:          { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
+  chatgpt:         { Icon: OpenAIIcon,    color: 'var(--text-primary)' },
 }
 
 // The two Claude variants shown on the sub-step after picking "Claude Agents".
@@ -62,8 +63,10 @@ const PLATFORMS = [
   // One Claude tile; a sub-step then splits SDK vs Managed Agents.
   { id: 'claude',         label: 'Claude Agents',             subtitle: 'Claude Agent SDK or Managed Agents',             needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
-  // ChatGPT is intentionally not in the picker: OpenAI's MCP app registration
-  // is pending. The MCP server + OAuth/Actions backend remain live and tested.
+  // A custom GPT built in ChatGPT: it reports its own activity to Trovis via
+  // GPT Actions (OAuth). Report-only — the GPT shows up in the fleet but can't
+  // query it back (no read endpoints in the Actions spec).
+  { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor a GPT via Actions — no code',            needsProvider: false },
 ]
 
 const PROVIDERS = [
@@ -653,6 +656,18 @@ export function computeOverseeEndpoint() {
   return base.replace(/\/+$/, '') + '/v1/traces'
 }
 
+// Canonical custom-domain host for the OAuth / GPT-Actions flow. Deliberately
+// NOT derived from VITE_API_URL: ChatGPT users must never see the raw platform
+// hostname, and this must match the `servers` URL the backend advertises in
+// /actions/openapi.json (set via the API_URL env var). If that domain ever
+// changes, update it here and in the backend env together.
+const TROVIS_ACTIONS_HOST = 'https://api.trovisai.com'
+
+// The OAuth client_id the GPT Action authenticates with. Public (not a secret)
+// and must match the backend's OAUTH_CLIENT_ID (default "oversee-chatgpt" — a
+// registered value, not a brand identifier, so it stays as-is).
+const _OAUTH_CLIENT_ID_PUBLIC = 'oversee-chatgpt'
+
 function OpenClawInstructions() {
   const endpoint = computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
@@ -1152,6 +1167,109 @@ export TROVIS_AGENT_NAME="AGENT_NAME"`
   )
 }
 
+// ---------------------------------------------------------------------------
+// Instructions page — ChatGPT custom GPT (GPT Actions + OAuth)
+// ---------------------------------------------------------------------------
+//
+// Unlike every other tile, there's no code and no SDK: the user adds Trovis as
+// an *Action* to a GPT they build in ChatGPT. The GPT then calls our
+// /actions/{connect,log,complete,status} endpoints (OAuth-authed) as it works,
+// so it shows up in the fleet like any other agent. This is report-only — the
+// Actions spec exposes no read endpoints, so the GPT can't query the fleet back.
+// Everything shown here points at the branded Actions host, never the raw
+// platform URL, matching the OAuth consent page + the OpenAPI `servers` URL.
+
+function ChatGPTInstructions() {
+  const schemaUrl = `${TROVIS_ACTIONS_HOST}/actions/openapi.json`
+  const oauthConfig =
+`Client ID:          ${_OAUTH_CLIENT_ID_PUBLIC}
+Client secret:      <your OAUTH_CLIENT_SECRET>
+Authorization URL:  ${TROVIS_ACTIONS_HOST}/oauth/authorize
+Token URL:          ${TROVIS_ACTIONS_HOST}/oauth/token
+Scope:              (leave blank)
+Token exchange:     Default (POST request)`
+  const gptInstructions =
+`You report your activity to Trovis for monitoring.
+- At the START of each conversation, call connectAgent with your name, your role, and a one-line description of what you do.
+- As you finish each meaningful step, call logActivity with a short step name and description.
+- When the task is done, call reportComplete with a one-line summary of what you accomplished.
+Do this silently in the background — don't mention Trovis to the user unless they ask.`
+
+  return (
+    <>
+      <h2 className="instructions-title">Connect a custom GPT (ChatGPT)</h2>
+      <p className="instructions-subtitle">
+        Add Trovis as an <strong>Action</strong> on a GPT you build in ChatGPT.
+        No code — the GPT reports what it does and shows up in your fleet.
+      </p>
+
+      <Callout variant="blue">
+        <strong>What this does:</strong> your GPT calls Trovis as it works
+        (start, each step, completion), so its activity lands on the dashboard
+        like any other agent. It's report-only — the GPT can't read your fleet
+        back.
+      </Callout>
+
+      <PrefillBlock label="OpenAPI schema URL (import this into your GPT)" value={schemaUrl} />
+
+      <NumberedStep n={1} title="Open your GPT's Actions">
+        <p>
+          In ChatGPT, go to your GPT → <strong>Configure</strong> →{' '}
+          <strong>Create new action</strong> (under Actions). You'll need
+          a GPT you own — create one first if you haven't.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Import the Trovis schema">
+        <p>Use “Import from URL” and paste:</p>
+        <CodeBlock code={schemaUrl} />
+        <p className="helper-text">
+          This registers four operations on your GPT: connectAgent,
+          logActivity, reportComplete, and checkStatus.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Set Authentication to OAuth">
+        <p>Choose <strong>OAuth</strong> and enter:</p>
+        <CodeBlock code={oauthConfig} />
+        <p className="helper-text">
+          The client secret is the <code>OAUTH_CLIENT_SECRET</code> you set on
+          your Trovis backend — not shown here. When the GPT first runs,
+          ChatGPT sends the user to the Trovis sign-in page to authorize.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={4} title="Add a privacy policy URL (if prompted)">
+        <CodeBlock code="https://trovisai.com/privacy" />
+      </NumberedStep>
+
+      <NumberedStep n={5} title="Tell the GPT to report to Trovis">
+        <p>Paste this into the GPT's <strong>Instructions</strong>:</p>
+        <AgentMessageBlock code={gptInstructions} />
+      </NumberedStep>
+
+      <NumberedStep n={6} title="Save. Run your GPT — it authorizes once, then appears in Trovis within seconds." />
+
+      <h3 className="section-title section-title-spaced">Prefer a custom MCP connector?</h3>
+      <p>
+        If your ChatGPT plan supports custom connectors, you can point one at{' '}
+        <code>{`${TROVIS_ACTIONS_HOST}/sse`}</code> (or{' '}
+        <code>{`${TROVIS_ACTIONS_HOST}/mcp`}</code>) with a Bearer{' '}
+        Trovis API key instead of Actions. Same monitoring, different transport.
+      </p>
+
+      <Callout variant="info">
+        <strong>What gets captured:</strong> the agent's name + role, each step
+        you tell it to log, and task completions. Everything runs on OpenAI's
+        side, so token-level cost isn't available for GPT-Action agents — you
+        see their activity, not per-call spend.
+      </Callout>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
 function PrefillBlock({ label, value, placeholder }) {
   const [copied, setCopied] = useState(false)
   async function copy() {
@@ -1472,6 +1590,9 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'hermes') {
     return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  if (platform === 'chatgpt') {
+    return <ChatGPTInstructions />
   }
   // Unreachable from the picker — the platform list above only
   // contains the live integrations. Returning null is safer than

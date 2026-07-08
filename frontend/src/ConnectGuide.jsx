@@ -21,6 +21,7 @@ const OPENING_TURN = {
     'Claude Agent SDK / Claude Code',
     'OpenClaw',
     'Hermes',
+    'ChatGPT (custom GPT)',
     'Custom Python / other',
   ],
   code: [],
