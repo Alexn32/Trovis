@@ -4072,7 +4072,7 @@ async def actions_openapi():
                 "post": {
                     "operationId": "askFleet",
                     "summary": "Ask a question about the user's Trovis fleet",
-                    "description": "Answer a plain-English question about the user's monitored agents — what they did, their most recent or last activity, costs, health/drift, and status. Use this whenever the user asks anything about their agents or fleet (e.g. 'what was the last agent that ran?', 'what did my agents do today?', 'which ones are drifting?').",
+                    "description": "Answer a plain-English question about the user's monitored agents — recent or last activity, what they did, costs, and health/drift. Use whenever the user asks about their agents or fleet, e.g. 'what was the last agent that ran?' or 'what did my agents do today?'.",
                     "requestBody": {
                         "required": True,
                         "content": {
