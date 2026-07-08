@@ -3590,8 +3590,8 @@ _OVERSEE_APP_URL = database.env("APP_URL", "https://oversee-pi.vercel.app")
 _OVERSEE_API_URL = database.env("API_URL", "https://web-production-e6bc4.up.railway.app")
 # OAuth client_id/secret — set in env for production; defaults for dev. Default
 # literals stay `oversee-*` (registered values, not brand identifiers).
-_OAUTH_CLIENT_ID = database.env("OAUTH_CLIENT_ID", "oversee-chatgpt")
-_OAUTH_CLIENT_SECRET = database.env("OAUTH_CLIENT_SECRET", "oversee-dev-secret")
+_OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "oversee-chatgpt")
+_OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", "oversee-dev-secret")
 
 # redirect_uri allowlist — the auth code is only ever redirected to a URL whose
 # origin is on this list, so a phished victim's code can't be sent to an
@@ -3601,7 +3601,7 @@ _OAUTH_CLIENT_SECRET = database.env("OAUTH_CLIENT_SECRET", "oversee-dev-secret")
 _OAUTH_REDIRECT_ALLOWLIST = [
     p.strip().rstrip("/")
     for p in (
-        database.env(
+        os.getenv(
             "OAUTH_REDIRECT_ALLOWLIST",
             "https://chatgpt.com,https://chat.openai.com",
         )
