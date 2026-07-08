@@ -63,10 +63,9 @@ const PLATFORMS = [
   // One Claude tile; a sub-step then splits SDK vs Managed Agents.
   { id: 'claude',         label: 'Claude Agents',             subtitle: 'Claude Agent SDK or Managed Agents',             needsProvider: false },
   { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
-  // A custom GPT built in ChatGPT: it reports its own activity to Trovis via
-  // GPT Actions (OAuth). Report-only — the GPT shows up in the fleet but can't
-  // query it back (no read endpoints in the Actions spec).
-  { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor a GPT via Actions — no code',            needsProvider: false },
+  // A custom GPT built in ChatGPT: via GPT Actions (OAuth) it both reports its
+  // own activity to Trovis AND can ask about the fleet (askFleet). No code.
+  { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor + query a GPT via Actions — no code',    needsProvider: false },
 ]
 
 const PROVIDERS = [
@@ -1173,11 +1172,10 @@ export TROVIS_AGENT_NAME="AGENT_NAME"`
 //
 // Unlike every other tile, there's no code and no SDK: the user adds Trovis as
 // an *Action* to a GPT they build in ChatGPT. The GPT then calls our
-// /actions/{connect,log,complete,status} endpoints (OAuth-authed) as it works,
-// so it shows up in the fleet like any other agent. This is report-only — the
-// Actions spec exposes no read endpoints, so the GPT can't query the fleet back.
-// Everything shown here points at the branded Actions host, never the raw
-// platform URL, matching the OAuth consent page + the OpenAPI `servers` URL.
+// /actions/* endpoints (OAuth-authed) as it works — connect/log/complete to
+// report its activity, and askFleet to answer the user's questions about the
+// fleet. Everything shown here points at the branded Actions host, never the
+// raw platform URL, matching the OAuth consent page + the OpenAPI `servers` URL.
 
 function ChatGPTInstructions() {
   const schemaUrl = `${TROVIS_ACTIONS_HOST}/actions/openapi.json`
@@ -1189,11 +1187,12 @@ Token URL:          ${TROVIS_ACTIONS_HOST}/oauth/token
 Scope:              (leave blank)
 Token exchange:     Default (POST request)`
   const gptInstructions =
-`You report your activity to Trovis for monitoring.
+`You are connected to Trovis, the user's agent monitoring system.
 - At the START of each conversation, call connectAgent with your name, your role, and a one-line description of what you do.
 - As you finish each meaningful step, call logActivity with a short step name and description.
 - When the task is done, call reportComplete with a one-line summary of what you accomplished.
-Do this silently in the background — don't mention Trovis to the user unless they ask.`
+- Whenever the user asks ANYTHING about their agents or fleet (e.g. "what was the last agent that ran?", "what did my agents do today?", "which ones are drifting?", "what did I spend?"), call askFleet with their question and answer from the result.
+Do the connect/log/complete calls silently in the background — don't mention Trovis unless the user asks.`
 
   return (
     <>
@@ -1204,10 +1203,11 @@ Do this silently in the background — don't mention Trovis to the user unless t
       </p>
 
       <Callout variant="blue">
-        <strong>What this does:</strong> your GPT calls Trovis as it works
-        (start, each step, completion), so its activity lands on the dashboard
-        like any other agent. It's report-only — the GPT can't read your fleet
-        back.
+        <strong>What this does:</strong> your GPT reports its own activity to
+        Trovis as it works (start, each step, completion), so it lands on the
+        dashboard like any other agent — <em>and</em> it can answer your
+        questions about the whole fleet ("what was the last agent that ran?")
+        by querying Trovis back.
       </Callout>
 
       <PrefillBlock label="OpenAPI schema URL (import this into your GPT)" value={schemaUrl} />
@@ -1224,8 +1224,8 @@ Do this silently in the background — don't mention Trovis to the user unless t
         <p>Use “Import from URL” and paste:</p>
         <CodeBlock code={schemaUrl} />
         <p className="helper-text">
-          This registers four operations on your GPT: connectAgent,
-          logActivity, reportComplete, and checkStatus.
+          This registers five operations on your GPT: connectAgent,
+          logActivity, reportComplete, checkStatus, and askFleet.
         </p>
       </NumberedStep>
 
@@ -1243,7 +1243,7 @@ Do this silently in the background — don't mention Trovis to the user unless t
         <CodeBlock code="https://trovisai.com/privacy" />
       </NumberedStep>
 
-      <NumberedStep n={5} title="Tell the GPT to report to Trovis">
+      <NumberedStep n={5} title="Tell the GPT to report to — and query — Trovis">
         <p>Paste this into the GPT's <strong>Instructions</strong>:</p>
         <AgentMessageBlock code={gptInstructions} />
       </NumberedStep>

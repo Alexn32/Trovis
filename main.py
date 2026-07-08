@@ -3949,6 +3949,31 @@ async def action_status(request: Request):
     }
 
 
+@app.post("/actions/ask")
+async def action_ask(request: Request):
+    """Answer a plain-English question about the caller's Trovis fleet.
+
+    The read-only counterpart to connect/log/complete — it delegates to the
+    same fleet assistant that powers the dashboard Ask pill, scoped to the
+    OAuth-authorized account so a GPT only ever sees its own owner's fleet."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    body = await request.json()
+    question = str(body.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    try:
+        result = asker.ask_about_fleet(
+            account_id, [{"role": "user", "content": question}], concise=True
+        )
+    except asker.AskApiKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"question": question, "answer": result.get("answer", "")}
+
+
 @app.get("/actions/openapi.json", include_in_schema=False)
 async def actions_openapi():
     """Serve the OpenAPI spec for the ChatGPT GPT Action."""
@@ -3956,8 +3981,8 @@ async def actions_openapi():
         "openapi": "3.1.0",
         "info": {
             "title": "Trovis Agent Monitoring",
-            "description": "Monitor your AI agents with Trovis. Track activity, log steps, and report completions.",
-            "version": "1.0.0",
+            "description": "Monitor your AI agents with Trovis and ask about your fleet. Register an agent, log steps, report completions, and answer plain-English questions about what your agents have been doing.",
+            "version": "1.1.0",
         },
         "servers": [{"url": _OVERSEE_API_URL}],
         "paths": {
@@ -4041,6 +4066,28 @@ async def actions_openapi():
                     "summary": "Check monitoring connection status",
                     "description": "Check if Trovis monitoring is active and which agent is being tracked.",
                     "responses": {"200": {"description": "Monitoring status"}},
+                },
+            },
+            "/actions/ask": {
+                "post": {
+                    "operationId": "askFleet",
+                    "summary": "Ask a question about the user's Trovis fleet",
+                    "description": "Answer a plain-English question about the user's monitored agents — what they did, their most recent or last activity, costs, health/drift, and status. Use this whenever the user asks anything about their agents or fleet (e.g. 'what was the last agent that ran?', 'what did my agents do today?', 'which ones are drifting?').",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "question": {"type": "string", "description": "The user's question about their fleet, in plain English"},
+                                    },
+                                    "required": ["question"],
+                                },
+                            },
+                        },
+                    },
+                    "responses": {"200": {"description": "Plain-English answer about the fleet"}},
                 },
             },
         },
