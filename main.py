@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -457,6 +458,27 @@ app.add_middleware(_MCPInterceptMiddleware)
 # doesn't fit safely in a JSON number), so we coerce them to int here.
 
 
+_OTLP_STATUS_CODES = {"STATUS_CODE_UNSET": 0, "STATUS_CODE_OK": 1, "STATUS_CODE_ERROR": 2}
+
+
+def _otlp_int(v: Any, mapping: dict[str, int] | None = None) -> int:
+    """Coerce an OTLP enum field (kind / status.code) to int. Accepts ints,
+    numeric strings, and protobuf-JSON string enum names (via `mapping`); any
+    other/garbage value → 0. Prevents a valid string-enum OTLP batch from
+    500-ing ingestion."""
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s.lstrip("-").isdigit():
+            return int(s)
+        if mapping and s in mapping:
+            return mapping[s]
+    return 0
+
+
 def _attr_value(v: dict[str, Any]) -> Any:
     """Unwrap an OTLP AnyValue into a plain Python value."""
     if not isinstance(v, dict):
@@ -474,9 +496,11 @@ def _attr_value(v: dict[str, Any]) -> Any:
     if "doubleValue" in v:
         return v["doubleValue"]
     if "arrayValue" in v:
-        return [_attr_value(x) for x in v["arrayValue"].get("values", [])]
+        av = v["arrayValue"]
+        return [_attr_value(x) for x in (av.get("values", []) if isinstance(av, dict) else [])]
     if "kvlistValue" in v:
-        return _attrs_to_dict(v["kvlistValue"].get("values", []))
+        kv = v["kvlistValue"]
+        return _attrs_to_dict(kv.get("values", []) if isinstance(kv, dict) else [])
     if "bytesValue" in v:
         return v["bytesValue"]
     return None
@@ -524,10 +548,10 @@ def _parse_otlp_json(payload: dict[str, Any]) -> list[dict[str, Any]]:
                         "parent_span_id": span.get("parentSpanId") or None,
                         "service_name": service_name,
                         "span_name": span.get("name", ""),
-                        "kind": int(span.get("kind", 0) or 0),
+                        "kind": _otlp_int(span.get("kind", 0)),
                         "start_time_unix": _to_int_ns(span.get("startTimeUnixNano")),
                         "end_time_unix": _to_int_ns(span.get("endTimeUnixNano")),
-                        "status_code": int(status.get("code", 0) or 0),
+                        "status_code": _otlp_int(status.get("code", 0), _OTLP_STATUS_CODES),
                         "status_message": status.get("message", "") or "",
                         "attributes": _attrs_to_dict(span.get("attributes")),
                         "resource_attributes": resource_attrs,
@@ -647,6 +671,15 @@ async def ingest_traces(request: Request) -> IngestResponse:
     # body size before doing any work. Generous limits — normal telemetry from
     # real agents stays well under them.
     _check_ingest_rate_limit(request, account_id)
+
+    # Reject an over-cap body from the Content-Length header BEFORE buffering it,
+    # so a huge POST can't be fully read into memory just to be 413'd.
+    try:
+        declared_len = int(request.headers.get("content-length") or 0)
+    except (TypeError, ValueError):
+        declared_len = 0
+    if declared_len > _INGEST_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large")
 
     # We accept the raw JSON body rather than a Pydantic-modeled one — see
     # models.py for why. The OTLP/JSON schema is too loose to model strictly
@@ -921,15 +954,17 @@ async def agent_drift(
             status="unknown",
             headline="Drift could not be assessed right now — try again shortly.",
         )
-    # Cache only real verdicts (incl. the no-identity 'unknown'); error fallbacks
-    # above return without caching so a transient failure isn't pinned for 6h.
-    database.save_insight(
-        account_id=account_id,
-        service_name=service_name,
-        agent_id=agent_id or "main",
-        kind="drift",
-        data=report,
-    )
+    # Cache only real verdicts (aligned/minor/drift). An 'unknown' is either a
+    # no-identity case (recomputed cheaply with no Claude call) or a transient
+    # parse failure — neither should be pinned for 6h, so skip caching it.
+    if report.get("status") != "unknown":
+        database.save_insight(
+            account_id=account_id,
+            service_name=service_name,
+            agent_id=agent_id or "main",
+            kind="drift",
+            data=report,
+        )
     return DriftReport(
         status=report["status"],
         headline=report["headline"],
@@ -1177,6 +1212,9 @@ async def set_owner(
     """Assign a team member as the human owner of one sub-agent.
     Re-assigns when an owner already exists. 204 No Content on success."""
     account_id = getattr(request.state, "account_id", None)
+    # Reject a team_member_id from another tenant (would leak their PII via joins).
+    if not database.team_member_in_account(account_id, body.team_member_id):
+        raise HTTPException(status_code=400, detail="unknown team member")
     database.set_agent_owner(
         account_id=account_id,
         service_name=service_name,
@@ -1318,6 +1356,10 @@ async def add_workflow_step(
     # Ownership gate — only operate on a workflow this account owns.
     if database.get_workflow(workflow_id, account_id=account_id) is None:
         raise HTTPException(status_code=404, detail="workflow not found")
+    if body.team_member_id is not None and not database.team_member_in_account(
+        account_id, body.team_member_id
+    ):
+        raise HTTPException(status_code=400, detail="unknown team member")
     step = database.add_workflow_step(workflow_id, body.model_dump())
     return WorkflowStep(**step)
 
@@ -1459,6 +1501,10 @@ async def add_workflow_participant(
             (p["role_name"] or "").strip().lower() == body.role_name.strip().lower()
         ):
             raise HTTPException(status_code=409, detail="human role already a participant")
+    if body.team_member_id is not None and not database.team_member_in_account(
+        account_id, body.team_member_id
+    ):
+        raise HTTPException(status_code=400, detail="unknown team member")
     participant = database.add_workflow_participant(
         workflow_id,
         ptype,
@@ -1775,9 +1821,9 @@ async def delete_waitlist(email: str, request: Request) -> WaitlistDeleteRespons
     path is NOT in _OPEN_PATHS, so the auth middleware requires a valid Trovis
     credential (session or API key). Used to clear test/bogus entries so they
     don't skew the marketing-site count."""
-    account_id = getattr(request.state, "account_id", None)
-    if account_id is None:
-        raise HTTPException(status_code=401, detail="authentication required")
+    # The waitlist is shared, global marketing data — so require an owner session
+    # (not just any authenticated tenant / API key) to prune it.
+    _require_owner(request)
     deleted = database.delete_waitlist_signup(email)
     return WaitlistDeleteResponse(deleted=deleted > 0, email=(email or "").strip().lower())
 
@@ -3119,28 +3165,42 @@ def _drift_attention_items(agents: list[dict], account_id: int | None) -> list[d
         service = a.get("service_name")
         if not service:
             continue
-        cached = database.get_insight(
-            account_id=account_id,
-            service_name=service,
-            agent_id="main",
-            kind="drift",
-        )
-        data = (cached or {}).get("data") or {}
-        if data.get("status") != "drift":
-            continue
-        findings = data.get("findings") or []
-        first = findings[0] if findings else {}
-        items.append(
-            {
-                "severity": "warning",
-                "agent": a.get("display_name") or service,
-                "title": data.get("headline") or "Behavior drifted from its declared job",
-                "detail": first.get("evidence") or "",
-                "recommendation": "Open this agent and review the drift findings against its declared identity.",
-                "impact": "",
-                "last_seen": a.get("last_seen"),
-            }
-        )
+        # Check every sub-agent (agent_id), not just "main" — multi-agent
+        # services (e.g. CrewAI 'researcher'/'writer') compute drift under their
+        # own agent_id, so a "main"-only lookup would miss them entirely.
+        subs = a.get("agents") or []
+        agent_ids = [s.get("agent_id") or "main" for s in subs] or ["main"]
+        multi = len([x for x in dict.fromkeys(agent_ids)]) > 1
+        seen: set[str] = set()
+        for aid in agent_ids:
+            if aid in seen:
+                continue
+            seen.add(aid)
+            cached = database.get_insight(
+                account_id=account_id,
+                service_name=service,
+                agent_id=aid,
+                kind="drift",
+            )
+            data = (cached or {}).get("data") or {}
+            if data.get("status") != "drift":
+                continue
+            findings = data.get("findings") or []
+            first = findings[0] if findings else {}
+            label = a.get("display_name") or service
+            if multi and aid != "main":
+                label = f"{label} · {aid}"
+            items.append(
+                {
+                    "severity": "warning",
+                    "agent": label,
+                    "title": data.get("headline") or "Behavior drifted from its declared job",
+                    "detail": first.get("evidence") or "",
+                    "recommendation": "Open this agent and review the drift findings against its declared identity.",
+                    "impact": "",
+                    "last_seen": a.get("last_seen"),
+                }
+            )
     return items
 
 
@@ -3533,6 +3593,34 @@ _OVERSEE_API_URL = database.env("API_URL", "https://web-production-e6bc4.up.rail
 _OAUTH_CLIENT_ID = database.env("OAUTH_CLIENT_ID", "oversee-chatgpt")
 _OAUTH_CLIENT_SECRET = database.env("OAUTH_CLIENT_SECRET", "oversee-dev-secret")
 
+# redirect_uri allowlist — the auth code is only ever redirected to a URL whose
+# origin is on this list, so a phished victim's code can't be sent to an
+# attacker-controlled host. Defaults to ChatGPT's OAuth callback hosts (the only
+# real client); override with OAUTH_REDIRECT_ALLOWLIST (comma-separated origin
+# prefixes) if the callback host changes.
+_OAUTH_REDIRECT_ALLOWLIST = [
+    p.strip().rstrip("/")
+    for p in (
+        database.env(
+            "OAUTH_REDIRECT_ALLOWLIST",
+            "https://chatgpt.com,https://chat.openai.com",
+        )
+        or ""
+    ).split(",")
+    if p.strip()
+]
+
+
+def _oauth_redirect_allowed(redirect_uri: str) -> bool:
+    """True if redirect_uri's origin is on the allowlist. Prefix-match on the
+    scheme+host so any path under an allowed host is accepted, nothing else."""
+    if not redirect_uri:
+        return False
+    return any(
+        redirect_uri == base or redirect_uri.startswith(base + "/")
+        for base in _OAUTH_REDIRECT_ALLOWLIST
+    )
+
 
 from starlette.responses import HTMLResponse, RedirectResponse
 
@@ -3548,8 +3636,18 @@ async def oauth_authorize(
     """OAuth consent page. Renders a simple branded login+approve form.
     On submit, validates credentials, creates an auth code, and redirects
     back to ChatGPT's callback with ?code=&state=."""
+    # Reject any redirect_uri not on the allowlist BEFORE showing the password
+    # form — this is what stops an attacker from harvesting the auth code.
+    if not _oauth_redirect_allowed(redirect_uri):
+        return HTMLResponse("<h3>Invalid redirect_uri.</h3>", status_code=400)
+    # Escape everything interpolated into the page (it's rendered on a
+    # password-collecting page — unescaped params would be reflected XSS).
+    c_client = html.escape(client_id, quote=True)
+    c_redirect = html.escape(redirect_uri, quote=True)
+    c_scope = html.escape(scope, quote=True)
+    c_state = html.escape(state, quote=True)
     # Render a self-contained consent page (no React needed — it's a redirect flow)
-    html = f"""<!DOCTYPE html>
+    page = f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Trovis — Authorize</title>
@@ -3589,10 +3687,10 @@ async def oauth_authorize(
     <li>Read agent status</li>
   </ul>
   <form method="POST" action="/oauth/authorize/submit">
-    <input type="hidden" name="client_id" value="{client_id}">
-    <input type="hidden" name="redirect_uri" value="{redirect_uri}">
-    <input type="hidden" name="scope" value="{scope}">
-    <input type="hidden" name="state" value="{state}">
+    <input type="hidden" name="client_id" value="{c_client}">
+    <input type="hidden" name="redirect_uri" value="{c_redirect}">
+    <input type="hidden" name="scope" value="{c_scope}">
+    <input type="hidden" name="state" value="{c_state}">
     <label>Email</label>
     <input type="email" name="email" required placeholder="you@company.com">
     <label>Password</label>
@@ -3603,7 +3701,7 @@ async def oauth_authorize(
   </form>
 </div>
 </body></html>"""
-    return HTMLResponse(html)
+    return HTMLResponse(page)
 
 
 @app.post("/oauth/authorize/submit", include_in_schema=False)
@@ -3616,6 +3714,11 @@ async def oauth_authorize_submit(request: Request):
     redirect_uri = str(form.get("redirect_uri", ""))
     scope = str(form.get("scope", ""))
     state = str(form.get("state", ""))
+
+    # Re-validate the redirect target here too — /submit can be POSTed directly,
+    # so the allowlist check on /authorize alone isn't enough.
+    if not _oauth_redirect_allowed(redirect_uri):
+        return HTMLResponse("<h3>Invalid redirect_uri.</h3>", status_code=400)
 
     # Authenticate the user
     user_row = database.get_user_by_email(email)
@@ -3666,6 +3769,10 @@ async def oauth_token(request: Request):
         raise HTTPException(status_code=400, detail="unsupported_grant_type")
     if not code:
         raise HTTPException(status_code=400, detail="missing code")
+    # Confidential client: the caller must present the registered secret. This
+    # is what stops someone who merely intercepted a code from redeeming it.
+    if not _OAUTH_CLIENT_SECRET or client_secret != _OAUTH_CLIENT_SECRET:
+        raise HTTPException(status_code=401, detail="invalid_client")
 
     result = database.exchange_oauth_code(code, client_id, redirect_uri)
     if result is None:

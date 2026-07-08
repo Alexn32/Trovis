@@ -99,11 +99,11 @@ function BillingCard({ onUpgrade }) {
       }
       setError('Could not open the billing portal.')
     } catch (e) {
-      const msg = String(e?.message || '')
-      if (msg.includes('400')) {
+      // The status is on e.status (api.js); e.message is the server's detail text.
+      if (e?.status === 400) {
         // No Stripe customer yet → there's nothing to manage; go to checkout.
         onUpgrade?.()
-      } else if (msg.includes('503') || /not configured/i.test(msg)) {
+      } else if (e?.status === 503 || /not configured/i.test(String(e?.message || ''))) {
         setError('Billing isn’t available just yet.')
       } else {
         setError('Could not open the billing portal. Please try again.')

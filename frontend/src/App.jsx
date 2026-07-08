@@ -179,9 +179,10 @@ function AppInner() {
     clearSessionToken()
     clearApiKey()
     clearPersistedView()
-    setMe(null)
-    setTab('dashboard')
-    setOverlay(null)
+    // Hard navigate to a clean root: this drops any stale ?reset=/invite token
+    // held in the mount-time refs, so logging out after a password reset lands
+    // on the landing/login instead of re-showing the consumed reset form.
+    window.location.assign('/')
   }
 
   function openDetail(serviceName, agentId) {

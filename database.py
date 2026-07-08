@@ -3201,6 +3201,20 @@ def delete_team_member(account_id: int | None, member_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def team_member_in_account(account_id: int | None, team_member_id: int | None) -> bool:
+    """True if team_member_id belongs to this account. Used to reject a
+    cross-tenant team_member_id before it's stored (owner/workflow), which would
+    otherwise leak that member's name/email/role through the read-side joins."""
+    if account_id is None or team_member_id is None:
+        return False
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT 1 FROM team_members WHERE id = {PH} AND account_id = {PH}",
+            (team_member_id, account_id),
+        )
+        return cur.fetchone() is not None
+
+
 def set_agent_owner(
     account_id: int | None,
     service_name: str,

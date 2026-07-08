@@ -286,6 +286,26 @@ function AgentCard({ group, onSelect }) {
   const compat = groupForStatus(group)
   const errRate = errorRatePercent(compat)
 
+  // Hooks must run unconditionally (before any early return) — a locked card
+  // skips the fetch but still calls the hook, so hook order stays stable if
+  // `locked` flips on a live re-render.
+  useEffect(() => {
+    if (group.locked) return undefined
+    let cancelled = false
+    api
+      .getAgentSpans(group.service_name, 100)
+      .then((spans) => {
+        if (cancelled) return
+        setSparkData(bucketSpansForSparkline(spans, 12))
+      })
+      .catch(() => {
+        if (!cancelled) setSparkData([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [group.service_name, group.locked])
+
   // Locked agents stay in the list (not hidden), muted, with a lock + a calm
   // line. Still clickable — opens the detail page in its locked state. Its
   // telemetry is recorded; we just don't surface it until the plan covers it.
@@ -305,22 +325,6 @@ function AgentCard({ group, onSelect }) {
       </button>
     )
   }
-
-  useEffect(() => {
-    let cancelled = false
-    api
-      .getAgentSpans(group.service_name, 100)
-      .then((spans) => {
-        if (cancelled) return
-        setSparkData(bucketSpansForSparkline(spans, 12))
-      })
-      .catch(() => {
-        if (!cancelled) setSparkData([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [group.service_name])
 
   return (
     <button
@@ -408,6 +412,25 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
   const compat = groupForStatus(group)
   const errRate = errorRatePercent(compat)
 
+  // Hooks before any early return — locked skips the fetch but still calls the
+  // hook, keeping hook order stable if `locked` flips on a live re-render.
+  useEffect(() => {
+    if (group.locked) return undefined
+    let cancelled = false
+    api
+      .getAgentSpans(group.service_name, 100)
+      .then((spans) => {
+        if (cancelled) return
+        setSparkData(bucketSpansForSparkline(spans, 12))
+      })
+      .catch(() => {
+        if (!cancelled) setSparkData([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [group.service_name, group.locked])
+
   // Fully-locked instance (every sub-agent beyond the plan limit): muted card,
   // still clickable into its locked detail. Telemetry is recorded regardless.
   if (group.locked) {
@@ -425,22 +448,6 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
       </button>
     )
   }
-
-  useEffect(() => {
-    let cancelled = false
-    api
-      .getAgentSpans(group.service_name, 100)
-      .then((spans) => {
-        if (cancelled) return
-        setSparkData(bucketSpansForSparkline(spans, 12))
-      })
-      .catch(() => {
-        if (!cancelled) setSparkData([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [group.service_name])
 
   return (
     <div className={`agent-card agent-card-group status-${status}`}>
