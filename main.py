@@ -3651,36 +3651,50 @@ async def oauth_authorize(
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Trovis — Authorize</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: #f8f9fb; display:flex; justify-content:center; align-items:center;
-         min-height:100vh; }}
-  .card {{ background:#fff; border-radius:16px; border:1px solid #eaedf0;
-           padding:32px; max-width:400px; width:100%; }}
-  .logo {{ display:flex; align-items:center; gap:8px; margin-bottom:20px; }}
-  .dot {{ width:8px; height:8px; border-radius:50%; background:#10b981; }}
-  .brand {{ font-size:16px; font-weight:800; color:#0f172a; letter-spacing:-0.04em; }}
-  h2 {{ font-size:18px; font-weight:700; color:#0f172a; margin-bottom:8px; }}
-  p {{ font-size:13px; color:#64748b; margin-bottom:20px; line-height:1.5; }}
-  .perms {{ background:#f8f9fb; border-radius:8px; padding:12px; margin-bottom:20px;
-            font-size:12px; color:#374151; }}
-  .perms li {{ margin:4px 0; }}
-  label {{ display:block; font-size:13px; font-weight:600; color:#374151; margin-bottom:6px; }}
-  input {{ width:100%; padding:10px 12px; border-radius:8px; border:1.5px solid #e2e5e9;
-          font-size:14px; margin-bottom:12px; }}
-  input:focus {{ outline:none; border-color:#0f172a; }}
-  .btn {{ width:100%; padding:11px; border-radius:8px; border:none; background:#0f172a;
-          color:#fff; font-size:14px; font-weight:600; cursor:pointer; margin-bottom:8px; }}
-  .btn:hover {{ background:#1e293b; }}
-  .btn-cancel {{ background:#fff; color:#64748b; border:1.5px solid #e2e5e9; }}
-  .err {{ color:#dc2626; font-size:12px; margin-bottom:12px; display:none; }}
+  body {{ font-family:'DM Sans',-apple-system,BlinkMacSystemFont,sans-serif; color:#2C2418;
+         background:#F5F1EB; display:flex; justify-content:center; align-items:center;
+         min-height:100vh; padding:20px; -webkit-font-smoothing:antialiased; }}
+  .card {{ background:#FBF8F3; border:1px solid #DDD7CE; border-radius:16px;
+           box-shadow:0 24px 60px -30px rgba(44,36,24,0.25); padding:32px; max-width:400px; width:100%; }}
+  .logo {{ display:flex; align-items:center; gap:9px; margin-bottom:22px; }}
+  .brand {{ font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700;
+            color:#5A7B7B; letter-spacing:-0.02em; }}
+  h2 {{ font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; color:#2C2418;
+        letter-spacing:-0.01em; margin-bottom:8px; }}
+  .sub {{ font-size:13.5px; color:#8C8378; margin-bottom:20px; line-height:1.55; }}
+  .perms {{ background:#F5F1EB; border:1px solid #ECE8E1; border-radius:10px;
+            padding:14px 16px 14px 32px; margin-bottom:22px; font-size:13px; color:#4A4137; }}
+  .perms li {{ margin:5px 0; }}
+  label {{ display:block; font-size:13px; font-weight:600; color:#4A4137; margin-bottom:6px; }}
+  input {{ width:100%; padding:11px 13px; border-radius:9px; border:1.5px solid #DDD7CE;
+          font-family:'DM Sans',sans-serif; font-size:14px; color:#2C2418; background:#fff; margin-bottom:14px; }}
+  input:focus {{ outline:none; border-color:#5A7B7B; }}
+  input::placeholder {{ color:#B8B0A4; }}
+  .btn {{ width:100%; padding:12px; border-radius:10px; border:none; cursor:pointer;
+          font-family:'Space Grotesk',sans-serif; font-size:14.5px; font-weight:600; margin-bottom:8px; }}
+  .btn-primary {{ background:#5A7B7B; color:#FBF8F3; }}
+  .btn-primary:hover {{ background:#4e6d6d; }}
+  .btn-cancel {{ background:transparent; color:#8C8378; border:1.5px solid #DDD7CE; }}
+  .btn-cancel:hover {{ color:#2C2418; }}
 </style>
 </head><body>
 <div class="card">
-  <div class="logo"><span class="dot"></span><span class="brand">trovis</span></div>
+  <div class="logo">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <line x1="3" y1="5" x2="21" y2="5" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round"/>
+      <line x1="12" y1="5" x2="12" y2="21" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round"/>
+      <line x1="6.5" y1="12" x2="9.5" y2="12" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round"/>
+      <line x1="14.5" y1="12" x2="17.5" y2="12" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round"/>
+    </svg>
+    <span class="brand">trovis</span>
+  </div>
   <h2>Authorize ChatGPT</h2>
-  <p>ChatGPT wants to connect to your Trovis account to monitor agent activity.</p>
+  <p class="sub">ChatGPT wants to connect to your Trovis account to monitor agent activity.</p>
   <ul class="perms">
     <li>Report agent activity and task completions</li>
     <li>Register agents in your fleet</li>
@@ -3695,8 +3709,7 @@ async def oauth_authorize(
     <input type="email" name="email" required placeholder="you@company.com">
     <label>Password</label>
     <input type="password" name="password" required placeholder="Your Trovis password">
-    <div class="err" id="err"></div>
-    <button type="submit" class="btn">Authorize</button>
+    <button type="submit" class="btn btn-primary">Authorize</button>
     <button type="button" class="btn btn-cancel" onclick="window.close()">Cancel</button>
   </form>
 </div>
