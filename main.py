@@ -3974,6 +3974,60 @@ async def action_ask(request: Request):
     return {"question": question, "answer": result.get("answer", "")}
 
 
+@app.get("/actions/agents")
+async def action_list_agents(request: Request):
+    """Structured list of the caller's agents — name, description, most-recent
+    activity, event count, errors, cost — newest-active first. Read-only,
+    OAuth-scoped. Locked (plan-gated) agents are listed by name only, with
+    their description withheld, mirroring the dashboard's view-lock."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    groups = database.get_agents(account_id=account_id)
+    out = []
+    for g in sorted(groups, key=lambda x: x.get("last_seen") or "", reverse=True):
+        locked = bool(g.get("locked"))
+        out.append({
+            "name": g.get("display_name") or g.get("service_name"),
+            "service_name": g.get("service_name"),
+            "description": None if locked else (g.get("description") or None),
+            "platform": g.get("platform"),
+            "last_active": g.get("last_seen"),
+            "total_events": g.get("total_spans", 0),
+            "errors": g.get("total_errors", 0),
+            "cost_today_usd": round(float(g.get("cost_today", 0) or 0), 4),
+            "cost_7d_usd": round(float(g.get("cost_7d", 0) or 0), 4),
+            "locked": locked,
+        })
+    return {"count": len(out), "agents": out}
+
+
+@app.get("/actions/recent-activity")
+async def action_recent_activity(request: Request, hours: int = 24, limit: int = 20):
+    """Structured, fleet-wide recent work events (what ran, when, on which
+    agent, success/failure), newest first. Read-only, OAuth-scoped. Captured
+    output content is intentionally NOT included — use askFleet for detail."""
+    account_id = _resolve_action_account(request)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    hours = max(1, min(24 * 30, int(hours)))
+    limit = max(1, min(100, int(limit)))
+    from time import time as _time
+
+    now_ns = int(_time() * 1_000_000_000)
+    since_ns = now_ns - hours * (_NS_PER_DAY // 24)
+    rows = database.get_fleet_activity(account_id, since_ns, limit=limit)
+    events = [{
+        "time": r.get("time"),
+        "agent": r.get("agent"),
+        "operation": r.get("operation"),
+        "status": r.get("status", "ok"),
+        "tool": r.get("tool"),
+        "duration_ms": round(float(r.get("duration_ms", 0) or 0), 1),
+    } for r in rows]
+    return {"count": len(events), "hours": hours, "events": events}
+
+
 @app.get("/actions/openapi.json", include_in_schema=False)
 async def actions_openapi():
     """Serve the OpenAPI spec for the ChatGPT GPT Action."""
@@ -4088,6 +4142,26 @@ async def actions_openapi():
                         },
                     },
                     "responses": {"200": {"description": "Plain-English answer about the fleet"}},
+                },
+            },
+            "/actions/agents": {
+                "get": {
+                    "operationId": "listAgents",
+                    "summary": "List the user's agents",
+                    "description": "Return a structured list of the user's monitored agents — name, description, most-recent activity time, event count, errors, and cost — newest-active first. Use for 'what agents do I have?' or to see which one ran most recently.",
+                    "responses": {"200": {"description": "List of agents"}},
+                },
+            },
+            "/actions/recent-activity": {
+                "get": {
+                    "operationId": "recentActivity",
+                    "summary": "List recent fleet activity",
+                    "description": "Return recent work events across all the user's agents (what ran, when, on which agent, success or failure), newest first. Optional query params: hours (default 24) and limit (default 20).",
+                    "parameters": [
+                        {"name": "hours", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Look-back window in hours (default 24)"},
+                        {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer"}, "description": "Max events to return (default 20)"},
+                    ],
+                    "responses": {"200": {"description": "Recent activity events"}},
                 },
             },
         },

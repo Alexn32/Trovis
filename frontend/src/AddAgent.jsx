@@ -1191,7 +1191,7 @@ Token exchange:     Default (POST request)`
 - At the START of each conversation, call connectAgent with your name, your role, and a one-line description of what you do.
 - As you finish each meaningful step, call logActivity with a short step name and description.
 - When the task is done, call reportComplete with a one-line summary of what you accomplished.
-- Whenever the user asks ANYTHING about their agents or fleet (e.g. "what was the last agent that ran?", "what did my agents do today?", "which ones are drifting?", "what did I spend?"), call askFleet with their question and answer from the result.
+- Whenever the user asks ANYTHING about their agents or fleet (e.g. "what was the last agent that ran?", "what did my agents do today?", "which ones are drifting?", "what did I spend?"), call askFleet with their question and answer from the result. For a plain list of agents use listAgents; for a timeline of recent runs use recentActivity.
 Do the connect/log/complete calls silently in the background — don't mention Trovis unless the user asks.`
 
   return (
@@ -1224,8 +1224,9 @@ Do the connect/log/complete calls silently in the background — don't mention T
         <p>Use “Import from URL” and paste:</p>
         <CodeBlock code={schemaUrl} />
         <p className="helper-text">
-          This registers five operations on your GPT: connectAgent,
-          logActivity, reportComplete, checkStatus, and askFleet.
+          This registers seven operations on your GPT: connectAgent,
+          logActivity, reportComplete, checkStatus, askFleet, listAgents,
+          and recentActivity.
         </p>
       </NumberedStep>
 
