@@ -817,6 +817,71 @@ CREATE TABLE IF NOT EXISTS agent_budgets (
 )
 """
 
+# Per-account proactive-alert configuration. One row per account; absence means
+# "defaults" (email on to the owner, all rules on). Channels: email (to the
+# account owner via Resend), plus an optional Slack incoming-webhook URL and/or
+# a generic webhook URL. Rules are individually toggleable; thresholds tune the
+# budget-warn percentage and the runaway-loop trip count.
+_ALERT_SETTINGS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS alert_settings (
+    account_id        INTEGER PRIMARY KEY,
+    email_enabled     INTEGER   NOT NULL DEFAULT 1,
+    slack_webhook_url TEXT,
+    webhook_url       TEXT,
+    rule_drift        INTEGER   NOT NULL DEFAULT 1,
+    rule_budget       INTEGER   NOT NULL DEFAULT 1,
+    rule_loop         INTEGER   NOT NULL DEFAULT 1,
+    rule_error        INTEGER   NOT NULL DEFAULT 1,
+    budget_warn_pct   INTEGER   NOT NULL DEFAULT 80,
+    loop_threshold    INTEGER   NOT NULL DEFAULT 50,
+    updated_at        TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_ALERT_SETTINGS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS alert_settings (
+    account_id        INTEGER PRIMARY KEY,
+    email_enabled     INTEGER   NOT NULL DEFAULT 1,
+    slack_webhook_url TEXT,
+    webhook_url       TEXT,
+    rule_drift        INTEGER   NOT NULL DEFAULT 1,
+    rule_budget       INTEGER   NOT NULL DEFAULT 1,
+    rule_loop         INTEGER   NOT NULL DEFAULT 1,
+    rule_error        INTEGER   NOT NULL DEFAULT 1,
+    budget_warn_pct   INTEGER   NOT NULL DEFAULT 80,
+    loop_threshold    INTEGER   NOT NULL DEFAULT 50,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+# Dedup + history for fired alerts. The sweep records one row per delivered
+# alert keyed by (account, rule, subject, state); before firing it checks
+# whether a matching row exists inside the cooldown window, so a standing
+# condition (an agent still drifting) alerts at most once per cooldown instead
+# of every sweep. `state_key` captures WHAT tripped (e.g. budget bucket "100",
+# drift headline hash) so a genuinely new state re-alerts.
+_ALERT_LOG_DDL_PG = """
+CREATE TABLE IF NOT EXISTS alert_log (
+    id          SERIAL    PRIMARY KEY,
+    account_id  INTEGER   NOT NULL,
+    rule        TEXT      NOT NULL,
+    subject_key TEXT      NOT NULL DEFAULT '',
+    state_key   TEXT      NOT NULL DEFAULT '',
+    created_at  TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_ALERT_LOG_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS alert_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL,
+    rule        TEXT    NOT NULL,
+    subject_key TEXT    NOT NULL DEFAULT '',
+    state_key   TEXT    NOT NULL DEFAULT '',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 # Process workflows: a named, ordered sequence of steps (agent + human)
 # describing how work flows through an agent's process. Auto-generated from
 # telemetry + identity by Claude, then operator-editable. workflow_steps
@@ -983,6 +1048,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_connections_account_id ON agent_connections(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_budgets_account ON agent_budgets(account_id, service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_oauth_codes_code ON oauth_codes(code)",
+    "CREATE INDEX IF NOT EXISTS idx_alert_log_lookup ON alert_log(account_id, rule, subject_key, state_key)",
 ]
 
 
@@ -1020,6 +1086,8 @@ def init_db() -> None:
             _PW_RESET_DDL_PG,
             _CONNECTIONS_DDL_PG,
             _AGENT_BUDGETS_DDL_PG,
+            _ALERT_SETTINGS_DDL_PG,
+            _ALERT_LOG_DDL_PG,
             _OAUTH_CODES_DDL_PG,
             # Standalone (no FKs, no account scoping) — order doesn't matter.
             _WAITLIST_DDL_PG,
@@ -1046,6 +1114,8 @@ def init_db() -> None:
             _PW_RESET_DDL_SQLITE,
             _CONNECTIONS_DDL_SQLITE,
             _AGENT_BUDGETS_DDL_SQLITE,
+            _ALERT_SETTINGS_DDL_SQLITE,
+            _ALERT_LOG_DDL_SQLITE,
             _OAUTH_CODES_DDL_SQLITE,
             _WAITLIST_DDL_SQLITE,
         ]
@@ -5191,6 +5261,157 @@ def get_insight(
         "data": data,
         "generated_at": _ts_to_str(row["generated_at"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Proactive alerts — settings, dedup log, account enumeration
+# ---------------------------------------------------------------------------
+
+# Defaults returned when an account has no alert_settings row yet. Kept here so
+# the sweep and the config endpoint agree on the out-of-the-box behavior:
+# email on to the owner, every rule on, warn at 80% budget, loop trip at 50.
+_ALERT_DEFAULTS: dict[str, Any] = {
+    "email_enabled": True,
+    "slack_webhook_url": None,
+    "webhook_url": None,
+    "rule_drift": True,
+    "rule_budget": True,
+    "rule_loop": True,
+    "rule_error": True,
+    "budget_warn_pct": 80,
+    "loop_threshold": 50,
+}
+
+_ALERT_BOOL_FIELDS = (
+    "email_enabled", "rule_drift", "rule_budget", "rule_loop", "rule_error",
+)
+_ALERT_INT_FIELDS = ("budget_warn_pct", "loop_threshold")
+_ALERT_STR_FIELDS = ("slack_webhook_url", "webhook_url")
+
+
+def list_account_ids() -> list[int]:
+    """Every account id, for the fleet-wide alert sweep to iterate tenants."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute("SELECT id FROM accounts ORDER BY id")
+        return [r["id"] for r in cur.fetchall()]
+
+
+def get_alert_settings(account_id: int) -> dict[str, Any]:
+    """Return an account's alert config, filling any unset fields with the
+    defaults. Always returns a full dict (never None) so callers don't branch."""
+    out = dict(_ALERT_DEFAULTS)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT email_enabled, slack_webhook_url, webhook_url, rule_drift, "
+            "rule_budget, rule_loop, rule_error, budget_warn_pct, loop_threshold "
+            f"FROM alert_settings WHERE account_id = {PH}",
+            (account_id,),
+        )
+        row = cur.fetchone()
+    if row is not None:
+        for f in _ALERT_BOOL_FIELDS:
+            out[f] = bool(_row_get(row, f))
+        for f in _ALERT_INT_FIELDS:
+            v = _row_get(row, f)
+            if v is not None:
+                out[f] = int(v)
+        for f in _ALERT_STR_FIELDS:
+            out[f] = _row_get(row, f) or None
+    return out
+
+
+def upsert_alert_settings(account_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+    """Create or update an account's alert config with the provided fields
+    (partial updates supported). Unknown keys are ignored. Returns the full
+    resolved settings after the write."""
+    allowed = set(_ALERT_BOOL_FIELDS) | set(_ALERT_INT_FIELDS) | set(_ALERT_STR_FIELDS)
+    clean: dict[str, Any] = {}
+    for k, v in (fields or {}).items():
+        if k not in allowed:
+            continue
+        if k in _ALERT_BOOL_FIELDS:
+            clean[k] = 1 if v else 0
+        elif k in _ALERT_INT_FIELDS:
+            try:
+                clean[k] = int(v)
+            except (TypeError, ValueError):
+                continue
+        else:
+            s = (str(v).strip() if v is not None else "")
+            clean[k] = s or None
+    # Clamp the budget percentage to a sane 1–100 range.
+    if "budget_warn_pct" in clean:
+        clean["budget_warn_pct"] = max(1, min(100, clean["budget_warn_pct"]))
+    if "loop_threshold" in clean:
+        clean["loop_threshold"] = max(2, clean["loop_threshold"])
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT 1 FROM alert_settings WHERE account_id = {PH}", (account_id,)
+        )
+        exists = cur.fetchone() is not None
+        if not exists:
+            # Seed a row from defaults, then apply the update on top.
+            base = dict(_ALERT_DEFAULTS)
+            merged = {
+                **{k: (1 if base[k] else 0) for k in _ALERT_BOOL_FIELDS},
+                **{k: base[k] for k in _ALERT_INT_FIELDS},
+                **{k: base[k] for k in _ALERT_STR_FIELDS},
+            }
+            merged.update(clean)
+            cols = ["account_id", *merged.keys()]
+            ph = ", ".join([PH] * len(cols))
+            cur.execute(
+                f"INSERT INTO alert_settings ({', '.join(cols)}) VALUES ({ph})",
+                (account_id, *merged.values()),
+            )
+        elif clean:
+            sets = ", ".join(f"{k} = {PH}" for k in clean)
+            ts = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+            cur.execute(
+                f"UPDATE alert_settings SET {sets}, updated_at = {ts} "
+                f"WHERE account_id = {PH}",
+                (*clean.values(), account_id),
+            )
+    return get_alert_settings(account_id)
+
+
+def was_alerted(
+    account_id: int,
+    rule: str,
+    subject_key: str,
+    state_key: str,
+    cooldown_seconds: int,
+) -> bool:
+    """True if a matching alert was already fired inside the cooldown window —
+    so a standing condition alerts once per window, not every sweep. A new
+    `state_key` (e.g. budget crossing 100% after 80%) is treated as fresh."""
+    with _connect() as conn, _cursor(conn) as cur:
+        if USE_POSTGRES:
+            cur.execute(
+                "SELECT 1 FROM alert_log WHERE account_id = %s AND rule = %s "
+                "AND subject_key = %s AND state_key = %s "
+                "AND created_at > NOW() - (%s || ' seconds')::interval LIMIT 1",
+                (account_id, rule, subject_key, state_key, str(int(cooldown_seconds))),
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM alert_log WHERE account_id = ? AND rule = ? "
+                "AND subject_key = ? AND state_key = ? "
+                "AND created_at > datetime('now', ?) LIMIT 1",
+                (account_id, rule, subject_key, state_key, f"-{int(cooldown_seconds)} seconds"),
+            )
+        return cur.fetchone() is not None
+
+
+def record_alert(account_id: int, rule: str, subject_key: str, state_key: str) -> None:
+    """Record that an alert fired (for dedup + history)."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO alert_log (account_id, rule, subject_key, state_key) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH})",
+            (account_id, rule, subject_key, state_key),
+        )
 
 
 # ---------------------------------------------------------------------------

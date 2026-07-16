@@ -34,6 +34,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import alerts
 import asker
 import billing
 import database
@@ -71,6 +72,8 @@ from models import (
     ConnectionStatusUpdate,
     ConnectionsFromDescription,
     AgentBudgetUpdate,
+    AlertSettings,
+    AlertSettingsUpdate,
     BudgetUpdate,
     CostAgent,
     CostAgentRow,
@@ -236,10 +239,32 @@ async def _pricing_refresh_loop() -> None:
         await asyncio.sleep(_PRICING_REFRESH_INTERVAL_S)
 
 
+# How often the proactive-alert sweep runs. 15 min is well below the rules'
+# 24h dedup cooldown, so a condition surfaces within a quarter-hour without
+# risking duplicate alerts. Override with TROVIS_ALERT_SWEEP_INTERVAL_S.
+_ALERT_SWEEP_INTERVAL_S = int(database.env("ALERT_SWEEP_INTERVAL_S", "900") or 900)
+
+
+async def _alert_sweep_loop() -> None:
+    """Run the fleet-wide alert sweep on an interval. Same resilience posture as
+    the pricing loop: a failed pass is logged and swallowed so it can never take
+    the API down. The sweep itself is fail-soft per account. Skips its first run
+    by _ALERT_SWEEP_INTERVAL_S so startup isn't slowed and brand-new deploys
+    don't alert before the fleet is loaded."""
+    while True:
+        await asyncio.sleep(_ALERT_SWEEP_INTERVAL_S)
+        try:
+            summary = await asyncio.to_thread(alerts.run_sweep)
+            logger.info("[Trovis] alert sweep: %s", summary)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Trovis] alert sweep failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
     refresh_task: asyncio.Task | None = None
+    alert_task: asyncio.Task | None = None
     # TROVIS_DISABLE_PRICING_SYNC=1 (legacy: OVERSEE_DISABLE_PRICING_SYNC) turns
     # off the network pull (offline dev, tests) — seeded prices cover common models.
     if (database.env("DISABLE_PRICING_SYNC", "") or "").lower() not in (
@@ -248,6 +273,14 @@ async def lifespan(app: FastAPI):
         "yes",
     ):
         refresh_task = asyncio.create_task(_pricing_refresh_loop())
+    # Proactive-alert sweep. TROVIS_DISABLE_ALERTS=1 turns it off (offline dev,
+    # tests). Fail-soft, so it's safe to leave on by default in prod.
+    if (database.env("DISABLE_ALERTS", "") or "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        alert_task = asyncio.create_task(_alert_sweep_loop())
     try:
         # Run the MCP Streamable-HTTP session manager for the app's lifetime so
         # the /mcp mount can serve ChatGPT agents.
@@ -256,6 +289,8 @@ async def lifespan(app: FastAPI):
     finally:
         if refresh_task is not None:
             refresh_task.cancel()
+        if alert_task is not None:
+            alert_task.cancel()
         database.shutdown_db()
 
 
@@ -2505,6 +2540,39 @@ async def account_usage(request: Request) -> AccountUsage:
         agent_limit=lock["limit"],
         locked_count=lock["locked_count"],
     )
+
+
+@app.get("/account/alerts", response_model=AlertSettings)
+async def get_alert_settings(request: Request) -> AlertSettings:
+    """The account's proactive-alert configuration (channels + rule toggles +
+    thresholds). Returns defaults when nothing has been saved yet."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    return AlertSettings(**database.get_alert_settings(account_id))
+
+
+@app.put("/account/alerts", response_model=AlertSettings)
+async def update_alert_settings(
+    request: Request, body: AlertSettingsUpdate
+) -> AlertSettings:
+    """Partial update of the account's alert config. Only provided fields
+    change; the rest keep their current value."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    fields = body.model_dump(exclude_unset=True)
+    return AlertSettings(**database.upsert_alert_settings(account_id, fields))
+
+
+@app.post("/account/alerts/test")
+async def test_alert(request: Request) -> dict:
+    """Send a sample alert over the account's currently-enabled channels so the
+    operator can confirm delivery. No dedup — always attempts to send."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    return await asyncio.to_thread(alerts.send_test_alert, account_id)
 
 
 @app.put("/account/plan", response_model=PlanChangeResult)

@@ -373,6 +373,12 @@ export const api = {
   // account has never subscribed (no Stripe customer yet).
   billingPortal: () => request('/account/billing-portal', { method: 'POST' }),
 
+  // --- proactive alerts (Settings → Alerts) ---
+  getAlerts: () => request('/account/alerts'),
+  updateAlerts: (patch) =>
+    request('/account/alerts', { method: 'PUT', body: JSON.stringify(patch) }),
+  testAlert: () => request('/account/alerts/test', { method: 'POST' }),
+
   // --- dashboard (daily briefing) ---
   getBriefing: () => request('/dashboard/briefing'),
   getAttention: () => request('/dashboard/attention'),

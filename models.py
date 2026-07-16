@@ -1102,6 +1102,35 @@ class AgentBudgetUpdate(BaseModel):
     monthly_cap: float | None = None
 
 
+class AlertSettings(BaseModel):
+    """The account's proactive-alert config (GET /account/alerts response)."""
+
+    email_enabled: bool = True
+    slack_webhook_url: str | None = None
+    webhook_url: str | None = None
+    rule_drift: bool = True
+    rule_budget: bool = True
+    rule_loop: bool = True
+    rule_error: bool = True
+    budget_warn_pct: int = 80
+    loop_threshold: int = 50
+
+
+class AlertSettingsUpdate(BaseModel):
+    """Body for PUT /account/alerts. Every field optional — partial updates
+    supported; unset fields keep their current value."""
+
+    email_enabled: bool | None = None
+    slack_webhook_url: str | None = None
+    webhook_url: str | None = None
+    rule_drift: bool | None = None
+    rule_budget: bool | None = None
+    rule_loop: bool | None = None
+    rule_error: bool | None = None
+    budget_warn_pct: int | None = None
+    loop_threshold: int | None = None
+
+
 class WorkFeedItem(BaseModel):
     """One Work Feed row — a plain-English summary of what an agent recently
     did. `time` is the ISO timestamp of the agent's latest span; `tasks` is

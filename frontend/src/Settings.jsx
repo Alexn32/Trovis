@@ -37,6 +37,8 @@ export default function Settings({ me, onClose, onUpdated, onUpgrade }) {
 
       <BillingCard onUpgrade={onUpgrade} />
 
+      {user && <AlertsCard />}
+
       {user && <PasswordCard onUpdated={onUpdated} />}
 
       {isOwner && <ApiKeyCard />}
@@ -139,6 +141,137 @@ function BillingCard({ onUpgrade }) {
       {error && (
         <p className="settings-note" style={{ color: 'var(--error)', marginTop: 10 }}>{error}</p>
       )}
+    </section>
+  )
+}
+
+// Proactive alerts: which conditions push a notification, over which channels.
+// The sweep runs server-side every ~15 min — nobody has to be watching the
+// dashboard. Email goes to the account owner; Slack/webhook are opt-in URLs.
+function AlertToggle({ label, hint, checked, onChange }) {
+  return (
+    <label className="alert-toggle">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className="alert-toggle-text">
+        <span className="alert-toggle-label">{label}</span>
+        {hint && <span className="alert-toggle-hint">{hint}</span>}
+      </span>
+    </label>
+  )
+}
+
+function AlertsCard() {
+  const [s, setS] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState(null)
+  const [testResult, setTestResult] = useState(null)
+  const [testing, setTesting] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    api.getAlerts().then((r) => alive && setS(r)).catch(() => alive && setError('Could not load alert settings.'))
+    return () => { alive = false }
+  }, [])
+
+  function set(field, value) {
+    setS((prev) => ({ ...prev, [field]: value }))
+    setSaved(false)
+  }
+
+  async function save() {
+    if (!s) return
+    setSaving(true); setError(null); setSaved(false)
+    try {
+      const next = await api.updateAlerts(s)
+      setS(next)
+      setSaved(true)
+    } catch (e) {
+      setError(e.message || 'Could not save alert settings.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function sendTest() {
+    setTesting(true); setTestResult(null)
+    try {
+      const r = await api.testAlert()
+      setTestResult(
+        r?.delivered
+          ? `Test sent over: ${(r.channels || []).join(', ')}`
+          : `Not sent — ${r?.reason || 'no channels enabled'}.`,
+      )
+    } catch (e) {
+      setTestResult(e.message || 'Could not send a test.')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  if (!s) {
+    return (
+      <section className="settings-card">
+        <h3 className="settings-card-title">Alerts</h3>
+        <div className="settings-note">{error || <><Spinner /> Loading…</>}</div>
+      </section>
+    )
+  }
+
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">Alerts</h3>
+      <p className="settings-note">
+        Trovis watches your fleet in the background and pushes an alert the
+        moment something trips — so you find out without checking the dashboard.
+      </p>
+
+      <h4 className="settings-subtitle">What to alert on</h4>
+      <div className="alert-toggles">
+        <AlertToggle label="Behavioral drift" hint="an agent steps outside its declared job"
+          checked={s.rule_drift} onChange={(v) => set('rule_drift', v)} />
+        <AlertToggle label="Budget threshold" hint={`spend crosses ${s.budget_warn_pct}% and 100% of your monthly budget`}
+          checked={s.rule_budget} onChange={(v) => set('rule_budget', v)} />
+        <AlertToggle label="Runaway loop" hint={`one operation repeats ${s.loop_threshold}+ times in 30 min`}
+          checked={s.rule_loop} onChange={(v) => set('rule_loop', v)} />
+        <AlertToggle label="Repeated failures" hint="an agent errors several times in a short window"
+          checked={s.rule_error} onChange={(v) => set('rule_error', v)} />
+      </div>
+
+      <h4 className="settings-subtitle">Thresholds</h4>
+      <div className="alert-thresholds">
+        <label className="field-label">Budget warning at (%)</label>
+        <input className="text-input" type="number" min="1" max="100" value={s.budget_warn_pct}
+          onChange={(e) => set('budget_warn_pct', Number(e.target.value))} />
+        <label className="field-label">Loop trip count</label>
+        <input className="text-input" type="number" min="2" value={s.loop_threshold}
+          onChange={(e) => set('loop_threshold', Number(e.target.value))} />
+      </div>
+
+      <h4 className="settings-subtitle">Where to send them</h4>
+      <div className="alert-channels">
+        <AlertToggle label="Email" hint="to the account owner"
+          checked={s.email_enabled} onChange={(v) => set('email_enabled', v)} />
+        <label className="field-label">Slack incoming webhook URL</label>
+        <input className="text-input" type="url" placeholder="https://hooks.slack.com/services/…"
+          value={s.slack_webhook_url || ''} onChange={(e) => set('slack_webhook_url', e.target.value)} />
+        <label className="field-label">Custom webhook URL</label>
+        <input className="text-input" type="url" placeholder="https://your-endpoint.example.com/hook"
+          value={s.webhook_url || ''} onChange={(e) => set('webhook_url', e.target.value)} />
+      </div>
+
+      {error && <p className="form-error" style={{ marginTop: 10 }}>{error}</p>}
+      {saved && <p className="settings-success" style={{ marginTop: 10 }}>Saved.</p>}
+      {testResult && <p className="settings-note" style={{ marginTop: 10 }}>{testResult}</p>}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button type="button" className="btn btn-primary btn-sm" onClick={save} disabled={saving}>
+          {saving ? <><Spinner /> Saving…</> : 'Save changes'}
+        </button>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={sendTest} disabled={testing}>
+          {testing ? 'Sending…' : 'Send test alert'}
+        </button>
+      </div>
     </section>
   )
 }

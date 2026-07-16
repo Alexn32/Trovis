@@ -3821,6 +3821,42 @@ a:hover {
   display: flex;
   flex-direction: column;
 }
+/* Alerts card */
+.alert-toggles,
+.alert-channels,
+.alert-thresholds {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.alert-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+.alert-toggle input {
+  margin-top: 3px;
+  accent-color: var(--teal, #5A7B7B);
+  flex-shrink: 0;
+}
+.alert-toggle-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+.alert-toggle-label {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.alert-toggle-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.alert-thresholds .text-input,
+.alert-channels .text-input {
+  margin-bottom: 4px;
+}
 .settings-row {
   display: flex;
   justify-content: space-between;
