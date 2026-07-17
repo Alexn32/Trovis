@@ -277,23 +277,48 @@ function AgentList({ groups, loading, error, onSelectAgent, onAddAgent, onDelete
   )
 }
 
-// The flat single-agent card. Looks exactly like the pre-multi-agent
-// version. Reads .total_spans/.total_errors off the group instead of the
-// (now-removed) flat per-service span_count/error_count.
-function AgentCard({ group, onSelect }) {
+// ----------------------------------------------------------------------------
+// FleetCard — the one card body used for BOTH a flat single-agent instance and
+// a sub-agent inside an instance group. Driven by normalized props so a
+// sub-agent (agent_id-scoped) renders identically to a standalone agent — just
+// nested under its instance band. Owns its own sparkline fetch (scoped to
+// service_name + optional agentId). When `onDelete` is passed (sub-agents), an
+// inline delete control overlays the card corner.
+// ----------------------------------------------------------------------------
+function FleetCard({
+  name,
+  secondary,
+  titleText,
+  status,
+  errRate,
+  spans,
+  avgMs,
+  lastSeen,
+  costToday,
+  cost7d,
+  description,
+  platform,
+  ownerName,
+  ownerRole,
+  locked,
+  lockedLine,
+  serviceName,
+  agentId,
+  onSelect,
+  onDelete,
+  deleteLabel,
+}) {
   const [sparkData, setSparkData] = useState(null)
-  const status = statusFor(groupForStatus(group))
-  const compat = groupForStatus(group)
-  const errRate = errorRatePercent(compat)
 
-  // Hooks must run unconditionally (before any early return) — a locked card
-  // skips the fetch but still calls the hook, so hook order stays stable if
-  // `locked` flips on a live re-render.
+  // Hook runs unconditionally (before any conditional render) so hook order
+  // stays stable if `locked` flips on a live re-render. Locked cards skip the
+  // fetch. Sparkline is scoped to (service, agentId) so a sub-agent shows its
+  // own trend, not the whole instance's.
   useEffect(() => {
-    if (group.locked) return undefined
+    if (locked) return undefined
     let cancelled = false
     api
-      .getAgentSpans(group.service_name, 100)
+      .getAgentSpans(serviceName, 100, agentId)
       .then((spans) => {
         if (cancelled) return
         setSparkData(bucketSpansForSparkline(spans, 12))
@@ -304,29 +329,18 @@ function AgentCard({ group, onSelect }) {
     return () => {
       cancelled = true
     }
-  }, [group.service_name, group.locked])
+  }, [serviceName, agentId, locked])
 
-  // Locked agents stay in the list (not hidden), muted, with a lock + a calm
-  // line. Still clickable — opens the detail page in its locked state. Its
-  // telemetry is recorded; we just don't surface it until the plan covers it.
-  if (group.locked) {
-    return (
-      <button type="button" className="agent-card locked" onClick={onSelect}>
-        <div className="agent-card-title">
-          <span className="agent-lock"><LockIcon size={13} /></span>
-          <span className="agent-name" title={group.service_name}>
-            {group.display_name || group.service_name}
-          </span>
-          {group.display_name && (
-            <span className="agent-name-secondary">{group.service_name}</span>
-          )}
-        </div>
-        <p className="agent-locked-line">Recording — upgrade to view</p>
-      </button>
-    )
-  }
-
-  return (
+  const card = locked ? (
+    <button type="button" className="agent-card locked" onClick={onSelect}>
+      <div className="agent-card-title">
+        <span className="agent-lock"><LockIcon size={13} /></span>
+        <span className="agent-name" title={titleText}>{name}</span>
+        {secondary && <span className="agent-name-secondary">{secondary}</span>}
+      </div>
+      <p className="agent-locked-line">{lockedLine || 'Recording — upgrade to view'}</p>
+    </button>
+  ) : (
     <button
       type="button"
       className={`agent-card status-${status}`}
@@ -335,12 +349,8 @@ function AgentCard({ group, onSelect }) {
       <div className="agent-card-top">
         <div className="agent-card-title">
           <span className={`status-dot status-${status}`} />
-          <span className="agent-name" title={group.service_name}>
-            {group.display_name || group.service_name}
-          </span>
-          {group.display_name && (
-            <span className="agent-name-secondary">{group.service_name}</span>
-          )}
+          <span className="agent-name" title={titleText}>{name}</span>
+          {secondary && <span className="agent-name-secondary">{secondary}</span>}
         </div>
         <Sparkline
           data={sparkData ?? []}
@@ -350,29 +360,25 @@ function AgentCard({ group, onSelect }) {
         />
       </div>
 
-      {group.platform && <div className="agent-platform">{group.platform}</div>}
-      {group.owner_name && (
+      {platform && <div className="agent-platform">{platform}</div>}
+      {ownerName && (
         <div className="owner-tag">
-          Owner: <strong>{group.owner_name}</strong>
-          {group.owner_role && (
-            <span className="owner-tag-role"> · {group.owner_role}</span>
-          )}
+          Owner: <strong>{ownerName}</strong>
+          {ownerRole && <span className="owner-tag-role"> · {ownerRole}</span>}
         </div>
       )}
 
-      <p className={`agent-description ${group.description ? '' : 'empty'}`}>
-        {group.description ||
+      <p className={`agent-description ${description ? '' : 'empty'}`}>
+        {description ||
           'No description yet — auto-generated when telemetry includes registration data.'}
       </p>
 
-      <CardCostLine group={group} />
+      <CardCostLine group={{ cost_today: costToday, cost_7d: cost7d }} />
 
       <div className="agent-card-stats">
         <div className="agent-stat">
           <span className="agent-stat-label">Spans</span>
-          <span className="agent-stat-value">
-            {group.total_spans.toLocaleString()}
-          </span>
+          <span className="agent-stat-value">{(spans || 0).toLocaleString()}</span>
         </div>
         <div className="agent-stat">
           <span className="agent-stat-label">Error rate</span>
@@ -386,31 +392,128 @@ function AgentCard({ group, onSelect }) {
         </div>
         <div className="agent-stat">
           <span className="agent-stat-label">Avg duration</span>
-          <span className="agent-stat-value">
-            {formatDuration(group.avg_duration_ms)}
-          </span>
+          <span className="agent-stat-value">{formatDuration(avgMs)}</span>
         </div>
         <div className="agent-stat">
           <span className="agent-stat-label">Last seen</span>
-          <span className="agent-stat-value">{relativeTime(group.last_seen)}</span>
+          <span className="agent-stat-value">{relativeTime(lastSeen)}</span>
         </div>
       </div>
     </button>
   )
+
+  // No delete → return the plain card. With delete → wrap so the delete
+  // control can overlay the corner (can't nest a <button> inside the card
+  // <button>, so it's a sibling in a positioned wrapper).
+  if (!onDelete) return card
+  return (
+    <div className="fleet-card-wrap">
+      {card}
+      <CardDelete label={deleteLabel} onDelete={onDelete} />
+    </div>
+  )
 }
 
-// The multi-agent group card — instance-level header on top, expandable
-// sub-agent list underneath. Clicking the header opens the instance
-// aggregate view; clicking a sub-agent row opens AgentDetail scoped to
-// that agent_id. The outer container is a <div> (not a button) because we
-// can't nest interactive elements; each clickable region is its own
-// <button>.
+// Inline delete control (trash → Yes / Cancel), extracted from the old
+// SubAgentRow so any card can carry it. stopPropagation everywhere so a
+// click never falls through to the card's onSelect.
+function CardDelete({ label, onDelete }) {
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
+  async function handleConfirm(e) {
+    e.stopPropagation()
+    setDeleting(true)
+    try {
+      await onDelete()
+      // Parent drops this card from state, unmounting us — no cleanup needed.
+    } catch (err) {
+      console.warn('[Fleet] delete failed:', err)
+      setDeleting(false)
+      setConfirming(false)
+    }
+  }
+
+  if (confirming) {
+    return (
+      <span className="card-delete-confirm" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className="btn-link-inline danger"
+          onClick={handleConfirm}
+          disabled={deleting}
+        >
+          {deleting ? 'Deleting…' : 'Yes, delete'}
+        </button>
+        <button
+          type="button"
+          className="btn-link-inline"
+          onClick={(e) => {
+            e.stopPropagation()
+            setConfirming(false)
+          }}
+          disabled={deleting}
+        >
+          Cancel
+        </button>
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      className="card-delete-btn"
+      onClick={(e) => {
+        e.stopPropagation()
+        setConfirming(true)
+      }}
+      aria-label={label}
+      title={label}
+    >
+      <TrashIcon size={13} />
+    </button>
+  )
+}
+
+// The flat single-agent card (single 'main' sub-agent). Thin wrapper over
+// FleetCard reading the group's service-level fields.
+function AgentCard({ group, onSelect }) {
+  const status = statusFor(groupForStatus(group))
+  const errRate = errorRatePercent(groupForStatus(group))
+  return (
+    <FleetCard
+      name={group.display_name || group.service_name}
+      secondary={group.display_name ? group.service_name : null}
+      titleText={group.service_name}
+      status={status}
+      errRate={errRate}
+      spans={group.total_spans}
+      avgMs={group.avg_duration_ms}
+      lastSeen={group.last_seen}
+      costToday={group.cost_today}
+      cost7d={group.cost_7d}
+      description={group.description}
+      platform={group.platform}
+      ownerName={group.owner_name}
+      ownerRole={group.owner_role}
+      locked={group.locked}
+      serviceName={group.service_name}
+      onSelect={onSelect}
+    />
+  )
+}
+
+// The multi-agent instance group: a clickable instance BAND on top (opens the
+// instance aggregate view + holds the collapse toggle) over a stack of full
+// FleetCards — one per sub-agent. Each sub-agent is a first-class agent card;
+// the band + shared container are what say "these live in the same instance."
+// The outer container is a <div> (not a button) because we can't nest
+// interactive elements; each clickable region is its own <button>.
 function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent }) {
   const [expanded, setExpanded] = useState(true)
   const [sparkData, setSparkData] = useState(null)
   const status = statusFor(groupForStatus(group))
-  const compat = groupForStatus(group)
-  const errRate = errorRatePercent(compat)
+  const errRate = errorRatePercent(groupForStatus(group))
 
   // Hooks before any early return — locked skips the fetch but still calls the
   // hook, keeping hook order stable if `locked` flips on a live re-render.
@@ -449,218 +552,101 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
     )
   }
 
+  const lockedCount = group.agents.filter((a) => a.locked).length
+  const costLabel =
+    group.cost_today > 0
+      ? `${formatCost(group.cost_today)} today`
+      : group.cost_7d > 0
+        ? `${formatCost(group.cost_7d)} wk`
+        : null
+
   return (
-    <div className={`agent-card agent-card-group status-${status}`}>
-      <button
-        type="button"
-        className="agent-card-header-btn"
-        onClick={onSelectInstance}
-      >
-        <div className="agent-card-top">
-          <div className="agent-card-title">
-            <span className={`status-dot status-${status}`} />
-            <span className="agent-name" title={group.service_name}>
-              {group.display_name || group.service_name}
+    <div className={`instance-group status-${status}`}>
+      <div className="instance-band">
+        <button
+          type="button"
+          className="instance-band-main"
+          onClick={onSelectInstance}
+        >
+          <span className={`status-dot status-${status}`} />
+          <span className="instance-band-name" title={group.service_name}>
+            {group.display_name || group.service_name}
+          </span>
+          {group.display_name && (
+            <span className="agent-name-secondary">{group.service_name}</span>
+          )}
+          {group.platform && (
+            <span className="instance-band-platform">{group.platform}</span>
+          )}
+          <span className="agent-sub-count">· {group.agents.length} agents</span>
+          {lockedCount > 0 && (
+            <span className="instance-band-locked">{lockedCount} locked</span>
+          )}
+          <span className="instance-band-stats">
+            <span>{(group.total_spans || 0).toLocaleString()} spans</span>
+            <span className={errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''}>
+              {errRate.toFixed(1)}% err
             </span>
-            {group.display_name && (
-              <span className="agent-name-secondary">{group.service_name}</span>
-            )}
-            <span className="agent-sub-count">
-              · {group.agents.length} agents
-            </span>
-          </div>
+            {costLabel && <span>{costLabel}</span>}
+            <span>{relativeTime(group.last_seen)}</span>
+          </span>
           <Sparkline
             data={sparkData ?? []}
             color={statusColor(status)}
-            width={100}
-            height={28}
+            width={72}
+            height={22}
           />
-        </div>
-
-        {group.platform && (
-          <div className="agent-platform">{group.platform}</div>
-        )}
-        {group.owner_name && (
-          <div className="owner-tag">
-            Owner: <strong>{group.owner_name}</strong>
-            {group.owner_role && (
-              <span className="owner-tag-role"> · {group.owner_role}</span>
-            )}
-          </div>
-        )}
-
-        <p
-          className={`agent-description ${group.description ? '' : 'empty'}`}
-        >
-          {group.description ||
-            'No description yet — auto-generated when telemetry includes registration data.'}
-        </p>
-
-        <CardCostLine group={group} />
-
-        <div className="agent-card-stats">
-          <div className="agent-stat">
-            <span className="agent-stat-label">Total spans</span>
-            <span className="agent-stat-value">
-              {group.total_spans.toLocaleString()}
-            </span>
-          </div>
-          <div className="agent-stat">
-            <span className="agent-stat-label">Error rate</span>
-            <span
-              className={`agent-stat-value ${
-                errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''
-              }`}
-            >
-              {errRate.toFixed(1)}%
-            </span>
-          </div>
-          <div className="agent-stat">
-            <span className="agent-stat-label">Avg duration</span>
-            <span className="agent-stat-value">
-              {formatDuration(group.avg_duration_ms)}
-            </span>
-          </div>
-          <div className="agent-stat">
-            <span className="agent-stat-label">Last seen</span>
-            <span className="agent-stat-value">
-              {relativeTime(group.last_seen)}
-            </span>
-          </div>
-        </div>
-      </button>
-
-      <div className="agent-card-subagents">
+        </button>
         <button
           type="button"
-          className="agent-card-expand"
+          className="instance-band-toggle"
           onClick={(e) => {
             e.stopPropagation()
             setExpanded((v) => !v)
           }}
           aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse agents' : 'Expand agents'}
         >
           {expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-          <span>
-            {expanded ? 'Hide' : 'Show'} {group.agents.length} agents
-          </span>
         </button>
-        {expanded && (
-          <ul className="subagent-list">
-            {group.agents.map((sa) => (
-              <SubAgentRow
+      </div>
+
+      {expanded && (
+        <div className="instance-group-grid">
+          {group.agents.map((sa) => {
+            const saCompat = {
+              span_count: sa.span_count,
+              error_count: sa.error_count,
+              last_seen: sa.last_seen,
+            }
+            return (
+              <FleetCard
                 key={sa.agent_id}
-                subAgent={sa}
+                name={sa.display_name || sa.agent_id}
+                secondary={sa.display_name ? sa.agent_id : null}
+                titleText={sa.agent_id}
+                status={statusFor(saCompat)}
+                errRate={errorRatePercent(saCompat)}
+                spans={sa.span_count}
+                avgMs={sa.avg_duration_ms}
+                lastSeen={sa.last_seen}
+                costToday={sa.cost_today}
+                cost7d={sa.cost_7d}
+                description={sa.description}
+                ownerName={sa.owner_name}
+                ownerRole={sa.owner_role}
+                locked={sa.locked}
+                serviceName={group.service_name}
+                agentId={sa.agent_id}
                 onSelect={() => onSelectSubAgent(sa.agent_id)}
                 onDelete={() => onDeleteSubAgent(sa.agent_id)}
+                deleteLabel={`Delete ${sa.agent_id}`}
               />
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function SubAgentRow({ subAgent, onSelect, onDelete }) {
-  const compat = {
-    span_count: subAgent.span_count,
-    error_count: subAgent.error_count,
-    last_seen: subAgent.last_seen,
-  }
-  const status = statusFor(compat)
-  const errRate = errorRatePercent(compat)
-
-  // Inline-confirm pattern matches TeamRow's delete UX — no modal.
-  // Clicking the trash icon flips to a "Yes / Cancel" pair so the
-  // destructive action is two clicks even though the icon is small.
-  const [confirming, setConfirming] = useState(false)
-  const [deleting, setDeleting] = useState(false)
-
-  async function handleConfirm(e) {
-    e.stopPropagation()
-    setDeleting(true)
-    try {
-      await onDelete()
-      // Parent Fleet.handleDeleteSubAgent drops this row from state,
-      // so the unmount runs before any state cleanup here. Safe.
-    } catch (err) {
-      // If the API call fails, snap back to non-confirming so the
-      // operator can retry. The row's still here.
-      console.warn('[Fleet] sub-agent delete failed:', err)
-      setDeleting(false)
-      setConfirming(false)
-    }
-  }
-
-  return (
-    <li className="subagent-row-wrapper">
-      <button type="button" className="subagent-row" onClick={onSelect}>
-        <span className={`status-dot status-${status}`} />
-        <span className="subagent-id">
-          {subAgent.display_name ? (
-            <>
-              {subAgent.display_name}{' '}
-              <span className="subagent-id-raw mono">({subAgent.agent_id})</span>
-            </>
-          ) : (
-            <span className="mono">{subAgent.agent_id}</span>
-          )}
-          {subAgent.owner_name && (
-            <span className="subagent-owner">→ {subAgent.owner_name}</span>
-          )}
-        </span>
-        <span className="subagent-stat">
-          {subAgent.span_count.toLocaleString()} spans
-        </span>
-        <span
-          className={`subagent-stat ${
-            errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''
-          }`}
-        >
-          {errRate.toFixed(1)}% err
-        </span>
-        <span className="subagent-stat subagent-seen">
-          {relativeTime(subAgent.last_seen)}
-        </span>
-      </button>
-      {confirming ? (
-        <span className="subagent-delete-confirm">
-          <button
-            type="button"
-            className="btn-link-inline danger"
-            onClick={handleConfirm}
-            disabled={deleting}
-          >
-            {deleting ? 'Deleting…' : 'Yes, delete'}
-          </button>
-          <button
-            type="button"
-            className="btn-link-inline"
-            onClick={(e) => {
-              e.stopPropagation()
-              setConfirming(false)
-            }}
-            disabled={deleting}
-          >
-            Cancel
-          </button>
-        </span>
-      ) : (
-        <button
-          type="button"
-          className="subagent-delete-btn"
-          onClick={(e) => {
-            e.stopPropagation()
-            setConfirming(true)
-          }}
-          aria-label={`Delete ${subAgent.agent_id}`}
-          title="Delete sub-agent"
-        >
-          <TrashIcon size={13} />
-        </button>
+            )
+          })}
+        </div>
       )}
-    </li>
+    </div>
   )
 }
 
