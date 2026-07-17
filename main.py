@@ -1062,14 +1062,16 @@ async def agent_summary(
     # View-lock by plan. The detail page still gets identity + status; when
     # locked it swaps the Work Feed for the "recording" panel (count proves the
     # data exists). Telemetry was never gated.
+    # Locking is per-instance (service_name); sub-agents inherit their instance.
     lock = database.get_locked_state(account_id)
-    key = (service_name, agent_id or "main")
-    summary["locked"] = key in lock["locked"]
+    summary["locked"] = service_name in lock["locked"]
     if summary["locked"]:
         summary["records_count"] = database.count_agent_records(
             service_name, account_id=account_id, agent_id=agent_id
         )
-        summary["recording_since"] = lock["first_seen"].get(key) or summary.get("first_seen")
+        summary["recording_since"] = (
+            lock["first_seen"].get(service_name) or summary.get("first_seen")
+        )
 
     return AgentSummary(**summary)
 
@@ -1087,10 +1089,10 @@ async def agent_drift(
     compare against, or when AI isn't configured (503 only on a hard failure)."""
     account_id = getattr(request.state, "account_id", None)
 
-    # Honor the plan view-lock — a locked agent withholds its detail body, so it
-    # withholds the drift analysis too (telemetry was still recorded).
+    # Honor the plan view-lock — a locked instance withholds its detail body, so
+    # it withholds the drift analysis too (telemetry was still recorded).
     lock = database.get_locked_state(account_id)
-    if (service_name, agent_id or "main") in lock["locked"]:
+    if service_name in lock["locked"]:
         return DriftReport(
             status="unknown",
             headline="Upgrade to view this agent's drift analysis.",
@@ -1190,9 +1192,9 @@ async def agent_records(
     the plan rises these same records become visible with full history."""
     account_id = getattr(request.state, "account_id", None)
 
-    # Withhold record payloads for a locked agent (identity/count only).
+    # Withhold record payloads for a locked instance (identity/count only).
     lock = database.get_locked_state(account_id)
-    if (service_name, agent_id or "main") in lock["locked"]:
+    if service_name in lock["locked"]:
         return AgentRecordsResponse(
             records=[],
             next_cursor=None,
@@ -1200,7 +1202,7 @@ async def agent_records(
             records_count=database.count_agent_records(
                 service_name, account_id=account_id, agent_id=agent_id
             ),
-            recording_since=lock["first_seen"].get((service_name, agent_id or "main")),
+            recording_since=lock["first_seen"].get(service_name),
         )
 
     before_ns = None
@@ -2675,8 +2677,8 @@ async def get_org(request: Request) -> OrgPublic:
 @app.get("/account/usage", response_model=AccountUsage)
 async def account_usage(request: Request) -> AccountUsage:
     """Plan + agent count + limit + locked count — for the Fleet header and
-    upgrade prompts. Agent count is distinct (service_name, agent_id); limit is
-    None for unlimited plans."""
+    upgrade prompts. Agent count is distinct INSTANCES (service_name) — a
+    multi-sub-agent instance counts once; limit is None for unlimited plans."""
     account_id = getattr(request.state, "account_id", None)
     lock = database.get_locked_state(account_id)
     return AccountUsage(

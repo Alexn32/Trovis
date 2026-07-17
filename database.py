@@ -2957,9 +2957,10 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                 "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
                 "cost_today": round(float(row["cost_today"] or 0.0), 6),
                 "cost_7d": round(float(row["cost_7d"] or 0.0), 6),
-                # View-locked when this agent's first-seen position exceeds the
-                # plan's agent limit. Its telemetry is still fully recorded.
-                "locked": (sn, row["agent_id"] or "main") in locked_keys,
+                # View-locked when this agent's INSTANCE is beyond the plan's
+                # instance limit (sub-agents inherit their instance's lock).
+                # Telemetry is still fully recorded regardless.
+                "locked": sn in locked_keys,
             }
             if sn not in groups:
                 groups[sn] = {
@@ -6470,14 +6471,17 @@ def get_account_stripe_customer(account_id: int) -> str | None:
 def get_locked_state(account_id: int | None) -> dict[str, Any]:
     """Which agents are *view-locked* for this account under its plan.
 
-    Distinct agents (service_name + agent_id) are ordered by first_seen
-    ascending; the first `limit` are unlocked, the rest locked. Unlimited
-    plans (limit None) lock nothing. This informs the VIEW only — telemetry
-    is never gated, so locked agents still have every span recorded.
+    The plan limit counts *instances* (distinct `service_name`), NOT sub-agents:
+    a single instance with many sub-agents consumes one slot, and its sub-agents
+    are free. Instances are ordered by first_seen ascending; the first `limit`
+    stay unlocked, older-beyond-limit instances lock (with all their sub-agents).
+    Unlimited plans (limit None) lock nothing. This informs the VIEW only —
+    telemetry is never gated, so locked instances still have every span recorded.
 
     Returns {plan, limit, agent_count, locked_count,
-             locked: set[(service_name, agent_id)],
-             first_seen: {(service_name, agent_id): iso}}.
+             locked: set[service_name],
+             first_seen: {service_name: iso}}.
+    where agent_count / locked_count are INSTANCE counts.
     """
     plan = "free"
     if account_id is not None:
@@ -6487,29 +6491,29 @@ def get_locked_state(account_id: int | None) -> dict[str, Any]:
     limit = agent_limit(plan)
 
     account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    # One row per instance; first_seen is the earliest across its sub-agents.
     sql = f"""
         SELECT service_name,
-               COALESCE(agent_id, 'main') AS agent_id,
                MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS}
                         THEN start_time_unix END) AS first_seen_ns
         FROM spans
         WHERE 1=1 {account_filter}
-        GROUP BY service_name, COALESCE(agent_id, 'main')
+        GROUP BY service_name
     """
     args = (account_id,) if account_id is not None else ()
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, args)
         rows = cur.fetchall()
 
-    # Oldest first. Agents with no valid (post-floor) first_seen sort last, so
-    # an undated/garbage-timestamp agent never preempts an established one.
-    items = [(r["service_name"], r["agent_id"], r["first_seen_ns"]) for r in rows]
-    items.sort(key=lambda t: (t[2] is None, t[2] or 0))
+    # Oldest first. Instances with no valid (post-floor) first_seen sort last, so
+    # an undated/garbage-timestamp instance never preempts an established one.
+    items = [(r["service_name"], r["first_seen_ns"]) for r in rows]
+    items.sort(key=lambda t: (t[1] is None, t[1] or 0))
 
-    first_seen = {(s, a): _ns_to_iso(ns) for (s, a, ns) in items}
-    locked: set[tuple[str, str]] = set()
+    first_seen = {s: _ns_to_iso(ns) for (s, ns) in items}
+    locked: set[str] = set()
     if limit is not None:
-        locked = {(s, a) for (s, a, _ns) in items[limit:]}
+        locked = {s for (s, _ns) in items[limit:]}
     return {
         "plan": plan,
         "limit": limit,
