@@ -1158,3 +1158,58 @@ class ActivityItem(BaseModel):
     content: str | None = None
     content_type: str | None = None  # 'message' | 'response' | 'tool_result'
     tool: str | None = None
+
+
+class LoopParticipant(BaseModel):
+    """One participant in a workloop. `participant` is the composite
+    "service_name:agent_id" for agents, the user id (as a string) for
+    humans."""
+
+    participant_type: str  # 'agent' | 'human'
+    participant: str
+    role: str  # 'initiator' | 'executor' | 'reviewer'
+    added_at: str | None = None
+
+
+class LoopEventRecord(BaseModel):
+    """One event in a loop's merged, ordered stream: a lifecycle event
+    (loop_opened, handoff_*, loop_closed, ...) or a span-derived 'activity'
+    event. `ts` is unix nanoseconds — the stream's ordering key."""
+
+    type: str
+    ts: int
+    actor_type: str = ""  # 'agent' | 'human' | 'system'
+    actor: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class LoopSummary(BaseModel):
+    """One workloop as listed by GET /loops. State is derived from events
+    (loops.compute_loop_state); cached_state is a recomputed cache, never
+    the source of truth. total_cost_usd is a live SUM over the loop's
+    spans — no stored aggregate."""
+
+    id: int
+    external_id: str | None = None
+    service_name: str
+    agent_id: str = "main"
+    title: str | None = None
+    initiated_by_type: str
+    initiated_by: str
+    cached_state: str
+    last_event_unix: int | None = None
+    created_at: str | None = None
+    closed_at: str | None = None
+    participant_count: int = 0
+    span_count: int = 0
+    event_count: int = 0
+    total_cost_usd: float = 0.0
+    stalled_for_s: int | None = None  # populated by GET /loops/stalled only
+
+
+class LoopDetail(LoopSummary):
+    """Full loop view: summary fields + participants + the complete ordered
+    event stream."""
+
+    participants: list[LoopParticipant] = Field(default_factory=list)
+    events: list[LoopEventRecord] = Field(default_factory=list)

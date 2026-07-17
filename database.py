@@ -1002,6 +1002,116 @@ CREATE TABLE IF NOT EXISTS workflow_edges (
 )
 """
 
+# --- Workloops ------------------------------------------------------------
+# A loop is a unit of work derived from the event stream (see loops.py).
+# `loops` is the mutable READ MODEL: cached_state/closed_at/last_event_unix
+# are recomputed caches, never sources of truth. The event record itself
+# (spans + loop_events) is append-only. external_id/service_name/agent_id/
+# last_event_unix are denormalized here purely so implicit grouping (keyed
+# lookup + 30-min gap rule) is one indexed query, not a JSON scan.
+_LOOPS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS loops (
+    id                SERIAL  PRIMARY KEY,
+    account_id        INTEGER REFERENCES accounts(id),
+    external_id       TEXT,
+    service_name      TEXT    NOT NULL,
+    agent_id          TEXT    NOT NULL DEFAULT 'main',
+    title             TEXT,
+    initiated_by_type TEXT    NOT NULL DEFAULT 'agent'
+                      CHECK (initiated_by_type IN ('agent', 'human')),
+    initiated_by      TEXT    NOT NULL DEFAULT '',
+    cached_state      TEXT    NOT NULL DEFAULT 'open'
+                      CHECK (cached_state IN ('open', 'working', 'awaiting_human',
+                             'awaiting_agent', 'stalled', 'done', 'abandoned')),
+    last_event_unix   BIGINT,
+    created_at        TIMESTAMP DEFAULT NOW(),
+    closed_at         TIMESTAMP
+)
+"""
+
+_LOOPS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS loops (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id        INTEGER REFERENCES accounts(id),
+    external_id       TEXT,
+    service_name      TEXT    NOT NULL,
+    agent_id          TEXT    NOT NULL DEFAULT 'main',
+    title             TEXT,
+    initiated_by_type TEXT    NOT NULL DEFAULT 'agent'
+                      CHECK (initiated_by_type IN ('agent', 'human')),
+    initiated_by      TEXT    NOT NULL DEFAULT '',
+    cached_state      TEXT    NOT NULL DEFAULT 'open'
+                      CHECK (cached_state IN ('open', 'working', 'awaiting_human',
+                             'awaiting_agent', 'stalled', 'done', 'abandoned')),
+    last_event_unix   INTEGER,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    closed_at         TIMESTAMP
+)
+"""
+
+# Loop lifecycle events — APPEND-ONLY, like spans. Never UPDATE or DELETE
+# rows here; corrections are new events. `type` vocabulary is enforced in
+# code (append_loop_event / loops.EVENT_TYPES), not a CHECK, so it can grow
+# without a table rebuild on SQLite. event_time_unix (unix ns) is the sole
+# ordering key — created_at is display-only (dialect-divergent type).
+# actor_type includes 'system' so sweep-authored events (auto-abandon) are
+# attributed natively, with no reserved uuid or boolean flag needed.
+_LOOP_EVENTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS loop_events (
+    id              SERIAL  PRIMARY KEY,
+    account_id      INTEGER,
+    loop_id         INTEGER NOT NULL REFERENCES loops(id),
+    type            TEXT    NOT NULL,
+    actor_type      TEXT    NOT NULL CHECK (actor_type IN ('agent', 'human', 'system')),
+    actor           TEXT    NOT NULL DEFAULT '',
+    payload         TEXT    DEFAULT '{}',
+    event_time_unix BIGINT  NOT NULL,
+    created_at      TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_LOOP_EVENTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS loop_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER,
+    loop_id         INTEGER NOT NULL REFERENCES loops(id),
+    type            TEXT    NOT NULL,
+    actor_type      TEXT    NOT NULL CHECK (actor_type IN ('agent', 'human', 'system')),
+    actor           TEXT    NOT NULL DEFAULT '',
+    payload         TEXT    DEFAULT '{}',
+    event_time_unix INTEGER NOT NULL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+# Who's involved in a loop. participant is the composite "service:agent_id"
+# for agents, str(user_id) for humans (see loops.agent_actor).
+_LOOP_PARTICIPANTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS loop_participants (
+    id               SERIAL  PRIMARY KEY,
+    loop_id          INTEGER NOT NULL REFERENCES loops(id),
+    participant_type TEXT    NOT NULL CHECK (participant_type IN ('agent', 'human')),
+    participant      TEXT    NOT NULL,
+    role             TEXT    NOT NULL DEFAULT 'executor'
+                     CHECK (role IN ('initiator', 'executor', 'reviewer')),
+    added_at         TIMESTAMP DEFAULT NOW(),
+    UNIQUE (loop_id, participant_type, participant, role)
+)
+"""
+
+_LOOP_PARTICIPANTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS loop_participants (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    loop_id          INTEGER NOT NULL REFERENCES loops(id),
+    participant_type TEXT    NOT NULL CHECK (participant_type IN ('agent', 'human')),
+    participant      TEXT    NOT NULL,
+    role             TEXT    NOT NULL DEFAULT 'executor'
+                     CHECK (role IN ('initiator', 'executor', 'reviewer')),
+    added_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (loop_id, participant_type, participant, role)
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -1049,6 +1159,18 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_budgets_account ON agent_budgets(account_id, service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_oauth_codes_code ON oauth_codes(code)",
     "CREATE INDEX IF NOT EXISTS idx_alert_log_lookup ON alert_log(account_id, rule, subject_key, state_key)",
+    # Workloops. The spans index is partial — most historical spans have
+    # NULL loop_id (no backfill) and the syntax is identical on both
+    # backends (SQLite supports partial indexes since 3.8).
+    "CREATE INDEX IF NOT EXISTS idx_spans_loop_id ON spans(loop_id) WHERE loop_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_loops_account_state ON loops(account_id, cached_state)",
+    "CREATE INDEX IF NOT EXISTS idx_loops_account_created ON loops(account_id, created_at DESC)",
+    # Implicit grouping lookups: keyed (external_id/run.id, service-wide so
+    # multi-agent runs share one loop) and per-agent gap-rule.
+    "CREATE INDEX IF NOT EXISTS idx_loops_grouping ON loops(account_id, service_name, external_id)",
+    "CREATE INDEX IF NOT EXISTS idx_loops_gap ON loops(account_id, service_name, agent_id, last_event_unix)",
+    "CREATE INDEX IF NOT EXISTS idx_loop_events_loop_ts ON loop_events(loop_id, event_time_unix)",
+    "CREATE INDEX IF NOT EXISTS idx_loop_participants_loop ON loop_participants(loop_id)",
 ]
 
 
@@ -1091,6 +1213,10 @@ def init_db() -> None:
             _OAUTH_CODES_DDL_PG,
             # Standalone (no FKs, no account scoping) — order doesn't matter.
             _WAITLIST_DDL_PG,
+            # loops before loop_events/loop_participants — the FKs reference it.
+            _LOOPS_DDL_PG,
+            _LOOP_EVENTS_DDL_PG,
+            _LOOP_PARTICIPANTS_DDL_PG,
         ]
     else:
         ddls = [
@@ -1118,6 +1244,9 @@ def init_db() -> None:
             _ALERT_LOG_DDL_SQLITE,
             _OAUTH_CODES_DDL_SQLITE,
             _WAITLIST_DDL_SQLITE,
+            _LOOPS_DDL_SQLITE,
+            _LOOP_EVENTS_DDL_SQLITE,
+            _LOOP_PARTICIPANTS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -1194,6 +1323,13 @@ def init_db() -> None:
         _try_add_column(cur, "workflow_steps", "pos_y", "REAL DEFAULT 0")
         _try_add_column(cur, "workflow_steps", "node_width", "REAL DEFAULT 170")
         _try_add_column(cur, "workflow_steps", "node_height", "REAL DEFAULT 72")
+        # Workloops: link each span to the loop it belongs to. Nullable —
+        # historical spans are never backfilled, and non-ingest writers
+        # (MCP synthetic spans) stay loop-less. Set at INSERT time only;
+        # spans are append-only, so this is never UPDATEd afterwards. No
+        # FK: SQLite's ALTER ADD COLUMN can't enforce one, and the two
+        # backends must stay schema-identical.
+        _try_add_column(cur, "spans", "loop_id", "INTEGER DEFAULT NULL")
         for idx in _INDEXES:
             cur.execute(idx)
         # Bootstrap the pricing table with a handful of common models so
@@ -1538,9 +1674,9 @@ _INSERT_COLUMNS = (
     "attributes, resource_attributes, account_id, "
     "input_tokens, output_tokens, total_tokens, "
     "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd, "
-    "cost_source"
+    "cost_source, loop_id"
 )
-_INSERT_COLUMN_COUNT = 21
+_INSERT_COLUMN_COUNT = 22
 
 
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
@@ -1812,8 +1948,30 @@ def _load_pricing(cur) -> dict[str, tuple[float, float]]:
 def insert_spans(
     spans: list[dict[str, Any]], account_id: int | None = None,
 ) -> int:
-    """Bulk-insert parsed spans. Returns the row count. Tags each row with
-    account_id when provided (None preserves the pre-multi-tenant behavior).
+    """Bulk-insert parsed spans with loop_id NULL. Returns the row count.
+
+    Thin wrapper around _insert_span_rows for writers that don't participate
+    in workloops (MCP synthetic spans, connect-ask). The OTLP ingest path
+    uses ingest_spans_with_loops instead, which resolves loops and links
+    spans in the same transaction. These callers staying loop-less is
+    intentional — don't "fix" them to create loops.
+    """
+    if not spans:
+        return 0
+    with _connect() as conn, _cursor(conn) as cur:
+        return _insert_span_rows(cur, spans, account_id)
+
+
+def _insert_span_rows(
+    cur,
+    spans: list[dict[str, Any]],
+    account_id: int | None = None,
+    loop_ids: list[int | None] | None = None,
+) -> int:
+    """Insert parsed spans on an open cursor — the caller owns the
+    transaction. Tags each row with account_id when provided (None preserves
+    the pre-multi-tenant behavior). loop_ids is positionally parallel to
+    spans (None → every row gets loop_id NULL).
 
     Token usage (`gen_ai.usage.*`) and the model (`gen_ai.request.model`)
     are read off each span's attributes; when both are present and the
@@ -1832,117 +1990,726 @@ def insert_spans(
     if not spans:
         return 0
 
-    with _connect() as conn, _cursor(conn) as cur:
-        pricing = _load_pricing(cur)
+    pricing = _load_pricing(cur)
 
-        # Pass 1: which runs in this batch carry an SDK-reported total?
-        parsed: list[tuple] = []
-        reported_runs: set[str] = set()
+    # Pass 1: which runs in this batch carry an SDK-reported total?
+    parsed: list[tuple] = []
+    reported_runs: set[str] = set()
+    for s in spans:
+        attrs = s.get("attributes") or {}
+        inp, out, tot = _extract_tokens(attrs)
+        cc, cr = _extract_cache_tokens(attrs)
+        model = model_from_attrs(attrs)
+        has_usage = tot is not None or cc is not None or cr is not None
+        # total_tokens counts every billed token, cache included.
+        if has_usage:
+            tot = (tot or 0) + (cc or 0) + (cr or 0)
+        run_id = attr(attrs, "run.id")
+        run_id = str(run_id) if run_id else None
+        reported: float | None = None
+        try:
+            rc = attr(attrs, "run.cost_usd")
+            if rc is not None and float(rc) > 0:
+                reported = round(float(rc), 6)
+        except (TypeError, ValueError):
+            pass
+        if reported is not None and run_id:
+            reported_runs.add(run_id)
+        parsed.append(
+            (s, attrs, inp, out, tot, cc, cr, model, has_usage, run_id, reported)
+        )
+
+    rows = []
+    for i, (
+        s, attrs, inp, out, tot, cc, cr, model, has_usage, run_id, reported,
+    ) in enumerate(parsed):
+        if reported is not None:
+            cost: float | None = reported
+            source: str | None = "reported"
+        elif has_usage and run_id in reported_runs:
+            cost = 0.0  # included in this run's reported total
+            source = "covered"
+        elif has_usage:
+            cost = _compute_cost(
+                model, inp, out, pricing, cache_creation=cc, cache_read=cr
+            )
+            source = None  # token-derived estimate
+        else:
+            cost = None
+            source = None
+        rows.append(
+            (
+                s["trace_id"],
+                s["span_id"],
+                s.get("parent_span_id") or None,
+                s["service_name"],
+                _agent_id_from_attrs(attrs),
+                s["span_name"],
+                s.get("kind", 0),
+                s["start_time_unix"],
+                s["end_time_unix"],
+                s.get("status_code", 0),
+                s.get("status_message", "") or "",
+                json.dumps(s.get("attributes", {})),
+                json.dumps(s.get("resource_attributes", {})),
+                account_id,
+                inp,
+                out,
+                tot,
+                cc,
+                cr,
+                cost,
+                source,
+                loop_ids[i] if loop_ids else None,
+            )
+        )
+
+    if USE_POSTGRES:
+        execute_values(
+            cur,
+            f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES %s",
+            rows,
+        )
+    else:
+        placeholders = ", ".join(["?"] * _INSERT_COLUMN_COUNT)
+        cur.executemany(
+            f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES ({placeholders})",
+            rows,
+        )
+
+    # Cross-batch covering: a run's per-turn spans often arrive in earlier
+    # export batches than its run-complete span. Now that the run's
+    # reported total has landed, zero those earlier token estimates so the
+    # run isn't double-counted. Prior 'reported' rows are left alone —
+    # per the Agent SDK docs each result reflects only its own query()
+    # call, so multiple reported totals on one session legitimately sum.
+    for rid in reported_runs:
+        if not _RUN_ID_SAFE_RE.match(rid):
+            continue  # don't build LIKE patterns from exotic ids
+        sql = (
+            "UPDATE spans SET estimated_cost_usd = 0, cost_source = 'covered' "
+            f"WHERE (attributes LIKE {PH} OR attributes LIKE {PH}) "
+            "AND total_tokens IS NOT NULL "
+            "AND (cost_source IS NULL OR cost_source = 'estimate')"
+        )
+        args: list[Any] = [
+            f'%"trovis.run.id": "{rid}"%',
+            f'%"oversee.run.id": "{rid}"%',
+        ]
+        if account_id is not None:
+            sql += f" AND account_id = {PH}"
+            args.append(account_id)
+        cur.execute(sql, tuple(args))
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Workloops
+# ---------------------------------------------------------------------------
+# The event record (spans + loop_events) is APPEND-ONLY: no function below
+# ever UPDATEs or DELETEs a row in either table. The `loops` table is the
+# derived read model — its cached_state / closed_at / last_event_unix are
+# recomputed caches (from loops.compute_loop_state), never sources of truth,
+# and are the only rows this feature mutates.
+
+_NS_PER_S = 1_000_000_000
+
+
+def _loops_mod():
+    """loops.py imports database (for env config), so database imports loops
+    lazily — same pattern as sentry_sdk in main.py."""
+    import loops  # noqa: PLC0415
+
+    return loops
+
+
+def _insert_returning_id(cur, sql: str, params: tuple) -> int:
+    """INSERT and return the new row id on either backend."""
+    if USE_POSTGRES:
+        cur.execute(sql + " RETURNING id", params)
+        return cur.fetchone()["id"]
+    cur.execute(sql, params)
+    return cur.lastrowid
+
+
+def _loop_account_clause(account_id: int | None) -> tuple[str, list]:
+    """Strict account matching for loop grouping/writes. Unlike the read
+    convention (omit the filter when None), grouping must match NULL rows
+    exactly — otherwise open-mode spans could join another tenant's loop."""
+    if account_id is None:
+        return "AND account_id IS NULL", []
+    return f"AND account_id = {PH}", [account_id]
+
+
+def append_loop_event(
+    cur,
+    loop_id: int,
+    event_type: str,
+    actor_type: str,
+    actor: str,
+    payload: dict[str, Any] | None = None,
+    account_id: int | None = None,
+    event_time_unix: int | None = None,
+) -> int:
+    """Append one loop lifecycle event. The single write path into
+    loop_events — the type/actor vocabularies are enforced here (in code,
+    not a CHECK, so they can grow without a SQLite table rebuild)."""
+    lp = _loops_mod()
+    if event_type not in lp.EVENT_TYPES:
+        raise ValueError(f"unknown loop event type: {event_type!r}")
+    if actor_type not in lp.ACTOR_TYPES:
+        raise ValueError(f"unknown loop actor type: {actor_type!r}")
+    if event_time_unix is None:
+        event_time_unix = time.time_ns()
+    return _insert_returning_id(
+        cur,
+        "INSERT INTO loop_events "
+        "(account_id, loop_id, type, actor_type, actor, payload, event_time_unix) "
+        f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+        (
+            account_id,
+            loop_id,
+            event_type,
+            actor_type,
+            actor or "",
+            json.dumps(payload or {}),
+            int(event_time_unix),
+        ),
+    )
+
+
+def insert_loop_event(
+    loop_id: int,
+    event_type: str,
+    actor_type: str,
+    actor: str,
+    payload: dict[str, Any] | None = None,
+    account_id: int | None = None,
+    event_time_unix: int | None = None,
+) -> int:
+    """Standalone append_loop_event (own transaction) that also recomputes
+    the loop's cached_state. For tests and tooling; ingest uses the cursor
+    variants so everything lands in one transaction."""
+    with _connect() as conn, _cursor(conn) as cur:
+        event_id = append_loop_event(
+            cur, loop_id, event_type, actor_type, actor,
+            payload=payload, account_id=account_id,
+            event_time_unix=event_time_unix,
+        )
+        recompute_loop_state(cur, loop_id)
+        return event_id
+
+
+def _upsert_loop_participant(
+    cur, loop_id: int, participant_type: str, participant: str, role: str
+) -> None:
+    # Same-syntax upsert on both backends (SQLite >= 3.24, like _seed_pricing).
+    cur.execute(
+        "INSERT INTO loop_participants (loop_id, participant_type, participant, role) "
+        f"VALUES ({PH}, {PH}, {PH}, {PH}) "
+        "ON CONFLICT (loop_id, participant_type, participant, role) DO NOTHING",
+        (loop_id, participant_type, participant, role),
+    )
+
+
+def _resolve_loop_for_span(
+    cur,
+    attrs: dict[str, Any],
+    service_name: str,
+    agent_id: str,
+    ts_ns: int,
+    account_id: int | None,
+    cache: dict,
+) -> int:
+    """Find or create the loop a span belongs to.
+
+    Grouping, in order:
+      1. Keyed: trovis.loop.external_id, falling back to trovis.run.id
+         (both dual-read with the legacy oversee.* prefix via attr()) →
+         the service's open loop with that external_id. Deliberately NOT
+         per-agent_id: a multi-agent run shares one run.id, and its
+         sub-agents must land in ONE loop as co-participants.
+      2. Gap rule: the agent's most recent open keyless loop whose last
+         event is < GAP_THRESHOLD old, else a new loop. (Per-agent_id —
+         with no shared key there's nothing tying sub-agents together.)
+
+    Closed loops (closed_at set) never accept new spans — a recurring
+    external_id/run.id after a close starts a fresh loop.
+    """
+    lp = _loops_mod()
+    key = attr(attrs, "loop.external_id") or attr(attrs, "run.id")
+    key = str(key) if key else None
+    cache_key = (service_name, key) if key else (service_name, agent_id, None)
+    if cache_key in cache:
+        return cache[cache_key]
+
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    row = None
+    if key is not None:
+        cur.execute(
+            f"SELECT id FROM loops WHERE service_name = {PH} "
+            f"AND external_id = {PH} AND closed_at IS NULL {acct_sql} "
+            "ORDER BY id DESC LIMIT 1",
+            tuple([service_name, key, *acct_args]),
+        )
+        row = cur.fetchone()
+    else:
+        cutoff = ts_ns - lp.GAP_THRESHOLD_S * _NS_PER_S
+        cur.execute(
+            f"SELECT id FROM loops WHERE service_name = {PH} AND agent_id = {PH} "
+            f"AND external_id IS NULL AND closed_at IS NULL "
+            f"AND last_event_unix >= {PH} {acct_sql} "
+            "ORDER BY last_event_unix DESC LIMIT 1",
+            tuple([service_name, agent_id, cutoff, *acct_args]),
+        )
+        row = cur.fetchone()
+    if row:
+        loop_id = row["id"]
+        cache[cache_key] = loop_id
+        return loop_id
+
+    title = attr(attrs, "loop.title")
+    actor = lp.agent_actor(service_name, agent_id)
+    loop_id = _insert_returning_id(
+        cur,
+        "INSERT INTO loops (account_id, external_id, service_name, agent_id, "
+        "title, initiated_by_type, initiated_by, cached_state, last_event_unix) "
+        f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'agent', {PH}, 'open', {PH})",
+        (
+            account_id,
+            key,
+            service_name,
+            agent_id,
+            str(title) if title else None,
+            actor,
+            ts_ns,
+        ),
+    )
+    append_loop_event(
+        cur, loop_id, "loop_opened", "agent", actor,
+        account_id=account_id, event_time_unix=ts_ns,
+    )
+    _upsert_loop_participant(cur, loop_id, "agent", actor, "initiator")
+    cache[cache_key] = loop_id
+    return loop_id
+
+
+# Values of trovis.loop.close that mean a bare "done" (no extra detail).
+_LOOP_CLOSE_BARE = ("", "done", "true", "1", "yes")
+
+
+def ingest_spans_with_loops(
+    spans: list[dict[str, Any]], account_id: int | None = None,
+) -> int:
+    """The OTLP ingest write path: resolve a loop for every span, link spans
+    at INSERT time (loop_id is never UPDATEd later), append any loop
+    lifecycle events the batch carries (handoff / close attributes), and
+    recompute each affected loop's cached_state — all in ONE transaction.
+
+    Historical spans are never backfilled; only spans flowing through here
+    get a loop_id.
+    """
+    if not spans:
+        return 0
+    lp = _loops_mod()
+    now_ns = time.time_ns()
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cache: dict = {}
+        loop_ids: list[int | None] = []
+        affected: dict[int, int] = {}  # loop_id -> max event ts in this batch
+        executor_pairs: set[tuple[int, str]] = set()
+        closes: dict[int, tuple[str, str, int]] = {}  # loop_id -> (actor, value, ts)
+
         for s in spans:
             attrs = s.get("attributes") or {}
-            inp, out, tot = _extract_tokens(attrs)
-            cc, cr = _extract_cache_tokens(attrs)
-            model = model_from_attrs(attrs)
-            has_usage = tot is not None or cc is not None or cr is not None
-            # total_tokens counts every billed token, cache included.
-            if has_usage:
-                tot = (tot or 0) + (cc or 0) + (cr or 0)
-            run_id = attr(attrs, "run.id")
-            run_id = str(run_id) if run_id else None
-            reported: float | None = None
-            try:
-                rc = attr(attrs, "run.cost_usd")
-                if rc is not None and float(rc) > 0:
-                    reported = round(float(rc), 6)
-            except (TypeError, ValueError):
-                pass
-            if reported is not None and run_id:
-                reported_runs.add(run_id)
-            parsed.append(
-                (s, attrs, inp, out, tot, cc, cr, model, has_usage, run_id, reported)
-            )
+            svc = s["service_name"]
+            aid = _agent_id_from_attrs(attrs)
+            # Loop bookkeeping uses the span's own clock so the gap rule and
+            # idle thresholds survive batched/delayed exports — but clamped:
+            # agent clocks are untrusted (the _FIRST_SEEN_FLOOR_NS lesson).
+            ts = min(max(int(s.get("start_time_unix") or 0), _FIRST_SEEN_FLOOR_NS), now_ns)
+            loop_id = _resolve_loop_for_span(cur, attrs, svc, aid, ts, account_id, cache)
+            loop_ids.append(loop_id)
+            affected[loop_id] = max(affected.get(loop_id, 0), ts)
+            actor = lp.agent_actor(svc, aid)
+            executor_pairs.add((loop_id, actor))
 
-        rows = []
-        for (
-            s, attrs, inp, out, tot, cc, cr, model, has_usage, run_id, reported,
-        ) in parsed:
-            if reported is not None:
-                cost: float | None = reported
-                source: str | None = "reported"
-            elif has_usage and run_id in reported_runs:
-                cost = 0.0  # included in this run's reported total
-                source = "covered"
-            elif has_usage:
-                cost = _compute_cost(
-                    model, inp, out, pricing, cache_creation=cc, cache_read=cr
+            # handoff block -> handoff_initiated event in the span's loop.
+            direction = attr(attrs, "handoff.direction")
+            if isinstance(direction, str) and direction in lp.HANDOFF_DIRECTIONS:
+                payload: dict[str, Any] = {"direction": direction}
+                for suffix, pkey in (
+                    ("handoff.target_id", "target_id"),
+                    ("handoff.reason", "reason"),
+                    ("handoff.id", "handoff_id"),
+                ):
+                    v = attr(attrs, suffix)
+                    if v is not None:
+                        payload[pkey] = str(v)
+                append_loop_event(
+                    cur, loop_id, "handoff_initiated", "agent", actor,
+                    payload=payload, account_id=account_id, event_time_unix=ts,
                 )
-                source = None  # token-derived estimate
-            else:
-                cost = None
-                source = None
-            rows.append(
-                (
-                    s["trace_id"],
-                    s["span_id"],
-                    s.get("parent_span_id") or None,
-                    s["service_name"],
-                    _agent_id_from_attrs(attrs),
-                    s["span_name"],
-                    s.get("kind", 0),
-                    s["start_time_unix"],
-                    s["end_time_unix"],
-                    s.get("status_code", 0),
-                    s.get("status_message", "") or "",
-                    json.dumps(s.get("attributes", {})),
-                    json.dumps(s.get("resource_attributes", {})),
-                    account_id,
-                    inp,
-                    out,
-                    tot,
-                    cc,
-                    cr,
-                    cost,
-                    source,
-                )
+
+            # trovis.loop.close -> agent completed the loop. Without this,
+            # every agent-finished task would sit idle until the sweep
+            # mislabels it abandoned 48h later.
+            close_val = attr(attrs, "loop.close")
+            if close_val is not None:
+                closes[loop_id] = (actor, str(close_val), ts)
+
+        _insert_span_rows(cur, spans, account_id, loop_ids)
+
+        for loop_id, actor in executor_pairs:
+            _upsert_loop_participant(cur, loop_id, "agent", actor, "executor")
+
+        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+        for loop_id, (actor, value, ts) in closes.items():
+            cur.execute(
+                f"SELECT closed_at FROM loops WHERE id = {PH}", (loop_id,)
+            )
+            row = cur.fetchone()
+            if row is None or row["closed_at"] is not None:
+                continue  # already closed — never a second close event
+            payload = {"reason": "completed_by_agent"}
+            if value.strip().lower() not in _LOOP_CLOSE_BARE:
+                payload["detail"] = value
+            append_loop_event(
+                cur, loop_id, "loop_closed", "agent", actor,
+                payload=payload, account_id=account_id, event_time_unix=ts,
+            )
+            cur.execute(
+                f"UPDATE loops SET closed_at = {now_sql} WHERE id = {PH}",
+                (loop_id,),
             )
 
-        if USE_POSTGRES:
-            execute_values(
-                cur,
-                f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES %s",
-                rows,
+        for loop_id, batch_max in affected.items():
+            cur.execute(
+                f"SELECT last_event_unix FROM loops WHERE id = {PH}", (loop_id,)
             )
-        else:
-            placeholders = ", ".join(["?"] * _INSERT_COLUMN_COUNT)
-            cur.executemany(
-                f"INSERT INTO spans ({_INSERT_COLUMNS}) VALUES ({placeholders})",
-                rows,
+            row = cur.fetchone()
+            prev = int(row["last_event_unix"] or 0) if row else 0
+            cur.execute(
+                f"UPDATE loops SET last_event_unix = {PH} WHERE id = {PH}",
+                (max(prev, batch_max), loop_id),
             )
+            recompute_loop_state(cur, loop_id, now_ns=now_ns)
 
-        # Cross-batch covering: a run's per-turn spans often arrive in earlier
-        # export batches than its run-complete span. Now that the run's
-        # reported total has landed, zero those earlier token estimates so the
-        # run isn't double-counted. Prior 'reported' rows are left alone —
-        # per the Agent SDK docs each result reflects only its own query()
-        # call, so multiple reported totals on one session legitimately sum.
-        for rid in reported_runs:
-            if not _RUN_ID_SAFE_RE.match(rid):
-                continue  # don't build LIKE patterns from exotic ids
-            sql = (
-                "UPDATE spans SET estimated_cost_usd = 0, cost_source = 'covered' "
-                f"WHERE (attributes LIKE {PH} OR attributes LIKE {PH}) "
-                "AND total_tokens IS NOT NULL "
-                "AND (cost_source IS NULL OR cost_source = 'estimate')"
+    return len(spans)
+
+
+def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, Any]]:
+    """The loop's merged, ordered event stream (loop_events + span-derived
+    'activity'), normalized for loops.compute_loop_state.
+
+    full=False (state recompute): spans collapse to at most two activity
+    events (MIN and MAX start time) — provably equivalent for the state
+    rules, which only test "any non-open event" and the latest timestamp.
+    full=True (detail endpoint): one activity event per span.
+
+    Ties sort loop events before span activity (a loop_opened stamped at the
+    same ns as its first span comes first), then by id — deterministic on
+    both backends.
+    """
+    lp = _loops_mod()
+    keyed: list[tuple[tuple, dict]] = []
+
+    cur.execute(
+        "SELECT id, type, actor_type, actor, payload, event_time_unix "
+        f"FROM loop_events WHERE loop_id = {PH} ORDER BY event_time_unix, id",
+        (loop_id,),
+    )
+    for r in cur.fetchall():
+        ev = lp.normalize_loop_event(dict(r))
+        keyed.append(((ev["ts"], 0, r["id"]), ev))
+
+    if full:
+        cur.execute(
+            "SELECT id, trace_id, span_id, span_name, service_name, agent_id, "
+            "start_time_unix, estimated_cost_usd "
+            f"FROM spans WHERE loop_id = {PH} ORDER BY start_time_unix, id",
+            (loop_id,),
+        )
+        for r in cur.fetchall():
+            ev = lp.activity_event(
+                r["start_time_unix"],
+                actor=lp.agent_actor(r["service_name"], r["agent_id"] or "main"),
+                payload={
+                    "span_name": r["span_name"],
+                    "trace_id": r["trace_id"],
+                    "span_id": r["span_id"],
+                    "cost_usd": r["estimated_cost_usd"],
+                },
             )
-            args: list[Any] = [
-                f'%"trovis.run.id": "{rid}"%',
-                f'%"oversee.run.id": "{rid}"%',
-            ]
-            if account_id is not None:
-                sql += f" AND account_id = {PH}"
-                args.append(account_id)
-            cur.execute(sql, tuple(args))
-    return len(rows)
+            keyed.append(((ev["ts"], 1, r["id"]), ev))
+    else:
+        cur.execute(
+            "SELECT COUNT(*) AS c, MIN(start_time_unix) AS mn, MAX(start_time_unix) AS mx "
+            f"FROM spans WHERE loop_id = {PH}",
+            (loop_id,),
+        )
+        r = cur.fetchone()
+        if r and r["c"]:
+            keyed.append(((int(r["mn"]), 1, 0), lp.activity_event(r["mn"])))
+            if r["mx"] != r["mn"]:
+                keyed.append(((int(r["mx"]), 1, 1), lp.activity_event(r["mx"])))
+
+    keyed.sort(key=lambda kv: kv[0])
+    return [ev for _, ev in keyed]
+
+
+def recompute_loop_state(cur, loop_id: int, now_ns: int | None = None) -> str:
+    """Recompute cached_state from the event stream and write it if changed.
+
+    Called in-transaction on every ingest that touches the loop. The cache
+    can still lag for pure time-based transitions (awaiting_* -> stalled,
+    idle -> stalled) since nothing recomputes between events — the sweep job
+    covers those within its interval.
+    """
+    lp = _loops_mod()
+    events = _fetch_loop_stream(cur, loop_id)
+    state = lp.compute_loop_state(events, now_ns=now_ns)
+    cur.execute(
+        f"UPDATE loops SET cached_state = {PH} "
+        f"WHERE id = {PH} AND cached_state != {PH}",
+        (state, loop_id, state),
+    )
+    return state
+
+
+def recompute_loop_state_standalone(
+    loop_id: int, account_id: int | None = None, now_ns: int | None = None,
+) -> str | None:
+    """Sweep entry point: recompute one loop's cached_state in its own
+    transaction. Returns the computed state, or None if the loop doesn't
+    exist under this account."""
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id FROM loops WHERE id = {PH} {acct_sql}",
+            tuple([loop_id, *acct_args]),
+        )
+        if cur.fetchone() is None:
+            return None
+        return recompute_loop_state(cur, loop_id, now_ns=now_ns)
+
+
+def abandon_loop(loop_id: int, account_id: int | None = None) -> bool:
+    """Sweep-driven terminal close for a loop idle past ABANDON_THRESHOLD:
+    append a system-attributed loop_closed event (payload.reason='abandoned')
+    and set closed_at + cached_state. Idempotent — an already-closed loop is
+    left alone (never a second close event)."""
+    lp = _loops_mod()
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT closed_at FROM loops WHERE id = {PH} {acct_sql}",
+            tuple([loop_id, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row is None or row["closed_at"] is not None:
+            return False
+        append_loop_event(
+            cur, loop_id, "loop_closed", "system", lp.SYSTEM_ACTOR,
+            payload={"reason": "abandoned"}, account_id=account_id,
+        )
+        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+        cur.execute(
+            f"UPDATE loops SET cached_state = 'abandoned', closed_at = {now_sql} "
+            f"WHERE id = {PH}",
+            (loop_id,),
+        )
+        return True
+
+
+def close_loop(
+    loop_id: int, account_id: int | None, user_id: int,
+) -> dict[str, Any] | None:
+    """Operator close: append a loop_closed event attributed to the user and
+    set closed_at. The ONLY user-facing write — it writes an EVENT; it never
+    mutates existing events. Idempotent: closing an already-closed loop
+    returns it unchanged (no duplicate close event)."""
+    with _connect() as conn, _cursor(conn) as cur:
+        # Reads scope by the read convention (filter only when account_id is
+        # set) so open/dev mode behaves like every other endpoint.
+        sql = f"SELECT id, closed_at FROM loops WHERE id = {PH}"
+        args: list[Any] = [loop_id]
+        if account_id is not None:
+            sql += f" AND account_id = {PH}"
+            args.append(account_id)
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        if row["closed_at"] is None:
+            append_loop_event(
+                cur, loop_id, "loop_closed", "human", str(user_id),
+                payload={"reason": "closed_by_user"}, account_id=account_id,
+            )
+            _upsert_loop_participant(cur, loop_id, "human", str(user_id), "reviewer")
+            now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+            cur.execute(
+                f"UPDATE loops SET cached_state = 'done', closed_at = {now_sql} "
+                f"WHERE id = {PH}",
+                (loop_id,),
+            )
+    return get_loop(loop_id, account_id)
+
+
+# Shared SELECT for loop listings: the read model row + live aggregates.
+# Total cost is SUM(spans.estimated_cost_usd) computed here, never stored.
+_LOOP_SELECT = """
+SELECT l.id, l.account_id, l.external_id, l.service_name, l.agent_id, l.title,
+       l.initiated_by_type, l.initiated_by, l.cached_state, l.last_event_unix,
+       l.created_at, l.closed_at,
+       COALESCE(p.c, 0) AS participant_count,
+       COALESCE(e.c, 0) AS loop_event_count,
+       COALESCE(sp.c, 0) AS span_count,
+       COALESCE(sp.cost, 0) AS total_cost_usd
+FROM loops l
+LEFT JOIN (SELECT loop_id, COUNT(*) AS c
+           FROM loop_participants GROUP BY loop_id) p ON p.loop_id = l.id
+LEFT JOIN (SELECT loop_id, COUNT(*) AS c
+           FROM loop_events GROUP BY loop_id) e ON e.loop_id = l.id
+LEFT JOIN (SELECT loop_id, COUNT(*) AS c,
+                  COALESCE(SUM(estimated_cost_usd), 0) AS cost
+           FROM spans WHERE loop_id IS NOT NULL GROUP BY loop_id) sp
+       ON sp.loop_id = l.id
+"""
+
+
+def _loop_row(r: dict[str, Any]) -> dict[str, Any]:
+    d = dict(r)
+    loop_event_count = int(d.get("loop_event_count") or 0)
+    span_count = int(d.get("span_count") or 0)
+    return {
+        "id": d["id"],
+        "external_id": d.get("external_id"),
+        "service_name": d.get("service_name"),
+        "agent_id": d.get("agent_id") or "main",
+        "title": d.get("title"),
+        "initiated_by_type": d.get("initiated_by_type"),
+        "initiated_by": d.get("initiated_by"),
+        "cached_state": d.get("cached_state"),
+        "last_event_unix": d.get("last_event_unix"),
+        "created_at": _ts_to_str(d.get("created_at")),
+        "closed_at": _ts_to_str(d.get("closed_at")),
+        "participant_count": int(d.get("participant_count") or 0),
+        "span_count": span_count,
+        # "events" in the API = the merged stream (lifecycle + activity).
+        "event_count": loop_event_count + span_count,
+        "total_cost_usd": round(float(d.get("total_cost_usd") or 0.0), 6),
+    }
+
+
+def get_loops(
+    account_id: int | None,
+    state: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List loops for the org, newest first."""
+    sql = _LOOP_SELECT + " WHERE 1=1"
+    args: list[Any] = []
+    if account_id is not None:
+        sql += f" AND l.account_id = {PH}"
+        args.append(account_id)
+    if state:
+        sql += f" AND l.cached_state = {PH}"
+        args.append(state)
+    # id DESC tiebreak: SQLite created_at is second-granularity TEXT.
+    sql += f" ORDER BY l.created_at DESC, l.id DESC LIMIT {PH} OFFSET {PH}"
+    args.extend([int(limit), int(offset)])
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return [_loop_row(dict(r)) for r in cur.fetchall()]
+
+
+def get_loop(loop_id: int, account_id: int | None) -> dict[str, Any] | None:
+    sql = _LOOP_SELECT + f" WHERE l.id = {PH}"
+    args: list[Any] = [loop_id]
+    if account_id is not None:
+        sql += f" AND l.account_id = {PH}"
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+        return _loop_row(dict(row)) if row else None
+
+
+def get_loop_participants(
+    loop_id: int, account_id: int | None,
+) -> list[dict[str, Any]] | None:
+    """Participants for one loop, or None when the loop isn't visible to
+    this account (so the API can 404)."""
+    if get_loop(loop_id, account_id) is None:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT participant_type, participant, role, added_at "
+            f"FROM loop_participants WHERE loop_id = {PH} ORDER BY id",
+            (loop_id,),
+        )
+        return [
+            {
+                "participant_type": r["participant_type"],
+                "participant": r["participant"],
+                "role": r["role"],
+                "added_at": _ts_to_str(r["added_at"]),
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def get_loop_stream(
+    loop_id: int, account_id: int | None,
+) -> list[dict[str, Any]] | None:
+    """Full ordered event stream for the detail endpoint (every span as an
+    activity event), or None when the loop isn't visible to this account."""
+    if get_loop(loop_id, account_id) is None:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        return _fetch_loop_stream(cur, loop_id, full=True)
+
+
+def get_stalled_loops(
+    account_id: int | None, limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Loops needing attention (stalled, or waiting on a human), oldest
+    stall first. stalled_for_s = now - last event timestamp."""
+    sql = _LOOP_SELECT + " WHERE l.cached_state IN ('stalled', 'awaiting_human')"
+    args: list[Any] = []
+    if account_id is not None:
+        sql += f" AND l.account_id = {PH}"
+        args.append(account_id)
+    # COALESCE keeps NULL ordering identical on both backends.
+    sql += f" ORDER BY COALESCE(l.last_event_unix, 0) ASC, l.id ASC LIMIT {PH}"
+    args.append(int(limit))
+    now_ns = time.time_ns()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        out = []
+        for r in cur.fetchall():
+            row = _loop_row(dict(r))
+            last = int(row.get("last_event_unix") or 0)
+            row["stalled_for_s"] = max(0, (now_ns - last) // _NS_PER_S) if last else None
+            out.append(row)
+        return out
+
+
+def get_open_loops_for_sweep(account_id: int | None) -> list[dict[str, Any]]:
+    """Non-terminal loops for one account (strict NULL matching — the sweep
+    visits every account plus one NULL pass, and each loop must be visited
+    exactly once)."""
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, cached_state, last_event_unix FROM loops "
+            f"WHERE cached_state NOT IN ('done', 'abandoned') {acct_sql}",
+            tuple(acct_args),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def save_description(

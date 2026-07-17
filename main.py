@@ -40,6 +40,7 @@ import billing
 import database
 import describer
 import email_send
+import loops
 import pricing_sync
 # MCP server for ChatGPT agents. Two transports: Streamable HTTP (/mcp) for
 # standard MCP clients, SSE (/mcp/sse + /mcp/messages/) for ChatGPT Custom MCP.
@@ -89,6 +90,10 @@ from models import (
     ApiKeyInfo,
     LoginRequest,
     LoginResponse,
+    LoopDetail,
+    LoopEventRecord,
+    LoopParticipant,
+    LoopSummary,
     MeResponse,
     NewKeyResponse,
     OrgPublic,
@@ -260,11 +265,31 @@ async def _alert_sweep_loop() -> None:
             logger.warning("[Trovis] alert sweep failed: %s", e)
 
 
+# How often the workloop sweep runs. cached_state lags for pure time-based
+# transitions (awaiting_* -> stalled, idle -> stalled) between events; 15 min
+# bounds that lag, and loops idle past ABANDON_THRESHOLD get a real
+# system-attributed abandoned close. Override with TROVIS_LOOP_SWEEP_INTERVAL_S.
+_LOOP_SWEEP_INTERVAL_S = int(database.env("LOOP_SWEEP_INTERVAL_S", "900") or 900)
+
+
+async def _loop_sweep_loop() -> None:
+    """Run the workloop state sweep on an interval. Same posture as the alert
+    sweep: sleep-first (no startup cost), failures logged and swallowed."""
+    while True:
+        await asyncio.sleep(_LOOP_SWEEP_INTERVAL_S)
+        try:
+            summary = await asyncio.to_thread(loops.run_sweep)
+            logger.info("[Trovis] loop sweep: %s", summary)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Trovis] loop sweep failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
     refresh_task: asyncio.Task | None = None
     alert_task: asyncio.Task | None = None
+    loop_sweep_task: asyncio.Task | None = None
     # TROVIS_DISABLE_PRICING_SYNC=1 (legacy: OVERSEE_DISABLE_PRICING_SYNC) turns
     # off the network pull (offline dev, tests) — seeded prices cover common models.
     if (database.env("DISABLE_PRICING_SYNC", "") or "").lower() not in (
@@ -281,6 +306,14 @@ async def lifespan(app: FastAPI):
         "yes",
     ):
         alert_task = asyncio.create_task(_alert_sweep_loop())
+    # Workloop state sweep. TROVIS_DISABLE_LOOP_SWEEP=1 turns it off
+    # (deterministic tests, offline dev). Fail-soft like the other loops.
+    if (database.env("DISABLE_LOOP_SWEEP", "") or "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        loop_sweep_task = asyncio.create_task(_loop_sweep_loop())
     try:
         # Run the MCP Streamable-HTTP session manager for the app's lifetime so
         # the /mcp mount can serve ChatGPT agents.
@@ -291,6 +324,8 @@ async def lifespan(app: FastAPI):
             refresh_task.cancel()
         if alert_task is not None:
             alert_task.cancel()
+        if loop_sweep_task is not None:
+            loop_sweep_task.cancel()
         database.shutdown_db()
 
 
@@ -701,6 +736,32 @@ def _extract_registrations(
 
 @app.post("/v1/traces", response_model=IngestResponse)
 async def ingest_traces(request: Request) -> IngestResponse:
+    """OTLP/JSON trace ingestion.
+
+    Workloop attributes (all optional; span attributes are the carrier since
+    the wire format is OTLP. Every key is read with the trovis./oversee.
+    dual-prefix via database.attr()):
+
+      trovis.loop.external_id   explicit loop grouping key
+                                (falls back to trovis.run.id)
+      trovis.loop.title         plain-English title, used at loop creation
+      trovis.loop.close         'done' or a reason string -> agent-attributed
+                                loop_closed event (payload.reason =
+                                'completed_by_agent'); the loop goes 'done'
+                                and later events with the same key start a
+                                NEW loop
+      trovis.handoff.direction  'to_human' | 'to_agent' -> emits a
+                                handoff_initiated event in the span's loop
+      trovis.handoff.target_id  who the work was handed to (optional)
+      trovis.handoff.reason     free text (optional)
+      trovis.handoff.id         correlation id for a later
+                                handoff_accepted/completed/declined (optional)
+
+    Spans carrying none of these still get a loop: they join the agent's most
+    recent open implicit loop when its last event is < 30 min old, else a new
+    loop is created. Historical spans are never backfilled (loop_id stays
+    NULL on anything that predates this feature).
+    """
     account_id = getattr(request.state, "account_id", None)
     # Abuse protection (never plan-gating): throttle runaway callers and cap
     # body size before doing any work. Generous limits — normal telemetry from
@@ -751,7 +812,9 @@ async def ingest_traces(request: Request) -> IngestResponse:
     }
 
     # Insert spans first so any subsequent describe_agent calls see them.
-    inserted = database.insert_spans(spans, account_id=account_id)
+    # The loop-aware path resolves/creates each span's workloop, links the
+    # spans at INSERT time, and recomputes cached_state — one transaction.
+    inserted = database.ingest_spans_with_loops(spans, account_id=account_id)
 
     # Save registrations + auto-describe on the registration path.
     described = _extract_registrations(spans, account_id=account_id)
@@ -805,6 +868,88 @@ def _agent_id_for_span(span: dict[str, Any]) -> str:
     if isinstance(val, str) and val:
         return val
     return "main"
+
+
+# ---------------------------------------------------------------------------
+# Workloops
+# ---------------------------------------------------------------------------
+# Loops are a read model derived from the append-only event record (see
+# loops.py). Registration order matters: /loops/stalled MUST precede
+# /loops/{loop_id} — Starlette matches routes in registration order and
+# "stalled" would otherwise be parsed as a loop id.
+
+
+@app.get("/loops", response_model=list[LoopSummary])
+async def list_loops(
+    request: Request,
+    state: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[LoopSummary]:
+    """List the org's loops, newest first, optionally filtered by state."""
+    if state is not None and state not in loops.STATES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown state {state!r}; one of: {', '.join(loops.STATES)}",
+        )
+    account_id = getattr(request.state, "account_id", None)
+    rows = database.get_loops(account_id, state=state, limit=limit, offset=offset)
+    return [LoopSummary(**r) for r in rows]
+
+
+@app.get("/loops/stalled", response_model=list[LoopSummary])
+async def stalled_loops(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[LoopSummary]:
+    """Loops needing human attention — stalled, or waiting on a human —
+    oldest stall first. stalled_for_s = now minus the last event timestamp.
+    The sweep keeps cached_state fresh within its 15-min interval."""
+    account_id = getattr(request.state, "account_id", None)
+    return [LoopSummary(**r) for r in database.get_stalled_loops(account_id, limit=limit)]
+
+
+@app.get("/loops/{loop_id}", response_model=LoopDetail)
+async def loop_detail(loop_id: int, request: Request) -> LoopDetail:
+    """One loop with its participants and full ordered event stream
+    (lifecycle events merged with span-derived activity)."""
+    account_id = getattr(request.state, "account_id", None)
+    row = database.get_loop(loop_id, account_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="loop not found")
+    participants = database.get_loop_participants(loop_id, account_id) or []
+    events = database.get_loop_stream(loop_id, account_id) or []
+    return LoopDetail(
+        **row,
+        participants=[LoopParticipant(**p) for p in participants],
+        events=[LoopEventRecord(**e) for e in events],
+    )
+
+
+@app.post("/loops/{loop_id}/close", response_model=LoopDetail)
+async def close_loop(loop_id: int, request: Request) -> LoopDetail:
+    """Close a loop: append a loop_closed EVENT attributed to the
+    authenticated user and set closed_at. The only write endpoint on loops —
+    it appends to the event record, it never mutates existing events.
+    Idempotent: re-closing returns the loop unchanged."""
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    if not user:
+        # API-key auth carries no user to attribute the close to. Agents
+        # close their own loops via the trovis.loop.close ingest attribute.
+        raise HTTPException(
+            status_code=403, detail="sign in to close a loop",
+        )
+    row = database.close_loop(loop_id, account_id, user["id"])
+    if row is None:
+        raise HTTPException(status_code=404, detail="loop not found")
+    participants = database.get_loop_participants(loop_id, account_id) or []
+    events = database.get_loop_stream(loop_id, account_id) or []
+    return LoopDetail(
+        **row,
+        participants=[LoopParticipant(**p) for p in participants],
+        events=[LoopEventRecord(**e) for e in events],
+    )
 
 
 @app.get("/agents", response_model=list[AgentGroup])
