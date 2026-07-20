@@ -194,6 +194,7 @@ _CONNECT_SETUP_EXTRAS = (
     "- Claude Code (the CLI): add to the \"env\" object in "
     "~/.claude/settings.json, then restart Claude Code:\n"
     "  \"CLAUDE_CODE_ENABLE_TELEMETRY\": \"1\"\n"
+    "  \"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA\": \"1\"\n"
     "  \"OTEL_TRACES_EXPORTER\": \"otlp\"\n"
     "  \"OTEL_EXPORTER_OTLP_PROTOCOL\": \"http/json\"\n"
     "  \"OTEL_EXPORTER_OTLP_ENDPOINT\": \"TROVIS_ENDPOINT\"\n"

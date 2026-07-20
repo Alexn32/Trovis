@@ -1448,18 +1448,20 @@ function ClaudeCoworkInstructions({ endpoint }) {
 }
 
 function ClaudeCodeInstructions({ endpoint }) {
+  const apiKey = getApiKey() || ''
   const settingsJson = fill(
 `{
   "env": {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "otlp",
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+    "OTEL_TRACES_EXPORTER": "otlp",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "TROVIS_ENDPOINT"
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "TROVIS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS": "X-Trovis-Api-Key=TROVIS_API_KEY"
   }
 }`,
     '', endpoint,
-  )
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
   return (
     <>
       <h2 className="instructions-title">Native OTEL export — no code changes needed</h2>
@@ -1475,7 +1477,7 @@ function ClaudeCodeInstructions({ endpoint }) {
       <NumberedStep n={3} title="Restart Claude Code. Telemetry flows immediately." />
       <h3 className="section-title section-title-spaced">What you'll see</h3>
       <p>
-        API requests, tool calls, token usage, cost data, and session activity.
+        API requests, tool calls, and session activity.
       </p>
       <SuccessCallout />
     </>
