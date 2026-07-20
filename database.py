@@ -2178,28 +2178,6 @@ def append_loop_event(
     )
 
 
-def insert_loop_event(
-    loop_id: int,
-    event_type: str,
-    actor_type: str,
-    actor: str,
-    payload: dict[str, Any] | None = None,
-    account_id: int | None = None,
-    event_time_unix: int | None = None,
-) -> int:
-    """Standalone append_loop_event (own transaction) that also recomputes
-    the loop's cached_state. For tests and tooling; ingest uses the cursor
-    variants so everything lands in one transaction."""
-    with _connect() as conn, _cursor(conn) as cur:
-        event_id = append_loop_event(
-            cur, loop_id, event_type, actor_type, actor,
-            payload=payload, account_id=account_id,
-            event_time_unix=event_time_unix,
-        )
-        recompute_loop_state(cur, loop_id)
-        return event_id
-
-
 def _upsert_loop_participant(
     cur, loop_id: int, participant_type: str, participant: str, role: str
 ) -> None:
@@ -3809,35 +3787,6 @@ def set_display_name(
         cur.execute(sql, (account_id, service_name, agent_id or "main", clean))
 
 
-def get_display_name(
-    service_name: str,
-    agent_id: str,
-    account_id: int | None = None,
-) -> str | None:
-    """Return the operator-set display name for an agent, or None when
-    no override exists."""
-    account_filter = (
-        f"AND account_id = {PH}"
-        if account_id is not None
-        else "AND account_id IS NULL"
-    )
-    sql = f"""
-        SELECT display_name
-        FROM agent_display_names
-        WHERE service_name = {PH}
-          AND COALESCE(agent_id, 'main') = {PH}
-          {account_filter}
-        LIMIT 1
-    """
-    args: tuple[Any, ...] = (service_name, agent_id or "main")
-    if account_id is not None:
-        args = (*args, account_id)
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, args)
-        row = cur.fetchone()
-    return row["display_name"] if row else None
-
-
 # ---------------------------------------------------------------------------
 # Team members + agent ownership
 # ---------------------------------------------------------------------------
@@ -4762,24 +4711,6 @@ def delete_workflow_participant(participant_id: int, workflow_id: int) -> bool:
     return removed
 
 
-def get_workflow_participants(workflow_id: int) -> list[dict[str, Any]]:
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            "SELECT * FROM workflow_participants "
-            f"WHERE workflow_id = {PH} ORDER BY id ASC",
-            (workflow_id,),
-        )
-        return [_row_to_participant(r) for r in cur.fetchall()]
-
-
-def delete_workflow_participants(workflow_id: int) -> None:
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"DELETE FROM workflow_participants WHERE workflow_id = {PH}",
-            (workflow_id,),
-        )
-
-
 def add_workflow_edge(
     workflow_id: int,
     from_step_id: int,
@@ -4871,23 +4802,6 @@ def delete_workflow_edge(edge_id: int, workflow_id: int) -> bool:
         if removed:
             _touch_workflow(cur, workflow_id)
     return removed
-
-
-def get_workflow_edges(workflow_id: int) -> list[dict[str, Any]]:
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            "SELECT * FROM workflow_edges "
-            f"WHERE workflow_id = {PH} ORDER BY edge_order ASC, id ASC",
-            (workflow_id,),
-        )
-        return [_row_to_edge(r) for r in cur.fetchall()]
-
-
-def delete_workflow_edges(workflow_id: int) -> None:
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"DELETE FROM workflow_edges WHERE workflow_id = {PH}", (workflow_id,)
-        )
 
 
 def update_step_position(
@@ -6549,24 +6463,6 @@ def mark_account_onboarded(account_id: int | None) -> None:
         )
 
 
-def get_account_by_email(email: str) -> dict[str, Any] | None:
-    """Look up an account by email. Returns None if not found."""
-    email = (email or "").strip().lower()
-    if not email:
-        return None
-    sql = f"SELECT id, email, created_at FROM accounts WHERE email = {PH}"
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, (email,))
-        row = cur.fetchone()
-    if row is None:
-        return None
-    return {
-        "id": row["id"],
-        "email": row["email"],
-        "created_at": _ts_to_str(row["created_at"]),
-    }
-
-
 def generate_api_key(account_id: int, name: str = "default") -> str:
     """Mint a new API key for an account and persist it. Returns the key
     string. The key is shown to the user exactly once — we don't have a
@@ -7026,29 +6922,6 @@ def create_invite(
             (token_hash, account_id, email, role, invited_by_user_id, expires_at),
         )
     return {"token": raw, "email": email, "role": role, "expires_at": expires_at}
-
-
-def get_invite(raw_token: str | None) -> dict[str, Any] | None:
-    """Resolve a still-valid invite (unaccepted + unexpired). Returns
-    {id, account_id, email, role} or None."""
-    if not raw_token:
-        return None
-    now_iso = _utcnow().isoformat()
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            "SELECT id, account_id, email, role FROM invites "
-            f"WHERE token_hash = {PH} AND accepted_at IS NULL AND expires_at > {PH}",
-            (_hash_token(raw_token), now_iso),
-        )
-        row = cur.fetchone()
-    if row is None:
-        return None
-    return {
-        "id": row["id"],
-        "account_id": row["account_id"],
-        "email": row["email"],
-        "role": row["role"],
-    }
 
 
 def list_invites(account_id: int) -> list[dict[str, Any]]:
