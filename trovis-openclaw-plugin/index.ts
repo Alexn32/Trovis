@@ -52,7 +52,7 @@ import { randomUUID } from "node:crypto"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.5.1"
+const PLUGIN_VERSION = "0.5.2"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
