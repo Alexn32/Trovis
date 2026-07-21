@@ -2,7 +2,7 @@
   "id": "trovis",
   "name": "Trovis Agent Management",
   "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Trovis dashboard.",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "author": "Trovis",
   "homepage": "https://oversee.dev",
   "activation": {
