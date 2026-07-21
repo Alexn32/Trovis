@@ -64,8 +64,9 @@ Add an `trovis` entry under `plugins.entries` in your `openclaw.json`:
 | `enabled`        | boolean | no       | `true`           | Set to `false` to load the plugin without emitting telemetry.                                                                                |
 | `captureOutputs` | boolean | no       | `false`          | When `true`, include message text and tool results in spans (see [Output capture](#output-capture)). Off by default.                          |
 | `readUserData`   | boolean | no       | `false`          | When `true`, include `USER.md` and `MEMORY.md` in the startup registration. May contain personal data — opt-in only.                          |
+| `handoffTools`   | string  | no       | *(empty)*        | Comma-separated `tool:direction` pairs marking tools as workloop handoffs (see [Workloops](#workloops)). Empty by default — never guessed.     |
 
-Each field can also be supplied via environment variables for containerized deployments: `TROVIS_ENDPOINT`, `TROVIS_AGENT_NAME`, `TROVIS_API_KEY`, `TROVIS_ENABLED`, `TROVIS_CAPTURE_OUTPUTS`, `TROVIS_TRANSCRIPT_DIR` (override the auto-detected session-transcript directory).
+Each field can also be supplied via environment variables for containerized deployments: `TROVIS_ENDPOINT`, `TROVIS_AGENT_NAME`, `TROVIS_API_KEY`, `TROVIS_ENABLED`, `TROVIS_CAPTURE_OUTPUTS`, `TROVIS_HANDOFF_TOOLS`, `TROVIS_TRANSCRIPT_DIR` (override the auto-detected session-transcript directory).
 
 ### API key handling
 
@@ -174,6 +175,57 @@ openclaw config set plugins.entries.trovis.config.<key> <value>
 ```
 
 The shell-out uses `execFile` (not shell `exec`). **Arguments are fixed strings** — no user input is interpolated into commands, so user-supplied URLs or keys can't inject extra shell commands. If the `openclaw config set` subcommand doesn't exist or fails for any reason, the in-memory state still updates (the change is good for the current session) and a warning is logged.
+
+## Workloops
+
+Trovis groups an agent's spans into **workloops** — units of work with a
+derived state (`working`, `awaiting_human`, `done`, …) shown on the
+dashboard. The plugin declares loop boundaries automatically and gives you
+two small hooks for the parts only your agent knows.
+
+**Automatic (no setup):**
+
+- Every span carries OpenClaw's own run id as `trovis.run.id`, so one
+  message-handling cycle = one loop. Spans without a run id fall back to
+  the backend's 30-minute gap rule.
+- When `captureOutputs` is on, the inbound message (collapsed, first 80
+  chars) becomes the loop's title. With capture off no title is sent —
+  titles are content-derived and follow the same opt-in.
+- When a run ends without error (`agent_end`), the loop is closed as
+  `done` — unless the run declared a handoff (the loop stays
+  `awaiting_human` / `awaiting_agent`) or was already closed explicitly.
+  Failed runs are never closed; the backend's sweep handles genuinely
+  abandoned loops.
+
+**Declared handoffs — helper:**
+
+```ts
+import { trovisHandoff, trovisCloseLoop } from "@trovis/openclaw-plugin"
+
+trovisHandoff("to_human", "ops-team", "needs approval")  // loop -> awaiting_human
+trovisCloseLoop("done")                                  // close the loop early
+```
+
+`trovisHandoff(direction, target?, reason?)` marks the current unit of work
+as waiting on a human (`"to_human"`) or another agent (`"to_agent"`); the
+attributes land on the next span the plugin emits, and the run's automatic
+`done` close is suppressed. It returns the generated handoff id for later
+correlation. `trovisCloseLoop(reason = "done")` closes the loop from agent
+code — useful when work completes mid-run.
+
+**Declared handoffs — config-mapped tools:**
+
+```json
+"handoffTools": "send_slack_message:to_human,request_approval:to_human,delegate_task:to_agent"
+```
+
+(or `TROVIS_HANDOFF_TOOLS` with the same format). When the agent calls a
+listed tool, that tool-call span is marked as a handoff automatically, with
+`reason: "tool:<name>"`. Ships **empty** — the plugin never guesses which
+tools hand work off.
+
+All loop signals are plain span attributes: older Trovis backends (and any
+other OTLP backend) simply ignore them.
 
 ## Reliability
 

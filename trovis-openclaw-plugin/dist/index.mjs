@@ -66148,7 +66148,8 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-var PLUGIN_VERSION = "0.4.2";
+import { randomUUID } from "node:crypto";
+var PLUGIN_VERSION = "0.5.0";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
@@ -66187,7 +66188,8 @@ var state = {
   sawConversationHook: false,
   transcriptFileHint: null,
   lastUsageSeen: null,
-  allowConversationAccess: void 0
+  allowConversationAccess: void 0,
+  handoffTools: /* @__PURE__ */ new Map()
 };
 function initTelemetry(endpoint, agentName, apiKey, gatewayVersion) {
   const resource = new import_resources.Resource({
@@ -66250,6 +66252,9 @@ function ensureInit(ctx) {
     pluginConfig?.captureOutputs ?? (process.env.TROVIS_CAPTURE_OUTPUTS ?? process.env.OVERSEE_CAPTURE_OUTPUTS) === "true"
   );
   state.allowConversationAccess = pluginConfig?.hooks?.allowConversationAccess;
+  state.handoffTools = parseHandoffTools(
+    pluginConfig?.handoffTools ?? (process.env.TROVIS_HANDOFF_TOOLS ?? process.env.OVERSEE_HANDOFF_TOOLS)
+  );
   state.tracer = initTelemetry(
     state.endpoint,
     state.agentName,
@@ -66384,6 +66389,73 @@ function pickAgentId(event, ctx) {
   }
   const direct = typeof ev.context?.agentId === "string" && ev.context.agentId || typeof c.agentId === "string" && c.agentId || typeof ev.agentId === "string" && ev.agentId || "";
   return direct || "main";
+}
+var pendingHandoff = null;
+var pendingClose = null;
+var handoffActiveRuns = /* @__PURE__ */ new Set();
+var closedRuns = /* @__PURE__ */ new Set();
+var RUN_TRACKING_MAX = 5e3;
+function trackRun(set, key) {
+  if (set.size >= RUN_TRACKING_MAX) set.clear();
+  set.add(key);
+}
+function pickRunId(event, ctx) {
+  const ev = event ?? {};
+  return pickStr(ev.runId) ?? pickStr(ctx?.runId);
+}
+function runKey(event, ctx) {
+  return pickRunId(event, ctx) ?? pickStr(ctx?.sessionKey) ?? "(no-run)";
+}
+function parseHandoffTools(raw) {
+  const map = /* @__PURE__ */ new Map();
+  if (!raw) return map;
+  for (const part of raw.split(",")) {
+    const idx = part.indexOf(":");
+    const name = (idx >= 0 ? part.slice(0, idx) : part).trim();
+    const dir = idx >= 0 ? part.slice(idx + 1).trim() : "";
+    if (!name) continue;
+    if (dir === "to_human" || dir === "to_agent") {
+      map.set(name, dir);
+    } else {
+      console.warn(
+        `${LOG} Ignoring handoff tool '${name}': direction must be 'to_human' or 'to_agent' (got '${dir || "(none)"}')`
+      );
+    }
+  }
+  return map;
+}
+function applyLoopSignals(span, event, ctx) {
+  setIfPresent(span, "trovis.run.id", pickRunId(event, ctx));
+  if (pendingHandoff) {
+    const h = pendingHandoff;
+    pendingHandoff = null;
+    span.setAttribute("trovis.handoff.direction", h.direction);
+    setIfPresent(span, "trovis.handoff.target_id", h.target);
+    setIfPresent(span, "trovis.handoff.reason", h.reason);
+    span.setAttribute("trovis.handoff.id", h.id);
+    trackRun(handoffActiveRuns, runKey(event, ctx));
+  }
+  if (pendingClose) {
+    const reason = pendingClose;
+    pendingClose = null;
+    span.setAttribute("trovis.loop.close", reason);
+    trackRun(closedRuns, runKey(event, ctx));
+  }
+}
+function trovisHandoff(direction = "to_human", target, reason) {
+  if (direction !== "to_human" && direction !== "to_agent") {
+    console.warn(
+      `${LOG} trovisHandoff: direction must be 'to_human' or 'to_agent' (got '${String(direction)}') \u2014 ignored.`
+    );
+    return null;
+  }
+  const id = randomUUID();
+  pendingHandoff = { direction, target, reason, id };
+  return id;
+}
+function trovisCloseLoop(reason = "done") {
+  const r = typeof reason === "string" && reason.trim().length > 0 ? reason : "done";
+  pendingClose = r;
 }
 function normalizeUsageObject(container) {
   const c = container ?? {};
@@ -66788,11 +66860,14 @@ function wireEvents(api) {
     setIfPresent(span, "trovis.trace.span_id", ctx.spanId);
     setIfPresent(span, "trovis.trace.parent_span_id", ctx.parentSpanId);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
+    applyLoopSignals(span, event, ctx);
     if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
       span.setAttribute(
         "trovis.message.content",
         truncate(event.content, 1e4)
       );
+      const title = event.content.replace(/\s+/g, " ").trim().slice(0, 80);
+      setIfPresent(span, "trovis.loop.title", title);
     }
     span.end();
   });
@@ -66804,6 +66879,7 @@ function wireEvents(api) {
     span.setAttribute("trovis.event.type", "message_sending");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
+    applyLoopSignals(span, event, ctx);
     setIfPresent(span, "trovis.message.thread_id", event?.threadId);
     setIfPresent(
       span,
@@ -66827,6 +66903,7 @@ function wireEvents(api) {
     span.setAttribute("trovis.event.type", "message_sent");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
+    applyLoopSignals(span, event, ctx);
     span.setAttribute("trovis.delivery.success", Boolean(success));
     if (!success) {
       span.setStatus({
@@ -66849,7 +66926,14 @@ function wireEvents(api) {
       JSON.stringify(Object.keys(event?.params ?? {}))
     );
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId);
+    applyLoopSignals(span, event, ctx);
+    const handoffDir = state.handoffTools.get(event.toolName);
+    if (handoffDir) {
+      span.setAttribute("trovis.handoff.direction", handoffDir);
+      span.setAttribute("trovis.handoff.reason", `tool:${event.toolName}`);
+      span.setAttribute("trovis.handoff.id", randomUUID());
+      trackRun(handoffActiveRuns, runKey(event, ctx));
+    }
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() });
   });
   safeOn(api, "after_tool_call", (event, hookCtx) => {
@@ -66895,7 +66979,7 @@ function wireEvents(api) {
     setIfPresent(span, "gen_ai.request.model", event?.model);
     span.setAttribute("trovis.model.call_id", event.callId);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId);
+    applyLoopSignals(span, event, ctx);
     noteSessionBaseline(ctx);
     openModelSpans.set(event.callId, {
       span,
@@ -66949,7 +67033,7 @@ function wireEvents(api) {
     span.setAttribute("trovis.event.type", "llm_output");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId);
+    applyLoopSignals(span, event, ctx);
     setIfPresent(span, "trovis.model.call_id", event?.callId);
     setIfPresent(span, "gen_ai.system", event?.provider);
     setIfPresent(span, "gen_ai.request.model", event?.model);
@@ -66978,7 +67062,7 @@ function wireEvents(api) {
     });
     span.setAttribute("trovis.event.type", "agent_run_complete");
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId);
+    applyLoopSignals(span, event, ctx);
     const success = event?.success ?? !event?.error;
     if (typeof success === "boolean") {
       span.setAttribute("trovis.run.success", success);
@@ -66989,6 +67073,12 @@ function wireEvents(api) {
         });
       }
     }
+    const key = runKey(event, ctx);
+    if (success !== false && !handoffActiveRuns.has(key) && !closedRuns.has(key)) {
+      span.setAttribute("trovis.loop.close", "done");
+    }
+    handoffActiveRuns.delete(key);
+    closedRuns.delete(key);
     setIfPresent(span, "trovis.run.message_provider", ctx.messageProvider);
     setIfPresent(span, "trovis.run.channel_id", ctx.channelId);
     setIfPresent(span, "trovis.run.job_id", ctx.jobId);
@@ -67075,6 +67165,7 @@ USER.md and MEMORY.md are read at gateway start during agent registration, so **
           `\u2022 Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
           `\u2022 User data: **${state.readUserData ? "on" : "off"}**`,
           `\u2022 Conversation access: **${state.allowConversationAccess === true ? "on" : "off"}** (required for tokens, cost & model)`,
+          `\u2022 Handoff tools: ${state.handoffTools.size > 0 ? [...state.handoffTools].map(([t, d]) => `\`${t}:${d}\``).join(", ") : "(none configured)"}`,
           `\u2022 Transcript file: \`${state.transcriptFileHint ?? "(not located)"}\``,
           `\u2022 Last usage read: ${state.lastUsageSeen ?? "(none yet)"}`,
           `\u2022 Telemetry: ${state.initialized ? "flowing" : "not initialized"}`
@@ -67194,6 +67285,7 @@ Setting commands update in-memory state immediately. To make permanent, run \`op
     );
   }
 }
+var __internal = { state, parseHandoffTools };
 var index_default = definePluginEntry({
   id: "trovis",
   name: "Trovis Agent Management",
@@ -67221,7 +67313,10 @@ var index_default = definePluginEntry({
   }
 });
 export {
-  index_default as default
+  __internal,
+  index_default as default,
+  trovisCloseLoop,
+  trovisHandoff
 };
 /*! Bundled license information:
 

@@ -11,6 +11,13 @@
  * All event names, payload shapes, and context fields are from confirmed
  * OpenClaw plugin-hooks docs.
  *
+ * Workloops (see "Workloop signals" section): every span carries OpenClaw's
+ * runId verbatim as `trovis.run.id` so the backend groups one run into one
+ * loop; agent_end auto-closes the loop as done; handoffs are declared via
+ * the exported trovisHandoff() helper or the handoffTools config mapping.
+ * Attribute-only — span structure and the export path are unchanged, and
+ * older backends simply ignore the extra attributes.
+ *
  * Privacy:
  *   - Conversation telemetry captures metadata only: message content
  *     lengths (not content), tool names (not parameter values), model
@@ -39,12 +46,13 @@ import { Resource } from "@opentelemetry/resources"
 import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
+import { randomUUID } from "node:crypto"
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.4.2"
+const PLUGIN_VERSION = "0.5.0"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 const DEFAULT_AGENT_NAME = "openclaw-agent"
@@ -118,6 +126,11 @@ interface PluginConfig {
   enabled?: boolean
   readUserData?: boolean
   captureOutputs?: boolean
+  // Comma-separated `tool_name:direction` pairs (direction: to_human |
+  // to_agent). Calling a listed tool marks that tool-call span as a
+  // workloop handoff. Empty by default — the plugin never guesses which
+  // tools hand work off. Same format as TROVIS_HANDOFF_TOOLS.
+  handoffTools?: string
   // Conversation-adjacent hooks (model_call_*, llm_output, agent_end) only
   // fire when OpenClaw is told they're allowed. Tokens + per-call model
   // depend on these — we read the flag purely to give a precise warning in
@@ -315,6 +328,10 @@ const state: {
   lastUsageSeen: string | null
   // The flag as configured, for `/trovis status` reporting only.
   allowConversationAccess: boolean | undefined
+  // tool name -> handoff direction, parsed from config.handoffTools /
+  // TROVIS_HANDOFF_TOOLS. Calling a listed tool emits workloop handoff
+  // attributes on its tool_call span. Empty by default.
+  handoffTools: Map<string, "to_human" | "to_agent">
 } = {
   initialized: false,
   disabled: false,
@@ -330,6 +347,7 @@ const state: {
   transcriptFileHint: null,
   lastUsageSeen: null,
   allowConversationAccess: undefined,
+  handoffTools: new Map(),
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +462,12 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   // Recorded for `/trovis status` diagnostics only — OpenClaw enforces the
   // actual gating. undefined = not present in config (treated as off).
   state.allowConversationAccess = pluginConfig?.hooks?.allowConversationAccess
+  // Workloop handoff-tool mapping. Ships empty — the operator opts in per
+  // tool; the plugin never guesses which tools constitute a handoff.
+  state.handoffTools = parseHandoffTools(
+    pluginConfig?.handoffTools ??
+      (process.env.TROVIS_HANDOFF_TOOLS ?? process.env.OVERSEE_HANDOFF_TOOLS),
+  )
 
   state.tracer = initTelemetry(
     state.endpoint,
@@ -695,6 +719,159 @@ function pickAgentId(event: unknown, ctx?: unknown): string {
     (typeof ev.agentId === "string" && ev.agentId) ||
     ""
   return direct || "main"
+}
+
+// ---------------------------------------------------------------------------
+// Workloop signals
+// ---------------------------------------------------------------------------
+//
+// The Trovis backend groups spans into "workloops" (units of work with
+// derived state: working / awaiting_human / done / …) using span attributes,
+// read dual-prefix (trovis.* preferred, legacy oversee.* accepted):
+//
+//   trovis.run.id             groups all spans of one run into one loop
+//   trovis.loop.title         plain-English loop title (creation only)
+//   trovis.handoff.*          declares a handoff to a human/agent
+//   trovis.loop.close         closes the loop as done
+//
+// Run identity: OpenClaw already has a natural unit of execution — the RUN
+// (one message-handling cycle, `runId` on hook events/context, terminated by
+// agent_end). We forward it VERBATIM as trovis.run.id on every span that has
+// it. When a hook fires without a runId (e.g. message_received on some
+// gateways), the attribute is omitted entirely and the backend's 30-min
+// gap rule groups the span instead — we never invent a competing id that
+// could split one run across two loops. A session (`sessionKey`) was
+// deliberately NOT chosen as the unit: sessions live for days, so a
+// session-scoped loop would never reach a terminal state.
+
+// One-shot signals set by the public helpers (trovisHandoff /
+// trovisCloseLoop, exported below) and consumed by the next span the plugin
+// emits. Module-scoped single-flight: agent code runs inside the gateway
+// process, so "the next span" is the helper's own run in practice.
+let pendingHandoff: {
+  direction: "to_human" | "to_agent"
+  target?: string
+  reason?: string
+  id: string
+} | null = null
+let pendingClose: string | null = null
+
+// Run-keys (runId, else sessionKey) that emitted a handoff / an explicit
+// close during the current run. agent_end consults these so it (a) never
+// auto-closes a loop that's awaiting a human/agent — the close would
+// overwrite awaiting_* with done — and (b) never double-closes after
+// trovisCloseLoop(). Entries are removed on agent_end; the size guard
+// below covers runs that never reach agent_end (gateway crash mid-run).
+const handoffActiveRuns = new Set<string>()
+const closedRuns = new Set<string>()
+const RUN_TRACKING_MAX = 5000
+
+function trackRun(set: Set<string>, key: string): void {
+  if (set.size >= RUN_TRACKING_MAX) set.clear() // bound memory on long-lived gateways
+  set.add(key)
+}
+
+/** The run id OpenClaw assigned to this hook's execution unit, verbatim.
+ * undefined (attribute omitted) when the gateway didn't provide one. */
+function pickRunId(event: unknown, ctx?: OpenClawContext): string | undefined {
+  const ev = (event ?? {}) as { runId?: unknown }
+  return pickStr(ev.runId) ?? pickStr(ctx?.runId)
+}
+
+/** Stable key for per-run bookkeeping (handoff/close suppression). Falls
+ * back to the session when the gateway gave no runId. */
+function runKey(event: unknown, ctx?: OpenClawContext): string {
+  return pickRunId(event, ctx) ?? pickStr(ctx?.sessionKey) ?? "(no-run)"
+}
+
+/** Parse `tool:direction,tool2:direction` (config.handoffTools /
+ * TROVIS_HANDOFF_TOOLS). Unknown directions are skipped with a warning —
+ * never guessed. */
+function parseHandoffTools(
+  raw: string | undefined | null,
+): Map<string, "to_human" | "to_agent"> {
+  const map = new Map<string, "to_human" | "to_agent">()
+  if (!raw) return map
+  for (const part of raw.split(",")) {
+    const idx = part.indexOf(":")
+    const name = (idx >= 0 ? part.slice(0, idx) : part).trim()
+    const dir = idx >= 0 ? part.slice(idx + 1).trim() : ""
+    if (!name) continue
+    if (dir === "to_human" || dir === "to_agent") {
+      map.set(name, dir)
+    } else {
+      console.warn(
+        `${LOG} Ignoring handoff tool '${name}': direction must be ` +
+          `'to_human' or 'to_agent' (got '${dir || "(none)"}')`,
+      )
+    }
+  }
+  return map
+}
+
+/**
+ * Stamp the workloop attributes every span carries: the run id, plus any
+ * one-shot handoff/close signal queued by the public helpers. Called from
+ * every span-emitting hook handler. Attribute-only — never changes span
+ * structure or the export path.
+ */
+function applyLoopSignals(span: Span, event: unknown, ctx?: OpenClawContext): void {
+  setIfPresent(span, "trovis.run.id", pickRunId(event, ctx))
+  if (pendingHandoff) {
+    const h = pendingHandoff
+    pendingHandoff = null
+    span.setAttribute("trovis.handoff.direction", h.direction)
+    setIfPresent(span, "trovis.handoff.target_id", h.target)
+    setIfPresent(span, "trovis.handoff.reason", h.reason)
+    span.setAttribute("trovis.handoff.id", h.id)
+    trackRun(handoffActiveRuns, runKey(event, ctx))
+  }
+  if (pendingClose) {
+    const reason = pendingClose
+    pendingClose = null
+    span.setAttribute("trovis.loop.close", reason)
+    trackRun(closedRuns, runKey(event, ctx))
+  }
+}
+
+/**
+ * Declare a handoff from agent code: the current unit of work is now
+ * waiting on a human (`to_human`) or another agent (`to_agent`). Sets the
+ * trovis.handoff.* attributes on the next span the plugin emits and
+ * suppresses the run's automatic `done` close, so the loop stays in
+ * awaiting_human / awaiting_agent on the dashboard until it's resolved.
+ * Returns the generated handoff id (uuid) for later correlation, or null
+ * when the direction is invalid (warned, no-op — agent code never throws).
+ */
+export function trovisHandoff(
+  direction: "to_human" | "to_agent" = "to_human",
+  target?: string,
+  reason?: string,
+): string | null {
+  if (direction !== "to_human" && direction !== "to_agent") {
+    console.warn(
+      `${LOG} trovisHandoff: direction must be 'to_human' or 'to_agent' ` +
+        `(got '${String(direction)}') — ignored.`,
+    )
+    return null
+  }
+  const id = randomUUID()
+  pendingHandoff = { direction, target, reason, id }
+  return id
+}
+
+/**
+ * Close the current unit of work from agent code. Sets trovis.loop.close
+ * on the next span the plugin emits; the backend closes the loop as done,
+ * agent-attributed (a non-"done" reason string is preserved as detail).
+ * Usually unnecessary — the plugin auto-closes on agent_end — but useful
+ * when work completes mid-run or a handoff was resolved by the agent
+ * itself. Empty reasons are coerced to "done" (the backend treats empty
+ * strings as absent).
+ */
+export function trovisCloseLoop(reason: string = "done"): void {
+  const r = typeof reason === "string" && reason.trim().length > 0 ? reason : "done"
+  pendingClose = r
 }
 
 interface TokenUsage {
@@ -1344,6 +1521,7 @@ function wireEvents(api: OpenClawApi): void {
     // Multi-agent gateways: the backend uses this to split spans into
     // per-agent virtual service names (`<service>-<agent_id>`).
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    applyLoopSignals(span, event, ctx)
     // Capture inbound message text when the operator opted in.
     if (
       state.captureOutputs &&
@@ -1354,6 +1532,14 @@ function wireEvents(api: OpenClawApi): void {
         "trovis.message.content",
         truncate(event.content, 10_000),
       )
+      // Workloop title: the inbound message is the best human-readable
+      // label for what this run is about. Content-derived, so it follows
+      // the same opt-in as content capture — with capture off, no title
+      // is sent (the backend shows the loop untitled; we never send
+      // placeholders). Creation-only on the backend, so re-sending on a
+      // later message of the same run is harmless.
+      const title = event.content.replace(/\s+/g, " ").trim().slice(0, 80)
+      setIfPresent(span, "trovis.loop.title", title)
     }
     span.end()
   })
@@ -1372,6 +1558,7 @@ function wireEvents(api: OpenClawApi): void {
     span.setAttribute("trovis.event.type", "message_sending")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    applyLoopSignals(span, event, ctx)
     setIfPresent(span, "trovis.message.thread_id", event?.threadId)
     setIfPresent(
       span,
@@ -1406,6 +1593,7 @@ function wireEvents(api: OpenClawApi): void {
     span.setAttribute("trovis.event.type", "message_sent")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+    applyLoopSignals(span, event, ctx)
     span.setAttribute("trovis.delivery.success", Boolean(success))
     if (!success) {
       span.setStatus({
@@ -1432,7 +1620,17 @@ function wireEvents(api: OpenClawApi): void {
       JSON.stringify(Object.keys(event?.params ?? {})),
     )
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
+    applyLoopSignals(span, event, ctx)
+    // Config-mapped handoff tools: calling a listed tool IS the handoff.
+    // Declared tier only — the mapping ships empty; the operator opts in
+    // per tool via config.handoffTools / TROVIS_HANDOFF_TOOLS.
+    const handoffDir = state.handoffTools.get(event.toolName)
+    if (handoffDir) {
+      span.setAttribute("trovis.handoff.direction", handoffDir)
+      span.setAttribute("trovis.handoff.reason", `tool:${event.toolName}`)
+      span.setAttribute("trovis.handoff.id", randomUUID())
+      trackRun(handoffActiveRuns, runKey(event, ctx))
+    }
 
     toolSpans.set(event.toolCallId, { span, startedAt: Date.now() })
   })
@@ -1495,7 +1693,7 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "gen_ai.request.model", event?.model)
     span.setAttribute("trovis.model.call_id", event.callId)
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
+    applyLoopSignals(span, event, ctx)
 
     // Anchor the transcript read position BEFORE this call's usage line is
     // written, so the first call of a session isn't skipped on first sight.
@@ -1575,7 +1773,7 @@ function wireEvents(api: OpenClawApi): void {
     span.setAttribute("trovis.event.type", "llm_output")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
+    applyLoopSignals(span, event, ctx)
     setIfPresent(span, "trovis.model.call_id", event?.callId)
     setIfPresent(span, "gen_ai.system", event?.provider)
     setIfPresent(span, "gen_ai.request.model", event?.model)
@@ -1612,7 +1810,10 @@ function wireEvents(api: OpenClawApi): void {
     })
     span.setAttribute("trovis.event.type", "agent_run_complete")
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
-    setIfPresent(span, "trovis.run.id", event?.runId ?? ctx.runId)
+    // Drains any trovisCloseLoop() the agent queued late in the run, so
+    // the explicit close lands here and marks the run closed BEFORE the
+    // auto-close check below.
+    applyLoopSignals(span, event, ctx)
 
     const success = event?.success ?? !event?.error
     if (typeof success === "boolean") {
@@ -1624,6 +1825,20 @@ function wireEvents(api: OpenClawApi): void {
         })
       }
     }
+    // Automatic workloop completion: agent_end IS OpenClaw's observable
+    // "unit of work finished" signal, and this span is the run's final
+    // span. Close as done UNLESS (a) the run failed — the backend's
+    // stall/abandon sweep is the honest state for that, a fake `done`
+    // would be wrong data in the permanent record; (b) the run declared a
+    // handoff — the loop must stay awaiting_human/awaiting_agent, not
+    // flip to done the moment the agent's turn ends; or (c) the run
+    // already closed explicitly via trovisCloseLoop() — never two closes.
+    const key = runKey(event, ctx)
+    if (success !== false && !handoffActiveRuns.has(key) && !closedRuns.has(key)) {
+      span.setAttribute("trovis.loop.close", "done")
+    }
+    handoffActiveRuns.delete(key)
+    closedRuns.delete(key)
     setIfPresent(span, "trovis.run.message_provider", ctx.messageProvider)
     setIfPresent(span, "trovis.run.channel_id", ctx.channelId)
     setIfPresent(span, "trovis.run.job_id", ctx.jobId)
@@ -1755,6 +1970,13 @@ function wireCommands(api: OpenClawApi): void {
           `• Conversation access: **${
             state.allowConversationAccess === true ? "on" : "off"
           }** (required for tokens, cost & model)`,
+          `• Handoff tools: ${
+            state.handoffTools.size > 0
+              ? [...state.handoffTools]
+                  .map(([t, d]) => `\`${t}:${d}\``)
+                  .join(", ")
+              : "(none configured)"
+          }`,
           `• Transcript file: \`${state.transcriptFileHint ?? "(not located)"}\``,
           `• Last usage read: ${state.lastUsageSeen ?? "(none yet)"}`,
           `• Telemetry: ${state.initialized ? "flowing" : "not initialized"}`,
@@ -1911,6 +2133,15 @@ function wireCommands(api: OpenClawApi): void {
     )
   }
 }
+
+// ---------------------------------------------------------------------------
+// Test surface (private)
+// ---------------------------------------------------------------------------
+// Exposed ONLY so the test suite can inject a fake tracer and inspect
+// parsed config without standing up a gateway or the OTEL SDK. Not part of
+// the public API — subject to change without a version bump.
+
+export const __internal = { state, parseHandoffTools }
 
 // ---------------------------------------------------------------------------
 // Plugin entry

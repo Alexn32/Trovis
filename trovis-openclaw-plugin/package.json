@@ -1,6 +1,6 @@
 {
   "name": "@trovis/openclaw-plugin",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Trovis Agent Management — automatic telemetry for OpenClaw agents",
   "type": "module",
   "homepage": "https://oversee.dev",
@@ -21,7 +21,9 @@
     }
   },
   "scripts": {
-    "build": "esbuild index.ts --outfile=dist/index.mjs --platform=node --format=esm --bundle --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);' --external:openclaw --external:openclaw/* --external:@sinclair/typebox"
+    "build": "esbuild index.ts --outfile=dist/index.mjs --platform=node --format=esm --bundle --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);' --external:openclaw --external:openclaw/* --external:@sinclair/typebox",
+    "build:test": "esbuild index.ts --outfile=dist/index.test.mjs --platform=node --format=esm --bundle --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);' --alias:openclaw/plugin-sdk/plugin-entry=./test/plugin-entry-stub.ts",
+    "test": "npm run build:test && node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "openclaw": "*"
