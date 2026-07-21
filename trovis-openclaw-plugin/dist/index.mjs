@@ -66149,7 +66149,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
-var PLUGIN_VERSION = "0.5.0";
+var PLUGIN_VERSION = "0.5.1";
 var DEFAULT_AGENT_NAME = "openclaw-agent";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
