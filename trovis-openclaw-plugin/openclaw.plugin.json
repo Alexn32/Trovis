@@ -2,7 +2,7 @@
   "id": "trovis",
   "name": "Trovis Agent Management",
   "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Trovis dashboard.",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "author": "Trovis",
   "homepage": "https://oversee.dev",
   "activation": {
@@ -40,6 +40,11 @@
         "type": "boolean",
         "description": "Capture message content and tool outputs for richer dashboard insights. Default: false.",
         "default": false
+      },
+      "handoffTools": {
+        "type": "string",
+        "description": "Comma-separated tool:direction pairs (direction: to_human | to_agent) marking tools as workloop handoffs, e.g. \"send_slack_message:to_human,delegate_task:to_agent\". Default: empty (no tools are treated as handoffs).",
+        "default": ""
       },
       "hooks": {
         "type": "object",
