@@ -1,9 +1,9 @@
 {
   "name": "@trovis/openclaw-plugin",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Trovis Agent Management — automatic telemetry for OpenClaw agents",
   "type": "module",
-  "homepage": "https://oversee.dev",
+  "homepage": "https://trovisai.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Alexn32/Trovis.git",
