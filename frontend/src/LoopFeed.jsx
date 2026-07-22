@@ -10,6 +10,7 @@ import {
   parseTs,
   showMarkDone,
   splitActor,
+  workflowGroupMeta,
 } from './loops.js'
 
 // Workloop rows for the Work Feed and the Stuck view. A loop is one unit of
@@ -233,6 +234,59 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
               </div>
             </>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * One workflow rollup row (the Work tab's "By workflow" view): an agent
+ * identity with its run count, total cost, and a warning-toned state
+ * summary when any member loop needs a human. Same visual grammar as loop
+ * rows; expanding shows the group's loops via LoopList.
+ */
+export function WorkflowRollupRow({ group, onOpenAgent, sessionUser, onChanged }) {
+  const [open, setOpen] = useState(false)
+  const meta = workflowGroupMeta(group)
+  return (
+    <div className={`loop-row ${meta.attention ? 'attn' : ''} ${open ? 'open' : ''}`}>
+      <button
+        type="button"
+        className="loop-row-main"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+      >
+        <span className="loop-chevron" aria-hidden="true">
+          {open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
+        </span>
+        <span className="loop-body">
+          <span className="loop-title">{group.label}</span>
+          <span className="loop-meta">
+            <span>{meta.runLabel}</span>
+            {meta.cost && (
+              <>
+                <span className="dash-dot-sep">·</span>
+                <span>{meta.cost}</span>
+              </>
+            )}
+            {meta.stateLabel && (
+              <>
+                <span className="dash-dot-sep">·</span>
+                <span className="loop-state tone-warning">{meta.stateLabel}</span>
+              </>
+            )}
+          </span>
+        </span>
+      </button>
+      {open && (
+        <div className="loop-rollup-loops">
+          <LoopList
+            loops={group.loops}
+            onOpenAgent={onOpenAgent}
+            sessionUser={sessionUser}
+            onChanged={onChanged}
+          />
         </div>
       )}
     </div>

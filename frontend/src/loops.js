@@ -207,6 +207,83 @@ export function lifecycleSentence(event) {
   return String(event?.type || '').replace(/_/g, ' ')
 }
 
+// ---------------------------------------------------------------------------
+// Workflow rollup (the Work tab's "By workflow" view)
+// ---------------------------------------------------------------------------
+
+// v1 workflow identity is a deliberate heuristic: the group key is
+// service_name + agent_id — one rollup row per agent identity. No
+// title-pattern clustering, no similarity matching; smarter grouping is a
+// later, data-informed problem.
+export function workflowGroupKey(loop) {
+  return `${loop?.service_name || ''}:${loop?.agent_id || 'main'}`
+}
+
+// The number badged on the Stuck segment: loops needing a human.
+export function stuckCount(loops) {
+  return (Array.isArray(loops) ? loops : []).filter((l) =>
+    ATTENTION_STATES.includes(l?.cached_state),
+  ).length
+}
+
+/**
+ * Group an (already attention-first-sorted) loop list into workflow rollups.
+ * Groups appear in first-encounter order, so groups containing attention
+ * loops naturally float to the top. Each group:
+ *   { key, service_name, agent_id, label, loops, runCount, totalCost,
+ *     stalledCount, awaitingCount, attention }
+ */
+export function groupLoopsByWorkflow(loops) {
+  const groups = new Map()
+  for (const l of Array.isArray(loops) ? loops : []) {
+    const key = workflowGroupKey(l)
+    let g = groups.get(key)
+    if (!g) {
+      g = {
+        key,
+        service_name: l?.service_name || '',
+        agent_id: l?.agent_id || 'main',
+        label:
+          l?.agent_id && l.agent_id !== 'main'
+            ? `${l.service_name} · ${l.agent_id}`
+            : l?.service_name || 'agent',
+        loops: [],
+        runCount: 0,
+        totalCost: 0,
+        stalledCount: 0,
+        awaitingCount: 0,
+        attention: false,
+      }
+      groups.set(key, g)
+    }
+    g.loops.push(l)
+    g.runCount += 1
+    g.totalCost += Number(l?.total_cost_usd) || 0
+    if (l?.cached_state === 'stalled') g.stalledCount += 1
+    if (l?.cached_state === 'awaiting_human') g.awaitingCount += 1
+    g.attention = g.stalledCount + g.awaitingCount > 0
+  }
+  return [...groups.values()]
+}
+
+// Rollup row strings. Reuses the loop-state vocabulary ("stalled",
+// "waiting on you") — never raw state identifiers.
+export function workflowGroupMeta(group) {
+  const parts = []
+  if (group?.stalledCount > 0) {
+    parts.push(`${group.stalledCount} stalled`)
+  }
+  if (group?.awaitingCount > 0) {
+    parts.push(`${group.awaitingCount} waiting on you`)
+  }
+  return {
+    runLabel: `ran ${group?.runCount ?? 0}×`,
+    cost: loopCostLabel(group?.totalCost),
+    stateLabel: parts.length > 0 ? parts.join(' · ') : null,
+    attention: Boolean(group?.attention),
+  }
+}
+
 // "service:agent" composite actor → display pieces.
 export function splitActor(actor) {
   const s = String(actor || '')

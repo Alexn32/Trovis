@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   LIFECYCLE_SENTENCES,
+  groupLoopsByWorkflow,
   lifecycleSentence,
   loopCostLabel,
   loopStateMeta,
@@ -12,6 +13,8 @@ import {
   loopTitle,
   showMarkDone,
   sortLoopsAttentionFirst,
+  stuckCount,
+  workflowGroupMeta,
 } from '../src/loops.js'
 
 const NOW = Date.parse('2026-07-22T12:00:00Z')
@@ -201,6 +204,77 @@ test('sentences reflect payload: handoff direction/reason, close reasons', () =>
 
 test('unknown future event types degrade to words, not identifiers', () => {
   assert.equal(lifecycleSentence({ type: 'review_requested' }), 'review requested')
+})
+
+// --- Workflow rollup (Work tab, By-workflow view) -------------------------------
+
+test('rollup: same service_name+agent_id collapses to one group with correct sums', () => {
+  const loops = [
+    loop({ id: 1, service_name: 'billing-bot', agent_id: 'main', total_cost_usd: 0.2 }),
+    loop({ id: 2, service_name: 'billing-bot', agent_id: 'main', total_cost_usd: 0.11 }),
+    loop({ id: 3, service_name: 'billing-bot', agent_id: 'helper', total_cost_usd: 1 }),
+    loop({ id: 4, service_name: 'ops-bot', agent_id: 'main' }),
+  ]
+  const groups = groupLoopsByWorkflow(loops)
+  assert.equal(groups.length, 3)
+  const billing = groups.find((g) => g.key === 'billing-bot:main')
+  assert.equal(billing.runCount, 2)
+  assert.ok(Math.abs(billing.totalCost - 0.31) < 1e-9)
+  assert.deepEqual(billing.loops.map((l) => l.id), [1, 2])
+  assert.equal(groups.find((g) => g.key === 'billing-bot:helper').label, 'billing-bot · helper')
+})
+
+test('rollup meta: run count and summed cost strings', () => {
+  const [g] = groupLoopsByWorkflow([
+    loop({ id: 1, total_cost_usd: 0.2 }),
+    loop({ id: 2, total_cost_usd: 0.11 }),
+  ])
+  const m = workflowGroupMeta(g)
+  assert.equal(m.runLabel, 'ran 2×')
+  assert.equal(m.cost, '$0.31')
+  assert.equal(m.stateLabel, null)
+  assert.equal(m.attention, false)
+})
+
+test('rollup state summary: any stalled/awaiting_human flags the group', () => {
+  const [g] = groupLoopsByWorkflow([
+    loop({ id: 1, cached_state: 'done' }),
+    loop({ id: 2, cached_state: 'stalled', stalled_for_s: 100 }),
+    loop({ id: 3, cached_state: 'awaiting_human', stalled_for_s: 50 }),
+  ])
+  const m = workflowGroupMeta(g)
+  assert.equal(m.attention, true)
+  assert.equal(m.stateLabel, '1 stalled · 1 waiting on you')
+  const quiet = workflowGroupMeta(
+    groupLoopsByWorkflow([loop({ id: 4, cached_state: 'done' }), loop({ id: 5 })])[0],
+  )
+  assert.equal(quiet.attention, false)
+  assert.equal(quiet.stateLabel, null)
+})
+
+test('stuck badge count = stalled + awaiting_human loops', () => {
+  assert.equal(
+    stuckCount([
+      loop({ cached_state: 'stalled' }),
+      loop({ cached_state: 'awaiting_human' }),
+      loop({ cached_state: 'working' }),
+      loop({ cached_state: 'done' }),
+    ]),
+    2,
+  )
+  assert.equal(stuckCount([]), 0)
+})
+
+test('rollup strings: no raw state identifiers or jargon leak', () => {
+  const [g] = groupLoopsByWorkflow([
+    loop({ cached_state: 'awaiting_human', stalled_for_s: 10 }),
+    loop({ cached_state: 'stalled', stalled_for_s: 20 }),
+  ])
+  const m = workflowGroupMeta(g)
+  for (const s of [m.runLabel, m.stateLabel]) {
+    assert.ok(!s.includes('_'), `raw identifier leaked: ${s}`)
+    assert.ok(!/span|telemetry|awaiting_human/i.test(s), `jargon leaked: ${s}`)
+  }
 })
 
 // --- Cost label ---------------------------------------------------------------

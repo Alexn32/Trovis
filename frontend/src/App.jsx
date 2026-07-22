@@ -3,7 +3,7 @@ import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
-import StuckPage from './StuckPage.jsx'
+import WorkPage from './WorkPage.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
 import AskPill from './AskPill.jsx'
@@ -13,7 +13,8 @@ import TrovisLanding from './TrovisLanding.jsx'
 import TrovisLegal from './TrovisLegal.jsx'
 import UpgradeModal from './UpgradeModal.jsx'
 import Team from './Team.jsx'
-import Workflows from './Workflows.jsx'
+// Workflows.jsx (the workflow-mapping visualization) is parked — unrouted,
+// awaiting reintegration under the Work tab's By-workflow view.
 import Settings from './Settings.jsx'
 import Onboarding from './Onboarding.jsx'
 import {
@@ -124,15 +125,24 @@ function AppInner() {
   const [authMode, setAuthMode] = useState('signup')  // 'signup' | 'login'
   // Restore the last view on mount so a browser reload stays put (see VIEW_KEY).
   const persistedView = useRef(readPersistedView()).current
-  const [tab, setTab] = useState(persistedView.tab || 'dashboard') // 'dashboard' | 'fleet' | 'team' | 'workflows'
+  // The old "Workflows" and "Stuck" tabs consolidated into "Work" — remap any
+  // stale persisted view from before the change (Stuck keeps its sub-view).
+  const legacyTab = persistedView.tab
+  const initialTab =
+    legacyTab === 'workflows' || legacyTab === 'stuck' ? 'work' : legacyTab || 'dashboard'
+  const [tab, setTab] = useState(initialTab) // 'dashboard' | 'fleet' | 'team' | 'work'
+  // Work tab sub-view: 'loops' | 'workflow' | 'stuck'
+  const [workView, setWorkView] = useState(
+    persistedView.workView || (legacyTab === 'stuck' ? 'stuck' : 'loops'),
+  )
   // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'} | {kind:'cost'} | {kind:'workfeed'}
   const [overlay, setOverlay] = useState(persistedView.overlay || null)
 
-  // Persist the current view (tab + overlay) on every change so a reload
-  // returns here instead of the Dashboard.
+  // Persist the current view (tab + overlay + Work sub-view) on every change
+  // so a reload returns here instead of the Dashboard.
   useEffect(() => {
-    persistView({ tab, overlay })
-  }, [tab, overlay])
+    persistView({ tab, overlay, workView })
+  }, [tab, overlay, workView])
 
   // Validate the saved credential on first mount (skip when landing on an
   // invite link — the visitor should see the accept form first).
@@ -317,8 +327,15 @@ function AppInner() {
         sessionUser={Boolean(me?.user)}
       />
     )
-  } else if (tab === 'stuck') {
-    mainContent = <StuckPage onOpenAgent={openDetail} sessionUser={Boolean(me?.user)} />
+  } else if (tab === 'work') {
+    mainContent = (
+      <WorkPage
+        view={workView}
+        onViewChange={setWorkView}
+        onOpenAgent={openDetail}
+        sessionUser={Boolean(me?.user)}
+      />
+    )
   } else if (tab === 'dashboard') {
     mainContent = (
       <Dashboard
@@ -331,8 +348,6 @@ function AppInner() {
     )
   } else if (tab === 'team' && isBusiness) {
     mainContent = <Team onSelectAgent={openDetail} />
-  } else if (tab === 'workflows') {
-    mainContent = <Workflows onSelectAgent={openDetail} />
   } else {
     mainContent = (
       <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} onUpgrade={openUpgrade} />
@@ -410,9 +425,9 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
     ['dashboard', 'Dashboard'],
     ['fleet', 'Fleet'],
     ...(isBusiness ? [['team', 'Team']] : []),
-    ['workflows', 'Workflows'],
-    // Loops that need a human — stalled or waiting on you.
-    ['stuck', 'Stuck'],
+    // Everything the agents are doing: loops, the by-workflow rollup, and
+    // the Stuck filter — one tab, three zoom levels.
+    ['work', 'Work'],
   ]
   return (
     <header className="app-header">

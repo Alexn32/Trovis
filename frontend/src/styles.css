@@ -5922,3 +5922,7 @@ select.wf2-input { cursor: pointer; }
   flex-shrink: 0;
   margin-left: 1px;
 }
+
+/* Workflow rollup rows (Work tab, By-workflow view): nested loop list. */
+.loop-rollup-loops { padding: 0 0 6px 22px; }
+.loop-rollup-loops .loop-row { border-left-width: 2px; }

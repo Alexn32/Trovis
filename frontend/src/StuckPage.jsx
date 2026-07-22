@@ -9,7 +9,9 @@ import { LoopList } from './LoopFeed.jsx'
 
 const REFRESH_MS = 30000
 
-export default function StuckPage({ onOpenAgent, sessionUser }) {
+// `embedded` drops the page chrome (title row) when rendered as the Work
+// tab's Stuck view rather than a standalone page.
+export default function StuckPage({ onOpenAgent, sessionUser, embedded = false }) {
   const [loops, setLoops] = useState(null)
   const [error, setError] = useState(null)
 
@@ -32,7 +34,7 @@ export default function StuckPage({ onOpenAgent, sessionUser }) {
 
   if (loops === null) {
     return (
-      <div className="dash">
+      <div className={embedded ? '' : 'dash'}>
         <div className="dash-skel">
           <span style={{ height: 60 }} />
           <span style={{ height: 220 }} />
@@ -42,17 +44,19 @@ export default function StuckPage({ onOpenAgent, sessionUser }) {
   }
 
   return (
-    <div className="dash">
-      <div className="wfp-titlerow">
-        <h1 className="dash-hello" style={{ margin: 0 }}>
-          Stuck
-        </h1>
-        {loops.length > 0 && (
-          <span className="wfp-sub">
-            {loops.length === 1 ? '1 loop needs you' : `${loops.length} loops need you`}
-          </span>
-        )}
-      </div>
+    <div className={embedded ? '' : 'dash'}>
+      {!embedded && (
+        <div className="wfp-titlerow">
+          <h1 className="dash-hello" style={{ margin: 0 }}>
+            Stuck
+          </h1>
+          {loops.length > 0 && (
+            <span className="wfp-sub">
+              {loops.length === 1 ? '1 loop needs you' : `${loops.length} loops need you`}
+            </span>
+          )}
+        </div>
+      )}
 
       {error && loops.length === 0 ? (
         <div className="dash-card">
