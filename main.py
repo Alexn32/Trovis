@@ -1086,6 +1086,8 @@ def _humanize_cadence(seconds: float | None) -> str:
     """Turn a median run-interval into a cadence phrase: hourly / daily / every 15m."""
     if not seconds or seconds <= 0:
         return "regularly"
+    if seconds < 45:
+        return f"about every {int(round(seconds))}s"
     if seconds < 90:
         return "about every minute"
     if seconds < 3600:
@@ -1097,6 +1099,12 @@ def _humanize_cadence(seconds: float | None) -> str:
     if seconds < 129600:
         return "daily"
     return f"about every {int(round(seconds / 86400))}d"
+
+
+# Never flag "attention" for a quiet gap shorter than this, no matter how fast
+# the agent's cadence — otherwise a high-frequency agent (runs every few
+# seconds) flips orange over a trivial pause. It's the floor on 2×cadence.
+_MIN_ATTENTION_QUIET_S = 120
 
 
 def _detail_status(stats: dict) -> tuple[str, str]:
@@ -1115,8 +1123,9 @@ def _detail_status(stats: dict) -> tuple[str, str]:
         return "healthy", "Connected — waiting for its first run"
     age_s = _time() - last_ns / 1_000_000_000
     cadence_s = stats.get("cadence_seconds")
-    # Quiet beyond ~2× the usual interval (or >24h when cadence is unknown).
-    threshold = (cadence_s * 2) if cadence_s else 86400.0
+    # Quiet beyond ~2× the usual interval, floored so a fast agent's trivial
+    # pause never flags (or >24h when cadence is unknown).
+    threshold = max(cadence_s * 2, _MIN_ATTENTION_QUIET_S) if cadence_s else 86400.0
     if age_s > threshold:
         return (
             "attention",
