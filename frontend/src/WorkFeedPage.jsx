@@ -1,29 +1,23 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ArrowLeftIcon } from './Icons.jsx'
+import { ActivityRow, LoopList, fmtRel } from './LoopFeed.jsx'
+import { parseTs, sortLoopsAttentionFirst } from './loops.js'
 
 // Dedicated Work Feed page (overlay opened from the dashboard's "View all →").
-// Two layers: the per-agent AI rollup up top (what each agent has been doing —
-// reuses /dashboard/work-feed), then the chronological, fleet-wide activity
-// stream below (every real work event from /dashboard/activity, newest first,
-// with captured message/response/tool content when present). Mirrors CostPage.
+// Three layers: the per-agent AI rollup up top (what each agent has been
+// doing — reuses /dashboard/work-feed), then WORKLOOPS as the primary unit
+// (units of work from /loops, attention-first: anything stalled or waiting
+// on you floats above the newest-first rest — a deliberate break from the
+// old feed's pure-chronological order), then "Ungrouped activity": actions
+// that don't belong to any loop (pre-loop history and keyless ingestion),
+// preserved as the old flat stream. Mirrors CostPage.
 
 const REFRESH_MS = 30000
 
-function fmtRel(iso) {
-  const ms = Date.now() - Date.parse(iso)
-  if (Number.isNaN(ms)) return ''
-  const m = Math.floor(ms / 60000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
-}
-
 // "Today" / "Yesterday" / weekday-date divider for an ISO timestamp.
 function dayLabel(iso) {
-  const d = new Date(iso)
+  const d = new Date(parseTs(iso))
   if (Number.isNaN(d.getTime())) return 'Earlier'
   const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
   const days = Math.round((startOf(new Date()) - startOf(d)) / 86_400_000)
@@ -33,24 +27,26 @@ function dayLabel(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-const TYPE_LABEL = { message: 'message', response: 'response', tool_result: 'tool result' }
-
-export default function WorkFeedPage({ onBack, onOpenAgent }) {
+export default function WorkFeedPage({ onBack, onOpenAgent, sessionUser }) {
   const [summaries, setSummaries] = useState(null) // per-agent AI rollup
+  const [loops, setLoops] = useState(null) // workloops, the feed's primary unit
   const [activity, setActivity] = useState(null) // chronological events
   const [error, setError] = useState(null)
 
   const load = useCallback(async () => {
     try {
-      const [acts, sums] = await Promise.all([
+      const [lps, acts, sums] = await Promise.all([
+        api.getLoops().catch(() => []), // older backends have no /loops
         api.getActivity(),
         api.getWorkFeed().catch(() => []), // rollup is best-effort (needs Claude)
       ])
+      setLoops(Array.isArray(lps) ? lps : [])
       setActivity(Array.isArray(acts) ? acts : [])
       setSummaries(Array.isArray(sums) ? sums : [])
       setError(null)
     } catch (e) {
       setError(e?.message || 'Could not load the work feed')
+      setLoops((l) => l ?? [])
       setActivity((a) => a ?? [])
       setSummaries((s) => s ?? [])
     }
@@ -87,8 +83,13 @@ export default function WorkFeedPage({ onBack, onOpenAgent }) {
     )
   }
 
+  const orderedLoops = sortLoopsAttentionFirst(loops || [])
+  // Actions that never landed in a loop (pre-loop history, keyless
+  // ingestion). loop_id is undefined on older backends → everything shows
+  // here, which is exactly the old behavior.
+  const ungrouped = activity.filter((it) => it.loop_id == null)
   const hasSummaries = summaries && summaries.length > 0
-  const empty = activity.length === 0 && !hasSummaries
+  const empty = orderedLoops.length === 0 && activity.length === 0 && !hasSummaries
 
   return (
     <div className="dash wfp">
@@ -99,7 +100,10 @@ export default function WorkFeedPage({ onBack, onOpenAgent }) {
         <h1 className="dash-hello" style={{ margin: 0 }}>
           Work Feed
         </h1>
-        <span className="wfp-sub">Last 24 hours · {activity.length} events</span>
+        <span className="wfp-sub">
+          {orderedLoops.length === 1 ? '1 loop' : `${orderedLoops.length} loops`} · last 24
+          hours
+        </span>
       </div>
 
       {empty ? (
@@ -129,22 +133,32 @@ export default function WorkFeedPage({ onBack, onOpenAgent }) {
             </section>
           )}
 
-          <section className="dash-section">
-            <div className="dash-section-head">
-              <span className="dash-section-title">Activity</span>
-            </div>
-            {activity.length === 0 ? (
-              <div className="dash-card">
-                <div className="dash-empty pad">
-                  No individual events captured yet — summaries above reflect recent runs.
-                </div>
+          {orderedLoops.length > 0 && (
+            <section className="dash-section">
+              <div className="dash-section-head">
+                <span className="dash-section-title">Loops</span>
               </div>
-            ) : (
+              <div className="dash-card">
+                <LoopList
+                  loops={orderedLoops}
+                  onOpenAgent={onOpenAgent}
+                  sessionUser={sessionUser}
+                  onChanged={load}
+                />
+              </div>
+            </section>
+          )}
+
+          {ungrouped.length > 0 && (
+            <section className="dash-section">
+              <div className="dash-section-head">
+                <span className="dash-section-title">Ungrouped activity</span>
+              </div>
               <div className="dash-card wfp-activity">
                 {(() => {
                   let lastDay = null
                   const out = []
-                  activity.forEach((it, i) => {
+                  ungrouped.forEach((it, i) => {
                     const day = dayLabel(it.time)
                     if (day !== lastDay) {
                       lastDay = day
@@ -154,51 +168,13 @@ export default function WorkFeedPage({ onBack, onOpenAgent }) {
                         </div>,
                       )
                     }
-                    out.push(
-                      <div key={`a-${i}`} className="wfp-act-row">
-                        <span
-                          className={`wfp-dot ${it.status === 'error' ? 'err' : ''}`}
-                          aria-hidden="true"
-                        />
-                        <div className="wfp-act-body">
-                          <div className="wfp-act-top">
-                            <button
-                              type="button"
-                              className="wfp-agent"
-                              onClick={() =>
-                                onOpenAgent &&
-                                onOpenAgent(it.service_name, it.agent_id || 'main')
-                              }
-                            >
-                              {it.agent}
-                            </button>
-                            <span className="dash-dot-sep">·</span>
-                            <span className="wfp-op">{it.operation}</span>
-                            {it.tool && <span className="wfp-tag">{it.tool}</span>}
-                            {it.status === 'error' && (
-                              <span className="wfp-tag err">error</span>
-                            )}
-                            <span className="wfp-time">{fmtRel(it.time)}</span>
-                          </div>
-                          {it.content && (
-                            <div className="wfp-snippet">
-                              {it.content_type && TYPE_LABEL[it.content_type] && (
-                                <span className="wfp-snippet-type">
-                                  {TYPE_LABEL[it.content_type]}
-                                </span>
-                              )}
-                              {it.content}
-                            </div>
-                          )}
-                        </div>
-                      </div>,
-                    )
+                    out.push(<ActivityRow key={`a-${i}`} item={it} onOpenAgent={onOpenAgent} />)
                   })
                   return out
                 })()}
               </div>
-            )}
-          </section>
+            </section>
+          )}
         </>
       )}
     </div>

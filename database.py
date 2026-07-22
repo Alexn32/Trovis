@@ -7457,6 +7457,7 @@ def get_fleet_activity(
             s.end_time_unix,
             s.status_code,
             s.attributes,
+            s.loop_id,
             (
                 SELECT display_name
                 FROM agent_display_names dn
@@ -7521,6 +7522,9 @@ def get_fleet_activity(
                 "content": content,
                 "content_type": content_type,
                 "tool": str(tool) if tool is not None else None,
+                # NULL for historical/loopless spans — lets the feed UI split
+                # loop-grouped activity from "Ungrouped activity".
+                "loop_id": r["loop_id"],
             }
         )
     return items

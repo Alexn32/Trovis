@@ -1158,6 +1158,7 @@ class ActivityItem(BaseModel):
     content: str | None = None
     content_type: str | None = None  # 'message' | 'response' | 'tool_result'
     tool: str | None = None
+    loop_id: int | None = None  # workloop this action belongs to; NULL = ungrouped
 
 
 class LoopParticipant(BaseModel):

@@ -3,6 +3,7 @@ import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
+import StuckPage from './StuckPage.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
 import AskPill from './AskPill.jsx'
@@ -309,7 +310,15 @@ function AppInner() {
   } else if (overlay?.kind === 'cost') {
     mainContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
   } else if (overlay?.kind === 'workfeed') {
-    mainContent = <WorkFeedPage onBack={closeOverlay} onOpenAgent={openDetail} />
+    mainContent = (
+      <WorkFeedPage
+        onBack={closeOverlay}
+        onOpenAgent={openDetail}
+        sessionUser={Boolean(me?.user)}
+      />
+    )
+  } else if (tab === 'stuck') {
+    mainContent = <StuckPage onOpenAgent={openDetail} sessionUser={Boolean(me?.user)} />
   } else if (tab === 'dashboard') {
     mainContent = (
       <Dashboard
@@ -402,6 +411,8 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
     ['fleet', 'Fleet'],
     ...(isBusiness ? [['team', 'Team']] : []),
     ['workflows', 'Workflows'],
+    // Loops that need a human — stalled or waiting on you.
+    ['stuck', 'Stuck'],
   ]
   return (
     <header className="app-header">

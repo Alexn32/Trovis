@@ -387,6 +387,16 @@ export const api = {
   // Chronological, fleet-wide activity stream for the Work Feed page.
   getActivity: (hours = 24, limit = 200) =>
     request(`/dashboard/activity?hours=${hours}&limit=${limit}`),
+  // --- workloops (units of work derived from the event stream) ---
+  getLoops: (state = null, limit = 50, offset = 0) =>
+    request(
+      `/loops?limit=${limit}&offset=${offset}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
+    ),
+  // Loops needing a human — stalled or waiting on you, oldest first.
+  getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
+  getLoop: (loopId) => request(`/loops/${loopId}`),
+  // Session auth only (the backend 403s api-key auth). Idempotent.
+  closeLoop: (loopId) => request(`/loops/${loopId}/close`, { method: 'POST' }),
   // --- dedicated cost page ---
   getCostOverview: () => request('/cost/overview'),
   // Per-day / per-model cost audit — surfaces tokens that landed unpriced

@@ -5820,3 +5820,105 @@ select.wf2-input { cursor: pointer; }
 @media (max-width: 520px) {
   .upgrade-tiers { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------------------
+   Workloops (Work Feed loop rows + Stuck view)
+   Status colors only — never the brand accent — per the palette rules.
+--------------------------------------------------------------------------- */
+
+.loop-list { display: flex; flex-direction: column; }
+
+.loop-row {
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--border-default);
+}
+.loop-row:last-child { border-bottom: none; }
+/* Attention emphasis: same warning left-border vocabulary as callouts. */
+.loop-row.attn { border-left-color: var(--warning); background: var(--warning-faint); }
+
+.loop-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.loop-chevron { color: var(--text-dim); margin-top: 2px; flex-shrink: 0; }
+.loop-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.loop-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loop-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.loop-headline { color: var(--warning); font-weight: 600; }
+
+.loop-state { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.loop-state.tone-warning { color: var(--warning); font-weight: 600; }
+.loop-state.tone-muted { color: var(--text-dim); }
+.loop-state.tone-live { color: var(--text-muted); }
+.loop-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: dash-pulse 1.6s ease-in-out infinite;
+}
+
+.loop-detail { padding: 4px 14px 12px 34px; }
+.loop-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.loop-detail-loading, .loop-detail-err { font-size: 12px; color: var(--text-dim); padding: 6px 0; }
+.loop-detail-err { color: var(--error); }
+
+.loop-parts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.loop-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.loop-part-role { color: var(--text-dim); }
+
+.loop-stream { display: flex; flex-direction: column; }
+.loop-sys-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.loop-sys-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--text-dim);
+  flex-shrink: 0;
+  margin-left: 1px;
+}
