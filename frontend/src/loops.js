@@ -180,7 +180,9 @@ const HANDOFF_TARGET = { to_human: 'a human', to_agent: 'another agent' }
 export const LIFECYCLE_SENTENCES = {
   loop_opened: () => 'Started',
   handoff_initiated: (p) => {
-    const who = HANDOFF_TARGET[p?.direction] || 'someone'
+    // target_name is the backend's org-scoped resolution of target_id to a
+    // real person ("Handed to Sarah"). Absent → the honest generic.
+    const who = p?.target_name || HANDOFF_TARGET[p?.direction] || 'someone'
     const reason = p?.reason ? ` — ${p.reason}` : ''
     return `Handed to ${who}${reason}`
   },

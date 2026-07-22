@@ -202,15 +202,17 @@ two small hooks for the parts only your agent knows.
 ```ts
 import { trovisHandoff, trovisCloseLoop } from "@trovis/openclaw-plugin"
 
-trovisHandoff("to_human", "ops-team", "needs approval")  // loop -> awaiting_human
-trovisCloseLoop("done")                                  // close the loop early
+trovisHandoff("to_human", "sarah@acme.com", "needs approval")  // loop -> awaiting_human
+trovisCloseLoop("done")                                        // close the loop early
 ```
 
 `trovisHandoff(direction, target?, reason?)` marks the current unit of work
 as waiting on a human (`"to_human"`) or another agent (`"to_agent"`); the
 attributes land on the next span the plugin emits, and the run's automatic
 `done` close is suppressed. It returns the generated handoff id for later
-correlation. `trovisCloseLoop(reason = "done")` closes the loop from agent
+correlation. For `"to_human"`, pass the teammate's **email** (or their
+Trovis user id) as `target` — the Trovis loop record resolves it to their
+name ("Handed to Sarah"); anything unresolvable displays as "a human". `trovisCloseLoop(reason = "done")` closes the loop from agent
 code — useful when work completes mid-run.
 
 **Declared handoffs — config-mapped tools:**

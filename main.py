@@ -752,7 +752,12 @@ async def ingest_traces(request: Request) -> IngestResponse:
                                 NEW loop
       trovis.handoff.direction  'to_human' | 'to_agent' -> emits a
                                 handoff_initiated event in the span's loop
-      trovis.handoff.target_id  who the work was handed to (optional)
+      trovis.handoff.target_id  who the work was handed to (optional). For
+                                'to_human', pass the teammate's EMAIL (or
+                                their Trovis user id) — the loop record
+                                resolves it to their name, org-scoped, at
+                                read time. Unresolvable values are kept but
+                                displayed as "a human".
       trovis.handoff.reason     free text (optional)
       trovis.handoff.id         correlation id for a later
                                 handoff_accepted/completed/declined (optional)

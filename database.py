@@ -2640,15 +2640,72 @@ def get_loop_participants(
         ]
 
 
+def _resolve_human_name(cur, target_id: str, account_id: int | None) -> str | None:
+    """Resolve a handoff target_id to a person's display name, org-scoped.
+
+    For 'to_human' handoffs the ingest contract asks agents to pass the
+    teammate's email (or their Trovis user id). Lookup order: numeric ->
+    users.id; email -> users.email, then team_members.email. Strictly
+    scoped to the account — another org's user never resolves. Returns
+    None when nothing matches (the UI falls back to "a human").
+    """
+    tid = str(target_id or "").strip()
+    if not tid:
+        return None
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    if tid.isdigit():
+        cur.execute(
+            f"SELECT name, email FROM users WHERE id = {PH} {acct_sql}",
+            tuple([int(tid), *acct_args]),
+        )
+        row = cur.fetchone()
+        return (row["name"] or row["email"]) if row else None
+    if "@" in tid:
+        cur.execute(
+            f"SELECT name, email FROM users WHERE LOWER(email) = LOWER({PH}) {acct_sql}",
+            tuple([tid, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row:
+            return row["name"] or row["email"]
+        cur.execute(
+            f"SELECT name FROM team_members WHERE LOWER(email) = LOWER({PH}) {acct_sql}",
+            tuple([tid, *acct_args]),
+        )
+        row = cur.fetchone()
+        return row["name"] if row else None
+    return None
+
+
 def get_loop_stream(
     loop_id: int, account_id: int | None,
 ) -> list[dict[str, Any]] | None:
     """Full ordered event stream for the detail endpoint (every span as an
-    activity event), or None when the loop isn't visible to this account."""
+    activity event), or None when the loop isn't visible to this account.
+
+    Read-time decoration: to_human handoff_initiated events whose
+    payload.target_id resolves to a person in this org gain a
+    payload.target_name. Decoration only — the stored loop_events rows are
+    never modified (the event record stays append-only).
+    """
     if get_loop(loop_id, account_id) is None:
         return None
     with _connect() as conn, _cursor(conn) as cur:
-        return _fetch_loop_stream(cur, loop_id, full=True)
+        events = _fetch_loop_stream(cur, loop_id, full=True)
+        names: dict[str, str | None] = {}
+        for ev in events:
+            payload = ev.get("payload") or {}
+            if (
+                ev.get("type") == "handoff_initiated"
+                and payload.get("direction") == "to_human"
+                and payload.get("target_id")
+            ):
+                tid = str(payload["target_id"])
+                if tid not in names:
+                    names[tid] = _resolve_human_name(cur, tid, account_id)
+                if names[tid]:
+                    payload["target_name"] = names[tid]
+        return events
 
 
 def get_stalled_loops(

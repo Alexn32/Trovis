@@ -169,6 +169,22 @@ test('sentences reflect payload: handoff direction/reason, close reasons', () =>
     lifecycleSentence({ type: 'handoff_initiated', payload: { direction: 'to_agent' } }),
     'Handed to another agent',
   )
+  // Backend-resolved names win over the generic; the generic stays the
+  // honest fallback when no name resolved.
+  assert.equal(
+    lifecycleSentence({
+      type: 'handoff_initiated',
+      payload: { direction: 'to_human', target_id: 'sarah@acme.com', target_name: 'Sarah Chen', reason: 'needs approval' },
+    }),
+    'Handed to Sarah Chen — needs approval',
+  )
+  assert.equal(
+    lifecycleSentence({
+      type: 'handoff_initiated',
+      payload: { direction: 'to_human', target_id: 'nobody@else.com' },
+    }),
+    'Handed to a human',
+  )
   assert.equal(
     lifecycleSentence({ type: 'loop_closed', payload: { reason: 'closed_by_user' } }),
     'Marked done',
