@@ -385,11 +385,34 @@ function FeedItem({ r }) {
   )
 }
 
+// Work Feed view filters. Categories mirror the per-row tags in FeedItem so
+// "what you filter" matches "what you see". Filtering is client-side over the
+// records already loaded (pagination pulls more raw records to filter over).
+const FEED_FILTERS = [
+  ['all', 'All'],
+  ['interaction', 'Interactions'],
+  ['error', 'Errors'],
+  ['system', 'System'],
+]
+function feedCategory(r) {
+  if (r.error) return 'error'
+  if (r.kind === 'system' || !r.exchange) return 'system'
+  return 'interaction' // has an exchange (user prompt and/or agent response)
+}
+
 function WorkFeed({ serviceName, agentId }) {
   const [records, setRecords] = useState(null)
   const [cursor, setCursor] = useState(null)
   const [expanded, setExpanded] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [filter, setFilter] = useState(() => {
+    try { return localStorage.getItem('trovis.feedFilter') || 'all' } catch { return 'all' }
+  })
+  const chooseFilter = (k) => {
+    setFilter(k)
+    setExpanded(false)
+    try { localStorage.setItem('trovis.feedFilter', k) } catch { /* private mode */ }
+  }
 
   useEffect(() => {
     let alive = true
@@ -421,8 +444,10 @@ function WorkFeed({ serviceName, agentId }) {
   }
 
   const recs = records || []
-  const visible = expanded ? recs : recs.slice(0, 4)
-  const countLabel = `${recs.length}${cursor ? '+' : ''} record${recs.length === 1 ? '' : 's'}`
+  const filtered = filter === 'all' ? recs : recs.filter((r) => feedCategory(r) === filter)
+  const visible = expanded ? filtered : filtered.slice(0, 4)
+  const countLabel = `${filtered.length}${cursor ? '+' : ''} record${filtered.length === 1 ? '' : 's'}`
+  const filterLabel = (FEED_FILTERS.find(([k]) => k === filter) || [, ''])[1].toLowerCase()
 
   return (
     <Card style={{ marginTop: 16, overflow: 'hidden' }}>
@@ -433,20 +458,49 @@ function WorkFeed({ serviceName, agentId }) {
         )}
       </div>
 
+      {/* View filter — lets the operator focus on real interactions, errors, or
+          system/heartbeat noise. Client-side over loaded records. */}
+      {records !== null && recs.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 18px 12px' }}>
+          {FEED_FILTERS.map(([key, label]) => {
+            const active = filter === key
+            return (
+              <button
+                key={key}
+                onClick={() => chooseFilter(key)}
+                style={{
+                  fontFamily: F.mono, fontSize: 10.5, fontWeight: 500, letterSpacing: '0.04em',
+                  textTransform: 'uppercase', padding: '3px 10px', borderRadius: 6, cursor: 'pointer',
+                  border: `1px solid ${active ? C.teal : C.subtle}`,
+                  background: active ? C.subtle : 'transparent',
+                  color: active ? C.teal : C.muted,
+                }}
+              >
+                {label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       {records === null ? (
         <div style={{ padding: '20px 18px', color: C.muted, fontFamily: F.body, fontSize: 14, borderTop: `1px solid ${C.subtle}` }}>Loading…</div>
       ) : recs.length === 0 ? (
         <div style={{ padding: '20px 18px', color: C.muted, fontFamily: F.body, fontSize: 14, borderTop: `1px solid ${C.subtle}` }}>
           No activity yet — this page fills in as the agent runs.
         </div>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: '20px 18px', color: C.muted, fontFamily: F.body, fontSize: 14, borderTop: `1px solid ${C.subtle}` }}>
+          No {filterLabel} in the loaded records{cursor ? ' — load more below to keep looking.' : '.'}
+        </div>
       ) : (
         visible.map((r) => <FeedItem key={r.id} r={r} />)
       )}
 
-      {records !== null && recs.length > 0 && (recs.length > 4 || cursor) && (
+      {records !== null && (filtered.length > 4 || cursor) && (
         <button
           onClick={() => {
-            if (!expanded) setExpanded(true)
+            if (!expanded && filtered.length > 4) setExpanded(true)
             else if (cursor) loadMore()
             else setExpanded(false)
           }}
@@ -457,7 +511,7 @@ function WorkFeed({ serviceName, agentId }) {
             fontSize: 13.5, fontWeight: 500, fontFamily: F.body, cursor: 'pointer',
           }}
         >
-          {!expanded
+          {!expanded && filtered.length > 4
             ? `Show all ${countLabel}`
             : loadingMore
               ? 'Loading…'
