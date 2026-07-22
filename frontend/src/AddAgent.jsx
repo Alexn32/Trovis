@@ -1335,11 +1335,14 @@ function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
         )}
       </NumberedStep>
 
-      <NumberedStep n={4} title="(Optional) Enable output capture">
+      <NumberedStep n={4} title="Turn on output capture (recommended)">
         <CodeBlock code="/trovis capture on" />
         <p className="helper-text">
-          Recommended — lets you see what your agents actually produce
-          (messages, responses, tool results) in the dashboard.
+          <strong>Do this or you'll only see metadata.</strong> Without capture,
+          Trovis records what ran, when, and how much it cost — but <em>not</em>{' '}
+          the actual messages, responses, or tool results, so you can't read
+          what your agent said or ask about its outputs. Turning it on sends
+          that content to Trovis; leave it off only if that's a concern.
         </p>
       </NumberedStep>
 
@@ -1378,10 +1381,14 @@ function OpenClawTerminalSetup({ endpoint, apiKey, installCmd }) {
         )}
       </NumberedStep>
 
-      <NumberedStep n={3} title="(Optional) Enable output capture">
+      <NumberedStep n={3} title="Turn on output capture (recommended)">
         <CodeBlock code={captureCmd} />
         <p className="helper-text">
-          Recommended — lets you see what your agents actually produce.
+          <strong>Do this or you'll only see metadata.</strong> Without capture,
+          Trovis records what ran, when, and cost — but <em>not</em> the actual
+          messages, responses, or tool results, so you can't read what your
+          agent said or ask about its outputs. Turning it on sends that content
+          to Trovis; leave it off only if that's a concern.
         </p>
       </NumberedStep>
 
