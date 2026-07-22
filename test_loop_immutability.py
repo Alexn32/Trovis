@@ -58,6 +58,37 @@ for path in [p for p in SOURCES if p != "database.py"]:
 for path in SOURCES:
     check(f"{path}: no DELETE FROM loops", count(path, "DELETE FROM loops") == 0)
 
+# --- Versioned workflows -----------------------------------------------------
+# workflow_versions: APPEND-ONLY, no exceptions — every edit is a new row.
+for path in SOURCES:
+    check(f"{path}: no UPDATE workflow_versions", count(path, "UPDATE workflow_versions") == 0)
+    check(f"{path}: no DELETE FROM workflow_versions", count(path, "DELETE FROM workflow_versions") == 0)
+
+# workflows allows EXACTLY TWO mutations, both in database.py:
+#   1. the current_version bump in create_workflow_version
+#   2. the archived_at set in archive_workflow (archive, never delete)
+check("database.py: UPDATE workflows pinned at 2 (version bump + archive)",
+      count("database.py", "UPDATE workflows") == 2)
+for path in [p for p in SOURCES if p != "database.py"]:
+    check(f"{path}: no UPDATE workflows", count(path, "UPDATE workflows") == 0)
+
+# Exactly ONE DELETE FROM workflows survives: the agent hard-delete sweep of
+# LEGACY graph rows in delete_agent, guarded by
+# `id NOT IN (SELECT workflow_id FROM workflow_versions)` — it can never
+# touch a versioned declaration. Anything beyond that count is a new delete
+# path and breaks the archive-never-delete contract.
+check("database.py: DELETE FROM workflows pinned at 1 (legacy-scoped agent sweep)",
+      count("database.py", "DELETE FROM workflows") == 1)
+check("database.py: the legacy sweep is version-guarded",
+      "NOT IN (SELECT workflow_id FROM workflow_versions)" in text["database.py"])
+for path in [p for p in SOURCES if p != "database.py"]:
+    check(f"{path}: no DELETE FROM workflows", count(path, "DELETE FROM workflows") == 0)
+
+# Two writers only into workflow_versions: create_workflow (v1) and
+# create_workflow_version (v2+).
+check("database.py: exactly two INSERT INTO workflow_versions",
+      count("database.py", "INSERT INTO workflow_versions") == 2)
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")

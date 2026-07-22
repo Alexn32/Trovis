@@ -219,6 +219,130 @@ def compute_loop_state(
 
 
 # ---------------------------------------------------------------------------
+# Workflow matching
+# ---------------------------------------------------------------------------
+# A workflow is a named, VERSIONED declaration of a recurring process: an
+# ordered list of stations (who holds the work at each step) plus match
+# hints (how to recognize a loop as an instance). Definitions are
+# append-only — every edit is a new version — and a matched loop records
+# WHICH version it matched: that pairing is load-bearing for future drift
+# detection. The loop's workflow_id/workflow_version/workflow_confidence
+# columns are a cache like cached_state: recomputable while the loop is
+# open, FROZEN once it reaches a terminal state.
+
+# Hint vocabularies — enforced in code (writers raise ValueError), like
+# EVENT_TYPES, so they can grow without a table rebuild.
+MATCH_FIELDS = ("service_name", "agent_id", "title")
+MATCH_OPS = ("equals", "contains", "prefix")
+
+STATION_HOLDER_TYPES = ACTOR_TYPES  # agent | human | system
+
+
+def validate_match_hints(hints) -> list:
+    """Validate the match_hints JSON shape. ALL hints must pass for a loop
+    to match (AND semantics). An empty list is legal — the workflow simply
+    never auto-matches (a declaration without recognition rules yet)."""
+    if not isinstance(hints, list):
+        raise ValueError("match_hints must be a list")
+    for h in hints:
+        if not isinstance(h, dict):
+            raise ValueError("each match hint must be an object")
+        if h.get("field") not in MATCH_FIELDS:
+            raise ValueError(
+                f"unknown hint field {h.get('field')!r}; one of: {', '.join(MATCH_FIELDS)}"
+            )
+        if h.get("op") not in MATCH_OPS:
+            raise ValueError(
+                f"unknown hint op {h.get('op')!r}; one of: {', '.join(MATCH_OPS)}"
+            )
+        if not isinstance(h.get("value"), str) or not h["value"]:
+            raise ValueError("hint value must be a non-empty string")
+    return hints
+
+
+def validate_stations(stations) -> list:
+    """Validate the stations JSON shape. Stored and returned, NOT used for
+    matching (that's a later inference tier)."""
+    if not isinstance(stations, list):
+        raise ValueError("stations must be a list")
+    for s in stations:
+        if not isinstance(s, dict):
+            raise ValueError("each station must be an object")
+        if s.get("holder_type") not in STATION_HOLDER_TYPES:
+            raise ValueError(
+                f"unknown holder_type {s.get('holder_type')!r}; "
+                f"one of: {', '.join(STATION_HOLDER_TYPES)}"
+            )
+        for key in ("holder", "label"):
+            if key in s and s[key] is not None and not isinstance(s[key], str):
+                raise ValueError(f"station {key} must be a string")
+        tools = s.get("tools")
+        if tools is not None and (
+            not isinstance(tools, list) or any(not isinstance(t, str) for t in tools)
+        ):
+            raise ValueError("station tools must be a list of strings")
+    return stations
+
+
+def _hint_passes(loop_row: dict, hint: dict) -> bool:
+    value = loop_row.get(hint["field"])
+    if not isinstance(value, str) or not value:
+        return False  # a missing field never matches
+    target = hint["value"]
+    if hint["field"] == "title":  # title matching is case-insensitive
+        value, target = value.lower(), target.lower()
+    op = hint["op"]
+    if op == "equals":
+        return value == target
+    if op == "contains":
+        return target in value
+    if op == "prefix":
+        return value.startswith(target)
+    return False
+
+
+def match_workflow(loop_row: dict, workflow_versions: list[dict]):
+    """Match a loop against workflow declarations. Pure function.
+
+    loop_row needs service_name / agent_id / title. workflow_versions is
+    the CURRENT version of each non-archived workflow:
+        [{"workflow_id": int, "version": int, "match_hints": [...]}]
+    (the caller filters to current+non-archived — and, structurally, to
+    versioned workflows only, so legacy graph rows can never match).
+
+    ALL hints must pass -> confidence 1.0 (a declared match; no partial or
+    fuzzy scoring in this tier — the confidence column exists for future
+    inference tiers). Hintless workflows never auto-match.
+
+    Multiple matches: most hints wins (more specific declaration); tie ->
+    most recently created wins (higher id — SERIAL ids are creation-
+    ordered). Ties are logged; that log becomes a user-facing
+    "overlapping workflows" warning later.
+
+    Returns (workflow_id, version, confidence) or None.
+    """
+    candidates = []
+    for wf in workflow_versions or []:
+        hints = wf.get("match_hints") or []
+        if not hints:
+            continue
+        if all(_hint_passes(loop_row, h) for h in hints):
+            candidates.append((len(hints), wf["workflow_id"], wf["version"]))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)  # most hints, then most recent (highest id)
+    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+        logger.info(
+            "[loops] ambiguous workflow match for loop %s: workflows %s tie at %d hints",
+            loop_row.get("id"),
+            [c[1] for c in candidates if c[0] == candidates[0][0]],
+            candidates[0][0],
+        )
+    _, workflow_id, version = candidates[0]
+    return (workflow_id, version, 1.0)
+
+
+# ---------------------------------------------------------------------------
 # Sweep
 # ---------------------------------------------------------------------------
 # cached_state can lag for pure time-based transitions (awaiting_* -> stalled,
@@ -230,10 +354,20 @@ def compute_loop_state(
 
 
 def run_sweep_for_account(account_id: int | None) -> dict[str, int]:
-    """Recompute state for one account's non-terminal loops. Fail-soft per
-    loop: one bad loop is logged and skipped, the sweep always finishes."""
+    """Recompute state for one account's non-terminal loops, and re-match
+    them against workflow declarations. Fail-soft per loop: one bad loop is
+    logged and skipped, the sweep always finishes.
+
+    The re-match pass is what lets a workflow created AFTER loops started
+    catch its in-flight instances, and moves open loops onto a new version
+    after an edit. Cost: one hint-set query per account, then an in-memory
+    evaluation per open loop with a write only when the match changed.
+    Terminal loops are never re-matched (frozen — enforced in
+    rematch_open_loop and by this function only visiting non-terminal
+    loops)."""
     now_ns = time.time_ns()
-    checked = abandoned = restated = 0
+    checked = abandoned = restated = rematched = 0
+    hint_sets = database.get_current_workflow_hints(account_id)
     for loop in database.get_open_loops_for_sweep(account_id):
         checked += 1
         try:
@@ -247,11 +381,20 @@ def run_sweep_for_account(account_id: int | None) -> dict[str, int]:
                 )
                 if new_state != loop.get("cached_state"):
                     restated += 1
+                if hint_sets and database.rematch_open_loop(
+                    loop["id"], account_id, hint_sets
+                ):
+                    rematched += 1
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[loops] sweep failed for loop %s: %s", loop.get("id"), e
             )
-    return {"checked": checked, "abandoned": abandoned, "restated": restated}
+    return {
+        "checked": checked,
+        "abandoned": abandoned,
+        "restated": restated,
+        "rematched": rematched,
+    }
 
 
 def run_sweep() -> dict[str, int]:

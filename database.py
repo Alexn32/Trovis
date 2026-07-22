@@ -1112,6 +1112,39 @@ CREATE TABLE IF NOT EXISTS loop_participants (
 )
 """
 
+# Workflow definitions are APPEND-ONLY: every edit creates a new version
+# row; nothing is mutated. The parent `workflows` row allows exactly two
+# writes (current_version bump, archived_at set — archive, never delete).
+# A matched loop records WHICH version it matched — load-bearing for
+# future drift detection.
+_WORKFLOW_VERSIONS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS workflow_versions (
+    id          SERIAL    PRIMARY KEY,
+    workflow_id INTEGER   NOT NULL REFERENCES workflows(id),
+    version     INTEGER   NOT NULL,
+    stations    TEXT      NOT NULL DEFAULT '[]',
+    match_hints TEXT      NOT NULL DEFAULT '[]',
+    note        TEXT,
+    created_by  TEXT      NOT NULL DEFAULT '',
+    created_at  TIMESTAMP DEFAULT NOW(),
+    UNIQUE (workflow_id, version)
+)
+"""
+
+_WORKFLOW_VERSIONS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS workflow_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL REFERENCES workflows(id),
+    version     INTEGER NOT NULL,
+    stations    TEXT    NOT NULL DEFAULT '[]',
+    match_hints TEXT    NOT NULL DEFAULT '[]',
+    note        TEXT,
+    created_by  TEXT    NOT NULL DEFAULT '',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (workflow_id, version)
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -1171,6 +1204,10 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_loops_gap ON loops(account_id, service_name, agent_id, last_event_unix)",
     "CREATE INDEX IF NOT EXISTS idx_loop_events_loop_ts ON loop_events(loop_id, event_time_unix)",
     "CREATE INDEX IF NOT EXISTS idx_loop_participants_loop ON loop_participants(loop_id)",
+    # Versioned workflows.
+    "CREATE INDEX IF NOT EXISTS idx_workflows_account ON workflows(account_id, archived_at)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_versions ON workflow_versions(workflow_id, version)",
+    "CREATE INDEX IF NOT EXISTS idx_loops_workflow ON loops(account_id, workflow_id)",
 ]
 
 
@@ -1217,6 +1254,8 @@ def init_db() -> None:
             _LOOPS_DDL_PG,
             _LOOP_EVENTS_DDL_PG,
             _LOOP_PARTICIPANTS_DDL_PG,
+            # References workflows (created far earlier in this list).
+            _WORKFLOW_VERSIONS_DDL_PG,
         ]
     else:
         ddls = [
@@ -1247,6 +1286,7 @@ def init_db() -> None:
             _LOOPS_DDL_SQLITE,
             _LOOP_EVENTS_DDL_SQLITE,
             _LOOP_PARTICIPANTS_DDL_SQLITE,
+            _WORKFLOW_VERSIONS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -1323,6 +1363,21 @@ def init_db() -> None:
         _try_add_column(cur, "workflow_steps", "pos_y", "REAL DEFAULT 0")
         _try_add_column(cur, "workflow_steps", "node_width", "REAL DEFAULT 170")
         _try_add_column(cur, "workflow_steps", "node_height", "REAL DEFAULT 72")
+        # Workflows became versioned declarations (the graph-editing layer
+        # was removed). The pre-existing `workflows` table is extended, not
+        # replaced: legacy graph rows have no workflow_versions row and are
+        # structurally excluded from every new query.
+        _try_add_column(cur, "workflows", "created_by", "TEXT DEFAULT ''")
+        _try_add_column(cur, "workflows", "archived_at", "TIMESTAMP")
+        _try_add_column(cur, "workflows", "current_version", "INTEGER DEFAULT 1")
+        # Loop → workflow match cache. Same philosophy as cached_state:
+        # derived and recomputable while the loop is OPEN, frozen once the
+        # loop reaches a terminal state (done/abandoned) — a closed loop
+        # permanently records what it matched when it closed. Never the
+        # source of truth.
+        _try_add_column(cur, "loops", "workflow_id", "INTEGER DEFAULT NULL")
+        _try_add_column(cur, "loops", "workflow_version", "INTEGER DEFAULT NULL")
+        _try_add_column(cur, "loops", "workflow_confidence", "REAL DEFAULT NULL")
         # Workloops: link each span to the loop it belongs to. Nullable —
         # historical spans are never backfilled, and non-ingest writers
         # (MCP synthetic spans) stay loop-less. Set at INSERT time only;
@@ -2342,6 +2397,25 @@ def ingest_spans_with_loops(
         for loop_id, actor in executor_pairs:
             _upsert_loop_participant(cur, loop_id, "agent", actor, "executor")
 
+        # Workflow matching — same transaction, and deliberately BEFORE the
+        # close pass below: every affected loop is still open here (the
+        # resolver only returns open loops), so a loop that closes in its
+        # creation batch still records the match it had when it closed.
+        # After terminal, the match columns are frozen (see
+        # rematch_open_loop). Zero cost when no workflows are declared.
+        hint_sets = _current_workflow_hints(cur, account_id)
+        if hint_sets:
+            for loop_id in affected:
+                cur.execute(
+                    "SELECT id, service_name, agent_id, title, "
+                    "workflow_id, workflow_version FROM loops "
+                    f"WHERE id = {PH}",
+                    (loop_id,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    _apply_workflow_match(cur, dict(row), hint_sets)
+
         now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
         for loop_id, (actor, value, ts) in closes.items():
             cur.execute(
@@ -2541,11 +2615,17 @@ _LOOP_SELECT = """
 SELECT l.id, l.account_id, l.external_id, l.service_name, l.agent_id, l.title,
        l.initiated_by_type, l.initiated_by, l.cached_state, l.last_event_unix,
        l.created_at, l.closed_at,
+       l.workflow_id, l.workflow_version,
+       wf.name AS workflow_name,
        COALESCE(p.c, 0) AS participant_count,
        COALESCE(e.c, 0) AS loop_event_count,
        COALESCE(sp.c, 0) AS span_count,
        COALESCE(sp.cost, 0) AS total_cost_usd
 FROM loops l
+-- Safe join: l.workflow_id is only ever written by the matcher, whose scan
+-- is restricted to versioned workflows — a legacy graph row can never be
+-- referenced, so workflow_name never resolves to one.
+LEFT JOIN workflows wf ON wf.id = l.workflow_id
 LEFT JOIN (SELECT loop_id, COUNT(*) AS c
            FROM loop_participants GROUP BY loop_id) p ON p.loop_id = l.id
 LEFT JOIN (SELECT loop_id, COUNT(*) AS c
@@ -2573,6 +2653,9 @@ def _loop_row(r: dict[str, Any]) -> dict[str, Any]:
         "last_event_unix": d.get("last_event_unix"),
         "created_at": _ts_to_str(d.get("created_at")),
         "closed_at": _ts_to_str(d.get("closed_at")),
+        "workflow_id": d.get("workflow_id"),
+        "workflow_name": d.get("workflow_name"),
+        "workflow_version": d.get("workflow_version"),
         "participant_count": int(d.get("participant_count") or 0),
         "span_count": span_count,
         # "events" in the API = the merged stream (lifecycle + activity).
@@ -2745,6 +2828,343 @@ def get_open_loops_for_sweep(account_id: int | None) -> list[dict[str, Any]]:
             tuple(acct_args),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Versioned workflows (declarations; matching engine lives in loops.py)
+# ---------------------------------------------------------------------------
+# workflow_versions is APPEND-ONLY. The workflows row allows exactly two
+# writes: the current_version bump in create_workflow_version and the
+# archived_at set in archive_workflow (archive, never delete). Legacy
+# graph-workflow rows (no version row) are excluded from everything below
+# by the INNER JOIN on workflow_versions.
+
+
+def _parse_json_list(raw) -> list:
+    try:
+        v = json.loads(raw or "[]")
+        return v if isinstance(v, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def create_workflow(
+    account_id: int | None,
+    name: str,
+    stations: list | None = None,
+    match_hints: list | None = None,
+    note: str | None = None,
+    created_by: str = "",
+) -> dict[str, Any]:
+    """Declare a workflow: the parent row + version 1, one transaction."""
+    lp = _loops_mod()
+    stations = lp.validate_stations(stations or [])
+    match_hints = lp.validate_match_hints(match_hints or [])
+    if not name or not str(name).strip():
+        raise ValueError("name is required")
+    if account_id is None:
+        # workflows.account_id is NOT NULL (creation is session-only anyway).
+        raise ValueError("an account is required to declare a workflow")
+    with _connect() as conn, _cursor(conn) as cur:
+        workflow_id = _insert_returning_id(
+            cur,
+            "INSERT INTO workflows (account_id, name, created_by, current_version) "
+            f"VALUES ({PH}, {PH}, {PH}, 1)",
+            (account_id, str(name).strip(), created_by or ""),
+        )
+        cur.execute(
+            "INSERT INTO workflow_versions "
+            "(workflow_id, version, stations, match_hints, note, created_by) "
+            f"VALUES ({PH}, 1, {PH}, {PH}, {PH}, {PH})",
+            (workflow_id, json.dumps(stations), json.dumps(match_hints),
+             note, created_by or ""),
+        )
+    return get_workflow(workflow_id, account_id)
+
+
+def create_workflow_version(
+    workflow_id: int,
+    account_id: int | None,
+    stations: list | None = None,
+    match_hints: list | None = None,
+    note: str | None = None,
+    created_by: str = "",
+) -> dict[str, Any] | None:
+    """Append a new FULL definition (not a diff) and bump current_version —
+    one of the two allowed writes on the workflows row. Prior versions are
+    never touched. Open loops re-match on the next ingest/sweep pass;
+    closed loops keep the version they matched forever."""
+    lp = _loops_mod()
+    stations = lp.validate_stations(stations or [])
+    match_hints = lp.validate_match_hints(match_hints or [])
+    with _connect() as conn, _cursor(conn) as cur:
+        sql = (
+            "SELECT w.id, w.current_version, w.archived_at FROM workflows w "
+            "JOIN workflow_versions v ON v.workflow_id = w.id "
+            "AND v.version = w.current_version "
+            f"WHERE w.id = {PH}"
+        )
+        args: list[Any] = [workflow_id]
+        if account_id is not None:
+            sql += f" AND w.account_id = {PH}"
+            args.append(account_id)
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        if row["archived_at"] is not None:
+            raise ValueError("workflow is archived — unarchive is not a thing; declare a new one")
+        next_version = int(row["current_version"] or 1) + 1
+        cur.execute(
+            "INSERT INTO workflow_versions "
+            "(workflow_id, version, stations, match_hints, note, created_by) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (workflow_id, next_version, json.dumps(stations),
+             json.dumps(match_hints), note, created_by or ""),
+        )
+        # ALLOWED WRITE 1 of 2 on workflows: the current_version bump.
+        cur.execute(
+            f"UPDATE workflows SET current_version = {PH} WHERE id = {PH}",
+            (next_version, workflow_id),
+        )
+    return get_workflow(workflow_id, account_id)
+
+
+def archive_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | None:
+    """Archive (never delete): stops future matching, history stays fully
+    readable. Idempotent. The other of the two allowed workflows writes."""
+    with _connect() as conn, _cursor(conn) as cur:
+        sql = (
+            "SELECT w.id FROM workflows w "
+            "JOIN workflow_versions v ON v.workflow_id = w.id "
+            "AND v.version = w.current_version "
+            f"WHERE w.id = {PH}"
+        )
+        args: list[Any] = [workflow_id]
+        if account_id is not None:
+            sql += f" AND w.account_id = {PH}"
+            args.append(account_id)
+        cur.execute(sql, tuple(args))
+        if cur.fetchone() is None:
+            return None
+        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+        # ALLOWED WRITE 2 of 2 on workflows: setting archived_at (once).
+        cur.execute(
+            f"UPDATE workflows SET archived_at = {now_sql} "
+            f"WHERE id = {PH} AND archived_at IS NULL",
+            (workflow_id,),
+        )
+    return get_workflow(workflow_id, account_id)
+
+
+def _workflow_loop_aggregates(
+    cur, account_id: int | None, workflow_id: int | None = None,
+) -> tuple[dict, dict]:
+    """(state counts, loops-today counts) keyed by workflow_id."""
+    scope_sql = ""
+    scope_args: list[Any] = []
+    if account_id is not None:
+        scope_sql += f" AND account_id = {PH}"
+        scope_args.append(account_id)
+    if workflow_id is not None:
+        scope_sql += f" AND workflow_id = {PH}"
+        scope_args.append(workflow_id)
+    cur.execute(
+        "SELECT workflow_id, cached_state, COUNT(*) AS c FROM loops "
+        f"WHERE workflow_id IS NOT NULL {scope_sql} "
+        "GROUP BY workflow_id, cached_state",
+        tuple(scope_args),
+    )
+    by_state: dict[int, dict[str, int]] = {}
+    for r in cur.fetchall():
+        by_state.setdefault(r["workflow_id"], {})[r["cached_state"]] = int(r["c"])
+    # "Today" is the UTC calendar day, like the cost pages.
+    midnight = _utcnow().strftime("%Y-%m-%d 00:00:00")
+    cur.execute(
+        "SELECT workflow_id, COUNT(*) AS c FROM loops "
+        f"WHERE workflow_id IS NOT NULL AND created_at >= {PH} {scope_sql} "
+        "GROUP BY workflow_id",
+        tuple([midnight, *scope_args]),
+    )
+    today = {r["workflow_id"]: int(r["c"]) for r in cur.fetchall()}
+    return by_state, today
+
+
+def _workflow_summary_row(r, by_state: dict, today: dict) -> dict[str, Any]:
+    return {
+        "id": r["id"],
+        "name": r["name"],
+        "current_version": int(r["current_version"] or 1),
+        "created_by": r["created_by"] or "",
+        "created_at": _ts_to_str(r["created_at"]),
+        "archived_at": _ts_to_str(r["archived_at"]),
+        "loop_counts": by_state.get(r["id"], {}),
+        "loops_today": today.get(r["id"], 0),
+    }
+
+
+def get_workflows(
+    account_id: int | None, include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    sql = (
+        "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
+        "w.current_version FROM workflows w "
+        "JOIN workflow_versions v ON v.workflow_id = w.id "
+        "AND v.version = w.current_version WHERE 1=1"
+    )
+    args: list[Any] = []
+    if account_id is not None:
+        sql += f" AND w.account_id = {PH}"
+        args.append(account_id)
+    if not include_archived:
+        sql += " AND w.archived_at IS NULL"
+    sql += " ORDER BY w.created_at DESC, w.id DESC"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        rows = cur.fetchall()
+        by_state, today = _workflow_loop_aggregates(cur, account_id)
+        return [_workflow_summary_row(r, by_state, today) for r in rows]
+
+
+def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | None:
+    """Current definition + full version history. None for unknown ids and
+    for legacy graph rows (no version row → excluded by the join)."""
+    sql = (
+        "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
+        "w.current_version, v.stations, v.match_hints, v.note "
+        "FROM workflows w "
+        "JOIN workflow_versions v ON v.workflow_id = w.id "
+        "AND v.version = w.current_version "
+        f"WHERE w.id = {PH}"
+    )
+    args: list[Any] = [workflow_id]
+    if account_id is not None:
+        sql += f" AND w.account_id = {PH}"
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        by_state, today = _workflow_loop_aggregates(cur, account_id, workflow_id)
+        out = _workflow_summary_row(row, by_state, today)
+        out["stations"] = _parse_json_list(row["stations"])
+        out["match_hints"] = _parse_json_list(row["match_hints"])
+        cur.execute(
+            "SELECT version, note, created_by, created_at FROM workflow_versions "
+            f"WHERE workflow_id = {PH} ORDER BY version DESC",
+            (workflow_id,),
+        )
+        out["versions"] = [
+            {
+                "version": int(r["version"]),
+                "note": r["note"],
+                "created_by": r["created_by"] or "",
+                "created_at": _ts_to_str(r["created_at"]),
+            }
+            for r in cur.fetchall()
+        ]
+        return out
+
+
+def get_workflow_loops(
+    workflow_id: int,
+    account_id: int | None,
+    state: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]] | None:
+    """Loops matched to this workflow, same row shape as get_loops. None
+    when the workflow isn't visible (so the API can 404). Works for
+    archived workflows — matched history stays readable."""
+    if get_workflow(workflow_id, account_id) is None:
+        return None
+    sql = _LOOP_SELECT + f" WHERE l.workflow_id = {PH}"
+    args: list[Any] = [workflow_id]
+    if account_id is not None:
+        sql += f" AND l.account_id = {PH}"
+        args.append(account_id)
+    if state:
+        sql += f" AND l.cached_state = {PH}"
+        args.append(state)
+    sql += f" ORDER BY l.created_at DESC, l.id DESC LIMIT {PH} OFFSET {PH}"
+    args.extend([int(limit), int(offset)])
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return [_loop_row(dict(r)) for r in cur.fetchall()]
+
+
+def _current_workflow_hints(cur, account_id: int | None) -> list[dict[str, Any]]:
+    """The matching engine's scan: CURRENT version of each NON-ARCHIVED
+    workflow. The version join structurally excludes legacy graph rows —
+    they can never match a loop. Strict account matching (this feeds
+    writes)."""
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    cur.execute(
+        "SELECT w.id AS workflow_id, w.current_version AS version, "
+        "v.match_hints FROM workflows w "
+        "JOIN workflow_versions v ON v.workflow_id = w.id "
+        "AND v.version = w.current_version "
+        f"WHERE w.archived_at IS NULL {acct_sql.replace('account_id', 'w.account_id')}",
+        tuple(acct_args),
+    )
+    return [
+        {
+            "workflow_id": r["workflow_id"],
+            "version": int(r["version"] or 1),
+            "match_hints": _parse_json_list(r["match_hints"]),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def get_current_workflow_hints(account_id: int | None) -> list[dict[str, Any]]:
+    with _connect() as conn, _cursor(conn) as cur:
+        return _current_workflow_hints(cur, account_id)
+
+
+def _apply_workflow_match(cur, loop_row: dict[str, Any], hint_sets: list) -> bool:
+    """Recompute the loop's workflow match and write the cache columns when
+    changed. Cache semantics mirror cached_state: mutation allowed while
+    the loop is open, FROZEN at terminal — every caller guarantees the
+    loop is open. Returns True when the columns changed."""
+    lp = _loops_mod()
+    m = lp.match_workflow(loop_row, hint_sets)
+    new_id, new_version, new_conf = m if m else (None, None, None)
+    if (
+        loop_row.get("workflow_id") == new_id
+        and loop_row.get("workflow_version") == new_version
+    ):
+        return False
+    cur.execute(
+        f"UPDATE loops SET workflow_id = {PH}, workflow_version = {PH}, "
+        f"workflow_confidence = {PH} WHERE id = {PH}",
+        (new_id, new_version, new_conf, loop_row["id"]),
+    )
+    return True
+
+
+def rematch_open_loop(
+    loop_id: int, account_id: int | None, hint_sets: list,
+) -> bool:
+    """Sweep entry point: re-match ONE loop if (and only if) it's still
+    open. Terminal loops are frozen — a done/abandoned loop permanently
+    records what it matched when it closed; new workflow versions never
+    retroactively re-match closed loops."""
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, service_name, agent_id, title, closed_at, "
+            "cached_state, workflow_id, workflow_version FROM loops "
+            f"WHERE id = {PH} {acct_sql}",
+            tuple([loop_id, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        if row["closed_at"] is not None or row["cached_state"] in ("done", "abandoned"):
+            return False  # FROZEN
+        return _apply_workflow_match(cur, dict(row), hint_sets)
 
 
 def save_description(
@@ -4214,44 +4634,15 @@ def get_agent_owner(
 
 
 # ---------------------------------------------------------------------------
-# Workflows — named, ordered step sequences (agent + human)
+# Workflows — versioned declarations of recurring processes (see loops.py)
 # ---------------------------------------------------------------------------
-
-# Fields a workflow_steps row carries beyond id/workflow_id/step_order.
-_STEP_FIELDS = (
-    "step_type",
-    "label",
-    "description",
-    "agent_service_name",
-    "agent_id",
-    "team_member_id",
-    "operation",
-    "duration_estimate_ms",
-    "inferred_from",
-    "config",
-    "pos_x",
-    "pos_y",
-    "node_width",
-    "node_height",
-)
-
-_VALID_STEP_TYPES = {"trigger", "agent", "human", "decision", "output"}
-
-
-def _row_to_workflow(row: Any) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "account_id": row["account_id"],
-        "name": row["name"],
-        "description": row["description"],
-        "agent_service_name": row["agent_service_name"],
-        "agent_id": row["agent_id"],
-        "method": _row_get(row, "method", "generate") or "generate",
-        "source_description": _row_get(row, "source_description"),
-        "loop_count": int(_row_get(row, "loop_count", 0) or 0),
-        "created_at": _ts_to_str(row["created_at"]),
-        "updated_at": _ts_to_str(row["updated_at"]),
-    }
+# The legacy graph-workflow layer (steps/edges/participants CRUD, canvas
+# editing, Claude generate/describe) was REMOVED when workflows became
+# versioned declarations. Its tables (workflow_steps, workflow_edges,
+# workflow_participants) and their rows remain on disk untouched — data is
+# archived, never deleted — but nothing writes to them anymore. Legacy
+# `workflows` rows (no workflow_versions row) are structurally excluded
+# from every new query via INNER JOIN on workflow_versions.
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -4261,1160 +4652,6 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
         return row[key]
     except (KeyError, IndexError):
         return default
-
-
-def _row_to_step(row: Any) -> dict[str, Any]:
-    raw_config = row["config"]
-    config: Any = None
-    if raw_config:
-        try:
-            config = json.loads(raw_config)
-        except (TypeError, ValueError):
-            config = None
-    return {
-        "id": row["id"],
-        "workflow_id": row["workflow_id"],
-        "step_order": row["step_order"],
-        "step_type": row["step_type"],
-        "label": row["label"],
-        "description": row["description"],
-        "agent_service_name": row["agent_service_name"],
-        "agent_id": row["agent_id"],
-        "team_member_id": row["team_member_id"],
-        # Only present when the query LEFT JOINed team_members (get_workflow).
-        "team_member_name": _row_get(row, "team_member_name"),
-        "operation": row["operation"],
-        "duration_estimate_ms": row["duration_estimate_ms"],
-        "inferred_from": row["inferred_from"],
-        "config": config,
-        # Spatial canvas position + size (default for pre-redesign rows).
-        "pos_x": _row_get(row, "pos_x", 0.0) or 0.0,
-        "pos_y": _row_get(row, "pos_y", 0.0) or 0.0,
-        "node_width": _row_get(row, "node_width", 170.0) or 170.0,
-        "node_height": _row_get(row, "node_height", 72.0) or 72.0,
-    }
-
-
-def _clean_step_values(step: dict[str, Any]) -> dict[str, Any]:
-    """Pull the persistable fields out of an arbitrary step dict, applying
-    light validation/normalization. `config` is JSON-encoded for storage."""
-    step_type = str(step.get("step_type") or "agent").strip().lower()
-    if step_type not in _VALID_STEP_TYPES:
-        step_type = "agent"
-    duration = step.get("duration_estimate_ms")
-    try:
-        duration = int(duration) if duration is not None else None
-    except (TypeError, ValueError):
-        duration = None
-    config = step.get("config")
-    config_json = (
-        json.dumps(config) if isinstance(config, (dict, list)) else None
-    )
-    member_id = step.get("team_member_id")
-    try:
-        member_id = int(member_id) if member_id not in (None, "") else None
-    except (TypeError, ValueError):
-        member_id = None
-
-    def _num(v: Any, default: float) -> float:
-        try:
-            return float(v) if v is not None else default
-        except (TypeError, ValueError):
-            return default
-
-    return {
-        "step_type": step_type,
-        "label": str(step.get("label") or "").strip() or "Untitled step",
-        "description": (step.get("description") or None),
-        "agent_service_name": (step.get("agent_service_name") or None),
-        "agent_id": (step.get("agent_id") or None),
-        "team_member_id": member_id,
-        "operation": (step.get("operation") or None),
-        "duration_estimate_ms": duration,
-        "inferred_from": (step.get("inferred_from") or "manual"),
-        "config": config_json,
-        "pos_x": _num(step.get("pos_x"), 0.0),
-        "pos_y": _num(step.get("pos_y"), 0.0),
-        "node_width": _num(step.get("node_width"), 170.0),
-        "node_height": _num(step.get("node_height"), 72.0),
-    }
-
-
-def _touch_workflow(cur, workflow_id: int) -> None:
-    """Bump a workflow's updated_at. Called after step mutations."""
-    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
-    cur.execute(
-        f"UPDATE workflows SET updated_at = {now_sql} WHERE id = {PH}",
-        (workflow_id,),
-    )
-
-
-def create_workflow(
-    account_id: int | None,
-    name: str,
-    description: str | None = None,
-    agent_service_name: str | None = None,
-    agent_id: str | None = "main",
-    method: str = "generate",
-    source_description: str | None = None,
-) -> dict[str, Any]:
-    """Insert a new (empty) workflow and return the row."""
-    clean_name = (name or "").strip()
-    if not clean_name:
-        raise ValueError("name is required")
-    cols = (
-        "(account_id, name, description, agent_service_name, agent_id, "
-        "method, source_description)"
-    )
-    vals = (
-        account_id,
-        clean_name,
-        description or None,
-        agent_service_name or None,
-        agent_id or "main",
-        method or "generate",
-        source_description or None,
-    )
-    ph = ", ".join([PH] * len(vals))
-    with _connect() as conn, _cursor(conn) as cur:
-        if USE_POSTGRES:
-            cur.execute(
-                f"INSERT INTO workflows {cols} VALUES ({ph}) RETURNING *", vals
-            )
-            row = cur.fetchone()
-        else:
-            cur.execute(f"INSERT INTO workflows {cols} VALUES ({ph})", vals)
-            new_id = cur.lastrowid
-            cur.execute("SELECT * FROM workflows WHERE id = ?", (new_id,))
-            row = cur.fetchone()
-    return _row_to_workflow(row)
-
-
-def get_workflows(account_id: int | None) -> list[dict[str, Any]]:
-    """List workflows for an account (most recently updated first), each
-    with a `step_count`. Steps themselves are not loaded here."""
-    account_filter = (
-        f"WHERE w.account_id = {PH}"
-        if account_id is not None
-        else "WHERE w.account_id IS NULL"
-    )
-    sql = f"""
-        SELECT w.*,
-               (SELECT COUNT(*) FROM workflow_steps s WHERE s.workflow_id = w.id) AS step_count,
-               (SELECT COUNT(*) FROM workflow_participants p WHERE p.workflow_id = w.id) AS participant_count,
-               (SELECT COUNT(*) FROM workflow_edges e
-                  JOIN workflow_steps fs ON fs.id = e.from_step_id
-                  JOIN workflow_steps ts ON ts.id = e.to_step_id
-                  WHERE e.workflow_id = w.id AND ts.step_order < fs.step_order) AS loop_count
-        FROM workflows w
-        {account_filter}
-        ORDER BY w.updated_at DESC, w.id DESC
-    """
-    args: tuple[Any, ...] = (account_id,) if account_id is not None else ()
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, args)
-        rows = cur.fetchall()
-        out = []
-        for r in rows:
-            wf = _row_to_workflow(r)
-            wf["step_count"] = int(r["step_count"] or 0)
-            wf["participant_count"] = int(_row_get(r, "participant_count", 0) or 0)
-            wf["steps"] = []
-            # Participant pills on the list card (cheap — small N per workflow).
-            cur.execute(
-                "SELECT * FROM workflow_participants "
-                f"WHERE workflow_id = {PH} ORDER BY id ASC",
-                (wf["id"],),
-            )
-            wf["participants"] = [_row_to_participant(p) for p in cur.fetchall()]
-            out.append(wf)
-    return out
-
-
-def get_workflow(
-    workflow_id: int, account_id: int | None
-) -> dict[str, Any] | None:
-    """Fetch one workflow (account-scoped) with all steps ordered by
-    step_order. Returns None when not found / not owned."""
-    account_clause = (
-        f"AND account_id = {PH}"
-        if account_id is not None
-        else "AND account_id IS NULL"
-    )
-    wf_args: tuple[Any, ...] = (workflow_id,)
-    if account_id is not None:
-        wf_args = (workflow_id, account_id)
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"SELECT * FROM workflows WHERE id = {PH} {account_clause}",
-            wf_args,
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        wf = _row_to_workflow(row)
-        cur.execute(
-            "SELECT s.*, m.name AS team_member_name "
-            "FROM workflow_steps s "
-            "LEFT JOIN team_members m ON m.id = s.team_member_id "
-            f"WHERE s.workflow_id = {PH} ORDER BY s.step_order ASC, s.id ASC",
-            (workflow_id,),
-        )
-        wf["steps"] = [_row_to_step(s) for s in cur.fetchall()]
-        cur.execute(
-            "SELECT * FROM workflow_participants "
-            f"WHERE workflow_id = {PH} ORDER BY id ASC",
-            (workflow_id,),
-        )
-        wf["participants"] = [_row_to_participant(p) for p in cur.fetchall()]
-        cur.execute(
-            "SELECT * FROM workflow_edges "
-            f"WHERE workflow_id = {PH} ORDER BY edge_order ASC, id ASC",
-            (workflow_id,),
-        )
-        wf["edges"] = [_row_to_edge(e) for e in cur.fetchall()]
-    wf["step_count"] = len(wf["steps"])
-    wf["participant_count"] = len(wf["participants"])
-    return wf
-
-
-def update_workflow(
-    workflow_id: int,
-    account_id: int | None,
-    name: str | None = None,
-    description: str | None = None,
-) -> dict[str, Any] | None:
-    """Update a workflow's name/description (only provided fields). Returns
-    the updated workflow (with steps) or None when not owned."""
-    sets = []
-    args: list[Any] = []
-    if name is not None:
-        sets.append(f"name = {PH}")
-        args.append(name.strip())
-    if description is not None:
-        sets.append(f"description = {PH}")
-        args.append(description or None)
-    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
-    sets.append(f"updated_at = {now_sql}")
-    account_clause = (
-        f"AND account_id = {PH}"
-        if account_id is not None
-        else "AND account_id IS NULL"
-    )
-    args.append(workflow_id)
-    if account_id is not None:
-        args.append(account_id)
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"UPDATE workflows SET {', '.join(sets)} WHERE id = {PH} {account_clause}",
-            tuple(args),
-        )
-        if cur.rowcount == 0:
-            return None
-    return get_workflow(workflow_id, account_id)
-
-
-def delete_workflow(workflow_id: int, account_id: int | None) -> bool:
-    """Delete a workflow and its steps (steps first — SQLite doesn't
-    enforce the cascade). Account-scoped. Returns True when removed."""
-    account_clause = (
-        f"AND account_id = {PH}"
-        if account_id is not None
-        else "AND account_id IS NULL"
-    )
-    with _connect() as conn, _cursor(conn) as cur:
-        # Ownership check first so we don't drop another tenant's steps.
-        cur.execute(
-            f"SELECT 1 FROM workflows WHERE id = {PH} {account_clause}",
-            (workflow_id,) if account_id is None else (workflow_id, account_id),
-        )
-        if cur.fetchone() is None:
-            return False
-        # Children first — SQLite doesn't enforce the FK cascade. Edges
-        # reference steps, so drop edges + participants before steps.
-        cur.execute(
-            f"DELETE FROM workflow_edges WHERE workflow_id = {PH}", (workflow_id,)
-        )
-        cur.execute(
-            f"DELETE FROM workflow_participants WHERE workflow_id = {PH}",
-            (workflow_id,),
-        )
-        cur.execute(
-            f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
-        )
-        cur.execute(
-            f"DELETE FROM workflows WHERE id = {PH} {account_clause}",
-            (workflow_id,) if account_id is None else (workflow_id, account_id),
-        )
-        return cur.rowcount > 0
-
-
-def add_workflow_step(
-    workflow_id: int, step_data: dict[str, Any]
-) -> dict[str, Any]:
-    """Append a step to a workflow (step_order = current max + 1 unless an
-    explicit step_order is given). Ownership must be checked by the caller."""
-    clean = _clean_step_values(step_data)
-    with _connect() as conn, _cursor(conn) as cur:
-        order = step_data.get("step_order")
-        if order is None:
-            cur.execute(
-                f"SELECT COALESCE(MAX(step_order), -1) + 1 AS n FROM workflow_steps WHERE workflow_id = {PH}",
-                (workflow_id,),
-            )
-            order = int(cur.fetchone()["n"])
-        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
-        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
-        vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
-        if USE_POSTGRES:
-            cur.execute(
-                f"INSERT INTO workflow_steps {cols} VALUES ({ph}) RETURNING *",
-                vals,
-            )
-            row = cur.fetchone()
-        else:
-            cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
-            new_id = cur.lastrowid
-            cur.execute(
-                "SELECT * FROM workflow_steps WHERE id = ?",
-                (new_id,),
-            )
-            row = cur.fetchone()
-        _touch_workflow(cur, workflow_id)
-    return _row_to_step(row)
-
-
-def update_workflow_step(
-    step_id: int, workflow_id: int, step_data: dict[str, Any]
-) -> dict[str, Any] | None:
-    """Patch a step (only the fields present in step_data), scoped to its
-    workflow. Returns the updated step or None when not found."""
-    sets = []
-    args: list[Any] = []
-    cleaned = _clean_step_values({**step_data}) if step_data else {}
-    for field in _STEP_FIELDS:
-        if field in step_data:
-            sets.append(f"{field} = {PH}")
-            args.append(cleaned[field])
-    if "step_order" in step_data and step_data["step_order"] is not None:
-        sets.append(f"step_order = {PH}")
-        args.append(int(step_data["step_order"]))
-    if not sets:
-        # Nothing to change — just return the current row.
-        with _connect() as conn, _cursor(conn) as cur:
-            cur.execute(
-                f"SELECT * FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
-                (step_id, workflow_id),
-            )
-            row = cur.fetchone()
-        return _row_to_step(row) if row else None
-    args.extend([step_id, workflow_id])
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"UPDATE workflow_steps SET {', '.join(sets)} "
-            f"WHERE id = {PH} AND workflow_id = {PH}",
-            tuple(args),
-        )
-        if cur.rowcount == 0:
-            return None
-        _touch_workflow(cur, workflow_id)
-        cur.execute(
-            f"SELECT * FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
-            (step_id, workflow_id),
-        )
-        row = cur.fetchone()
-    return _row_to_step(row) if row else None
-
-
-def delete_workflow_step(step_id: int, workflow_id: int) -> bool:
-    """Delete one step from a workflow, plus any edges that reference it.
-    Returns True when removed. (FK cascade isn't enabled — PRAGMA
-    foreign_keys is off — so we remove the dependent edges by hand.)"""
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"DELETE FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
-            (step_id, workflow_id),
-        )
-        removed = cur.rowcount > 0
-        if removed:
-            cur.execute(
-                f"DELETE FROM workflow_edges WHERE workflow_id = {PH} "
-                f"AND (from_step_id = {PH} OR to_step_id = {PH})",
-                (workflow_id, step_id, step_id),
-            )
-            _touch_workflow(cur, workflow_id)
-    return removed
-
-
-def reorder_workflow_steps(
-    workflow_id: int, step_ids_in_order: list[int]
-) -> None:
-    """Set step_order to match the given id list. Only ids belonging to the
-    workflow are touched; unknown ids are ignored."""
-    with _connect() as conn, _cursor(conn) as cur:
-        for order, sid in enumerate(step_ids_in_order):
-            cur.execute(
-                f"UPDATE workflow_steps SET step_order = {PH} "
-                f"WHERE id = {PH} AND workflow_id = {PH}",
-                (order, int(sid), workflow_id),
-            )
-        _touch_workflow(cur, workflow_id)
-
-
-def _replace_workflow_steps(
-    workflow_id: int, steps: list[dict[str, Any]]
-) -> None:
-    """Drop all steps for a workflow and insert the given list in order.
-    Used by generate / regenerate."""
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
-        )
-        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
-        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
-        for order, step in enumerate(steps):
-            clean = _clean_step_values(step)
-            cur.execute(
-                f"INSERT INTO workflow_steps {cols} VALUES ({ph})",
-                (workflow_id, order, *(clean[f] for f in _STEP_FIELDS)),
-            )
-        _touch_workflow(cur, workflow_id)
-
-
-# ---------------------------------------------------------------------------
-# Workflow graph: participants, edges, positions
-# ---------------------------------------------------------------------------
-
-
-def _row_to_participant(row: Any) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "workflow_id": row["workflow_id"],
-        "type": row["participant_type"],
-        "agent_service_name": _row_get(row, "agent_service_name"),
-        "agent_id": _row_get(row, "agent_id"),
-        "role_name": _row_get(row, "role_name"),
-        "team_member_id": _row_get(row, "team_member_id"),
-    }
-
-
-def _row_to_edge(row: Any) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "workflow_id": row["workflow_id"],
-        "from_step_id": row["from_step_id"],
-        "to_step_id": row["to_step_id"],
-        "label": _row_get(row, "label"),
-        "is_branch": bool(_row_get(row, "is_branch", False)),
-        "edge_order": int(_row_get(row, "edge_order", 0) or 0),
-    }
-
-
-def add_workflow_participant(
-    workflow_id: int,
-    participant_type: str,
-    agent_service_name: str | None = None,
-    agent_id: str | None = None,
-    role_name: str | None = None,
-    team_member_id: int | None = None,
-) -> dict[str, Any]:
-    """Add one participant (agent or human role) to a workflow. Returns the
-    created participant row."""
-    ptype = "human" if str(participant_type).strip().lower() == "human" else "agent"
-    vals = (
-        workflow_id,
-        ptype,
-        agent_service_name or None,
-        (agent_id or "main") if ptype == "agent" else None,
-        role_name or None,
-        team_member_id,
-    )
-    cols = (
-        "(workflow_id, participant_type, agent_service_name, agent_id, "
-        "role_name, team_member_id)"
-    )
-    with _connect() as conn, _cursor(conn) as cur:
-        if USE_POSTGRES:
-            cur.execute(
-                f"INSERT INTO workflow_participants {cols} "
-                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}) RETURNING *",
-                vals,
-            )
-            row = cur.fetchone()
-        else:
-            cur.execute(
-                f"INSERT INTO workflow_participants {cols} "
-                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-                vals,
-            )
-            cur.execute(
-                "SELECT * FROM workflow_participants WHERE id = ?", (cur.lastrowid,)
-            )
-            row = cur.fetchone()
-        _touch_workflow(cur, workflow_id)
-    return _row_to_participant(row)
-
-
-def delete_workflow_participant(participant_id: int, workflow_id: int) -> bool:
-    """Delete one participant from a workflow. Returns True when removed."""
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"DELETE FROM workflow_participants WHERE id = {PH} AND workflow_id = {PH}",
-            (participant_id, workflow_id),
-        )
-        removed = cur.rowcount > 0
-        if removed:
-            _touch_workflow(cur, workflow_id)
-    return removed
-
-
-def add_workflow_edge(
-    workflow_id: int,
-    from_step_id: int,
-    to_step_id: int,
-    label: str | None = None,
-    is_branch: bool = False,
-    edge_order: int | None = None,
-) -> dict[str, Any]:
-    """Add one edge to a workflow's graph. `edge_order` is appended (max+1)
-    when omitted. Returns the created edge row. Backward edges (loops) are
-    allowed — the caller validates."""
-    branch_val = bool(is_branch) if USE_POSTGRES else (1 if is_branch else 0)
-    with _connect() as conn, _cursor(conn) as cur:
-        order = edge_order
-        if order is None:
-            cur.execute(
-                f"SELECT COALESCE(MAX(edge_order), -1) + 1 AS n FROM workflow_edges WHERE workflow_id = {PH}",
-                (workflow_id,),
-            )
-            order = int(cur.fetchone()["n"])
-        cols = "(workflow_id, from_step_id, to_step_id, label, is_branch, edge_order)"
-        vals = (workflow_id, from_step_id, to_step_id, label or None, branch_val, int(order))
-        if USE_POSTGRES:
-            cur.execute(
-                f"INSERT INTO workflow_edges {cols} "
-                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}) RETURNING *",
-                vals,
-            )
-            row = cur.fetchone()
-        else:
-            cur.execute(
-                f"INSERT INTO workflow_edges {cols} "
-                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-                vals,
-            )
-            cur.execute("SELECT * FROM workflow_edges WHERE id = ?", (cur.lastrowid,))
-            row = cur.fetchone()
-        _touch_workflow(cur, workflow_id)
-    return _row_to_edge(row)
-
-
-def update_workflow_edge(
-    edge_id: int, workflow_id: int, fields: dict[str, Any]
-) -> dict[str, Any] | None:
-    """Patch an edge's label / is_branch, scoped to its workflow. Returns the
-    updated edge or None when not found."""
-    sets = []
-    args: list[Any] = []
-    if "label" in fields:
-        sets.append(f"label = {PH}")
-        args.append(fields["label"] or None)
-    if "is_branch" in fields and fields["is_branch"] is not None:
-        sets.append(f"is_branch = {PH}")
-        args.append(bool(fields["is_branch"]) if USE_POSTGRES else (1 if fields["is_branch"] else 0))
-    if not sets:
-        with _connect() as conn, _cursor(conn) as cur:
-            cur.execute(
-                f"SELECT * FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
-                (edge_id, workflow_id),
-            )
-            row = cur.fetchone()
-        return _row_to_edge(row) if row else None
-    args.extend([edge_id, workflow_id])
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"UPDATE workflow_edges SET {', '.join(sets)} "
-            f"WHERE id = {PH} AND workflow_id = {PH}",
-            tuple(args),
-        )
-        if cur.rowcount == 0:
-            return None
-        _touch_workflow(cur, workflow_id)
-        cur.execute(
-            f"SELECT * FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
-            (edge_id, workflow_id),
-        )
-        row = cur.fetchone()
-    return _row_to_edge(row) if row else None
-
-
-def delete_workflow_edge(edge_id: int, workflow_id: int) -> bool:
-    """Delete one edge from a workflow. Returns True when removed."""
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"DELETE FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
-            (edge_id, workflow_id),
-        )
-        removed = cur.rowcount > 0
-        if removed:
-            _touch_workflow(cur, workflow_id)
-    return removed
-
-
-def update_step_position(
-    step_id: int, workflow_id: int, pos_x: float, pos_y: float
-) -> dict[str, Any] | None:
-    """Persist a node's canvas position (drag-to-reposition). Returns the
-    updated step or None when not found / not owned by the workflow."""
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"UPDATE workflow_steps SET pos_x = {PH}, pos_y = {PH} "
-            f"WHERE id = {PH} AND workflow_id = {PH}",
-            (float(pos_x), float(pos_y), step_id, workflow_id),
-        )
-        if cur.rowcount == 0:
-            return None
-        _touch_workflow(cur, workflow_id)
-        cur.execute(
-            f"SELECT * FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
-            (step_id, workflow_id),
-        )
-        row = cur.fetchone()
-    return _row_to_step(row) if row else None
-
-
-def _replace_workflow_graph(
-    workflow_id: int,
-    participants: list[dict[str, Any]],
-    steps: list[dict[str, Any]],
-    edges: list[dict[str, Any]],
-) -> None:
-    """Atomically replace a workflow's participants, steps, and edges in one
-    transaction. `edges` reference steps by their index in the `steps` list
-    (`from_index` / `to_index`); those map to the new DB ids after insert.
-    Used by the AI describe / multi-agent generate flows."""
-    branch_true = True if USE_POSTGRES else 1
-    branch_false = False if USE_POSTGRES else 0
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(f"DELETE FROM workflow_edges WHERE workflow_id = {PH}", (workflow_id,))
-        cur.execute(
-            f"DELETE FROM workflow_participants WHERE workflow_id = {PH}", (workflow_id,)
-        )
-        cur.execute(f"DELETE FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,))
-
-        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
-        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
-        index_to_id: dict[int, int] = {}
-        for order, step in enumerate(steps):
-            clean = _clean_step_values(step)
-            vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
-            if USE_POSTGRES:
-                cur.execute(
-                    f"INSERT INTO workflow_steps {cols} VALUES ({ph}) RETURNING id", vals
-                )
-                index_to_id[order] = cur.fetchone()["id"]
-            else:
-                cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
-                index_to_id[order] = cur.lastrowid
-
-        for eo, e in enumerate(edges or []):
-            try:
-                fi = int(e.get("from_index"))
-                ti = int(e.get("to_index"))
-            except (TypeError, ValueError):
-                continue
-            if fi not in index_to_id or ti not in index_to_id or fi == ti:
-                continue
-            cur.execute(
-                "INSERT INTO workflow_edges (workflow_id, from_step_id, to_step_id, "
-                f"label, is_branch, edge_order) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-                (
-                    workflow_id,
-                    index_to_id[fi],
-                    index_to_id[ti],
-                    (e.get("label") or None),
-                    branch_true if e.get("is_branch") else branch_false,
-                    eo,
-                ),
-            )
-
-        for p in participants or []:
-            ptype = (
-                "human"
-                if str(p.get("type") or p.get("participant_type") or "agent").strip().lower() == "human"
-                else "agent"
-            )
-            cur.execute(
-                "INSERT INTO workflow_participants (workflow_id, participant_type, "
-                f"agent_service_name, agent_id, role_name, team_member_id) "
-                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-                (
-                    workflow_id,
-                    ptype,
-                    (p.get("agent_service_name") or p.get("service_name") or None),
-                    ((p.get("agent_id") or "main") if ptype == "agent" else None),
-                    (p.get("role_name") or None),
-                    p.get("team_member_id"),
-                ),
-            )
-        _touch_workflow(cur, workflow_id)
-
-
-def apply_workflow_edit_operations(
-    workflow_id: int, operations: list[dict[str, Any]]
-) -> int:
-    """Apply a list of AI-generated edit operations to a workflow in ONE
-    transaction. Operations preserve existing step ids; new steps carry a
-    string `tmp_id` that later edges reference. Invalid/unresolvable ops are
-    skipped (these are best-effort canvas edits, not transactions). Returns the
-    number of operations applied. Ownership must be checked by the caller.
-
-    Op shapes (see describer.workflow_edit_operations):
-      add_step{tmp_id,...}, update_step{step_id,...}, delete_step{step_id},
-      add_edge{from,to,label,is_branch}, delete_edge{edge_id},
-      add_participant{type,...}
-    """
-    branch_true = True if USE_POSTGRES else 1
-    branch_false = False if USE_POSTGRES else 0
-    ops = operations or []
-    applied = 0
-
-    def _insert_step(cur, clean, order):
-        cols = "(workflow_id, step_order, " + ", ".join(_STEP_FIELDS) + ")"
-        ph = ", ".join([PH] * (2 + len(_STEP_FIELDS)))
-        vals = (workflow_id, order, *(clean[f] for f in _STEP_FIELDS))
-        if USE_POSTGRES:
-            cur.execute(
-                f"INSERT INTO workflow_steps {cols} VALUES ({ph}) RETURNING id", vals
-            )
-            return cur.fetchone()["id"]
-        cur.execute(f"INSERT INTO workflow_steps {cols} VALUES ({ph})", vals)
-        return cur.lastrowid
-
-    with _connect() as conn, _cursor(conn) as cur:
-        # Current state inside the txn.
-        cur.execute(
-            f"SELECT id FROM workflow_steps WHERE workflow_id = {PH}", (workflow_id,)
-        )
-        live_ids: set[int] = {r["id"] for r in cur.fetchall()}
-        cur.execute(
-            f"SELECT COALESCE(MAX(step_order), -1) + 1 AS n FROM workflow_steps WHERE workflow_id = {PH}",
-            (workflow_id,),
-        )
-        next_order = int(cur.fetchone()["n"])
-        cur.execute(
-            f"SELECT COALESCE(MAX(edge_order), -1) + 1 AS n FROM workflow_edges WHERE workflow_id = {PH}",
-            (workflow_id,),
-        )
-        next_edge_order = int(cur.fetchone()["n"])
-
-        tmp_to_id: dict[str, int] = {}
-        new_agent_steps: list[tuple[str, str]] = []  # (service, agent_id) added
-
-        def _resolve(ref) -> int | None:
-            if isinstance(ref, str) and ref in tmp_to_id:
-                return tmp_to_id[ref]
-            try:
-                rid = int(ref)
-            except (TypeError, ValueError):
-                return None
-            return rid if rid in live_ids else None
-
-        # 1) add_step (so tmp ids resolve for later edges)
-        for op in ops:
-            if not isinstance(op, dict) or op.get("op") != "add_step":
-                continue
-            clean = _clean_step_values(op)
-            new_id = _insert_step(cur, clean, next_order)
-            next_order += 1
-            live_ids.add(new_id)
-            tmp = op.get("tmp_id")
-            if isinstance(tmp, str) and tmp:
-                tmp_to_id[tmp] = new_id
-            if clean["step_type"] == "agent" and clean["agent_service_name"]:
-                new_agent_steps.append((clean["agent_service_name"], clean["agent_id"] or "main"))
-            applied += 1
-
-        # 2) update_step
-        for op in ops:
-            if not isinstance(op, dict) or op.get("op") != "update_step":
-                continue
-            sid = _resolve(op.get("step_id"))
-            if sid is None:
-                continue
-            clean = _clean_step_values(op)
-            sets, args = [], []
-            for f in _STEP_FIELDS:
-                if f in op:  # only fields the op actually provided
-                    sets.append(f"{f} = {PH}")
-                    args.append(clean[f])
-            if not sets:
-                continue
-            args.extend([sid, workflow_id])
-            cur.execute(
-                f"UPDATE workflow_steps SET {', '.join(sets)} WHERE id = {PH} AND workflow_id = {PH}",
-                tuple(args),
-            )
-            if clean["step_type"] == "agent" and clean["agent_service_name"] and "agent_service_name" in op:
-                new_agent_steps.append((clean["agent_service_name"], clean["agent_id"] or "main"))
-            applied += 1
-
-        # 3) delete_step (+ its edges — SQLite FK cascade is off)
-        for op in ops:
-            if not isinstance(op, dict) or op.get("op") != "delete_step":
-                continue
-            sid = _resolve(op.get("step_id"))
-            if sid is None:
-                continue
-            cur.execute(
-                f"DELETE FROM workflow_edges WHERE workflow_id = {PH} AND (from_step_id = {PH} OR to_step_id = {PH})",
-                (workflow_id, sid, sid),
-            )
-            cur.execute(
-                f"DELETE FROM workflow_steps WHERE id = {PH} AND workflow_id = {PH}",
-                (sid, workflow_id),
-            )
-            live_ids.discard(sid)
-            applied += 1
-
-        # 4) delete_edge
-        for op in ops:
-            if not isinstance(op, dict) or op.get("op") != "delete_edge":
-                continue
-            try:
-                eid = int(op.get("edge_id"))
-            except (TypeError, ValueError):
-                continue
-            cur.execute(
-                f"DELETE FROM workflow_edges WHERE id = {PH} AND workflow_id = {PH}",
-                (eid, workflow_id),
-            )
-            if cur.rowcount > 0:
-                applied += 1
-
-        # 5) add_edge (endpoints resolved against the now-current id set)
-        for op in ops:
-            if not isinstance(op, dict) or op.get("op") != "add_edge":
-                continue
-            fi = _resolve(op.get("from"))
-            ti = _resolve(op.get("to"))
-            if fi is None or ti is None or fi == ti:
-                continue
-            cur.execute(
-                f"SELECT 1 FROM workflow_edges WHERE workflow_id = {PH} AND from_step_id = {PH} AND to_step_id = {PH}",
-                (workflow_id, fi, ti),
-            )
-            if cur.fetchone():
-                continue  # skip duplicates
-            cur.execute(
-                "INSERT INTO workflow_edges (workflow_id, from_step_id, to_step_id, "
-                f"label, is_branch, edge_order) VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-                (
-                    workflow_id,
-                    fi,
-                    ti,
-                    (op.get("label") or None),
-                    branch_true if op.get("is_branch") else branch_false,
-                    next_edge_order,
-                ),
-            )
-            next_edge_order += 1
-            applied += 1
-
-        # Existing participants (for dedupe of explicit add + auto-add).
-        cur.execute(
-            f"SELECT participant_type, agent_service_name, agent_id, role_name "
-            f"FROM workflow_participants WHERE workflow_id = {PH}",
-            (workflow_id,),
-        )
-        have_agents: set[tuple[str, str]] = set()
-        have_roles: set[str] = set()
-        for r in cur.fetchall():
-            if r["participant_type"] == "human" and r["role_name"]:
-                have_roles.add(r["role_name"].strip().lower())
-            elif r["agent_service_name"]:
-                have_agents.add((r["agent_service_name"], r["agent_id"] or "main"))
-
-        def _add_participant(ptype, svc, aid, role):
-            cur.execute(
-                "INSERT INTO workflow_participants (workflow_id, participant_type, "
-                f"agent_service_name, agent_id, role_name, team_member_id) "
-                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, NULL)",
-                (workflow_id, ptype, svc, aid, role),
-            )
-
-        # 6) explicit add_participant
-        for op in ops:
-            if not isinstance(op, dict) or op.get("op") != "add_participant":
-                continue
-            ptype = "human" if str(op.get("type") or "").strip().lower() == "human" else "agent"
-            if ptype == "human":
-                role = (op.get("role_name") or "").strip()
-                if not role or role.lower() in have_roles:
-                    continue
-                _add_participant("human", None, None, role)
-                have_roles.add(role.lower())
-            else:
-                svc = (op.get("agent_service_name") or "").strip()
-                aid = (op.get("agent_id") or "main")
-                if not svc or (svc, aid) in have_agents:
-                    continue
-                _add_participant("agent", svc, aid, None)
-                have_agents.add((svc, aid))
-            applied += 1
-
-        # Auto-add any agent introduced by a step but not yet on the roster.
-        for svc, aid in new_agent_steps:
-            if (svc, aid) not in have_agents:
-                _add_participant("agent", svc, aid, None)
-                have_agents.add((svc, aid))
-
-        _touch_workflow(cur, workflow_id)
-    return applied
-
-
-def get_workflow_stats(
-    workflow_id: int, account_id: int | None
-) -> dict[str, Any] | None:
-    """Live telemetry stats for a workflow's source agent — runs (distinct
-    traces), errors, success rate, avg duration, last run, tokens, cost.
-    All-time, scoped to the workflow's (service_name, agent_id) and account.
-    Returns None when the workflow isn't owned; `has_agent=False` when the
-    workflow has no source agent to pull stats from."""
-    account_clause = (
-        f"AND account_id = {PH}"
-        if account_id is not None
-        else "AND account_id IS NULL"
-    )
-    empty = {
-        "has_agent": False,
-        "runs": 0,
-        "spans": 0,
-        "errors": 0,
-        "success_rate": 0.0,
-        "avg_duration_ms": 0.0,
-        "last_run": None,
-        "total_tokens": 0,
-        "estimated_cost_usd": 0.0,
-    }
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"SELECT agent_service_name, agent_id FROM workflows WHERE id = {PH} {account_clause}",
-            (workflow_id,) if account_id is None else (workflow_id, account_id),
-        )
-        wf = cur.fetchone()
-        if wf is None:
-            return None
-        service_name = wf["agent_service_name"]
-        agent_id = wf["agent_id"] or "main"
-        if not service_name:
-            return empty
-
-        span_acct = (
-            f"AND account_id = {PH}"
-            if account_id is not None
-            else "AND account_id IS NULL"
-        )
-        sql = f"""
-            SELECT
-                COUNT(DISTINCT trace_id)                         AS runs,
-                COUNT(*)                                         AS spans,
-                SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
-                AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
-                MAX(start_time_unix)                             AS last_run_ns,
-                SUM(total_tokens)                                AS total_tokens,
-                SUM(estimated_cost_usd)                          AS est_cost
-            FROM spans
-            WHERE service_name = {PH}
-              AND COALESCE(agent_id, 'main') = {PH}
-              {span_acct}
-        """
-        args: tuple[Any, ...] = (service_name, agent_id)
-        if account_id is not None:
-            args = (*args, account_id)
-        cur.execute(sql, args)
-        row = cur.fetchone()
-
-    spans = int(row["spans"] or 0)
-    errors = int(row["errors"] or 0)
-    return {
-        "has_agent": True,
-        "runs": int(row["runs"] or 0),
-        "spans": spans,
-        "errors": errors,
-        "success_rate": round((spans - errors) / spans * 100, 1) if spans else 0.0,
-        "avg_duration_ms": round(float(row["avg_duration_ms"] or 0.0), 1),
-        "last_run": _ns_to_iso(row["last_run_ns"]),
-        "total_tokens": int(row["total_tokens"] or 0),
-        "estimated_cost_usd": round(float(row["est_cost"] or 0.0), 6),
-    }
-
-
-def get_workflow_step_stats(
-    workflow_id: int, account_id: int | None
-) -> dict[str, Any] | None:
-    """Per-step + per-workflow telemetry over the last 24h for the multi-agent
-    canvas. Per-step runs/avg_duration/success are real (spans matched by the
-    step's agent + operation). Workflow rollup (total_runs, success_rate,
-    avg_cycle_ms) is real; escalation_rate + avg_human_wait_ms are returned
-    None (no per-run edge-path telemetry to derive them). Returns None when
-    the workflow isn't owned."""
-    wf = get_workflow(workflow_id, account_id)
-    if wf is None:
-        return None
-
-    from time import time as _time
-
-    now_ns = int(_time() * 1_000_000_000)
-    start_ns = now_ns - 24 * 60 * 60 * 1_000_000_000
-
-    steps = wf["steps"]
-    services = sorted(
-        {s["agent_service_name"] for s in steps if s["step_type"] == "agent" and s["agent_service_name"]}
-        | {
-            p["agent_service_name"]
-            for p in wf.get("participants", [])
-            if p["type"] == "agent" and p["agent_service_name"]
-        }
-    )
-
-    result: dict[str, Any] = {
-        "per_step": {},
-        "total_runs": 0,
-        "success_rate": 0.0,
-        "avg_cycle_ms": 0.0,
-        "escalation_rate": None,
-        "avg_human_wait_ms": None,
-        "loop_rate": None,
-        "avg_rounds": None,
-    }
-    if not services:
-        return result
-
-    # Does the graph contain a backward edge (a loop)? Loop metrics are only
-    # meaningful — and only "derivable" — for workflows that actually loop.
-    order_by_id = {s["id"]: s["step_order"] for s in steps}
-    has_loop_edge = any(
-        order_by_id.get(e["to_step_id"], 0) < order_by_id.get(e["from_step_id"], 0)
-        for e in wf.get("edges", [])
-    )
-    # Operations that correspond to real agent steps — a repeat of one of these
-    # span_names within a single trace is the signal that the run looped back.
-    loop_ops = sorted(
-        {s["operation"] for s in steps if s["step_type"] == "agent" and s["operation"]}
-    )
-
-    span_acct = (
-        f"AND account_id = {PH}" if account_id is not None else "AND account_id IS NULL"
-    )
-    placeholders = ", ".join([PH] * len(services))
-    grouped: dict[tuple, dict[str, Any]] = {}
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"""
-            SELECT service_name, COALESCE(agent_id, 'main') AS agent_id, span_name,
-                   COUNT(DISTINCT trace_id) AS runs,
-                   COUNT(*) AS spans,
-                   SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
-                   AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_dur
-            FROM spans
-            WHERE service_name IN ({placeholders})
-              AND start_time_unix >= {PH}
-              {span_acct}
-            GROUP BY service_name, COALESCE(agent_id, 'main'), span_name
-            """,
-            tuple([*services, start_ns] + ([account_id] if account_id is not None else [])),
-        )
-        for r in cur.fetchall():
-            grouped[(r["service_name"], r["agent_id"], r["span_name"])] = {
-                "runs": int(r["runs"] or 0),
-                "spans": int(r["spans"] or 0),
-                "errors": int(r["errors"] or 0),
-                "avg_dur": float(r["avg_dur"] or 0.0),
-            }
-
-        # Workflow rollup: distinct traces + average per-trace cycle time.
-        cur.execute(
-            f"""
-            SELECT COUNT(DISTINCT trace_id) AS runs,
-                   AVG(cycle) AS avg_cycle
-            FROM (
-                SELECT trace_id,
-                       (MAX(end_time_unix) - MIN(start_time_unix)) / 1000000.0 AS cycle
-                FROM spans
-                WHERE service_name IN ({placeholders})
-                  AND start_time_unix >= {PH}
-                  {span_acct}
-                GROUP BY trace_id
-            ) t
-            """,
-            tuple([*services, start_ns] + ([account_id] if account_id is not None else [])),
-        )
-        roll = cur.fetchone()
-
-        # Loop metrics: a run "looped" when the same step span_name appears 2+
-        # times for the same agent within one trace. Only derivable when the
-        # graph actually has a backward edge and there are step operations to
-        # inspect — otherwise we leave loop_rate / avg_rounds null (honest).
-        loop_rows = []
-        if has_loop_edge and loop_ops:
-            op_ph = ", ".join([PH] * len(loop_ops))
-            cur.execute(
-                f"""
-                SELECT trace_id, service_name, COALESCE(agent_id, 'main') AS agent_id,
-                       span_name, COUNT(*) AS c
-                FROM spans
-                WHERE service_name IN ({placeholders})
-                  AND span_name IN ({op_ph})
-                  AND start_time_unix >= {PH}
-                  {span_acct}
-                GROUP BY trace_id, service_name, COALESCE(agent_id, 'main'), span_name
-                """,
-                tuple(
-                    [*services, *loop_ops, start_ns]
-                    + ([account_id] if account_id is not None else [])
-                ),
-            )
-            loop_rows = cur.fetchall()
-
-    tot_spans = 0
-    tot_errors = 0
-    for s in steps:
-        if s["step_type"] != "agent" or not s["agent_service_name"] or not s["operation"]:
-            continue
-        key = (s["agent_service_name"], s["agent_id"] or "main", s["operation"])
-        g = grouped.get(key)
-        if not g:
-            continue
-        sp = g["spans"]
-        er = g["errors"]
-        tot_spans += sp
-        tot_errors += er
-        result["per_step"][str(s["id"])] = {
-            "runs": g["runs"],
-            "avg_duration_ms": round(g["avg_dur"], 1),
-            "success_rate": round((sp - er) / sp * 100, 1) if sp else 0.0,
-        }
-
-    result["total_runs"] = int(roll["runs"] or 0) if roll else 0
-    result["avg_cycle_ms"] = round(float(roll["avg_cycle"] or 0.0), 1) if roll else 0.0
-    result["success_rate"] = (
-        round((tot_spans - tot_errors) / tot_spans * 100, 1) if tot_spans else 0.0
-    )
-
-    # Roll the loop rows up per trace: rounds = max repeat count of any looped
-    # span in that trace; a trace looped when rounds >= 2.
-    if has_loop_edge and loop_ops and result["total_runs"] > 0:
-        rounds_by_trace: dict[Any, int] = {}
-        for r in loop_rows:
-            c = int(r["c"] or 0)
-            if c > rounds_by_trace.get(r["trace_id"], 0):
-                rounds_by_trace[r["trace_id"]] = c
-        looped = [n for n in rounds_by_trace.values() if n >= 2]
-        result["loop_rate"] = round(len(looped) / result["total_runs"] * 100, 1)
-        result["avg_rounds"] = round(sum(looped) / len(looped), 1) if looped else 0.0
-
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -6272,9 +5509,15 @@ def delete_agent(
         # children. workflows key on agent_service_name (value is the same
         # service_name) + agent_id, so the existing account/agent clauses
         # and `args` apply unchanged.
+        # Scoped to LEGACY graph-workflow rows only: versioned workflow
+        # declarations never set agent_service_name and never gain graph
+        # children, and the NOT IN guard makes that structural rather than
+        # incidental. Deleting an agent must never delete a declaration.
         cur.execute(
             f"SELECT id FROM workflows "
-            f"WHERE agent_service_name = {PH} {account_clause} {agent_clause}",
+            f"WHERE agent_service_name = {PH} "
+            f"AND id NOT IN (SELECT workflow_id FROM workflow_versions) "
+            f"{account_clause} {agent_clause}",
             args,
         )
         wf_ids = [row["id"] for row in cur.fetchall()]
@@ -6292,7 +5535,9 @@ def delete_agent(
                 wf_children[child] += cur.rowcount
         cur.execute(
             f"DELETE FROM workflows "
-            f"WHERE agent_service_name = {PH} {account_clause} {agent_clause}",
+            f"WHERE agent_service_name = {PH} "
+            f"AND id NOT IN (SELECT workflow_id FROM workflow_versions) "
+            f"{account_clause} {agent_clause}",
             args,
         )
         summary["workflows"] = cur.rowcount

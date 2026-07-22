@@ -360,230 +360,6 @@ class OwnedAgent(BaseModel):
     span_count: int = 0
 
 
-class WorkflowStep(BaseModel):
-    """One step in a workflow's process. `step_type` is one of
-    trigger|agent|human|decision|output. `operation` is the tool name for
-    agent steps; `team_member_id` the assignee for human steps;
-    `inferred_from` records how an auto-generated step was derived
-    (telemetry|identity|gap_analysis|manual). `config` holds extra per-step
-    data (e.g. decision branch labels) as a JSON object."""
-
-    id: int
-    workflow_id: int | None = None
-    step_order: int
-    step_type: str
-    label: str
-    description: str | None = None
-    agent_service_name: str | None = None
-    agent_id: str | None = None
-    team_member_id: int | None = None
-    team_member_name: str | None = None
-    operation: str | None = None
-    duration_estimate_ms: int | None = None
-    inferred_from: str | None = None
-    config: dict[str, Any] | None = None
-    # Spatial canvas position + node size (0,0 / defaults for pre-redesign rows).
-    pos_x: float = 0.0
-    pos_y: float = 0.0
-    node_width: float = 170.0
-    node_height: float = 72.0
-
-
-class WorkflowParticipant(BaseModel):
-    """An agent or human role that participates in a multi-agent workflow.
-    `type` is 'agent' | 'human'."""
-
-    id: int | None = None
-    workflow_id: int | None = None
-    type: str
-    agent_service_name: str | None = None
-    agent_id: str | None = None
-    role_name: str | None = None
-    team_member_id: int | None = None
-
-
-class WorkflowEdge(BaseModel):
-    """A directed connection between two steps (the workflow graph).
-    `is_branch` marks a decision-path edge (drawn dashed)."""
-
-    id: int | None = None
-    workflow_id: int | None = None
-    from_step_id: int
-    to_step_id: int
-    label: str | None = None
-    is_branch: bool = False
-    edge_order: int = 0
-
-
-class Workflow(BaseModel):
-    """A named process flow. Multi-agent: `participants` lists the agents +
-    human roles; `steps` are positioned nodes and `edges` connect them.
-    `steps`/`edges` are populated on the detail endpoint; the list endpoint
-    leaves them empty and sets `step_count`/`participant_count`."""
-
-    id: int
-    account_id: int | None = None
-    name: str
-    description: str | None = None
-    agent_service_name: str | None = None
-    agent_id: str | None = "main"
-    method: str = "generate"
-    source_description: str | None = None
-    participants: list[WorkflowParticipant] = Field(default_factory=list)
-    steps: list[WorkflowStep] = Field(default_factory=list)
-    edges: list[WorkflowEdge] = Field(default_factory=list)
-    step_count: int = 0
-    participant_count: int = 0
-    # Number of backward (loop) edges in the graph — surfaced on the list card.
-    loop_count: int = 0
-    # Derived in the list endpoint from participant-agent health.
-    status: str = "healthy"
-    created_at: str | None = None
-    updated_at: str | None = None
-
-
-class WorkflowCreate(BaseModel):
-    """Body for POST /workflows."""
-
-    name: str
-    agent_service_name: str | None = None
-    agent_id: str | None = "main"
-    description: str | None = None
-
-
-class WorkflowUpdate(BaseModel):
-    """Body for PUT /workflows/{id}. Only provided fields change."""
-
-    name: str | None = None
-    description: str | None = None
-
-
-class WorkflowStepCreate(BaseModel):
-    """Body for POST /workflows/{id}/steps. Only step_type + label are
-    required; everything else is optional."""
-
-    step_type: str
-    label: str
-    description: str | None = None
-    operation: str | None = None
-    duration_estimate_ms: int | None = None
-    agent_service_name: str | None = None
-    agent_id: str | None = None
-    team_member_id: int | None = None
-    inferred_from: str | None = "manual"
-    config: dict[str, Any] | None = None
-    step_order: int | None = None
-
-
-class WorkflowStepUpdate(BaseModel):
-    """Body for PUT /workflows/{id}/steps/{step_id}. All fields optional —
-    only those present are patched."""
-
-    step_type: str | None = None
-    label: str | None = None
-    description: str | None = None
-    operation: str | None = None
-    duration_estimate_ms: int | None = None
-    agent_service_name: str | None = None
-    agent_id: str | None = None
-    team_member_id: int | None = None
-    inferred_from: str | None = None
-    config: dict[str, Any] | None = None
-    step_order: int | None = None
-
-
-class WorkflowReorder(BaseModel):
-    """Body for POST /workflows/{id}/steps/reorder."""
-
-    step_ids: list[int] = Field(default_factory=list)
-
-
-class WorkflowEdgeCreate(BaseModel):
-    """Body for POST /workflows/{id}/edges. `edge_order` is appended
-    (max+1) when omitted. A backward edge (to_step before from_step in
-    flow order) is valid — it renders as a loop."""
-
-    from_step_id: int
-    to_step_id: int
-    label: str | None = None
-    is_branch: bool = False
-    edge_order: int | None = None
-
-
-class WorkflowEdgeUpdate(BaseModel):
-    """Body for PUT /workflows/{id}/edges/{edge_id}. Only label/is_branch
-    are mutable; the endpoints themselves are immutable."""
-
-    label: str | None = None
-    is_branch: bool | None = None
-
-
-class WorkflowParticipantCreate(BaseModel):
-    """Body for POST /workflows/{id}/participants. `type` is 'agent' |
-    'human'. Agents need agent_service_name; humans need role_name."""
-
-    type: str
-    agent_service_name: str | None = None
-    agent_id: str | None = None
-    role_name: str | None = None
-    team_member_id: int | None = None
-
-
-class WorkflowAiEdit(BaseModel):
-    """Body for POST /workflows/{id}/ai-edit — a plain-English instruction
-    describing how to change the existing flow."""
-
-    instruction: str
-
-
-class WorkflowAiEditResult(BaseModel):
-    """Response for POST /workflows/{id}/ai-edit. `summary` is Claude's one-line
-    description of the change, `applied` the number of operations applied, and
-    `workflow` the full updated graph."""
-
-    summary: str = ""
-    applied: int = 0
-    workflow: Workflow
-
-
-class WorkflowAgentRef(BaseModel):
-    """One agent in a multi-agent generate request."""
-
-    service_name: str
-    agent_id: str | None = "main"
-
-
-class WorkflowGenerate(BaseModel):
-    """Body for POST /workflows/generate. Single-agent (legacy):
-    `agent_service_name` + `agent_id`. Multi-agent: `method="agents"` with
-    `agents[]` + optional `human_roles[]` → Claude infers a multi-agent graph.
-    `agent_service_name` is optional now (back-compat keeps it required-ish via
-    validation in the endpoint)."""
-
-    name: str
-    agent_service_name: str | None = None
-    agent_id: str | None = "main"
-    method: str | None = None
-    agents: list[WorkflowAgentRef] = Field(default_factory=list)
-    human_roles: list[str] = Field(default_factory=list)
-
-
-class WorkflowDescribe(BaseModel):
-    """Body for POST /workflows/describe — AI builds the full multi-agent
-    graph (participants, steps, edges, positions) from a plain-English
-    description."""
-
-    name: str
-    description: str
-
-
-class StepPosition(BaseModel):
-    """Body for PUT /workflows/{id}/steps/{step_id}/position."""
-
-    pos_x: float
-    pos_y: float
-
-
 class Connection(BaseModel):
     """A directed agent→agent connection. `status` is detected (auto),
     confirmed/dismissed (operator decision on a detected edge), or manual
@@ -617,16 +393,6 @@ class ConnectionStatusUpdate(BaseModel):
     status: str  # 'confirmed' | 'dismissed' | 'detected' | 'manual'
 
 
-class WorkflowFromDescription(BaseModel):
-    """Body for POST /workflows/from-description — AI drafts the steps from a
-    plain-English description."""
-
-    name: str
-    description: str
-    agent_service_name: str | None = None
-    agent_id: str | None = "main"
-
-
 class ConnectionsFromDescription(BaseModel):
     """Body for POST /connections/from-description — AI proposes agent→agent
     connections from a description."""
@@ -634,40 +400,60 @@ class ConnectionsFromDescription(BaseModel):
     description: str
 
 
-class WorkflowStepStat(BaseModel):
-    """Per-step live telemetry (last 24h), keyed by step id in `per_step`."""
+# ---------------------------------------------------------------------------
+# Workflows — named, VERSIONED declarations of recurring processes. (The
+# legacy graph-workflow models were removed with their routes; the canvas
+# will be rebuilt against this model.)
+# ---------------------------------------------------------------------------
 
-    runs: int = 0
-    avg_duration_ms: float = 0.0
-    success_rate: float = 0.0
+
+class WorkflowCreate(BaseModel):
+    """POST /workflows body. stations describe who holds the work at each
+    step (stored + validated, not used for matching yet); match_hints are
+    ANDed conditions that recognize a loop as an instance of this
+    workflow."""
+
+    name: str
+    stations: list[dict[str, Any]] = Field(default_factory=list)
+    match_hints: list[dict[str, Any]] = Field(default_factory=list)
+    note: str | None = None
 
 
-class WorkflowStats(BaseModel):
-    """Live telemetry stats for a workflow (last 24h for the multi-agent
-    overlay; legacy single-agent all-time fields kept for back-compat).
-    `per_step` maps step id (str) → per-step stats. `escalation_rate` and
-    `avg_human_wait_ms` are best-effort and null when not derivable from
-    span data."""
+class WorkflowVersionCreate(BaseModel):
+    """POST /workflows/{id}/versions body — a FULL new definition (stations
+    + hints), not a diff. note says what changed."""
 
-    has_agent: bool = False
-    runs: int = 0
-    spans: int = 0
-    errors: int = 0
-    success_rate: float = 0.0
-    avg_duration_ms: float = 0.0
-    last_run: str | None = None
-    total_tokens: int = 0
-    estimated_cost_usd: float = 0.0
-    # Multi-agent canvas overlay (24h).
-    per_step: dict[str, WorkflowStepStat] = Field(default_factory=dict)
-    total_runs: int = 0
-    avg_cycle_ms: float = 0.0
-    escalation_rate: float | None = None
-    avg_human_wait_ms: float | None = None
-    # Loop metrics (24h): null when not derivable (no backward edge in the
-    # graph, or no trace data showing a step span repeated within one trace).
-    loop_rate: float | None = None
-    avg_rounds: float | None = None
+    stations: list[dict[str, Any]] = Field(default_factory=list)
+    match_hints: list[dict[str, Any]] = Field(default_factory=list)
+    note: str | None = None
+
+
+class WorkflowVersionInfo(BaseModel):
+    version: int
+    note: str | None = None
+    created_by: str = ""
+    created_at: str | None = None
+
+
+class WorkflowSummary(BaseModel):
+    """One workflow in GET /workflows: identity + live loop aggregates."""
+
+    id: int
+    name: str
+    current_version: int = 1
+    created_by: str = ""
+    created_at: str | None = None
+    archived_at: str | None = None
+    loop_counts: dict[str, int] = Field(default_factory=dict)  # state -> count
+    loops_today: int = 0
+
+
+class WorkflowDetail(WorkflowSummary):
+    """GET /workflows/{id}: the current version's definition + history."""
+
+    stations: list[dict[str, Any]] = Field(default_factory=list)
+    match_hints: list[dict[str, Any]] = Field(default_factory=list)
+    versions: list[WorkflowVersionInfo] = Field(default_factory=list)
 
 
 class AgentDescription(BaseModel):
@@ -1198,6 +984,11 @@ class LoopSummary(BaseModel):
     initiated_by_type: str
     initiated_by: str
     cached_state: str
+    # Workflow match cache (null when unmatched). Records WHICH version the
+    # loop matched — frozen once the loop reaches a terminal state.
+    workflow_id: int | None = None
+    workflow_name: str | None = None
+    workflow_version: int | None = None
     last_event_unix: int | None = None
     created_at: str | None = None
     closed_at: str | None = None
