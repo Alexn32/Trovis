@@ -80,6 +80,14 @@ test('done: muted, no emphasis, duration from closed_at - created_at', () => {
   assert.equal(m.label, 'done · 4 min')
 })
 
+test('done under a minute rounds up instead of suppressing', () => {
+  const m = loopStateMeta(
+    loop({ cached_state: 'done', created_at: '2026-07-22 09:00:00', closed_at: '2026-07-22 09:00:30' }),
+    NOW,
+  )
+  assert.equal(m.label, 'done · under a minute')
+})
+
 test('working/open: quiet live tone; abandoned: muted', () => {
   assert.deepEqual(loopStateMeta(loop({ cached_state: 'working' }), NOW).tone, 'live')
   assert.equal(loopStateMeta(loop({ cached_state: 'open' }), NOW).label, 'running')

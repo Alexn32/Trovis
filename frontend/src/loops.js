@@ -82,7 +82,10 @@ export function loopDurationSeconds(loop) {
 function fmtDurationShort(seconds) {
   if (seconds == null) return null
   const s = Math.max(0, Math.floor(seconds))
-  if (s < 60) return `${s} sec`
+  // Round up, don't suppress: "done · 0 sec" is technically true for a
+  // loop created and closed in one ingest batch, but "under a minute"
+  // states it legibly without hiding the duration.
+  if (s < 60) return 'under a minute'
   const m = Math.floor(s / 60)
   if (m < 60) return `${m} min`
   const h = Math.floor(m / 60)
