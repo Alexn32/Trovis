@@ -351,9 +351,9 @@ def ask_about_fleet(
     When `concise` is set, use the short plain-prose + generative-UI prompt."""
     api_key = _require_api_key()
     agents = database.get_agents(account_id=account_id)
-    context = _format_fleet_context(agents)
+    seed = _format_fleet_context(agents)
     system = SYSTEM_FLEET_CONCISE if concise else SYSTEM_FLEET
-    raw = _call_claude(api_key, system, context, messages)
+    raw = _agentic_answer(api_key, system, account_id, messages, seed)
     return _parse_ask_response(raw)
 
 
@@ -460,8 +460,17 @@ def ask_about_agent(
     registration = database.get_latest_registration(
         service_name, account_id=account_id, agent_id=agent_id
     )
-    context = _format_agent_context(summary, spans, registration)
-    return _call_claude(api_key, SYSTEM_AGENT, context, messages)
+    focus = (
+        f"You are focused on the agent '{service_name}'"
+        + (f" (sub-agent '{agent_id}')" if agent_id else "")
+        + ". Default every tool call to this agent (service_name="
+        + repr(service_name)
+        + (f", agent_id={agent_id!r}" if agent_id else "")
+        + ") unless the user explicitly asks about a different agent or the "
+        "wider fleet.\n\n"
+    )
+    seed = focus + _format_agent_context(summary, spans, registration)
+    return _agentic_answer(api_key, SYSTEM_AGENT, account_id, messages, seed)
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +609,284 @@ def _format_agent_context(
             lines.append(line)
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Agentic Ask — read-only tools + a bounded retrieval loop
+# ---------------------------------------------------------------------------
+# The assistant gets tools to pull live telemetry on demand — the ACTUAL
+# captured message/response/tool content, spans (incl. errors + status
+# messages), costs, and the fleet list — and loops until it has what it needs
+# to answer. `account_id` is bound server-side per call and NEVER exposed to
+# the model, so a tool can only ever read the caller's own data.
+
+_ASK_MAX_ITERS = 6
+_ASK_TOOL_TOKENS = 2200      # per-turn cap while looping
+_TOOL_CONTENT_CAP = 1600     # max chars of captured content per item
+_TOOL_ITEMS_CAP = 25         # max items any single tool returns
+
+
+def _cap(s: Any, n: int) -> str | None:
+    if s is None:
+        return None
+    t = str(s)
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def _normalize_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop empties + non-user/assistant turns; require a trailing user turn."""
+    cleaned: list[dict[str, str]] = []
+    for m in messages or []:
+        role = (m or {}).get("role")
+        content = ((m or {}).get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            cleaned.append({"role": role, "content": content})
+    if not cleaned:
+        raise ValueError("messages must contain at least one user message")
+    if cleaned[-1]["role"] != "user":
+        raise ValueError("the last message must be from the user")
+    return cleaned
+
+
+_ASK_TOOLS = [
+    {
+        "name": "list_agents",
+        "description": "List every agent in the user's fleet with status, description, recent activity, error counts, and cost. Use for fleet-wide or cross-agent questions, or to find which agent the user means.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_agent_details",
+        "description": "One agent's summary (span/error counts, error rate, avg duration, cost, tokens, status + reason, first/last seen) plus its declared identity (role, system prompt/SOUL, operating manual). Use to learn what an agent is supposed to do.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {"type": "string"},
+                "agent_id": {"type": "string", "description": "Optional sub-agent id."},
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "get_recent_exchanges",
+        "description": "An agent's ACTUAL captured content, newest first: user messages, agent responses, and tool results (the real text). Call this whenever the user asks what an agent said, replied, produced, wrote, or received. Empty when output capture is off for the agent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "limit": {"type": "integer", "description": "Max items (default 12, max 25)."},
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "get_recent_spans",
+        "description": "An agent's recent raw spans (operations) newest first, including status and error messages. Use to diagnose failures or see the structural sequence of what ran. Set errors_only to focus on failures.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "limit": {"type": "integer", "description": "Max spans (default 20, max 40)."},
+                "errors_only": {"type": "boolean"},
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "get_costs",
+        "description": "An agent's cost + token breakdown over the last N days (default 7), including the per-day series. Use for spend questions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "days": {"type": "integer"},
+            },
+            "required": ["service_name"],
+        },
+    },
+]
+
+_AGENTIC_INSTRUCTIONS = (
+    "\n\n---\n\nTOOLS — you can fetch live telemetry on demand:\n"
+    "list_agents, get_agent_details, get_recent_exchanges (the ACTUAL "
+    "message/response/tool text), get_recent_spans (incl. errors + status "
+    "messages), get_costs.\n"
+    "Ground every answer in real data:\n"
+    "- Asked what an agent said/did/produced/received → call "
+    "get_recent_exchanges and quote it.\n"
+    "- Asked why it failed / what's wrong → call get_recent_spans with "
+    "errors_only:true and read the status messages.\n"
+    "- Asked about spend → call get_costs. Fleet/cross-agent → list_agents.\n"
+    "Prefer fetching over guessing; make a few targeted calls, not many. Be "
+    "decisive and specific — cite exact numbers and quote real content. If the "
+    "data genuinely isn't there (capture off, no runs, every call errored), "
+    "say so plainly and say how to get it. NEVER invent content you didn't "
+    "retrieve."
+)
+
+
+def _run_tool(name: str, inp: dict[str, Any] | None, account_id: int | None) -> str:
+    """Execute one read-only Ask tool, scoped to `account_id`. Returns a JSON
+    string for the model. Never raises — failures return a readable message so
+    the loop keeps going."""
+    try:
+        inp = inp or {}
+        svc = inp.get("service_name")
+        aid = inp.get("agent_id")
+
+        if name == "list_agents":
+            groups = database.get_agents(account_id=account_id)
+            out = [
+                {
+                    "name": g.get("display_name") or g.get("service_name"),
+                    "service_name": g.get("service_name"),
+                    "sub_agents": [a.get("agent_id") for a in (g.get("agents") or [])],
+                    "description": _cap(g.get("description"), 300),
+                    "platform": g.get("platform"),
+                    "spans": g.get("total_spans"),
+                    "errors": g.get("total_errors"),
+                    "cost_today": round(float(g.get("cost_today") or 0), 4),
+                    "cost_7d": round(float(g.get("cost_7d") or 0), 4),
+                    "last_seen": g.get("last_seen"),
+                    "locked": g.get("locked"),
+                }
+                for g in groups[:_TOOL_ITEMS_CAP]
+            ]
+            return json.dumps({"count": len(groups), "agents": out})
+
+        if name == "get_agent_details":
+            if not svc:
+                return json.dumps({"error": "service_name is required"})
+            summary = database.get_agent_summary(svc, account_id=account_id, agent_id=aid)
+            if not summary:
+                return json.dumps({"error": f"agent {svc!r} not found"})
+            reg = database.get_latest_registration(svc, account_id=account_id, agent_id=aid) or {}
+            return json.dumps({
+                "summary": {
+                    k: summary.get(k)
+                    for k in (
+                        "service_name", "agent_id", "description", "span_count",
+                        "error_count", "avg_duration_ms", "first_seen", "last_seen",
+                        "estimated_cost_usd", "total_tokens", "status",
+                        "status_reason", "has_registration",
+                    )
+                },
+                "identity": {
+                    "role": reg.get("identity"),
+                    "system_prompt": _cap(reg.get("soul"), 2000),
+                    "operating_manual": _cap(reg.get("operating_manual"), 1500),
+                },
+            }, default=str)
+
+        if name == "get_recent_exchanges":
+            if not svc:
+                return json.dumps({"error": "service_name is required"})
+            limit = max(1, min(_TOOL_ITEMS_CAP, int(inp.get("limit") or 12)))
+            rows = database.get_agent_outputs(svc, account_id=account_id, agent_id=aid, limit=limit)
+            items = [
+                {
+                    "type": r.get("content_type"),
+                    "operation": r.get("operation"),
+                    "time": r.get("timestamp"),
+                    "content": _cap(r.get("content"), _TOOL_CONTENT_CAP),
+                }
+                for r in rows
+            ]
+            note = None if items else (
+                "No captured content for this agent — output capture may be off "
+                "(enable with '/trovis capture on'), or it has produced no "
+                "message/response/tool content yet."
+            )
+            return json.dumps({"count": len(items), "exchanges": items, "note": note})
+
+        if name == "get_recent_spans":
+            if not svc:
+                return json.dumps({"error": "service_name is required"})
+            limit = max(1, min(40, int(inp.get("limit") or 20)))
+            errors_only = bool(inp.get("errors_only"))
+            spans = database.get_agent_spans(svc, limit=limit, account_id=account_id, agent_id=aid)
+            out = []
+            for s in spans:
+                status = "error" if s.get("status_code") == 2 else "ok"
+                if errors_only and status != "error":
+                    continue
+                dur = (int(s.get("end_time_unix") or 0) - int(s.get("start_time_unix") or 0)) / 1e6
+                out.append({
+                    "operation": s.get("span_name"),
+                    "status": status,
+                    "status_message": _cap(s.get("status_message"), 300),
+                    "duration_ms": round(dur, 1),
+                })
+            return json.dumps({"count": len(out), "spans": out[:_TOOL_ITEMS_CAP]})
+
+        if name == "get_costs":
+            if not svc:
+                return json.dumps({"error": "service_name is required"})
+            days = max(1, min(90, int(inp.get("days") or 7)))
+            costs = database.get_agent_costs(svc, account_id=account_id, agent_id=aid, days=days)
+            return json.dumps(costs, default=str)[:4000]
+
+        return json.dumps({"error": f"unknown tool {name!r}"})
+    except Exception as e:  # noqa: BLE001 — a tool failure must not kill the loop
+        return json.dumps({"error": f"tool {name} failed: {e}"})
+
+
+def _agentic_answer(
+    api_key: str,
+    system_prompt: str,
+    account_id: int | None,
+    messages: list[dict[str, str]],
+    seed_context: str,
+) -> str:
+    """Run the tool-use loop: hand Claude the seed context + tools, execute any
+    tool calls against the account's data, and repeat until it answers (or the
+    iteration cap forces a wrap-up). Returns the final text."""
+    convo = list(_normalize_messages(messages))
+    system = (
+        system_prompt
+        + _AGENTIC_INSTRUCTIONS
+        + "\n\n---\n\nSTARTING CONTEXT (you may fetch more with tools):\n\n"
+        + seed_context
+    )
+    client = anthropic.Anthropic(api_key=api_key)
+
+    def _text(resp: Any) -> str:
+        return "".join(
+            b.text for b in resp.content if getattr(b, "type", None) == "text"
+        ).strip()
+
+    for _ in range(_ASK_MAX_ITERS):
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=_ASK_TOOL_TOKENS,
+            system=system,
+            tools=_ASK_TOOLS,
+            messages=convo,
+        )
+        if resp.stop_reason != "tool_use":
+            return _text(resp)
+        convo.append({"role": "assistant", "content": resp.content})
+        results = [
+            {
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": _run_tool(block.name, block.input, account_id),
+            }
+            for block in resp.content
+            if getattr(block, "type", None) == "tool_use"
+        ]
+        convo.append({"role": "user", "content": results})
+
+    # Iteration cap hit — force a final answer from what's been gathered.
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=system + "\n\nWrap up NOW: give your best answer from what you've gathered.",
+        messages=convo,
+    )
+    return _text(resp)
 
 
 def _call_claude(
