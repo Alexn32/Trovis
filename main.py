@@ -732,9 +732,12 @@ async def ingest_traces(request: Request) -> IngestResponse:
       trovis.loop.title         plain-English title, used at loop creation
       trovis.loop.close         'done' or a reason string -> agent-attributed
                                 loop_closed event (payload.reason =
-                                'completed_by_agent'); the loop goes 'done'
-                                and later events with the same key start a
-                                NEW loop
+                                'completed_by_agent'); the loop goes 'done'.
+                                Late-exported spans with the same key attach
+                                to the closed loop within a short grace
+                                window (TROVIS_LOOP_CLOSE_GRACE_S, 60s)
+                                without reopening it; past the window the
+                                same key starts a NEW loop
       trovis.handoff.direction  'to_human' | 'to_agent' -> emits a
                                 handoff_initiated event in the span's loop
       trovis.handoff.target_id  who the work was handed to (optional). For

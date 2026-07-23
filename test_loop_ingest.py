@@ -193,9 +193,25 @@ with TestClient(main.app) as c:
           len(closed) == 1 and closed[0]["actor_type"] == "agent"
           and closed[0]["actor"] == "closer:main"
           and closed[0]["payload"].get("reason") == "completed_by_agent")
-    assert post(c, key, "closer", [span("more", T + 2 * MIN, {"trovis.run.id": "rc1"})]).status_code == 200
+    # Closed-loop rule v2: within the close grace window (default 60s —
+    # covers the plugin's late-exported deferred spans), a same-key span
+    # ATTACHES to the closed loop without reopening it.
+    assert post(c, key, "closer", [span("late", T + 90 * NS, {"trovis.run.id": "rc1"})]).status_code == 200
     ls = loops_for(account_id, "closer")
-    check("closed loops never accept new events: same run.id opens a NEW loop",
+    check("grace window: late span attaches to the closed loop, no phantom",
+          len(ls) == 1 and ls[0]["cached_state"] == "done"
+          and ls[0]["span_count"] == 3)
+    # Past the grace window (simulated by shrinking it), the same run.id
+    # opens a NEW loop — the v1 reopen rule still holds beyond grace.
+    import loops as loops_mod
+    _saved_grace = loops_mod.CLOSE_GRACE_S
+    loops_mod.CLOSE_GRACE_S = 0
+    try:
+        assert post(c, key, "closer", [span("more", T + 2 * MIN, {"trovis.run.id": "rc1"})]).status_code == 200
+    finally:
+        loops_mod.CLOSE_GRACE_S = _saved_grace
+    ls = loops_for(account_id, "closer")
+    check("past grace: same run.id opens a NEW loop",
           len(ls) == 2 and sorted(l["cached_state"] for l in ls) == ["done", "working"])
     check("close with a reason string keeps detail",
           post(c, key, "closer", [span("fin", T + 3 * MIN, {

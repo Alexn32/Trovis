@@ -146,6 +146,27 @@ def _ns_to_iso(ns: int | None) -> str | None:
     return datetime.fromtimestamp(int(ns) / 1_000_000_000, tz=timezone.utc).isoformat()
 
 
+def _ts_to_epoch(v: Any) -> float | None:
+    """TIMESTAMP column value -> unix epoch seconds, both dialects.
+
+    psycopg2 returns (naive) datetimes, SQLite returns 'YYYY-MM-DD HH:MM:SS'
+    text. Both backends write UTC (PG NOW() on a UTC server, SQLite
+    CURRENT_TIMESTAMP), so naive values are interpreted as UTC.
+    """
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = datetime.strptime(v[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.timestamp()
+    return None
+
+
 # "First seen" floor: 2025-01-01 UTC in ns. Trovis didn't exist before this, so
 # any span timestamped earlier is a bad-clock / wrong-epoch artifact (e.g. an
 # agent host with a skewed clock). MIN(start_time_unix) would otherwise surface
@@ -2266,8 +2287,15 @@ def _resolve_loop_for_span(
          event is < GAP_THRESHOLD old, else a new loop. (Per-agent_id —
          with no shared key there's nothing tying sub-agents together.)
 
-    Closed loops (closed_at set) never accept new spans — a recurring
-    external_id/run.id after a close starts a fresh loop.
+    Closed-loop rule, v2: a keyed span arriving within CLOSE_GRACE_S of its
+    loop's close ATTACHES to the closed loop without reopening it — the
+    record stays complete, the loop stays done. (v1 was "closed loops never
+    accept new spans"; that sent the plugin's late-exported spans — deferred
+    model_call ends waiting on transcript token usage, up to ~10s — into a
+    phantom 1-span 'working' loop per completed run.) Only spans past the
+    grace window start a fresh loop, so a genuinely recurring run.id still
+    gets a new loop. The close itself is never mutated; frozen loops skip
+    the last_event/recompute/match passes (see ingest_spans_with_loops).
     """
     lp = _loops_mod()
     key = attr(attrs, "loop.external_id") or attr(attrs, "run.id")
@@ -2286,6 +2314,24 @@ def _resolve_loop_for_span(
             tuple([service_name, key, *acct_args]),
         )
         row = cur.fetchone()
+        if row is None:
+            # Grace window: the newest CLOSED loop for this key, if it
+            # closed recently enough that this is a straggler export, not a
+            # new run. A negative age (clock drift) counts as recent.
+            cur.execute(
+                f"SELECT id, closed_at FROM loops WHERE service_name = {PH} "
+                f"AND external_id = {PH} AND closed_at IS NOT NULL {acct_sql} "
+                "ORDER BY id DESC LIMIT 1",
+                tuple([service_name, key, *acct_args]),
+            )
+            crow = cur.fetchone()
+            if crow is not None:
+                closed_epoch = _ts_to_epoch(crow["closed_at"])
+                if (
+                    closed_epoch is not None
+                    and time.time() - closed_epoch <= lp.CLOSE_GRACE_S
+                ):
+                    row = crow
     else:
         cutoff = ts_ns - lp.GAP_THRESHOLD_S * _NS_PER_S
         cur.execute(
@@ -2397,15 +2443,29 @@ def ingest_spans_with_loops(
         for loop_id, actor in executor_pairs:
             _upsert_loop_participant(cur, loop_id, "agent", actor, "executor")
 
+        # Loops already closed before this batch (grace-window attaches) are
+        # FROZEN — same philosophy as cached_state / workflow-match at
+        # terminal: the record grew, but state, match, and activity clocks
+        # stay exactly as they were at close.
+        frozen: set[int] = set()
+        for loop_id in affected:
+            cur.execute(
+                f"SELECT closed_at FROM loops WHERE id = {PH}", (loop_id,)
+            )
+            row = cur.fetchone()
+            if row is not None and row["closed_at"] is not None:
+                frozen.add(loop_id)
+
         # Workflow matching — same transaction, and deliberately BEFORE the
-        # close pass below: every affected loop is still open here (the
-        # resolver only returns open loops), so a loop that closes in its
-        # creation batch still records the match it had when it closed.
-        # After terminal, the match columns are frozen (see
-        # rematch_open_loop). Zero cost when no workflows are declared.
+        # close pass below: a loop that closes in its creation batch still
+        # records the match it had when it closed. Frozen (grace-attached)
+        # loops are skipped — their match froze at close. Zero cost when no
+        # workflows are declared.
         hint_sets = _current_workflow_hints(cur, account_id)
         if hint_sets:
             for loop_id in affected:
+                if loop_id in frozen:
+                    continue
                 cur.execute(
                     "SELECT id, service_name, agent_id, title, "
                     "workflow_id, workflow_version FROM loops "
@@ -2418,11 +2478,7 @@ def ingest_spans_with_loops(
 
         now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
         for loop_id, (actor, value, ts) in closes.items():
-            cur.execute(
-                f"SELECT closed_at FROM loops WHERE id = {PH}", (loop_id,)
-            )
-            row = cur.fetchone()
-            if row is None or row["closed_at"] is not None:
+            if loop_id in frozen:
                 continue  # already closed — never a second close event
             payload = {"reason": "completed_by_agent"}
             if value.strip().lower() not in _LOOP_CLOSE_BARE:
@@ -2431,12 +2487,18 @@ def ingest_spans_with_loops(
                 cur, loop_id, "loop_closed", "agent", actor,
                 payload=payload, account_id=account_id, event_time_unix=ts,
             )
+            # cached_state set here (not via the recompute below) so the
+            # final pass can skip closed loops uniformly.
             cur.execute(
-                f"UPDATE loops SET closed_at = {now_sql} WHERE id = {PH}",
+                f"UPDATE loops SET closed_at = {now_sql}, cached_state = 'done' "
+                f"WHERE id = {PH}",
                 (loop_id,),
             )
+            frozen.add(loop_id)
 
         for loop_id, batch_max in affected.items():
+            if loop_id in frozen:
+                continue  # closed loops: state + activity clock frozen
             cur.execute(
                 f"SELECT last_event_unix FROM loops WHERE id = {PH}", (loop_id,)
             )

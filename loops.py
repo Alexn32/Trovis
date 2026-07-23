@@ -79,6 +79,14 @@ ABANDON_THRESHOLD_S = int(
 # GAP: implicit grouping — a keyless span joins the agent's most recent open
 # implicit loop only if that loop's last event is newer than this.
 GAP_THRESHOLD_S = int(database.env("LOOP_GAP_THRESHOLD_S", "1800") or 1800)  # 30min
+# CLOSE GRACE: keyed spans arriving within this window after their loop
+# closed attach to the closed loop instead of opening a new one. Exists for
+# late-exported spans — the OpenClaw plugin defers ending model_call spans
+# up to ~10s waiting for transcript token usage, so they land a batch or two
+# after the close. Production measurement (2026-07-22): late spans arrive
+# p50 13s / p95 14s / max 34s after close — 60s covers everything observed
+# with ~2x headroom.
+CLOSE_GRACE_S = int(database.env("LOOP_CLOSE_GRACE_S", "60") or 60)
 
 
 def agent_actor(service_name: str, agent_id: str) -> str:

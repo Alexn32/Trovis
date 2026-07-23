@@ -1,0 +1,70 @@
+{
+ "pair": {
+  "done_id": 4467,
+  "phantom_id": 4468,
+  "external_id": "3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1",
+  "service_name": "openclaw-agent"
+ },
+ "spans": [
+  {
+   "span_name": "tool_call",
+   "trace_id": "cb53861630cb4a024c72bd6fe0fce938",
+   "span_id": "3af12223fab0a744",
+   "parent_span_id": null,
+   "kind": 1,
+   "start_time_unix": 1784824558750000000,
+   "end_time_unix": 1784824561740020270,
+   "status_code": 0,
+   "attributes": "{\"trovis.event.type\": \"tool_call\", \"trovis.tool.name\": \"exec\", \"trovis.tool.call_id\": \"toolu_01XiUcvudzghWKvRxqUbBhBh\", \"trovis.tool.param_keys\": \"[\\\"command\\\"]\", \"trovis.agent.id\": \"main\", \"trovis.run.id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1\", \"trovis.tool.success\": true, \"trovis.tool.duration_ms\": 3022, \"trovis.tool.result\": \"{\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"\\ud83d\\udd0d Polling Sent folder...\\\\n\\ud83d\\udce7 Found 14 recent sent emails\\\\n\\ud83d\\udcee Checking: Re: PromptQL Demo Inquiry to cade.lau@promptql.io\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: test to social1@peg.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: test to social@peg.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Re: Your Latest Cox Business Bill Is Here to doug@peg.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Re: Rian's timecard to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Rian's timecard to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Re: New employee Christine to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Rian's timecard to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: New employee Christine to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Shipping time to service@hammocks.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Hello to orders@hammocks.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Test to orders@hammocks.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Hammocks.com to susan.nielsen@cox.net\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: hammocks to susan.nielsen@cox.net\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\"}],\\\"details\\\":{\\\"status\\\":\\\"completed\\\",\\\"exitCode\\\":0,\\\"durationMs\\\":2951,\\\"aggregated\\\":\\\"\\ud83d\\udd0d Polling Sent folder...\\\\n\\ud83d\\udce7 Found 14 recent sent emails\\\\n\\ud83d\\udcee Checking: Re: PromptQL Demo Inquiry to cade.lau@promptql.io\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: test to social1@peg.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: test to social@peg.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Re: Your Latest Cox Business Bill Is Here to doug@peg.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Re: Rian's timecard to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Rian's timecard to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Re: New employee Christine to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Rian's timecard to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: New employee Christine to lnielsen@rushmarket.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Shipping time to service@hammocks.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Hello to orders@hammocks.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Test to orders@hammocks.com\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: Hammocks.com to susan.nielsen@cox.net\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\\n\\ud83d\\udcee Checking: hammocks to susan.nielsen@cox.net\\\\nError checking if logged: <urlopen error [Errno -2] Name or service not known>\\\\n\\u2139\\ufe0f  Not in prospects\\\",\\\"cwd\\\":\\\"/home/base/.openclaw/workspace\\\"}}\"}",
+   "loop_id": 4467
+  },
+  {
+   "span_name": "model_call",
+   "trace_id": "79122cc2811f374b4975b7626224ad54",
+   "span_id": "4587f4dd5d956514",
+   "parent_span_id": null,
+   "kind": 3,
+   "start_time_unix": 1784824555011000000,
+   "end_time_unix": 1784824558446000000,
+   "status_code": 2,
+   "attributes": "{\"trovis.event.type\": \"model_call\", \"gen_ai.system\": \"anthropic\", \"gen_ai.request.model\": \"claude-haiku-4-5\", \"trovis.model.call_id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1:model:1\", \"trovis.agent.id\": \"main\", \"trovis.run.id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1\", \"trovis.model.duration_ms\": 3435, \"trovis.model.outcome\": \"completed\", \"gen_ai.usage.input_tokens\": 6, \"gen_ai.usage.output_tokens\": 203, \"gen_ai.usage.total_tokens\": 21471, \"gen_ai.usage.cache_creation_input_tokens\": 846, \"gen_ai.usage.cache_read_input_tokens\": 20416, \"trovis.model.usage_source\": \"transcript\"}",
+   "loop_id": 4467
+  },
+  {
+   "span_name": "agent_run_complete",
+   "trace_id": "183d004a0334b3070440a03ef57181e4",
+   "span_id": "a58b573098ca0825",
+   "parent_span_id": null,
+   "kind": 1,
+   "start_time_unix": 1784824565768000000,
+   "end_time_unix": 1784824565768042108,
+   "status_code": 0,
+   "attributes": "{\"trovis.event.type\": \"agent_run_complete\", \"trovis.agent.id\": \"main\", \"trovis.run.id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1\", \"trovis.run.success\": true, \"trovis.loop.close\": \"done\"}",
+   "loop_id": 4467
+  },
+  {
+   "span_name": "llm_output",
+   "trace_id": "efc15081a7571d25106e92b141fd2ded",
+   "span_id": "7501f908da2504b4",
+   "parent_span_id": null,
+   "kind": 1,
+   "start_time_unix": 1784824565768000000,
+   "end_time_unix": 1784824565768034053,
+   "status_code": 0,
+   "attributes": "{\"trovis.event.type\": \"llm_output\", \"trovis.session.key\": \"agent:main:cron:85be2771-274a-4f8a-8978-64bbe8481965:run:3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1\", \"trovis.agent.id\": \"main\", \"trovis.run.id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1\", \"gen_ai.system\": \"anthropic\", \"gen_ai.request.model\": \"claude-haiku-4-5\", \"trovis.response.content_length\": 954, \"trovis.response.content\": \"I'll check the Gmail sent folder and auto-log any new emails to prospects.\\n**Poll Result:** 14 recent sent emails checked, but **network error occurred** \\u2014 the poller can't reach Supabase to check if addresses are in the prospects table.\\n\\n**Error:** `Name or service not known` (DNS/network connectivity issue)\\n\\n**What happened:**\\n- Gmail sent folder was scanned successfully\\n- Found 14 emails from the recent window\\n- Attempted to check each recipient against the prospects table\\n- Network call to Supabase failed before any logging could happen\\n\\n**Next step:** The network issue needs to be resolved before automatic logging can resume. Once connectivity is restored, the poller will retry and log any matching emails to prospect activities.\\n\\nWould you like me to:\\n1. **Check network status** \\u2014 Verify Supabase connectivity\\n2. **Review the poller logs** \\u2014 See if there are persistent issues\\n3. **Restart monitoring** \\u2014 Once network is confirmed working\"}",
+   "loop_id": 4467
+  },
+  {
+   "span_name": "model_call",
+   "trace_id": "e4b60c1b19852cc7127ef7de2f8a8448",
+   "span_id": "77a639b69ea70813",
+   "parent_span_id": null,
+   "kind": 3,
+   "start_time_unix": 1784824561743000000,
+   "end_time_unix": 1784824565478000000,
+   "status_code": 2,
+   "attributes": "{\"trovis.event.type\": \"model_call\", \"gen_ai.system\": \"anthropic\", \"gen_ai.request.model\": \"claude-haiku-4-5\", \"trovis.model.call_id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1:model:2\", \"trovis.agent.id\": \"main\", \"trovis.run.id\": \"3a9fa555-89c7-40d3-998e-f2b1cdb6d1c1\", \"trovis.model.duration_ms\": 3734, \"trovis.model.outcome\": \"completed\"}",
+   "loop_id": 4468
+  }
+ ]
+}
