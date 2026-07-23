@@ -103,6 +103,17 @@ check("straggler folds into the segment covering its timestamp",
       segs[0]["touches"] == [{"name": "exec", "count": 2}]
       and segs[0]["event_count"] == 2 and segs[2]["event_count"] == 1)
 
+# The handoff-carrying span lands at the SAME timestamp as handoff_initiated
+# (attrs ride the span). It is the act of handing off — it must never count
+# as agent activity resuming the wait it just started.
+segs = compute_loop_segments([
+    ev("loop_opened", 0),
+    ev("handoff_initiated", 10, direction="to_human", target_name="Sarah"),
+    act(10),  # the span that carried the handoff attributes
+])
+check("handoff-carrying span does not resume its own wait",
+      len(segs) == 2 and segs[1]["waiting"] is True and segs[1]["end_ns"] is None)
+
 # --- Ongoing waiting possession -----------------------------------------------
 
 segs = compute_loop_segments([ev("loop_opened", 0),
@@ -141,6 +152,12 @@ check("collapse: consecutive same-tool calls", "Ran a command · 3×" in sentenc
 check("collapse: consecutive LLM calls", "Worked through it (2 steps)" in sentences)
 check("single LLM call reads as one thought", "Thought it through" in sentences)
 check("unmapped tool falls back to Used {name}", "Used weird_tool" in sentences)
+check("MCP tool names render as Used {Server}",
+      loops.tool_sentence("mcp__shopify__lookup_orders_by_email") == "Used Shopify"
+      and loops.tool_sentence("mcp__creative-toolkit__generate_image", 2)
+      == "Used Creative Toolkit · 2×")
+check("malformed MCP name falls back safely",
+      loops.tool_sentence("mcp__broken") == "Used mcp__broken")
 check("agent_run_complete omitted (loop_closed covers it)",
       not any((e.get("payload") or {}).get("span_name") == "agent_run_complete" for e in n))
 check("lifecycle sentences present",

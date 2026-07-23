@@ -549,6 +549,11 @@ def compute_loop_segments(events: list[dict], now_ns: int | None = None) -> list
             if (
                 current is not None
                 and current["waiting"]
+                # STRICTLY after the wait began: the handoff-carrying span
+                # itself lands at the same timestamp as handoff_initiated
+                # (the attrs ride the span) — it's the act of handing off,
+                # never a resumption.
+                and ts > current["start_ns"]
                 and (ev.get("actor_type") or "agent") == "agent"
             ):
                 # Agent activity resumes possession from a waiting holder.
@@ -604,7 +609,15 @@ TOOL_SENTENCES = {
 
 
 def tool_sentence(name: str, count: int = 1) -> str:
-    base = TOOL_SENTENCES.get(name, f"Used {name}")
+    base = TOOL_SENTENCES.get(name)
+    if base is None and name.startswith("mcp__"):
+        # MCP-prefixed tools (mcp__{server}__{tool}): the server is the
+        # readable identity — "Used Shopify", not the full triple-barreled id.
+        server = name.split("__")[1] if name.count("__") >= 2 else ""
+        if server:
+            base = f"Used {server.replace('-', ' ').replace('_', ' ').title()}"
+    if base is None:
+        base = f"Used {name}"
     return base if count <= 1 else f"{base} · {count}×"
 
 

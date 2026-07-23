@@ -93,7 +93,7 @@ test('done under a minute rounds up instead of suppressing', () => {
 
 test('working/open: quiet live tone; abandoned: muted', () => {
   assert.deepEqual(loopStateMeta(loop({ cached_state: 'working' }), NOW).tone, 'live')
-  assert.equal(loopStateMeta(loop({ cached_state: 'open' }), NOW).label, 'running')
+  assert.equal(loopStateMeta(loop({ cached_state: 'open' }), NOW).label, 'working')
   const ab = loopStateMeta(loop({ cached_state: 'abandoned' }), NOW)
   assert.equal(ab.tone, 'muted')
   assert.equal(ab.label, 'abandoned')
@@ -284,4 +284,145 @@ test('cost: two decimals, omitted entirely when zero or sub-cent', () => {
   assert.equal(loopCostLabel(0), null)
   assert.equal(loopCostLabel(0.001), null)
   assert.equal(loopCostLabel(null), null)
+})
+
+// --- Board derivations (the board + story build) --------------------------------
+
+import {
+  barSegments,
+  boardGroups,
+  boardGroupSummary,
+  boardTitle,
+  chainDots,
+} from '../src/loops.js'
+
+const N = 1e9 // ns per second
+
+test('bar geometry: proportional widths, normalized to 100', () => {
+  const mini = [
+    { holder_type: 'agent', start_ns: 0, end_ns: 60 * N, waiting: false },
+    { holder_type: 'human', start_ns: 60 * N, end_ns: 120 * N, waiting: true },
+    { holder_type: 'agent', start_ns: 120 * N, end_ns: 240 * N, waiting: false },
+  ]
+  const slices = barSegments(mini, 300 * N)
+  assert.equal(slices.length, 3)
+  const total = slices.reduce((a, s) => a + s.pct, 0)
+  assert.ok(Math.abs(total - 100) < 1e-6)
+  assert.deepEqual(slices.map((s) => s.kind), ['agent', 'wait', 'agent'])
+  assert.ok(Math.abs(slices[2].pct - 2 * slices[0].pct) < 1e-6) // 120s vs 60s
+})
+
+test('bar geometry: 3% minimum floor for slivers', () => {
+  const mini = [
+    { holder_type: 'agent', start_ns: 0, end_ns: 1 * N, waiting: false }, // 0.1%
+    { holder_type: 'agent', start_ns: 1 * N, end_ns: 1000 * N, waiting: false },
+  ]
+  const slices = barSegments(mini, 2000 * N)
+  assert.ok(slices[0].pct >= 2.9, `sliver got ${slices[0].pct}%`)
+})
+
+test('bar geometry: trailing unfinished agent segment renders pending; live wait stays warm', () => {
+  const running = barSegments(
+    [{ holder_type: 'agent', start_ns: 0, end_ns: null, waiting: false }], 100 * N)
+  assert.equal(running[0].kind, 'pending')
+  const waiting = barSegments(
+    [{ holder_type: 'human', start_ns: 0, end_ns: null, waiting: true }], 100 * N)
+  assert.equal(waiting[0].kind, 'wait')
+})
+
+test('bar geometry: abandoned loops color the final segment error', () => {
+  const slices = barSegments(
+    [
+      { holder_type: 'agent', start_ns: 0, end_ns: 50 * N, waiting: false },
+      { holder_type: 'agent', start_ns: 50 * N, end_ns: 100 * N, waiting: false },
+    ],
+    100 * N,
+    'abandoned',
+  )
+  assert.equal(slices[1].kind, 'error')
+})
+
+test('bar geometry: empty/null segments_mini renders one neutral bar (legacy loops)', () => {
+  assert.deepEqual(barSegments(null), [{ kind: 'pending', pct: 100 }])
+  assert.deepEqual(barSegments([]), [{ kind: 'pending', pct: 100 }])
+})
+
+test('chain collapses past 4 dots, current holder marked', () => {
+  const seg = (i, waiting = false) => ({
+    holder_type: waiting ? 'human' : 'agent',
+    start_ns: i, end_ns: i + 1, waiting,
+  })
+  const short = chainDots([seg(0), seg(1, true), seg(2)])
+  assert.equal(short.dots.length, 3)
+  assert.equal(short.collapsed, false)
+  assert.ok(short.dots[2].current && !short.dots[0].current)
+  const long = chainDots([seg(0), seg(1), seg(2), seg(3), seg(4), seg(5)])
+  assert.equal(long.collapsed, true)
+  assert.equal(long.dots.length, 4)
+  assert.ok(long.dots[3].current)
+})
+
+test('unknown/future states render neutrally, never crash', () => {
+  const m = loopStateMeta(loop({ cached_state: 'awaiting_system' }), NOW)
+  assert.equal(m.tone, 'muted')
+  assert.equal(m.label, 'awaiting system') // humanized, no underscore
+  assert.ok(!m.label.includes('_'))
+})
+
+test('board groups: matched workflows sort above unmatched agent groups', () => {
+  const loops2 = [
+    loop({ id: 1, service_name: 'free-bot' }),
+    loop({ id: 2, service_name: 'wf-bot', workflow_id: 9, workflow_name: 'Invoice run' }),
+    loop({ id: 3, service_name: 'wf-bot', workflow_id: 9, workflow_name: 'Invoice run' }),
+  ]
+  const groups = boardGroups(loops2, NOW)
+  assert.equal(groups.length, 2)
+  assert.equal(groups[0].name, 'Invoice run')
+  assert.equal(groups[0].matched, true)
+  assert.equal(groups[0].loops.length, 2)
+  assert.equal(groups[1].name, 'free-bot')
+})
+
+test('board groups: attention-first within a group', () => {
+  const loops2 = [
+    loop({ id: 1, workflow_id: 9, workflow_name: 'W', cached_state: 'done' }),
+    loop({ id: 2, workflow_id: 9, workflow_name: 'W', cached_state: 'stalled', stalled_for_s: 100 }),
+  ]
+  const g = boardGroups(loops2, NOW)[0]
+  assert.equal(g.loops[0].id, 2)
+})
+
+test('group summary counts and grammar', () => {
+  const today = new Date(NOW).toISOString()
+  const g = {
+    loops: [
+      loop({ created_at: today, cached_state: 'awaiting_human', stalled_for_s: 5 }),
+      loop({ created_at: today, cached_state: 'done' }),
+      loop({ created_at: '2020-01-01 00:00:00', cached_state: 'done' }),
+    ],
+  }
+  assert.equal(boardGroupSummary(g, NOW), '2 today · 1 needs you')
+  const quiet = { loops: [loop({ created_at: today, cached_state: 'done' })] }
+  assert.equal(boardGroupSummary(quiet, NOW), '1 today · all moving')
+})
+
+test('board title: server title wins; untitled open loops show agent identity', () => {
+  assert.equal(boardTitle(loop({ title: 'Reconcile July invoices' })), 'Reconcile July invoices')
+  assert.equal(boardTitle(loop({ title: null, service_name: 'ops-bot' })), 'ops-bot')
+  assert.equal(
+    boardTitle(loop({ title: null, service_name: 'ops-bot', agent_id: 'helper' })),
+    'ops-bot · helper',
+  )
+})
+
+test('jargon: no raw identifiers in board strings', () => {
+  const strings = [
+    boardGroupSummary({ loops: [loop({ cached_state: 'stalled', stalled_for_s: 5 })] }, NOW),
+    loopStateMeta(loop({ cached_state: 'awaiting_system' }), NOW).label,
+    boardTitle(loop({ title: null })),
+  ]
+  for (const s of strings) {
+    assert.ok(!/model_call|tool_call|llm_output|span|telemetry/i.test(s), s)
+    assert.ok(!s.includes('_'), `underscore leaked: ${s}`)
+  }
 })

@@ -1,25 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
-import { ActivityRow, LoopList, WorkflowRollupRow } from './LoopFeed.jsx'
-import StuckPage from './StuckPage.jsx'
-import { groupLoopsByWorkflow, parseTs, sortLoopsAttentionFirst, stuckCount } from './loops.js'
+import { ActivityRow } from './LoopFeed.jsx'
+import LoopBoard from './LoopBoard.jsx'
+import { ATTENTION_STATES, parseTs, stuckCount } from './loops.js'
 
-// The Work tab — one home for everything the agents are doing, at three
-// zoom levels behind a segmented control:
-//   Loops (default)  — the loop feed exactly as shipped: attention-first,
-//                      inline expansion, Mark done, Ungrouped activity below.
-//   By workflow      — the same loops rolled up per agent identity
-//                      (client-side group-by; see loops.workflowGroupKey for
-//                      the v1 heuristic). No extra fetching.
-//   Stuck            — the stalled/awaiting-you filter (StuckPage embedded),
-//                      with a live count on the segment label.
-// This tab replaced the separate "Workflows" and "Stuck" tabs; the legacy
-// workflow-mapping visualization (Workflows.jsx) is parked awaiting
-// reintegration under the By-workflow view.
+// The Work tab: the board. Loops group under workflow headers — the board
+// IS the loop feed and the by-workflow view in one — and clicking a row
+// opens the loop's story. Stuck is a filter toggle on the board header
+// (with its live count), not a separate view. Below the board, loopless
+// spans survive as "Ungrouped activity" until pre-loop data ages out.
 
 const REFRESH_MS = 30000
 
-// Same divider helper as the Work Feed overlay.
 function dayLabel(iso) {
   const d = new Date(parseTs(iso))
   if (Number.isNaN(d.getTime())) return 'Earlier'
@@ -31,16 +23,13 @@ function dayLabel(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-const VIEWS = [
-  ['loops', 'Loops'],
-  ['workflow', 'By workflow'],
-  ['stuck', 'Stuck'],
-]
-
-export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser }) {
+export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser, onConnectAgent }) {
   const [loops, setLoops] = useState(null)
   const [activity, setActivity] = useState(null)
   const [error, setError] = useState(null)
+  // Legacy persisted sub-views ('loops'/'workflow') both mean the board now;
+  // 'stuck' arrives as the filter being on.
+  const stuckOnly = view === 'stuck'
 
   const load = useCallback(async () => {
     try {
@@ -64,9 +53,6 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser 
     return () => clearInterval(id)
   }, [load])
 
-  const active = VIEWS.some(([id]) => id === view) ? view : 'loops'
-  const stuck = stuckCount(loops || [])
-
   if (loops === null) {
     return (
       <div className="dash">
@@ -78,8 +64,10 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser 
     )
   }
 
-  const orderedLoops = sortLoopsAttentionFirst(loops)
-  const groups = groupLoopsByWorkflow(orderedLoops)
+  const stuck = stuckCount(loops)
+  const shown = stuckOnly
+    ? loops.filter((l) => ATTENTION_STATES.includes(l.cached_state))
+    : loops
   const ungrouped = (activity || []).filter((it) => it.loop_id == null)
 
   return (
@@ -88,89 +76,67 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser 
         <h1 className="dash-hello" style={{ margin: 0 }}>
           Work
         </h1>
-        <div className="wf2-view-toggle" role="tablist" aria-label="Work views">
-          {VIEWS.map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={active === id}
-              className={active === id ? 'is-on' : ''}
-              onClick={() => onViewChange(id)}
-            >
-              {id === 'stuck' && stuck > 0 ? `${label} · ${stuck}` : label}
-            </button>
-          ))}
-        </div>
+        <button
+          type="button"
+          className={`board-stuck-toggle ${stuckOnly ? 'is-on' : ''}`}
+          aria-pressed={stuckOnly}
+          onClick={() => onViewChange(stuckOnly ? 'loops' : 'stuck')}
+        >
+          Stuck{stuck > 0 ? ` · ${stuck}` : ''}
+        </button>
       </div>
 
-      {active === 'stuck' ? (
-        <StuckPage onOpenAgent={onOpenAgent} sessionUser={sessionUser} embedded />
-      ) : error && orderedLoops.length === 0 ? (
+      {error && loops.length === 0 ? (
         <div className="dash-card">
           <div className="dash-empty pad">{error}</div>
         </div>
-      ) : orderedLoops.length === 0 ? (
+      ) : loops.length === 0 ? (
         <div className="dash-card">
-          <div className="dash-empty pad">No loops yet. Agent activity will appear here.</div>
-        </div>
-      ) : active === 'workflow' ? (
-        <div className="dash-card">
-          <div className="loop-list">
-            {groups.map((g) => (
-              <WorkflowRollupRow
-                key={g.key}
-                group={g}
-                onOpenAgent={onOpenAgent}
-                sessionUser={sessionUser}
-                onChanged={load}
-              />
-            ))}
+          <div className="dash-empty pad">
+            No loops yet.{' '}
+            <button type="button" className="btn-link-inline" onClick={onConnectAgent}>
+              Connect an agent to start the record →
+            </button>
           </div>
         </div>
+      ) : stuckOnly && shown.length === 0 ? (
+        <div className="dash-card">
+          <div className="dash-empty pad">Nothing is stuck. All loops are moving.</div>
+        </div>
       ) : (
-        <>
-          <section className="dash-section">
-            <div className="dash-section-head">
-              <span className="dash-section-title">Loops</span>
-            </div>
-            <div className="dash-card">
-              <LoopList
-                loops={orderedLoops}
-                onOpenAgent={onOpenAgent}
-                sessionUser={sessionUser}
-                onChanged={load}
-              />
-            </div>
-          </section>
+        <LoopBoard
+          loops={shown}
+          sessionUser={sessionUser}
+          onOpenAgent={onOpenAgent}
+          onChanged={load}
+        />
+      )}
 
-          {ungrouped.length > 0 && (
-            <section className="dash-section">
-              <div className="dash-section-head">
-                <span className="dash-section-title">Ungrouped activity</span>
-              </div>
-              <div className="dash-card wfp-activity">
-                {(() => {
-                  let lastDay = null
-                  const out = []
-                  ungrouped.forEach((it, i) => {
-                    const day = dayLabel(it.time)
-                    if (day !== lastDay) {
-                      lastDay = day
-                      out.push(
-                        <div key={`d-${i}`} className="wfp-divider">
-                          {day}
-                        </div>,
-                      )
-                    }
-                    out.push(<ActivityRow key={`a-${i}`} item={it} onOpenAgent={onOpenAgent} />)
-                  })
-                  return out
-                })()}
-              </div>
-            </section>
-          )}
-        </>
+      {!stuckOnly && ungrouped.length > 0 && (
+        <section className="dash-section">
+          <div className="dash-section-head">
+            <span className="dash-section-title">Ungrouped activity</span>
+          </div>
+          <div className="dash-card wfp-activity">
+            {(() => {
+              let lastDay = null
+              const out = []
+              ungrouped.forEach((it, i) => {
+                const day = dayLabel(it.time)
+                if (day !== lastDay) {
+                  lastDay = day
+                  out.push(
+                    <div key={`d-${i}`} className="wfp-divider">
+                      {day}
+                    </div>,
+                  )
+                }
+                out.push(<ActivityRow key={`a-${i}`} item={it} onOpenAgent={onOpenAgent} />)
+              })
+              return out
+            })()}
+          </div>
+        </section>
       )}
     </div>
   )

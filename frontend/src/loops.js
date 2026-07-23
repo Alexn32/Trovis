@@ -42,7 +42,8 @@ export function fmtAge(seconds) {
 export function fmtAgeLong(seconds) {
   const s = Math.max(0, Math.floor(seconds))
   const unit = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
-  if (s < 60) return 'moments'
+  // Round up, never suppress — same rule as the pill's "done · under a minute".
+  if (s < 60) return 'under a minute'
   const m = Math.floor(s / 60)
   if (m < 60) return unit(m, 'minute')
   const h = Math.floor(m / 60)
@@ -111,6 +112,126 @@ export function loopCostLabel(v) {
   return `$${n.toFixed(2)}`
 }
 
+// ---------------------------------------------------------------------------
+// Board derivations (pure — the board and story render these)
+// ---------------------------------------------------------------------------
+
+/**
+ * Possession-bar geometry from segments_mini. Returns proportional slices:
+ *   [{kind: 'agent'|'wait'|'pending'|'error', pct: number}]
+ * Widths are proportional to duration with a 3% floor, normalized to 100.
+ * A trailing unfinished agent segment renders 'pending' (gray, pulsing edge);
+ * a live wait keeps the warning kind — attention must stay visible. When the
+ * loop is abandoned, the final slice becomes 'error'.
+ */
+export function barSegments(mini, nowNs = Date.now() * 1e6, loopState = null) {
+  const segs = Array.isArray(mini) ? mini.filter((s) => s && s.start_ns != null) : []
+  if (segs.length === 0) return [{ kind: 'pending', pct: 100 }]
+  const start = Math.min(...segs.map((s) => s.start_ns))
+  const end = Math.max(...segs.map((s) => (s.end_ns == null ? nowNs : s.end_ns)))
+  const total = Math.max(1, end - start)
+  let slices = segs.map((s) => {
+    const ongoing = s.end_ns == null
+    const dur = Math.max(0, (ongoing ? nowNs : s.end_ns) - s.start_ns)
+    let kind = s.waiting ? 'wait' : 'agent'
+    if (ongoing && !s.waiting) kind = 'pending'
+    return { kind, pct: Math.max(3, (dur / total) * 100) }
+  })
+  if (loopState === 'abandoned' && slices.length > 0) {
+    slices[slices.length - 1] = { ...slices[slices.length - 1], kind: 'error' }
+  }
+  const sum = slices.reduce((a, s) => a + s.pct, 0)
+  slices = slices.map((s) => ({ ...s, pct: (s.pct / sum) * 100 }))
+  return slices
+}
+
+/**
+ * Possession chain dots from segments_mini. Cap at 4 dots; longer chains
+ * collapse the middle to a '··' marker. The current (last) holder is marked.
+ */
+export function chainDots(mini, cap = 4) {
+  const segs = Array.isArray(mini) ? mini : []
+  const dots = segs.map((s, i) => ({
+    holder_type: s.holder_type || 'agent',
+    waiting: Boolean(s.waiting),
+    current: i === segs.length - 1,
+  }))
+  if (dots.length <= cap) return { dots, collapsed: false }
+  return { dots: [...dots.slice(0, 2), ...dots.slice(-2)], collapsed: true }
+}
+
+export function initialsOf(label) {
+  const words = String(label || '')
+    .split(/[\s\-_:./]+/)
+    .filter(Boolean)
+  if (words.length === 0) return '?'
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
+  return (words[0][0] + words[1][0]).toUpperCase()
+}
+
+export function agentLabel(loop) {
+  return loop?.agent_id && loop.agent_id !== 'main'
+    ? `${loop.service_name} · ${loop.agent_id}`
+    : loop?.service_name || 'agent'
+}
+
+// Board row title. Server-generated titles are the record; the only client
+// fallback left is the agent identity for loops the server hasn't titled yet
+// (open, pre-handoff — titles land at first handoff or terminal state).
+export function boardTitle(loop) {
+  return loop?.title || agentLabel(loop)
+}
+
+/**
+ * Board grouping: loops matched to a declared workflow group under its name;
+ * unmatched loops group under agent identity. Matched groups sort above
+ * unmatched; group order and in-group order both derive from the
+ * attention-first sorted list (first-encounter), so groups needing a human
+ * float up and rows inside run attention-first then newest.
+ */
+export function boardGroups(loops, nowMs = Date.now()) {
+  const ordered = sortLoopsAttentionFirst(loops, nowMs)
+  const groups = new Map()
+  for (const l of ordered) {
+    const matched = l?.workflow_id != null
+    const key = matched ? `wf:${l.workflow_id}` : `agent:${workflowGroupKey(l)}`
+    let g = groups.get(key)
+    if (!g) {
+      g = {
+        key,
+        matched,
+        name: matched ? l.workflow_name || 'Workflow' : agentLabel(l),
+        loops: [],
+      }
+      groups.set(key, g)
+    }
+    g.loops.push(l)
+  }
+  const all = [...groups.values()].filter((g) => g.loops.length > 0)
+  return [...all.filter((g) => g.matched), ...all.filter((g) => !g.matched)]
+}
+
+// "14 today · 1 needs you" / "14 today · all moving"
+export function boardGroupSummary(group, nowMs = Date.now()) {
+  const today = new Date(nowMs)
+  const isToday = (iso) => {
+    const t = parseTs(iso)
+    if (Number.isNaN(t)) return false
+    const d = new Date(t)
+    return (
+      d.getFullYear() === today.getFullYear() &&
+      d.getMonth() === today.getMonth() &&
+      d.getDate() === today.getDate()
+    )
+  }
+  const n = group.loops.filter((l) => isToday(l.created_at)).length
+  const needs = stuckCount(group.loops)
+  const left = n === 1 ? '1 today' : `${n} today`
+  const right =
+    needs > 0 ? `${needs} ${needs === 1 ? 'needs' : 'need'} you` : 'all moving'
+  return `${left} · ${right}`
+}
+
 /**
  * State → presentation. tone drives the CSS class:
  *   'warning' — status warning color + attention left-border
@@ -131,7 +252,7 @@ export function loopStateMeta(loop, nowMs = Date.now()) {
       return { label: withAge('waiting on an agent'), tone: 'muted', attention: false }
     case 'working':
     case 'open':
-      return { label: 'running', tone: 'live', attention: false }
+      return { label: 'working', tone: 'live', attention: false }
     case 'done': {
       const dur = fmtDurationShort(loopDurationSeconds(loop))
       return { label: dur ? `done · ${dur}` : 'done', tone: 'muted', attention: false }

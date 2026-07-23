@@ -334,6 +334,7 @@ function AppInner() {
         onViewChange={setWorkView}
         onOpenAgent={openDetail}
         sessionUser={Boolean(me?.user)}
+        onConnectAgent={openAddAgent}
       />
     )
   } else if (tab === 'dashboard') {
