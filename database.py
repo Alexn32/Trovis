@@ -1041,9 +1041,7 @@ CREATE TABLE IF NOT EXISTS loops (
     initiated_by_type TEXT    NOT NULL DEFAULT 'agent'
                       CHECK (initiated_by_type IN ('agent', 'human')),
     initiated_by      TEXT    NOT NULL DEFAULT '',
-    cached_state      TEXT    NOT NULL DEFAULT 'open'
-                      CHECK (cached_state IN ('open', 'working', 'awaiting_human',
-                             'awaiting_agent', 'stalled', 'done', 'abandoned')),
+    cached_state      TEXT    NOT NULL DEFAULT 'open',
     last_event_unix   BIGINT,
     created_at        TIMESTAMP DEFAULT NOW(),
     closed_at         TIMESTAMP
@@ -1061,9 +1059,7 @@ CREATE TABLE IF NOT EXISTS loops (
     initiated_by_type TEXT    NOT NULL DEFAULT 'agent'
                       CHECK (initiated_by_type IN ('agent', 'human')),
     initiated_by      TEXT    NOT NULL DEFAULT '',
-    cached_state      TEXT    NOT NULL DEFAULT 'open'
-                      CHECK (cached_state IN ('open', 'working', 'awaiting_human',
-                             'awaiting_agent', 'stalled', 'done', 'abandoned')),
+    cached_state      TEXT    NOT NULL DEFAULT 'open',
     last_event_unix   INTEGER,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     closed_at         TIMESTAMP
@@ -1111,7 +1107,7 @@ _LOOP_PARTICIPANTS_DDL_PG = """
 CREATE TABLE IF NOT EXISTS loop_participants (
     id               SERIAL  PRIMARY KEY,
     loop_id          INTEGER NOT NULL REFERENCES loops(id),
-    participant_type TEXT    NOT NULL CHECK (participant_type IN ('agent', 'human')),
+    participant_type TEXT    NOT NULL,
     participant      TEXT    NOT NULL,
     role             TEXT    NOT NULL DEFAULT 'executor'
                      CHECK (role IN ('initiator', 'executor', 'reviewer')),
@@ -1124,7 +1120,7 @@ _LOOP_PARTICIPANTS_DDL_SQLITE = """
 CREATE TABLE IF NOT EXISTS loop_participants (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     loop_id          INTEGER NOT NULL REFERENCES loops(id),
-    participant_type TEXT    NOT NULL CHECK (participant_type IN ('agent', 'human')),
+    participant_type TEXT    NOT NULL,
     participant      TEXT    NOT NULL,
     role             TEXT    NOT NULL DEFAULT 'executor'
                      CHECK (role IN ('initiator', 'executor', 'reviewer')),
@@ -1399,6 +1395,30 @@ def init_db() -> None:
         _try_add_column(cur, "loops", "workflow_id", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "loops", "workflow_version", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "loops", "workflow_confidence", "REAL DEFAULT NULL")
+        # Grown vocabularies: cached_state gained 'awaiting_system' and
+        # participant_type gained 'tool'. Inline CHECKs can't be widened in
+        # place, so both moved to code enforcement (loops.STATES /
+        # PARTICIPANT_TYPES — the loop_events.type precedent). Existing DBs
+        # still carry the old CHECKs: PG drops them idempotently; SQLite gets
+        # a one-time guarded rebuild.
+        if USE_POSTGRES:
+            cur.execute(
+                "ALTER TABLE loops DROP CONSTRAINT IF EXISTS loops_cached_state_check"
+            )
+            cur.execute(
+                "ALTER TABLE loop_participants "
+                "DROP CONSTRAINT IF EXISTS loop_participants_participant_type_check"
+            )
+        else:
+            _sqlite_rebuild_if_check(
+                cur, "loops", "cached_state IN", _LOOPS_DDL_SQLITE
+            )
+            _sqlite_rebuild_if_check(
+                cur,
+                "loop_participants",
+                "participant_type IN",
+                _LOOP_PARTICIPANTS_DDL_SQLITE,
+            )
         # Workloops: link each span to the loop it belongs to. Nullable —
         # historical spans are never backfilled, and non-ingest writers
         # (MCP synthetic spans) stay loop-less. Set at INSERT time only;
@@ -1711,6 +1731,44 @@ def get_cost_audit(
         "unpriced_models": unpriced_models,
         "unpriced_token_total": sum(m["tokens"] for m in unpriced_models),
     }
+
+
+def _sqlite_rebuild_if_check(cur, table: str, marker: str, new_ddl: str) -> None:
+    """One-time guarded table rebuild for SQLite, which cannot drop a CHECK.
+
+    If the live table's DDL still contains `marker` (the old CHECK text),
+    rebuild it from `new_ddl` (which no longer carries that CHECK):
+    create-new → copy → drop → rename. Columns added post-launch via
+    _try_add_column are diffed from PRAGMA and re-added to the new table
+    BEFORE the copy, so no column (or its data — e.g. the frozen workflow
+    match cache) is ever lost. Indexes drop with the old table and are
+    recreated by the _INDEXES pass later in init_db. Idempotent: once the
+    marker is gone, this is a single PRAGMA read. Identifiers come from
+    sqlite_master/PRAGMA, never user input.
+    """
+    cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+    )
+    row = cur.fetchone()
+    if row is None or marker not in (row["sql"] or ""):
+        return
+    tmp = f"{table}__rebuild"
+    cur.execute(f"DROP TABLE IF EXISTS {tmp}")
+    cur.execute(new_ddl.replace(f"CREATE TABLE IF NOT EXISTS {table}", f"CREATE TABLE {tmp}", 1))
+    cur.execute(f"PRAGMA table_info({table})")
+    old_cols = {r["name"]: dict(r) for r in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({tmp})")
+    tmp_cols = {r["name"] for r in cur.fetchall()}
+    for name, info in old_cols.items():
+        if name not in tmp_cols:
+            decl = info.get("type") or "TEXT"
+            if info.get("dflt_value") is not None:
+                decl += f" DEFAULT {info['dflt_value']}"
+            cur.execute(f"ALTER TABLE {tmp} ADD COLUMN {name} {decl}")
+    cols = ", ".join(old_cols)
+    cur.execute(f"INSERT INTO {tmp} ({cols}) SELECT {cols} FROM {table}")
+    cur.execute(f"DROP TABLE {table}")
+    cur.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
 
 
 def _try_add_column(cur, table: str, column: str, type_decl: str) -> None:
@@ -2257,6 +2315,14 @@ def append_loop_event(
 def _upsert_loop_participant(
     cur, loop_id: int, participant_type: str, participant: str, role: str
 ) -> None:
+    # Vocabulary enforced here in code (participant_type's CHECK was dropped
+    # when 'tool' arrived — grown vocabularies follow the loop_events.type
+    # precedent). role stays a frozen three-value CHECK in the schema.
+    lp = _loops_mod()
+    if participant_type not in lp.PARTICIPANT_TYPES:
+        raise ValueError(f"unknown participant type: {participant_type!r}")
+    if role not in lp.PARTICIPANT_ROLES:
+        raise ValueError(f"unknown participant role: {role!r}")
     # Same-syntax upsert on both backends (SQLite >= 3.24, like _seed_pricing).
     cur.execute(
         "INSERT INTO loop_participants (loop_id, participant_type, participant, role) "
@@ -2400,6 +2466,7 @@ def ingest_spans_with_loops(
         executor_pairs: set[tuple[int, str]] = set()
         closes: dict[int, tuple[str, str, int]] = {}  # loop_id -> (actor, value, ts)
         handoff_loops: set[int] = set()  # first-handoff title trigger (post-tx)
+        tool_pairs: set[tuple[int, str]] = set()  # (loop_id, tool) cast upserts
 
         for s in spans:
             attrs = s.get("attributes") or {}
@@ -2414,6 +2481,16 @@ def ingest_spans_with_loops(
             affected[loop_id] = max(affected.get(loop_id, 0), ts)
             actor = lp.agent_actor(svc, aid)
             executor_pairs.add((loop_id, actor))
+
+            # Tools join the cast: every named tool-call span upserts a
+            # 'tool' participant (identifier = the tool name as spans carry
+            # it, lowercased, MCP prefixes verbatim). span_tool is the same
+            # identifier segments and narration use, and already excludes
+            # LLM-call spans. Tools are participants, almost never holders —
+            # the one exception is a declared to_system handoff.
+            tool = lp.span_tool(s.get("span_name"), attr(attrs, "tool.name"))
+            if tool:
+                tool_pairs.add((loop_id, tool))
 
             # handoff block -> handoff_initiated event in the span's loop.
             direction = attr(attrs, "handoff.direction")
@@ -2444,6 +2521,8 @@ def ingest_spans_with_loops(
 
         for loop_id, actor in executor_pairs:
             _upsert_loop_participant(cur, loop_id, "agent", actor, "executor")
+        for loop_id, tool in tool_pairs:
+            _upsert_loop_participant(cur, loop_id, "tool", tool, "executor")
 
         # Loops already closed before this batch (grace-window attaches) are
         # FROZEN — same philosophy as cached_state / workflow-match at
@@ -3147,7 +3226,11 @@ def get_stalled_loops(
 ) -> list[dict[str, Any]]:
     """Loops needing attention (stalled, or waiting on a human), oldest
     stall first. stalled_for_s = now - last event timestamp."""
-    sql = _LOOP_SELECT + " WHERE l.cached_state IN ('stalled', 'awaiting_human')"
+    # awaiting_system counts as stuck: a loop blocked on a dead webhook or a
+    # rate limit needs a human to notice exactly like one waiting on a person.
+    sql = _LOOP_SELECT + (
+        " WHERE l.cached_state IN ('stalled', 'awaiting_human', 'awaiting_system')"
+    )
     args: list[Any] = []
     if account_id is not None:
         sql += f" AND l.account_id = {PH}"

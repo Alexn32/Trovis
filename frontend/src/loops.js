@@ -15,8 +15,9 @@ export const LOOP_STATES = [
 ]
 
 // States that mean "a person should look at this" — warning treatment and
-// attention-first sorting.
-export const ATTENTION_STATES = ['stalled', 'awaiting_human']
+// attention-first sorting. awaiting_system is in the stuck set: a loop
+// blocked on a dead webhook needs a human to notice like any other wait.
+export const ATTENTION_STATES = ['stalled', 'awaiting_human', 'awaiting_system']
 export const TERMINAL_STATES = ['done', 'abandoned']
 
 // Backend timestamps are "YYYY-MM-DD HH:MM:SS" (SQLite) or ISO (Postgres).
@@ -250,6 +251,8 @@ export function loopStateMeta(loop, nowMs = Date.now()) {
       return { label: withAge('stalled'), tone: 'warning', attention: true }
     case 'awaiting_agent':
       return { label: withAge('waiting on an agent'), tone: 'muted', attention: false }
+    case 'awaiting_system':
+      return { label: withAge('waiting on a system'), tone: 'warning', attention: true }
     case 'working':
     case 'open':
       return { label: 'working', tone: 'live', attention: false }

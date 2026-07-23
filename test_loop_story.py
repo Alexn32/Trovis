@@ -103,6 +103,20 @@ check("straggler folds into the segment covering its timestamp",
       segs[0]["touches"] == [{"name": "exec", "count": 2}]
       and segs[0]["event_count"] == 2 and segs[2]["event_count"] == 1)
 
+# to_system wait: the one case where a tool/system HOLDS the work.
+segs = compute_loop_segments([
+    ev("loop_opened", 0),
+    act(5, tool="exec"),
+    ev("handoff_initiated", 10, direction="to_system", target_id="stripe"),
+    act(20),  # agent activity resumes possession from the system
+    ev("loop_closed", 30),
+])
+check("to_system opens a waiting segment held by the named system",
+      len(segs) == 3 and segs[1]["holder_type"] == "system"
+      and segs[1]["holder"] == "stripe" and segs[1]["waiting"] is True)
+check("agent activity resumes from a system wait",
+      segs[1]["end_ns"] == T + 20 and segs[2]["holder_type"] == "agent")
+
 # The handoff-carrying span lands at the SAME timestamp as handoff_initiated
 # (attrs ride the span). It is the act of handing off — it must never count
 # as agent activity resuming the wait it just started.

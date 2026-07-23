@@ -79,6 +79,28 @@ check("pending to_human wins over later pending to_agent (rule order)",
              ev("handoff_initiated", T0 + 10, direction="to_agent")])
       == "awaiting_human")
 
+# --- to_system mirrors (symmetric with the human/agent rules) ---
+h_sys = [ev("loop_opened", T0), ev("handoff_initiated", T0 + 5, direction="to_system",
+             target_id="stripe")]
+check("unresolved to_system handoff -> awaiting_system",
+      state(h_sys) == "awaiting_system")
+check("to_system at exactly STALL_THRESHOLD -> still awaiting_system",
+      state(h_sys, now_ns=T0 + 5 + STALL_NS) == "awaiting_system")
+check("to_system one ns past STALL_THRESHOLD -> stalled",
+      state(h_sys, now_ns=T0 + 5 + STALL_NS + 1) == "stalled")
+check("handoff_completed resolves to_system -> working",
+      state(h_sys + [ev("handoff_completed", T0 + 10)]) == "working")
+check("handoff_declined resolves to_system -> working",
+      state(h_sys + [ev("handoff_declined", T0 + 10)]) == "working")
+check("to_system resolution matches by handoff_id",
+      state([ev("handoff_initiated", T0 + 1, direction="to_system", handoff_id="s1"),
+             ev("handoff_initiated", T0 + 2, direction="to_agent", handoff_id="a1"),
+             ev("handoff_completed", T0 + 3, handoff_id="a1")]) == "awaiting_system")
+check("pending to_human wins over pending to_system (rule order)",
+      state([ev("handoff_initiated", T0, direction="to_system"),
+             ev("handoff_initiated", T0 + 10, direction="to_human")])
+      == "awaiting_human")
+
 # --- Handoff resolution ---
 for res in ("handoff_accepted", "handoff_completed", "handoff_declined"):
     check(f"{res} resolves the handoff -> working",

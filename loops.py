@@ -29,11 +29,15 @@ logger = logging.getLogger("trovis.loops")
 
 NS_PER_S = 1_000_000_000
 
+# cached_state vocabulary. Enforced in CODE (the writers), not a SQL CHECK —
+# this list grew once already (awaiting_system) and SQLite can't alter a
+# CHECK without a table rebuild. Same treatment as loop_events.type.
 STATES = (
     "open",
     "working",
     "awaiting_human",
     "awaiting_agent",
+    "awaiting_system",
     "stalled",
     "done",
     "abandoned",
@@ -43,9 +47,10 @@ TERMINAL_STATES = ("done", "abandoned")
 # loop_events.type vocabulary. Enforced in code (database.append_loop_event
 # raises ValueError on unknown types) rather than a SQL CHECK: this list will
 # grow, and SQLite can't alter a CHECK without a full table rebuild — the repo
-# has no migration tooling beyond idempotent startup DDL. The stable
-# vocabularies (cached_state, actor_type, participant_type, role) DO get
-# CHECKs in the schema.
+# has no migration tooling beyond idempotent startup DDL. cached_state and
+# participant_type moved to the same code-enforced posture when they grew
+# (awaiting_system / 'tool'); only truly frozen vocabularies (actor_type,
+# role) keep CHECKs in the schema.
 EVENT_TYPES = (
     "loop_opened",
     "loop_closed",
@@ -62,7 +67,18 @@ ACTOR_TYPES = ("agent", "human", "system")
 ACTIVITY = "activity"
 
 _HANDOFF_RESOLUTIONS = ("handoff_accepted", "handoff_completed", "handoff_declined")
-HANDOFF_DIRECTIONS = ("to_human", "to_agent")
+# to_system: a genuine blocking wait on an external system (rate limit,
+# slow export, unfired webhook). Declared, never inferred — same posture as
+# human handoffs. target_id is conventionally the system's name.
+HANDOFF_DIRECTIONS = ("to_human", "to_agent", "to_system")
+
+# Participant vocabulary. 'tool' entered when tools became cast members:
+# a tool is a PARTICIPANT (it appears in the loop's cast, auto-populated
+# from tool-call spans) but almost never a HOLDER — holders are actors.
+# The one exception is a declared to_system handoff. Enforced in code
+# (database._upsert_loop_participant raises ValueError), not a CHECK.
+PARTICIPANT_TYPES = ("agent", "human", "tool")
+PARTICIPANT_ROLES = ("initiator", "executor", "reviewer")
 
 # System actor for sweep-authored events (e.g. auto-abandon). loop_events has
 # actor_type='system' natively, so no reserved uuid or boolean column needed.
@@ -207,11 +223,12 @@ def compute_loop_state(
             )
 
     # Rules 3-4: unresolved handoffs. A pending to_human wins over a pending
-    # to_agent even if the to_agent handoff came later (spec order).
+    # to_agent, which wins over to_system, regardless of arrival order.
     unresolved = _unresolved_handoffs(evs)
     for direction, awaiting in (
         ("to_human", "awaiting_human"),
         ("to_agent", "awaiting_agent"),
+        ("to_system", "awaiting_system"),
     ):
         pending = [
             h
@@ -387,20 +404,28 @@ def sort_stream(events: list[dict]) -> list[dict]:
     return sorted(events, key=lambda e: (stream_position(e), int(e.get("ts") or 0)))
 
 
+def span_tool(span_name: str | None, tool: str | None) -> str | None:
+    """THE tool identifier: the tool name as spans carry it, lowercased, no
+    normalization (MCP-prefixed names stay verbatim — display mapping is
+    narration's job). None for LLM-call spans and spans with no named tool.
+    Single source for segments, narration, and tool participants."""
+    name = span_name or ""
+    if name in ("model_call", "llm_output"):
+        return None
+    if tool:
+        return str(tool).lower()
+    return None
+
+
 def activity_kind(ev: dict) -> str:
     """Classify a span-derived activity event: 'tool' | 'llm' | 'other'.
-
-    Tool identity comes from the span's trovis.tool.name (dual-read via
-    attr() in the DB adapter, surfaced as payload['tool']). Built fresh here
-    — it reuses the attr('tool.name') idiom the tools_used aggregate already
-    established; no earlier helper existed.
-    """
+    Tool identity defers to span_tool() — one identifier, everywhere."""
     p = ev.get("payload") or {}
-    if p.get("tool"):
-        return "tool"
     name = p.get("span_name") or ""
-    if name == "tool_call":
+    if span_tool(name, p.get("tool")):
         return "tool"
+    if name == "tool_call":
+        return "tool"  # unnamed tool call: still tool-shaped activity
     if name in ("model_call", "llm_output"):
         return "llm"
     return "other"

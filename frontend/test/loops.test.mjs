@@ -363,10 +363,22 @@ test('chain collapses past 4 dots, current holder marked', () => {
 })
 
 test('unknown/future states render neutrally, never crash', () => {
-  const m = loopStateMeta(loop({ cached_state: 'awaiting_system' }), NOW)
+  const m = loopStateMeta(loop({ cached_state: 'awaiting_review' }), NOW)
   assert.equal(m.tone, 'muted')
-  assert.equal(m.label, 'awaiting system') // humanized, no underscore
+  assert.equal(m.label, 'awaiting review') // humanized, no underscore
   assert.ok(!m.label.includes('_'))
+})
+
+test('awaiting_system: warning attention state, in the stuck set', () => {
+  const m = loopStateMeta(
+    loop({ cached_state: 'awaiting_system', stalled_for_s: 3600 }),
+    NOW,
+  )
+  assert.equal(m.tone, 'warning')
+  assert.equal(m.attention, true)
+  assert.equal(m.label, 'waiting on a system · 1h')
+  assert.equal(stuckCount([loop({ cached_state: 'awaiting_system' })]), 1)
+  assert.equal(showMarkDone(loop({ cached_state: 'awaiting_system' }), true), true)
 })
 
 test('board groups: matched workflows sort above unmatched agent groups', () => {
