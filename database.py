@@ -2764,13 +2764,14 @@ def get_untitled_terminal_loops(
     stories; titling them would spend a call on noise)."""
     acct_sql, acct_args = _loop_account_clause(account_id)
     with _connect() as conn, _cursor(conn) as cur:
+        # Pattern bound as a parameter — literal % breaks psycopg2 params.
         cur.execute(
             "SELECT l.id FROM loops l WHERE l.title IS NULL "
             f"AND l.cached_state IN ('done', 'abandoned') {acct_sql} "
             "AND NOT EXISTS (SELECT 1 FROM loop_events e WHERE e.loop_id = l.id "
-            "AND e.type = 'loop_closed' AND e.payload LIKE '%ingestion_artifact%') "
+            f"AND e.type = 'loop_closed' AND e.payload LIKE {PH}) "
             f"ORDER BY l.id DESC LIMIT {PH}",
-            tuple([*acct_args, int(limit)]),
+            tuple([*acct_args, "%ingestion_artifact%", int(limit)]),
         )
         return [r["id"] for r in cur.fetchall()]
 
@@ -2782,11 +2783,14 @@ def get_untitled_terminal_loops(
 
 def any_artifact_closes(account_id: int | None = None) -> bool:
     """Runs-once guard for the phantom reclassification pass."""
+    # LIKE pattern bound as a parameter, never inline: psycopg2 treats a
+    # literal % in the SQL as a placeholder whenever params are passed
+    # (same reason the cost-covering UPDATE binds its patterns).
     sql = (
         "SELECT 1 FROM loop_events WHERE type = 'loop_closed' "
-        "AND payload LIKE '%ingestion_artifact%'"
+        f"AND payload LIKE {PH}"
     )
-    args: list[Any] = []
+    args: list[Any] = ["%ingestion_artifact%"]
     if account_id is not None:
         sql += f" AND account_id = {PH}"
         args.append(account_id)
