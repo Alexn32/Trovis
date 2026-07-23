@@ -233,6 +233,144 @@ export function boardGroupSummary(group, nowMs = Date.now()) {
   return `${left} · ${right}`
 }
 
+// ---------------------------------------------------------------------------
+// Workflow map derivations + copy (the workflow page)
+// ---------------------------------------------------------------------------
+
+// Every user-facing workflow-surface string lives here (the sentence-
+// constants module) so the jargon test can sweep them.
+export const WORKFLOW_STRINGS = {
+  newWorkflow: 'New workflow',
+  editStations: 'Edit stations',
+  nameLabel: 'Name',
+  stationsLabel: 'Stations',
+  stationsEmptyNudge: 'No stations yet — the map stays empty until you describe the process.',
+  hintsTitle: 'How Trovis recognizes this work',
+  hintsExplainer: 'Loops matching these rules belong to this workflow.',
+  noteLabel: 'What changed (optional)',
+  mapEmpty: 'No stations declared yet — describe the process to see work move through it',
+  loopList: 'Loops in this workflow',
+  historyLabel: 'history ›',
+  waitingWord: 'waiting',
+}
+
+export function saveVersionLabel(currentVersion) {
+  return currentVersion ? `Save as v${currentVersion + 1}` : 'Create workflow'
+}
+
+export function doneTodayLabel(n) {
+  return `${n} done today`
+}
+
+export function moreDotsLabel(n) {
+  return `+${n} more`
+}
+
+export function workflowHeaderLine(wf, nowMs = Date.now()) {
+  const needs =
+    (wf?.loop_counts?.stalled || 0) +
+    (wf?.loop_counts?.awaiting_human || 0) +
+    (wf?.loop_counts?.awaiting_system || 0)
+  const parts = [`${wf?.loops_today ?? 0} today`]
+  parts.push(needs > 0 ? `${needs} ${needs === 1 ? 'needs' : 'need'} you` : 'all moving')
+  const latest = wf?.versions?.[0]?.created_at || wf?.created_at
+  const t = parseTs(latest)
+  if (!Number.isNaN(t)) {
+    parts.push(`updated ${new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`)
+  }
+  return parts.join(' · ')
+}
+
+// Dot label under the track: waiting dots carry the age; working dots just
+// the short title. Titles ellipsize in CSS; this is the text content.
+export function mapDotLabel(loop, nowMs = Date.now()) {
+  const title = loop?.title || agentLabel(loop)
+  const age = loopAgeSeconds(loop, nowMs)
+  const waiting = ATTENTION_STATES.includes(loop?.cached_state)
+  if (waiting && age != null) {
+    return `${title} · ${WORKFLOW_STRINGS.waitingWord} ${fmtAge(age)}`
+  }
+  return title
+}
+
+/**
+ * Group the map's live loops into per-station dot stacks. Only on_path
+ * loops get dots — off_path/no_stations render solely in the loop list.
+ * Waiting dots sort first within a stack; stacks cap at `cap` dots with an
+ * overflow count.
+ */
+export function mapDots(mapLoops, cap = 3) {
+  const byStation = new Map()
+  for (const l of Array.isArray(mapLoops) ? mapLoops : []) {
+    if (l?.position?.status !== 'on_path') continue
+    const idx = l.position.station_index
+    if (idx == null) continue
+    if (!byStation.has(idx)) byStation.set(idx, [])
+    byStation.get(idx).push(l)
+  }
+  const out = new Map()
+  for (const [idx, ls] of byStation) {
+    const sorted = [...ls].sort((a, b) => {
+      const aw = ATTENTION_STATES.includes(a.cached_state) ? 0 : 1
+      const bw = ATTENTION_STATES.includes(b.cached_state) ? 0 : 1
+      return aw - bw
+    })
+    out.set(idx, {
+      dots: sorted.slice(0, cap),
+      overflow: Math.max(0, sorted.length - cap),
+    })
+  }
+  return out
+}
+
+// Stations that currently hold waiting work get the warm treatment.
+export function waitingStations(mapLoops) {
+  const set = new Set()
+  for (const l of Array.isArray(mapLoops) ? mapLoops : []) {
+    if (
+      l?.position?.status === 'on_path' &&
+      l.position.station_index != null &&
+      ATTENTION_STATES.includes(l.cached_state)
+    ) {
+      set.add(l.position.station_index)
+    }
+  }
+  return set
+}
+
+/**
+ * Editor → API payload. Drops fully-empty station rows and hint rows with
+ * no value; trims strings; tools split on commas. Shape matches
+ * WorkflowCreate / WorkflowVersionCreate exactly.
+ */
+export function buildWorkflowPayload(name, stations, hints, note) {
+  const cleanStations = (Array.isArray(stations) ? stations : [])
+    .map((s) => {
+      const out = { holder_type: s.holder_type || 'agent' }
+      if (s.holder && s.holder.trim()) out.holder = s.holder.trim()
+      if (s.label && s.label.trim()) out.label = s.label.trim()
+      const tools = (Array.isArray(s.tools) ? s.tools : String(s.tools || '').split(','))
+        .map((t) => String(t).trim())
+        .filter(Boolean)
+      if (tools.length > 0) out.tools = tools
+      return out
+    })
+    .filter((s) => s.holder || s.label || (s.tools && s.tools.length) || stations.length > 0)
+  const cleanHints = (Array.isArray(hints) ? hints : [])
+    .map((h) => ({
+      field: h.field || 'service_name',
+      op: h.op || 'equals',
+      value: String(h.value || '').trim(),
+    }))
+    .filter((h) => h.value)
+  return {
+    name: String(name || '').trim(),
+    stations: cleanStations,
+    match_hints: cleanHints,
+    ...(note && note.trim() ? { note: note.trim() } : {}),
+  }
+}
+
 /**
  * State → presentation. tone drives the CSS class:
  *   'warning' — status warning color + attention left-border

@@ -3190,6 +3190,25 @@ def _resolve_human_name(cur, target_id: str, account_id: int | None) -> str | No
     return None
 
 
+def _decorate_handoff_names(cur, events, account_id: int | None) -> None:
+    """Read-time decoration shared by the story and the workflow map:
+    to_human handoff payloads whose target_id resolves to a person in this
+    org gain a target_name. Never touches stored rows."""
+    names: dict[str, str | None] = {}
+    for ev in events:
+        payload = ev.get("payload") or {}
+        if (
+            ev.get("type") == "handoff_initiated"
+            and payload.get("direction") == "to_human"
+            and payload.get("target_id")
+        ):
+            tid = str(payload["target_id"])
+            if tid not in names:
+                names[tid] = _resolve_human_name(cur, tid, account_id)
+            if names[tid]:
+                payload["target_name"] = names[tid]
+
+
 def get_loop_stream(
     loop_id: int, account_id: int | None,
 ) -> list[dict[str, Any]] | None:
@@ -3205,19 +3224,7 @@ def get_loop_stream(
         return None
     with _connect() as conn, _cursor(conn) as cur:
         events = _fetch_loop_stream(cur, loop_id, full=True)
-        names: dict[str, str | None] = {}
-        for ev in events:
-            payload = ev.get("payload") or {}
-            if (
-                ev.get("type") == "handoff_initiated"
-                and payload.get("direction") == "to_human"
-                and payload.get("target_id")
-            ):
-                tid = str(payload["target_id"])
-                if tid not in names:
-                    names[tid] = _resolve_human_name(cur, tid, account_id)
-                if names[tid]:
-                    payload["target_name"] = names[tid]
+        _decorate_handoff_names(cur, events, account_id)
         return events
 
 
@@ -3553,6 +3560,77 @@ def _current_workflow_hints(cur, account_id: int | None) -> list[dict[str, Any]]
         }
         for r in cur.fetchall()
     ]
+
+
+def get_workflow_map(
+    workflow_id: int, account_id: int | None
+) -> dict[str, Any] | None:
+    """The workflow page's live map: stations + every non-terminal matched
+    loop with its station position (loops.align_loop_to_stations over the
+    loop's possession chain), plus the one allowed aggregate — done today.
+
+    position.status: 'on_path' (dot on the track under station_index),
+    'off_path' (chain doesn't read along the stations; list-only, no dot),
+    'no_stations' (hint-only workflow). Computed live, never stored.
+    """
+    wf = get_workflow(workflow_id, account_id)
+    if wf is None:
+        return None
+    lp = _loops_mod()
+    stations = wf.get("stations") or []
+    sql = (
+        "SELECT id, title, cached_state, last_event_unix, service_name, agent_id "
+        f"FROM loops WHERE workflow_id = {PH} "
+        "AND cached_state NOT IN ('done', 'abandoned')"
+    )
+    args: list[Any] = [workflow_id]
+    if account_id is not None:
+        sql += f" AND account_id = {PH}"
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql + " ORDER BY id DESC LIMIT 100", tuple(args))
+        rows = [dict(r) for r in cur.fetchall()]
+        out_loops: list[dict[str, Any]] = []
+        for r in rows:
+            events = _fetch_loop_stream(cur, r["id"])
+            # Same name decoration as the story view — station holders are
+            # declared by name ("Sarah"), so alignment must see names too.
+            _decorate_handoff_names(cur, events, account_id)
+            segments = lp.compute_loop_segments(events)
+            position = lp.align_loop_to_stations(segments, stations)
+            out_loops.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "cached_state": r["cached_state"],
+                    "last_event_unix": r["last_event_unix"],
+                    "service_name": r["service_name"],
+                    "agent_id": r["agent_id"] or "main",
+                    "position": position,
+                }
+            )
+        today_sql = (
+            "date_trunc('day', NOW())" if USE_POSTGRES else "date('now')"
+        )
+        done_sql = (
+            "SELECT COUNT(*) AS c FROM loops "
+            f"WHERE workflow_id = {PH} AND cached_state = 'done' "
+            f"AND closed_at >= {today_sql}"
+        )
+        done_args: list[Any] = [workflow_id]
+        if account_id is not None:
+            done_sql += f" AND account_id = {PH}"
+            done_args.append(account_id)
+        cur.execute(done_sql, tuple(done_args))
+        done_today = int(cur.fetchone()["c"] or 0)
+    return {
+        "workflow_id": wf["id"],
+        "name": wf["name"],
+        "version": wf["current_version"],
+        "stations": stations,
+        "loops": out_loops,
+        "done_today": done_today,
+    }
 
 
 def get_current_workflow_hints(account_id: int | None) -> list[dict[str, Any]]:

@@ -4,6 +4,8 @@ import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
 import WorkPage from './WorkPage.jsx'
+import WorkflowPage from './WorkflowPage.jsx'
+import WorkflowEditor from './WorkflowEditor.jsx'
 import Fleet from './Fleet.jsx'
 import AgentDetail from './AgentDetail.jsx'
 import AskPill from './AskPill.jsx'
@@ -327,6 +329,24 @@ function AppInner() {
         sessionUser={Boolean(me?.user)}
       />
     )
+  } else if (overlay?.kind === 'workflow') {
+    mainContent = (
+      <WorkflowPage
+        workflowId={overlay.id}
+        onBack={closeOverlay}
+        onEdit={(wf) => setOverlay({ kind: 'workflow-edit', id: wf.id })}
+        onOpenAgent={openDetail}
+        sessionUser={Boolean(me?.user)}
+      />
+    )
+  } else if (overlay?.kind === 'workflow-new' || overlay?.kind === 'workflow-edit') {
+    mainContent = (
+      <WorkflowEditorLoader
+        workflowId={overlay.kind === 'workflow-edit' ? overlay.id : null}
+        onBack={closeOverlay}
+        onSaved={(id) => setOverlay({ kind: 'workflow', id })}
+      />
+    )
   } else if (tab === 'work') {
     mainContent = (
       <WorkPage
@@ -335,6 +355,8 @@ function AppInner() {
         onOpenAgent={openDetail}
         sessionUser={Boolean(me?.user)}
         onConnectAgent={openAddAgent}
+        onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
+        onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
       />
     )
   } else if (tab === 'dashboard') {
@@ -549,4 +571,20 @@ function AccountBadge({ me, onLogout, onOpenSettings }) {
       )}
     </div>
   )
+}
+
+// Fetches the workflow before rendering the editor in edit mode, so the
+// form opens pre-filled with the current version's definition.
+function WorkflowEditorLoader({ workflowId, onBack, onSaved }) {
+  const [wf, setWf] = useState(workflowId ? null : undefined) // undefined = create mode
+  useEffect(() => {
+    if (!workflowId) return
+    let alive = true
+    api.getWorkflow(workflowId).then((w) => alive && setWf(w)).catch(() => alive && setWf(undefined))
+    return () => { alive = false }
+  }, [workflowId])
+  if (workflowId && wf === null) {
+    return <div className="dash"><div className="dash-skel"><span style={{ height: 200 }} /></div></div>
+  }
+  return <WorkflowEditor workflow={wf || null} onBack={onBack} onSaved={onSaved} />
 }

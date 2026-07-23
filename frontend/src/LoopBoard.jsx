@@ -72,7 +72,7 @@ function StatusPill({ meta }) {
   return <span className={`board-pill tone-${meta.tone}`}>{meta.label}</span>
 }
 
-function BoardRow({ loop, sessionUser, onOpenAgent, onChanged }) {
+export function BoardRow({ loop, sessionUser, onOpenAgent, onChanged }) {
   const [open, setOpen] = useState(false)
   const meta = loopStateMeta(loop)
   const done = loop.cached_state === 'done' || loop.cached_state === 'abandoned'
@@ -104,7 +104,7 @@ function BoardRow({ loop, sessionUser, onOpenAgent, onChanged }) {
   )
 }
 
-export default function LoopBoard({ loops, sessionUser, onOpenAgent, onChanged }) {
+export default function LoopBoard({ loops, sessionUser, onOpenAgent, onChanged, onOpenWorkflow }) {
   const groups = boardGroups(loops)
   return (
     <div className="board">
@@ -112,7 +112,18 @@ export default function LoopBoard({ loops, sessionUser, onOpenAgent, onChanged }
         <section className="board-group" key={g.key}>
           <div className="board-group-head">
             <span className="board-group-tick" aria-hidden="true" />
-            <span className="board-group-name">{g.name}</span>
+            {g.matched && onOpenWorkflow ? (
+              // Declared workflows have a page — the header navigates there.
+              <button
+                type="button"
+                className="board-group-name is-link"
+                onClick={() => onOpenWorkflow(g.loops[0]?.workflow_id)}
+              >
+                {g.name} ›
+              </button>
+            ) : (
+              <span className="board-group-name">{g.name}</span>
+            )}
             <span className="board-group-summary">{boardGroupSummary(g)}</span>
           </div>
           <div className="board-card">

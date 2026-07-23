@@ -1037,3 +1037,34 @@ class LoopSegment(SegmentMini):
     holder: str = ""
     touches: list[LoopTouch] = Field(default_factory=list)
     event_count: int = 0
+
+
+class LoopMapPosition(BaseModel):
+    """Where a live loop sits on its workflow's station map.
+    status: 'on_path' (dot under station_index) | 'off_path' (list-only,
+    no dot) | 'no_stations' (hint-only workflow)."""
+
+    status: str
+    station_index: int | None = None
+
+
+class WorkflowMapLoop(BaseModel):
+    id: int
+    title: str | None = None
+    cached_state: str
+    last_event_unix: int | None = None
+    service_name: str
+    agent_id: str = "main"
+    position: LoopMapPosition
+
+
+class WorkflowMap(BaseModel):
+    """GET /workflows/{id}/map — stations + live loop positions + the one
+    allowed aggregate (done today). Computed live, never stored."""
+
+    workflow_id: int
+    name: str
+    version: int
+    stations: list[dict[str, Any]] = Field(default_factory=list)
+    loops: list[WorkflowMapLoop] = Field(default_factory=list)
+    done_today: int = 0

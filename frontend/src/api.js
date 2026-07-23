@@ -232,6 +232,13 @@ export const api = {
   // from telemetry + identity and operator-editable.
   getWorkflows: () => request('/workflows'),
   getWorkflow: (id) => request(`/workflows/${id}`),
+  // Live station map: where every non-terminal matched loop currently sits.
+  getWorkflowMap: (id) => request(`/workflows/${id}/map`),
+  getWorkflowLoops: (id, state = null) =>
+    request(`/workflows/${id}/loops${state ? `?state=${encodeURIComponent(state)}` : ''}`),
+  // Every edit is a new version (full definition, not a diff).
+  createWorkflowVersion: (id, data) =>
+    request(`/workflows/${id}/versions`, { method: 'POST', body: JSON.stringify(data) }),
   // Live telemetry stats for a workflow's source agent.
   getWorkflowStats: (id) => request(`/workflows/${id}/stats`),
   createWorkflow: (data) =>

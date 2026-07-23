@@ -608,6 +608,64 @@ def segments_mini(segments: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Station-position derivation (the workflow map)
+# ---------------------------------------------------------------------------
+# NOTE: built here because the map UI consumes it; the endpoint contract
+# (position.station_index, on_path/off_path/no_stations) comes from the
+# approved map spec. v1 alignment is a GREEDY MONOTONE walk — stations are
+# an ordered declaration, so a loop is on-path when its possession chain
+# can be read left-to-right along the stations without backtracking:
+# each segment advances the cursor to the next station (at or after the
+# cursor) whose holder_type matches and whose declared holder name (when
+# the station names one) matches the segment's holder. Anything that
+# can't align is off_path — rendered only in the loop list, never dotted
+# on the track. No fuzzy matching, no inference; refinements are a later,
+# data-informed problem.
+
+
+def _station_matches(station: dict, seg: dict) -> bool:
+    if (station.get("holder_type") or "") != (seg.get("holder_type") or ""):
+        return False
+    want = str(station.get("holder") or "").strip().lower()
+    if not want:
+        return True  # unnamed station: any holder of the right type
+    have = str(seg.get("holder") or "").strip().lower()
+    if have == want:
+        return True
+    # Agent holders are "service:agent" composites — accept either part.
+    if ":" in have and want in have.split(":"):
+        return True
+    return False
+
+
+def align_loop_to_stations(segments: list[dict], stations: list[dict]) -> dict:
+    """Where a loop currently sits on its workflow's station map.
+
+    Returns {"status": "on_path"|"off_path"|"no_stations",
+             "station_index": int|None}.
+    station_index is the station holding the CURRENT possession; None
+    unless on_path.
+    """
+    if not stations:
+        return {"status": "no_stations", "station_index": None}
+    if not segments:
+        return {"status": "off_path", "station_index": None}
+    cursor = 0
+    idx = None
+    for seg in segments:
+        found = None
+        for j in range(cursor, len(stations)):
+            if _station_matches(stations[j], seg):
+                found = j
+                break
+        if found is None:
+            return {"status": "off_path", "station_index": None}
+        cursor = found
+        idx = found
+    return {"status": "on_path", "station_index": idx}
+
+
+# ---------------------------------------------------------------------------
 # Narration (template tier)
 # ---------------------------------------------------------------------------
 

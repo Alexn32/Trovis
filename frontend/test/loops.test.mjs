@@ -438,3 +438,115 @@ test('jargon: no raw identifiers in board strings', () => {
     assert.ok(!s.includes('_'), `underscore leaked: ${s}`)
   }
 })
+
+// --- Workflow map derivations (the station map build) -----------------------------
+
+import {
+  WORKFLOW_STRINGS,
+  buildWorkflowPayload,
+  doneTodayLabel,
+  mapDotLabel,
+  mapDots,
+  moreDotsLabel,
+  saveVersionLabel,
+  waitingStations,
+} from '../src/loops.js'
+
+function mapLoop(over = {}) {
+  return {
+    id: 1,
+    title: 'Score the signup',
+    cached_state: 'working',
+    last_event_unix: (NOW - 3600 * 1000) * 1e6,
+    service_name: 'triage-bot',
+    agent_id: 'main',
+    position: { status: 'on_path', station_index: 0 },
+    ...over,
+  }
+}
+
+test('dots position by station_index; off_path/no_stations get none', () => {
+  const dots = mapDots([
+    mapLoop({ id: 1, position: { status: 'on_path', station_index: 0 } }),
+    mapLoop({ id: 2, position: { status: 'on_path', station_index: 2 } }),
+    mapLoop({ id: 3, position: { status: 'off_path', station_index: null } }),
+    mapLoop({ id: 4, position: { status: 'no_stations', station_index: null } }),
+  ])
+  assert.deepEqual([...dots.keys()].sort(), [0, 2])
+  assert.equal(dots.get(0).dots.length, 1)
+  assert.equal(dots.get(2).dots.length, 1)
+})
+
+test('stacking: waiting dots sort first; cap 3 with +n overflow', () => {
+  const stack = mapDots([
+    mapLoop({ id: 1, cached_state: 'working' }),
+    mapLoop({ id: 2, cached_state: 'awaiting_human', stalled_for_s: 100 }),
+    mapLoop({ id: 3, cached_state: 'working' }),
+    mapLoop({ id: 4, cached_state: 'working' }),
+    mapLoop({ id: 5, cached_state: 'working' }),
+  ]).get(0)
+  assert.equal(stack.dots.length, 3)
+  assert.equal(stack.dots[0].id, 2) // waiting first
+  assert.equal(stack.overflow, 2)
+  assert.equal(moreDotsLabel(stack.overflow), '+2 more')
+})
+
+test('waiting vs working dot labels', () => {
+  const w = mapLoop({ cached_state: 'awaiting_human', stalled_for_s: 3 * 3600 })
+  assert.equal(mapDotLabel(w, NOW), 'Score the signup · waiting 3h')
+  assert.equal(mapDotLabel(mapLoop(), NOW), 'Score the signup')
+})
+
+test('stations with waiting work get the warm treatment', () => {
+  const warm = waitingStations([
+    mapLoop({ id: 1, cached_state: 'awaiting_human',
+              position: { status: 'on_path', station_index: 1 } }),
+    mapLoop({ id: 2, cached_state: 'working',
+              position: { status: 'on_path', station_index: 0 } }),
+    mapLoop({ id: 3, cached_state: 'awaiting_system',
+              position: { status: 'off_path', station_index: null } }),
+  ])
+  assert.deepEqual([...warm], [1]) // off_path never warms a station
+})
+
+test('editor payload: shapes round-trip, empties dropped, tools split', () => {
+  const p = buildWorkflowPayload(
+    '  Signup triage ',
+    [
+      { holder_type: 'agent', holder: ' triage-bot ', label: 'scores it', tools: 'exec, read' },
+      { holder_type: 'human', holder: 'Sarah', label: '', tools: '' },
+    ],
+    [
+      { field: 'service_name', op: 'equals', value: ' triage-bot ' },
+      { field: 'title', op: 'contains', value: '' }, // dropped: no value
+    ],
+    ' first cut ',
+  )
+  assert.deepEqual(p, {
+    name: 'Signup triage',
+    stations: [
+      { holder_type: 'agent', holder: 'triage-bot', label: 'scores it', tools: ['exec', 'read'] },
+      { holder_type: 'human', holder: 'Sarah' },
+    ],
+    match_hints: [{ field: 'service_name', op: 'equals', value: 'triage-bot' }],
+    note: 'first cut',
+  })
+})
+
+test('version-bump button labeling', () => {
+  assert.equal(saveVersionLabel(0), 'Create workflow')
+  assert.equal(saveVersionLabel(3), 'Save as v4')
+})
+
+test('jargon: workflow-surface strings are clean', () => {
+  const strings = [
+    ...Object.values(WORKFLOW_STRINGS),
+    doneTodayLabel(4),
+    moreDotsLabel(2),
+    saveVersionLabel(2),
+    mapDotLabel(mapLoop({ cached_state: 'awaiting_system', stalled_for_s: 60 }), NOW),
+  ]
+  for (const s of strings) {
+    assert.ok(!/model_call|tool_call|llm_output|span|telemetry|drift|conformance/i.test(s), s)
+  }
+})

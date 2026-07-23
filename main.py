@@ -97,6 +97,7 @@ from models import (
     MeResponse,
     WorkflowCreate,
     WorkflowDetail,
+    WorkflowMap,
     WorkflowSummary,
     WorkflowVersionCreate,
     NewKeyResponse,
@@ -1029,6 +1030,18 @@ async def workflow_loops(
     if rows is None:
         raise HTTPException(status_code=404, detail="workflow not found")
     return [LoopSummary(**r) for r in rows]
+
+
+@app.get("/workflows/{workflow_id}/map", response_model=WorkflowMap)
+async def workflow_map(workflow_id: int, request: Request) -> WorkflowMap:
+    """The workflow page's live station map: where every non-terminal
+    matched loop currently sits (see loops.align_loop_to_stations), plus
+    done-today. Reads work for both auth types, like all workflow reads."""
+    account_id = getattr(request.state, "account_id", None)
+    result = database.get_workflow_map(workflow_id, account_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="workflow not found")
+    return WorkflowMap(**result)
 
 
 @app.post("/workflows/{workflow_id}/versions", response_model=WorkflowDetail)

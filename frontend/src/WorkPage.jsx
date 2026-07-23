@@ -23,7 +23,7 @@ function dayLabel(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser, onConnectAgent }) {
+export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser, onConnectAgent, onOpenWorkflow, onNewWorkflow }) {
   const [loops, setLoops] = useState(null)
   const [activity, setActivity] = useState(null)
   const [error, setError] = useState(null)
@@ -76,6 +76,12 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser,
         <h1 className="dash-hello" style={{ margin: 0 }}>
           Work
         </h1>
+        <span className="board-head-actions">
+          {sessionUser && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onNewWorkflow}>
+              New workflow
+            </button>
+          )}
         <button
           type="button"
           className={`board-stuck-toggle ${stuckOnly ? 'is-on' : ''}`}
@@ -84,6 +90,7 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser,
         >
           Stuck{stuck > 0 ? ` · ${stuck}` : ''}
         </button>
+        </span>
       </div>
 
       {error && loops.length === 0 ? (
@@ -109,6 +116,7 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser,
           sessionUser={sessionUser}
           onOpenAgent={onOpenAgent}
           onChanged={load}
+          onOpenWorkflow={onOpenWorkflow}
         />
       )}
 
