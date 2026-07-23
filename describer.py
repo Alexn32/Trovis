@@ -1516,3 +1516,54 @@ def workflow_edit_operations(
     ops = parsed.get("operations") if isinstance(parsed, dict) else None
     summary = str(parsed.get("summary") or "").strip() if isinstance(parsed, dict) else ""
     return {"operations": ops if isinstance(ops, list) else [], "summary": summary}
+
+
+def loop_title(shape: dict[str, Any]) -> str | None:
+    """One short plain-English title for a workloop, from its SHAPE only.
+
+    The shape (see database.get_loop_title_shape) is metadata: agent
+    identity, tool names in order, handoff target/direction, duration,
+    close reason. Span attribute VALUES are deliberately never included —
+    they may carry user content. Returns None on any failure (missing key,
+    API error, empty response); the caller falls back to the template
+    title. Same client + fail-soft posture as describe_agent.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    tools = shape.get("tools") or []
+    tool_line = " -> ".join(tools[:15]) if tools else "(no tools)"
+    handoff = shape.get("handoff") or {}
+    handoff_line = (
+        f"handed to {handoff.get('target') or handoff.get('direction') or 'someone'}"
+        + (f" ({handoff['reason']})" if handoff.get("reason") else "")
+        if handoff
+        else "no handoff"
+    )
+    dur = shape.get("duration_s")
+    dur_line = f"{dur}s" if dur is not None else "still open"
+    prompt = (
+        "Name this AI-agent work session in ONE short title (max 8 words, "
+        "no quotes, no trailing period). Plain English, specific to what "
+        "the shape suggests the agent was doing; never say 'session', "
+        "'loop', 'telemetry', or 'spans'.\n"
+        f"Agent: {shape.get('agent')}\n"
+        f"Tools used, in order: {tool_line}\n"
+        f"Actions: {shape.get('action_count')}\n"
+        f"Handoff: {handoff_line}\n"
+        f"Duration: {dur_line}\n"
+        f"Outcome: {shape.get('close_reason') or shape.get('state')}\n"
+    )
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=40,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(
+            b.text for b in resp.content if getattr(b, "type", "") == "text"
+        ).strip().strip('"').strip()
+        return text[:120] or None
+    except Exception:  # noqa: BLE001 — fail-soft: template fallback covers it
+        return None

@@ -2399,6 +2399,7 @@ def ingest_spans_with_loops(
         affected: dict[int, int] = {}  # loop_id -> max event ts in this batch
         executor_pairs: set[tuple[int, str]] = set()
         closes: dict[int, tuple[str, str, int]] = {}  # loop_id -> (actor, value, ts)
+        handoff_loops: set[int] = set()  # first-handoff title trigger (post-tx)
 
         for s in spans:
             attrs = s.get("attributes") or {}
@@ -2430,6 +2431,7 @@ def ingest_spans_with_loops(
                     cur, loop_id, "handoff_initiated", "agent", actor,
                     payload=payload, account_id=account_id, event_time_unix=ts,
                 )
+                handoff_loops.add(loop_id)
 
             # trovis.loop.close -> agent completed the loop. Without this,
             # every agent-finished task would sit idle until the sweep
@@ -2510,6 +2512,12 @@ def ingest_spans_with_loops(
             )
             recompute_loop_state(cur, loop_id, now_ns=now_ns)
 
+    # Title trigger: a first handoff means there's enough story to name the
+    # loop. AFTER the ingest transaction (the LLM call must never hold it
+    # open); fail-soft and NULL-guarded, so at most one call per loop ever.
+    for lid in handoff_loops:
+        lp.ensure_loop_title(lid, account_id)
+
     return len(spans)
 
 
@@ -2522,9 +2530,14 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
     rules, which only test "any non-open event" and the latest timestamp.
     full=True (detail endpoint): one activity event per span.
 
-    Ties sort loop events before span activity (a loop_opened stamped at the
-    same ns as its first span comes first), then by id — deterministic on
-    both backends.
+    Ordering is LOGICAL, not purely chronological: loop_opened sorts first
+    and loop_closed sorts last regardless of raw timestamps, because
+    late-exported spans (the plugin's ~10s token-usage wait) carry start
+    times EARLIER than the loop_opened stamp — sorting by timestamp alone
+    rendered "Started" mid-stream. Between those bookends, events order by
+    timestamp with lifecycle-before-span tiebreak, then id — deterministic
+    on both backends. The detail endpoint AND compute_loop_segments both
+    consume this order (see loops.stream_position / sort_stream).
     """
     lp = _loops_mod()
     keyed: list[tuple[tuple, dict]] = []
@@ -2536,16 +2549,21 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
     )
     for r in cur.fetchall():
         ev = lp.normalize_loop_event(dict(r))
-        keyed.append(((ev["ts"], 0, r["id"]), ev))
+        keyed.append(((lp.stream_position(ev), ev["ts"], 0, r["id"]), ev))
 
     if full:
         cur.execute(
             "SELECT id, trace_id, span_id, span_name, service_name, agent_id, "
-            "start_time_unix, estimated_cost_usd "
+            "start_time_unix, estimated_cost_usd, attributes "
             f"FROM spans WHERE loop_id = {PH} ORDER BY start_time_unix, id",
             (loop_id,),
         )
         for r in cur.fetchall():
+            try:
+                attrs = json.loads(r["attributes"] or "{}")
+            except (TypeError, ValueError):
+                attrs = {}
+            tool = attr(attrs, "tool.name") if isinstance(attrs, dict) else None
             ev = lp.activity_event(
                 r["start_time_unix"],
                 actor=lp.agent_actor(r["service_name"], r["agent_id"] or "main"),
@@ -2554,9 +2572,10 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
                     "trace_id": r["trace_id"],
                     "span_id": r["span_id"],
                     "cost_usd": r["estimated_cost_usd"],
+                    **({"tool": str(tool)} if tool else {}),
                 },
             )
-            keyed.append(((ev["ts"], 1, r["id"]), ev))
+            keyed.append(((1, ev["ts"], 1, r["id"]), ev))
     else:
         cur.execute(
             "SELECT COUNT(*) AS c, MIN(start_time_unix) AS mn, MAX(start_time_unix) AS mx "
@@ -2565,9 +2584,9 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
         )
         r = cur.fetchone()
         if r and r["c"]:
-            keyed.append(((int(r["mn"]), 1, 0), lp.activity_event(r["mn"])))
+            keyed.append(((1, int(r["mn"]), 1, 0), lp.activity_event(r["mn"])))
             if r["mx"] != r["mn"]:
-                keyed.append(((int(r["mx"]), 1, 1), lp.activity_event(r["mx"])))
+                keyed.append(((1, int(r["mx"]), 1, 1), lp.activity_event(r["mx"])))
 
     keyed.sort(key=lambda kv: kv[0])
     return [ev for _, ev in keyed]
@@ -2635,6 +2654,234 @@ def abandon_loop(loop_id: int, account_id: int | None = None) -> bool:
             (loop_id,),
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# Loop titles (server-side generation support)
+# ---------------------------------------------------------------------------
+
+
+def get_loop_title_shape(loop_id: int, account_id: int | None) -> dict[str, Any] | None:
+    """The metadata-only 'shape' a title is generated from: agent identity,
+    tool names in order, handoff target/direction, duration, close reason,
+    and event counts. Deliberately NEVER includes span attribute values —
+    they may carry user content. Returns None when the loop is missing,
+    belongs to another account, or already has a title (plugin titles always
+    win; generated titles are never regenerated)."""
+    sql = (
+        "SELECT id, title, service_name, agent_id, initiated_by, "
+        f"created_at, closed_at, cached_state FROM loops WHERE id = {PH}"
+    )
+    args: list[Any] = [loop_id]
+    if account_id is not None:
+        sql += f" AND account_id = {PH}"
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+        if row is None or row["title"] is not None:
+            return None
+        cur.execute(
+            "SELECT span_name, attributes FROM spans "
+            f"WHERE loop_id = {PH} ORDER BY start_time_unix, id LIMIT 200",
+            (loop_id,),
+        )
+        tools: list[str] = []
+        action_count = 0
+        for s in cur.fetchall():
+            action_count += 1
+            try:
+                attrs = json.loads(s["attributes"] or "{}")
+            except (TypeError, ValueError):
+                attrs = {}
+            tool = attr(attrs, "tool.name") if isinstance(attrs, dict) else None
+            if tool:
+                tools.append(str(tool))
+        cur.execute(
+            "SELECT type, payload FROM loop_events "
+            f"WHERE loop_id = {PH} ORDER BY event_time_unix, id",
+            (loop_id,),
+        )
+        handoff = None
+        close_reason = None
+        for e in cur.fetchall():
+            try:
+                payload = json.loads(e["payload"] or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            if e["type"] == "handoff_initiated" and handoff is None:
+                handoff = {
+                    "direction": payload.get("direction"),
+                    "target": payload.get("target_name") or payload.get("target_id"),
+                    "reason": payload.get("reason"),
+                }
+            elif e["type"] == "loop_closed" and close_reason is None:
+                close_reason = payload.get("reason")
+    created = _ts_to_epoch(row["created_at"])
+    closed = _ts_to_epoch(row["closed_at"])
+    duration_s = int(closed - created) if created and closed else None
+    agent = (
+        row["agent_id"]
+        if row["agent_id"] and row["agent_id"] != "main"
+        else row["service_name"]
+    )
+    return {
+        "agent": agent,
+        "service_name": row["service_name"],
+        "agent_id": row["agent_id"] or "main",
+        "tools": tools,
+        "action_count": action_count,
+        "handoff": handoff,
+        "close_reason": close_reason,
+        "duration_s": duration_s,
+        "state": row["cached_state"],
+    }
+
+
+def set_loop_title_if_missing(
+    loop_id: int, title: str, account_id: int | None
+) -> bool:
+    """The ONE allowed title write. NULL-guarded: a plugin-provided title is
+    never replaced and a generated title is never overwritten — first title
+    wins, forever. Returns True only when this call set it."""
+    if not title:
+        return False
+    sql = f"UPDATE loops SET title = {PH} WHERE id = {PH} AND title IS NULL"
+    args: list[Any] = [str(title)[:120], loop_id]
+    if account_id is not None:
+        sql += f" AND account_id = {PH}"
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return cur.rowcount > 0
+
+
+def get_untitled_terminal_loops(
+    account_id: int | None, limit: int = 25
+) -> list[int]:
+    """Terminal loops still lacking a title — the sweep's title-pass queue.
+    Artifact-closed phantoms are excluded (ingestion_artifact loops aren't
+    stories; titling them would spend a call on noise)."""
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT l.id FROM loops l WHERE l.title IS NULL "
+            f"AND l.cached_state IN ('done', 'abandoned') {acct_sql} "
+            "AND NOT EXISTS (SELECT 1 FROM loop_events e WHERE e.loop_id = l.id "
+            "AND e.type = 'loop_closed' AND e.payload LIKE '%ingestion_artifact%') "
+            f"ORDER BY l.id DESC LIMIT {PH}",
+            tuple([*acct_args, int(limit)]),
+        )
+        return [r["id"] for r in cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Phantom reclassification (one-off) support
+# ---------------------------------------------------------------------------
+
+
+def any_artifact_closes(account_id: int | None = None) -> bool:
+    """Runs-once guard for the phantom reclassification pass."""
+    sql = (
+        "SELECT 1 FROM loop_events WHERE type = 'loop_closed' "
+        "AND payload LIKE '%ingestion_artifact%'"
+    )
+    args: list[Any] = []
+    if account_id is not None:
+        sql += f" AND account_id = {PH}"
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql + " LIMIT 1", tuple(args))
+        return cur.fetchone() is not None
+
+
+def find_phantom_candidates(
+    account_id: int | None, grace_horizon_s: int = 120
+) -> list[dict[str, Any]]:
+    """Open keyed loops that look like pre-grace-window stragglers: every
+    span is a model_call, and an earlier loop with the same run.id closed
+    shortly before this one was created. Each candidate carries clean=True
+    only when the full signature holds — anything off-pattern is returned
+    clean=False so the caller counts it and leaves it alone (no guessing)."""
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT l2.id, l2.external_id, l2.service_name, l2.created_at, "
+            "  (SELECT COUNT(*) FROM spans s WHERE s.loop_id = l2.id) AS span_count, "
+            "  (SELECT COUNT(*) FROM spans s WHERE s.loop_id = l2.id "
+            "   AND s.span_name != 'model_call') AS non_model_spans "
+            "FROM loops l2 "
+            f"WHERE l2.closed_at IS NULL AND l2.external_id IS NOT NULL {acct_sql} "
+            "AND EXISTS (SELECT 1 FROM loops d WHERE d.external_id = l2.external_id "
+            "  AND d.service_name = l2.service_name AND d.id < l2.id "
+            "  AND d.closed_at IS NOT NULL) "
+            "ORDER BY l2.id",
+            tuple(acct_args),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            # The real loop: the newest earlier closed loop with the same key.
+            cur.execute(
+                "SELECT id, closed_at FROM loops WHERE external_id = {ph} "
+                "AND service_name = {ph} AND id < {ph} AND closed_at IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1".format(ph=PH),
+                (r["external_id"], r["service_name"], r["id"]),
+            )
+            real = cur.fetchone()
+            created = _ts_to_epoch(r["created_at"])
+            closed = _ts_to_epoch(real["closed_at"]) if real else None
+            clean = bool(
+                real is not None
+                and int(r["span_count"] or 0) >= 1
+                and int(r["non_model_spans"] or 0) == 0
+                and created is not None
+                and closed is not None
+                # Straggler shape: created at/after the real close, within
+                # the grace horizon. (Pre-fix stragglers landed 13-34s after
+                # close; 120s is generous without catching real reruns.)
+                and -1.0 <= (created - closed) <= grace_horizon_s
+            )
+            out.append(
+                {
+                    "id": r["id"],
+                    "external_id": r["external_id"],
+                    "real_loop_id": real["id"] if real else None,
+                    "clean": clean,
+                }
+            )
+        return out
+
+
+def artifact_close_loop(
+    loop_id: int, run_id: str, real_loop_id: int, account_id: int | None
+) -> None:
+    """Terminal-close one phantom as an ingestion artifact: a system-
+    attributed loop_closed whose payload records what it really was (a
+    straggler of run_id, artifact of real_loop_id), then the mechanical
+    terminal state. compute_loop_state maps reason='ingestion_artifact' to
+    'abandoned', so recomputes can never flip it to done."""
+    lp = _loops_mod()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"SELECT closed_at FROM loops WHERE id = {PH}", (loop_id,))
+        row = cur.fetchone()
+        if row is None or row["closed_at"] is not None:
+            return  # idempotent — never a second close
+        append_loop_event(
+            cur, loop_id, "loop_closed", "system", lp.SYSTEM_ACTOR,
+            payload={
+                "reason": "ingestion_artifact",
+                "straggler_of_run": str(run_id),
+                "artifact_of_loop": int(real_loop_id),
+            },
+            account_id=account_id,
+        )
+        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+        cur.execute(
+            f"UPDATE loops SET cached_state = 'abandoned', closed_at = {now_sql} "
+            f"WHERE id = {PH}",
+            (loop_id,),
+        )
 
 
 def close_loop(
@@ -2726,6 +2973,42 @@ def _loop_row(r: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _attach_segments_mini(cur, rows: list[dict[str, Any]]) -> None:
+    """Add segments_mini to list rows: the possession bar's minimal shape.
+
+    Cost: exactly TWO extra bounded queries per list page, both IN-list
+    keyed on the page's loop ids — one over loop_events (a handful of rows
+    per loop) and one over span start-times (indexed by idx_spans_loop_id).
+    The derivation itself is the same pure compute_loop_segments the detail
+    endpoint uses, fed minimal activity events (timestamps only — the mini
+    shape needs boundaries and waiting flags, not touches)."""
+    if not rows:
+        return
+    lp = _loops_mod()
+    ids = [r["id"] for r in rows]
+    ph_list = ", ".join([PH] * len(ids))
+    by_loop: dict[int, list[dict]] = {i: [] for i in ids}
+    cur.execute(
+        "SELECT loop_id, type, actor_type, actor, payload, event_time_unix "
+        f"FROM loop_events WHERE loop_id IN ({ph_list}) "
+        "ORDER BY event_time_unix, id",
+        tuple(ids),
+    )
+    for r in cur.fetchall():
+        by_loop[r["loop_id"]].append(lp.normalize_loop_event(dict(r)))
+    cur.execute(
+        "SELECT loop_id, start_time_unix FROM spans "
+        f"WHERE loop_id IN ({ph_list}) ORDER BY start_time_unix, id",
+        tuple(ids),
+    )
+    for r in cur.fetchall():
+        by_loop[r["loop_id"]].append(lp.activity_event(r["start_time_unix"]))
+    for row in rows:
+        row["segments_mini"] = lp.segments_mini(
+            lp.compute_loop_segments(by_loop.get(row["id"], []))
+        )
+
+
 def get_loops(
     account_id: int | None,
     state: str | None = None,
@@ -2746,7 +3029,9 @@ def get_loops(
     args.extend([int(limit), int(offset)])
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, tuple(args))
-        return [_loop_row(dict(r)) for r in cur.fetchall()]
+        rows = [_loop_row(dict(r)) for r in cur.fetchall()]
+        _attach_segments_mini(cur, rows)
+        return rows
 
 
 def get_loop(loop_id: int, account_id: int | None) -> dict[str, Any] | None:
@@ -2875,6 +3160,7 @@ def get_stalled_loops(
             last = int(row.get("last_event_unix") or 0)
             row["stalled_for_s"] = max(0, (now_ns - last) // _NS_PER_S) if last else None
             out.append(row)
+        _attach_segments_mini(cur, out)
         return out
 
 
@@ -3153,7 +3439,9 @@ def get_workflow_loops(
     args.extend([int(limit), int(offset)])
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, tuple(args))
-        return [_loop_row(dict(r)) for r in cur.fetchall()]
+        rows = [_loop_row(dict(r)) for r in cur.fetchall()]
+        _attach_segments_mini(cur, rows)
+        return rows
 
 
 def _current_workflow_hints(cur, account_id: int | None) -> list[dict[str, Any]]:

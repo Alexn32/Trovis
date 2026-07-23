@@ -132,6 +132,16 @@ with TestClient(main.app) as c:
     check("exactly one loop_closed event (close never duplicated)",
           sum(1 for e in stream if e["type"] == "loop_closed") == 1)
 
+    # Logical stream ordering (the "Started mid-stream" fix): regardless of
+    # the straggler's raw timestamps, the story reads opened-first,
+    # closed-last — the prod fixture's llm_output lands BETWEEN them even
+    # though its start time is after the close event's stamp.
+    check("stream order: loop_opened first, loop_closed last",
+          stream[0]["type"] == "loop_opened" and stream[-1]["type"] == "loop_closed")
+    check("all activity renders between the bookends",
+          all(e["type"] != "activity" or 0 < i < len(stream) - 1
+              for i, e in enumerate(stream)))
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")

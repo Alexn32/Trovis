@@ -904,18 +904,21 @@ async def stalled_loops(
 
 @app.get("/loops/{loop_id}", response_model=LoopDetail)
 async def loop_detail(loop_id: int, request: Request) -> LoopDetail:
-    """One loop with its participants and full ordered event stream
-    (lifecycle events merged with span-derived activity)."""
+    """One loop with its participants, narrated event stream (plain-English
+    `sentence` per entry, consecutive tool/LLM calls collapsed), and the
+    possession-segments chain — the loop's story. Segments and sentences are
+    computed live, never stored."""
     account_id = getattr(request.state, "account_id", None)
     row = database.get_loop(loop_id, account_id)
     if row is None:
         raise HTTPException(status_code=404, detail="loop not found")
     participants = database.get_loop_participants(loop_id, account_id) or []
-    events = database.get_loop_stream(loop_id, account_id) or []
+    stream = database.get_loop_stream(loop_id, account_id) or []
     return LoopDetail(
         **row,
         participants=[LoopParticipant(**p) for p in participants],
-        events=[LoopEventRecord(**e) for e in events],
+        events=[LoopEventRecord(**e) for e in loops.narrate_events(stream)],
+        segments=loops.compute_loop_segments(stream),
     )
 
 
@@ -937,11 +940,12 @@ async def close_loop(loop_id: int, request: Request) -> LoopDetail:
     if row is None:
         raise HTTPException(status_code=404, detail="loop not found")
     participants = database.get_loop_participants(loop_id, account_id) or []
-    events = database.get_loop_stream(loop_id, account_id) or []
+    stream = database.get_loop_stream(loop_id, account_id) or []
     return LoopDetail(
         **row,
         participants=[LoopParticipant(**p) for p in participants],
-        events=[LoopEventRecord(**e) for e in events],
+        events=[LoopEventRecord(**e) for e in loops.narrate_events(stream)],
+        segments=loops.compute_loop_segments(stream),
     )
 
 

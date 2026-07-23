@@ -968,6 +968,9 @@ class LoopEventRecord(BaseModel):
     actor_type: str = ""  # 'agent' | 'human' | 'system'
     actor: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
+    # Plain-English display string (loops.narrate_events). The raw
+    # span_name stays in payload; this is what the UI renders.
+    sentence: str | None = None
 
 
 class LoopSummary(BaseModel):
@@ -997,6 +1000,8 @@ class LoopSummary(BaseModel):
     event_count: int = 0
     total_cost_usd: float = 0.0
     stalled_for_s: int | None = None  # populated by GET /loops/stalled only
+    # Possession bar data (loops.segments_mini) — enough for a proportional bar.
+    segments_mini: list[SegmentMini] = Field(default_factory=list)
 
 
 class LoopDetail(LoopSummary):
@@ -1005,3 +1010,30 @@ class LoopDetail(LoopSummary):
 
     participants: list[LoopParticipant] = Field(default_factory=list)
     events: list[LoopEventRecord] = Field(default_factory=list)
+    # The possession chain (loops.compute_loop_segments) — computed live,
+    # never stored.
+    segments: list[LoopSegment] = Field(default_factory=list)
+
+
+class LoopTouch(BaseModel):
+    """One tool touched during a possession segment."""
+
+    name: str
+    count: int = 1
+
+
+class SegmentMini(BaseModel):
+    """List-row possession bar: who held the work, when, waiting or not."""
+
+    holder_type: str  # 'agent' | 'human' | 'system'
+    start_ns: int
+    end_ns: int | None = None  # None = ongoing
+    waiting: bool = False
+
+
+class LoopSegment(SegmentMini):
+    """Full possession segment for the loop detail's story view."""
+
+    holder: str = ""
+    touches: list[LoopTouch] = Field(default_factory=list)
+    event_count: int = 0

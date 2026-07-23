@@ -194,10 +194,17 @@ def compute_loop_state(
     evs = sorted(events, key=lambda e: int(e.get("ts") or 0))
 
     # Rules 1-2: a close is terminal regardless of anything after it.
+    # 'ingestion_artifact' (the one-off phantom reclassification) maps to
+    # abandoned so a recompute can never flip an artifact-closed loop to
+    # 'done' — the payload reason carries the real story.
     for e in reversed(evs):
         if e.get("type") == "loop_closed":
             reason = (e.get("payload") or {}).get("reason")
-            return "abandoned" if reason == "abandoned" else "done"
+            return (
+                "abandoned"
+                if reason in ("abandoned", "ingestion_artifact")
+                else "done"
+            )
 
     # Rules 3-4: unresolved handoffs. A pending to_human wins over a pending
     # to_agent even if the to_agent handoff came later (spec order).
@@ -351,6 +358,405 @@ def match_workflow(loop_row: dict, workflow_versions: list[dict]):
 
 
 # ---------------------------------------------------------------------------
+# Story derivations: logical stream order, possession segments, narration
+# ---------------------------------------------------------------------------
+# A loop's story is a chain of POSSESSIONS: at any moment exactly one actor
+# holds the work. Handoffs are the seams between possessions; tool calls are
+# touches WITHIN a possession, never possessions themselves. Segments and
+# sentences are computed on read, never stored (titles are the one stored
+# derivation — they cost an LLM call).
+
+
+def stream_position(ev: dict) -> int:
+    """Logical position class for merged-stream ordering: loop_opened is
+    always first and loop_closed always last, regardless of raw timestamps.
+    Exists because late-exported spans (the plugin's ~10s token-usage wait)
+    carry start times EARLIER than the loop_opened stamp and used to sort
+    before it — the "Started renders mid-stream" bug."""
+    t = ev.get("type")
+    if t == "loop_opened":
+        return 0
+    if t == "loop_closed":
+        return 2
+    return 1
+
+
+def sort_stream(events: list[dict]) -> list[dict]:
+    """Order a merged stream logically: opened first, closed last, everything
+    else by timestamp (stable, so the adapter's tiebreaks survive)."""
+    return sorted(events, key=lambda e: (stream_position(e), int(e.get("ts") or 0)))
+
+
+def activity_kind(ev: dict) -> str:
+    """Classify a span-derived activity event: 'tool' | 'llm' | 'other'.
+
+    Tool identity comes from the span's trovis.tool.name (dual-read via
+    attr() in the DB adapter, surfaced as payload['tool']). Built fresh here
+    — it reuses the attr('tool.name') idiom the tools_used aggregate already
+    established; no earlier helper existed.
+    """
+    p = ev.get("payload") or {}
+    if p.get("tool"):
+        return "tool"
+    name = p.get("span_name") or ""
+    if name == "tool_call":
+        return "tool"
+    if name in ("model_call", "llm_output"):
+        return "llm"
+    return "other"
+
+
+def compute_loop_segments(events: list[dict], now_ns: int | None = None) -> list[dict]:
+    """Derive the loop's possession chain. Pure function, no DB access.
+
+    Returns segments in order:
+        {"holder_type": "agent"|"human"|"system",
+         "holder": str,            # "service:agent", user id str, or name
+         "start_ns": int,
+         "end_ns": int | None,     # None = ongoing (unclosed loop)
+         "waiting": bool,          # handoff-target possessions await activity
+         "touches": [{"name": str, "count": int}],
+         "event_count": int}
+
+    Rules: the loop opens with a possession by the initiator; handoff_initiated
+    ends the current segment and hands possession to the target (waiting);
+    accepted/completed — or agent activity resuming — returns possession to
+    the agent; declined returns it to the prior holder; loop_closed ends the
+    chain. Stragglers (events timestamped inside an already-ended segment, or
+    arriving after close via the grace window) FOLD into the segment covering
+    their timestamp — they never extend the chain past close.
+    """
+    if now_ns is None:
+        now_ns = time.time_ns()
+    evs = sort_stream(events)
+    segments: list[dict] = []
+    current: dict | None = None
+    closed = False
+
+    def start(holder_type: str, holder: str, ts: int, waiting: bool) -> dict:
+        return {
+            "holder_type": holder_type,
+            "holder": holder,
+            "start_ns": ts,
+            "end_ns": None,
+            "waiting": waiting,
+            "touches": [],
+            "event_count": 0,
+        }
+
+    def end_current(ts: int) -> None:
+        nonlocal current
+        if current is not None:
+            current["end_ns"] = ts
+            segments.append(current)
+            current = None
+
+    def covering(ts: int) -> dict | None:
+        for seg in segments:
+            if seg["start_ns"] <= ts and (seg["end_ns"] is None or ts < seg["end_ns"]):
+                return seg
+        if current is not None and current["start_ns"] <= ts:
+            return current
+        return segments[0] if segments else current
+
+    def add_touch(seg: dict, name: str) -> None:
+        for t in seg["touches"]:
+            if t["name"] == name:
+                t["count"] += 1
+                return
+        seg["touches"].append({"name": name, "count": 1})
+
+    def record_activity(seg: dict | None, ev: dict) -> None:
+        if seg is None:
+            return
+        seg["event_count"] += 1
+        if activity_kind(ev) == "tool":
+            p = ev.get("payload") or {}
+            add_touch(seg, str(p.get("tool") or p.get("span_name") or "tool"))
+
+    def last_agent() -> tuple[str, str]:
+        pool = segments + ([current] if current is not None else [])
+        for seg in reversed(pool):
+            if seg["holder_type"] == "agent" and not seg["waiting"]:
+                return "agent", seg["holder"]
+        return "agent", ""
+
+    for ev in evs:
+        t = ev.get("type")
+        ts = int(ev.get("ts") or 0)
+        p = ev.get("payload") or {}
+
+        if t == "loop_opened":
+            if current is None and not segments:
+                current = start(
+                    ev.get("actor_type") or "agent", ev.get("actor") or "", ts, False
+                )
+            continue
+
+        if current is None and not segments and not closed:
+            # Defensive: a stream with no loop_opened still gets a chain.
+            current = start("agent", ev.get("actor") or "", ts, False)
+
+        if t == "loop_closed":
+            end_current(ts)
+            closed = True
+            continue
+
+        # Straggler folding: post-close events, or events timestamped before
+        # the current segment began, count where they belong — no new links.
+        if closed or (current is not None and ts < current["start_ns"]):
+            if t == ACTIVITY:
+                record_activity(covering(ts), ev)
+            continue
+
+        if t == "handoff_initiated":
+            end_current(ts)
+            direction = p.get("direction")
+            if direction == "to_human":
+                holder_type = "human"
+                holder = str(p.get("target_name") or p.get("target_id") or "human")
+            elif direction == "to_system":
+                holder_type = "system"
+                holder = str(p.get("target_id") or "system")
+            else:
+                holder_type = "agent"
+                holder = str(p.get("target_id") or "agent")
+            current = start(holder_type, holder, ts, True)
+            continue
+
+        if t in ("handoff_accepted", "handoff_completed"):
+            if current is not None and current["waiting"]:
+                end_current(ts)
+                if ev.get("actor_type") == "agent" and ev.get("actor"):
+                    current = start("agent", ev["actor"], ts, False)
+                else:
+                    ht, h = last_agent()
+                    current = start(ht, h, ts, False)
+            continue
+
+        if t == "handoff_declined":
+            if current is not None and current["waiting"]:
+                prior = segments[-1] if segments else None
+                end_current(ts)
+                if prior is not None:
+                    current = start(prior["holder_type"], prior["holder"], ts, False)
+                else:
+                    ht, h = last_agent()
+                    current = start(ht, h, ts, False)
+            continue
+
+        if t == ACTIVITY:
+            if (
+                current is not None
+                and current["waiting"]
+                and (ev.get("actor_type") or "agent") == "agent"
+            ):
+                # Agent activity resumes possession from a waiting holder.
+                end_current(ts)
+                current = start("agent", ev.get("actor") or "", ts, False)
+            record_activity(current, ev)
+            continue
+
+        # Other lifecycle events (stall_detected, ...) change no possession.
+
+    if current is not None:
+        segments.append(current)  # unclosed loop: end_ns stays None
+    return segments
+
+
+def segments_mini(segments: list[dict]) -> list[dict]:
+    """The list-endpoint shape: just enough to draw a proportional bar."""
+    return [
+        {
+            "holder_type": s["holder_type"],
+            "start_ns": s["start_ns"],
+            "end_ns": s["end_ns"],
+            "waiting": s["waiting"],
+        }
+        for s in segments
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Narration (template tier)
+# ---------------------------------------------------------------------------
+
+# Human names for common tools, seeded from the spec plus the top tools
+# observed in production spans (exec/read/process/edit/web_fetch/write/...).
+# Unmapped tools render "Used {name}" — never a raw span_name.
+TOOL_SENTENCES = {
+    "exec": "Ran a command",
+    "read": "Read a file",
+    "edit": "Edited a file",
+    "write": "Wrote a file",
+    "process": "Managed a process",
+    "web_fetch": "Fetched a web page",
+    "web_search": "Searched the web",
+    "browser": "Used the browser",
+    "message": "Sent a message",
+    "sessions_send": "Messaged another agent session",
+    "sessions_list": "Checked other agent sessions",
+    "memory_search": "Searched its memory",
+    "send_slack_message": "Sent a Slack message",
+    "send_email": "Sent an email",
+    "request_approval": "Requested approval",
+}
+
+
+def tool_sentence(name: str, count: int = 1) -> str:
+    base = TOOL_SENTENCES.get(name, f"Used {name}")
+    return base if count <= 1 else f"{base} · {count}×"
+
+
+def _handoff_sentence(p: dict) -> str:
+    targets = {"to_human": "a human", "to_agent": "another agent"}
+    who = p.get("target_name") or targets.get(p.get("direction"), "someone")
+    reason = f" — {p['reason']}" if p.get("reason") else ""
+    return f"Handed to {who}{reason}"
+
+
+def _close_sentence(p: dict) -> str:
+    reason = p.get("reason")
+    if reason == "abandoned":
+        return "Closed automatically — no activity for 2 days"
+    if reason == "ingestion_artifact":
+        return "Closed — stray telemetry from a completed run"
+    if reason == "closed_by_user":
+        return "Marked done"
+    if reason == "completed_by_agent":
+        return f"Closed by agent — {p['detail']}" if p.get("detail") else "Closed by agent — completed"
+    return "Closed"
+
+
+# One place for lifecycle sentences (server-side mirror of the frontend map;
+# the frontend half consumes `sentence` and retires its copy next session).
+LIFECYCLE_SENTENCES = {
+    "loop_opened": lambda p: "Started",
+    "handoff_initiated": _handoff_sentence,
+    "handoff_accepted": lambda p: "Handoff accepted",
+    "handoff_completed": lambda p: "Handoff completed",
+    "handoff_declined": lambda p: "Handoff declined",
+    "loop_closed": _close_sentence,
+    "stall_detected": lambda p: "Stalled — no recent activity",
+}
+
+
+def lifecycle_sentence(ev: dict) -> str:
+    fn = LIFECYCLE_SENTENCES.get(ev.get("type"))
+    if fn:
+        return fn(ev.get("payload") or {})
+    return str(ev.get("type") or "").replace("_", " ")
+
+
+def narrate_events(events: list[dict]) -> list[dict]:
+    """Attach a plain-English `sentence` to each stream entry, collapsing
+    consecutive same-tool calls ("Sent a Slack message · 3×") and consecutive
+    LLM calls ("Worked through it (4 steps)") into single entries. Raw
+    span_names stay in the payload; the sentence is the only display string.
+
+    agent_run_complete spans are omitted — the loop_closed line covers them.
+    """
+    mode = (database.env("LOOP_NARRATION", "template") or "template").lower()
+    if mode == "llm":
+        # LLM narration tier: one Claude pass over the loop's shape producing
+        # richer prose per entry. Follow the _auto_describe precedent
+        # (describer client, fail-soft, cached) when building this.
+        raise NotImplementedError("TROVIS_LOOP_NARRATION=llm is not implemented yet")
+
+    out: list[dict] = []
+    for ev in sort_stream(events):
+        if ev.get("type") != ACTIVITY:
+            entry = dict(ev)
+            entry["sentence"] = lifecycle_sentence(ev)
+            entry["_group"] = None
+            out.append(entry)
+            continue
+        p = ev.get("payload") or {}
+        name = p.get("span_name") or ""
+        if name == "agent_run_complete":
+            continue
+        kind = activity_kind(ev)
+        group = (
+            ("tool", str(p.get("tool") or name))
+            if kind == "tool"
+            else ("llm", None)
+            if kind == "llm"
+            else ("other", name)
+        )
+        if out and out[-1].get("_group") == group:
+            prev = out[-1]
+            prev["payload"] = dict(prev.get("payload") or {})
+            prev["payload"]["count"] = int(prev["payload"].get("count") or 1) + 1
+            continue
+        entry = dict(ev)
+        entry["payload"] = dict(p)
+        entry["_group"] = group
+        out.append(entry)
+
+    for entry in out:
+        group = entry.pop("_group", None)
+        if not group:
+            continue
+        kind, name = group
+        n = int((entry.get("payload") or {}).get("count") or 1)
+        if kind == "llm":
+            entry["sentence"] = (
+                "Thought it through" if n <= 1 else f"Worked through it ({n} steps)"
+            )
+        elif kind == "tool":
+            entry["sentence"] = tool_sentence(name, n)
+        else:
+            entry["sentence"] = str(name or "activity").replace("_", " ").capitalize()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Titles (the one STORED derivation — they cost an LLM call)
+# ---------------------------------------------------------------------------
+# Pipeline, first hit wins: (1) plugin-provided trovis.loop.title, never
+# overwritten; (2) LLM title from the loop's SHAPE (metadata only — agent
+# identity, tool names, handoff target, duration, close reason; never span
+# attribute values); (3) template fallback. All stored via the single
+# NULL-guarded UPDATE in database.set_loop_title_if_missing — generated
+# titles never overwrite, plugin titles never get replaced.
+
+# Cap per sweep pass, same idea as the alert sweep's _MAX_FRESH_DRIFT: bounds
+# Claude spend per 15-min interval regardless of backlog.
+MAX_TITLES_PER_SWEEP = int(database.env("LOOP_TITLES_PER_SWEEP", "25") or 25)
+
+
+def template_title(shape: dict) -> str:
+    tools = shape.get("tools") or []
+    top = tools[0] if tools else "run"
+    n = int(shape.get("action_count") or 0)
+    return f"{shape.get('agent') or 'agent'} · {top} · {n} actions"
+
+
+def ensure_loop_title(loop_id: int, account_id: int | None) -> bool:
+    """Generate and store a title for one untitled loop. Fail-soft (never
+    raises); returns True only when a title was written. One LLM call per
+    loop ever — the NULL-only write makes retries idempotent."""
+    try:
+        shape = database.get_loop_title_shape(loop_id, account_id)
+        if not shape:
+            return False  # missing, other-account, or already titled
+        title = None
+        if (database.env("LOOP_TITLES", "llm") or "llm").lower() == "llm":
+            try:
+                import describer  # noqa: PLC0415  (lazy: heavy import)
+
+                title = describer.loop_title(shape)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[loops] title generation failed for %s: %s", loop_id, e)
+        if not title:
+            title = template_title(shape)
+        return database.set_loop_title_if_missing(loop_id, title, account_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[loops] ensure_loop_title(%s) failed: %s", loop_id, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Sweep
 # ---------------------------------------------------------------------------
 # cached_state can lag for pure time-based transitions (awaiting_* -> stalled,
@@ -397,18 +803,28 @@ def run_sweep_for_account(account_id: int | None) -> dict[str, int]:
             logger.warning(
                 "[loops] sweep failed for loop %s: %s", loop.get("id"), e
             )
+    # Title pass: loops that reached terminal state without a title (the
+    # ingestion trigger covers handoff moments). Capped per sweep so Claude
+    # spend stays bounded regardless of backlog.
+    titled = 0
+    for lid in database.get_untitled_terminal_loops(
+        account_id, limit=MAX_TITLES_PER_SWEEP
+    ):
+        if ensure_loop_title(lid, account_id):
+            titled += 1
     return {
         "checked": checked,
         "abandoned": abandoned,
         "restated": restated,
         "rematched": rematched,
+        "titled": titled,
     }
 
 
 def run_sweep() -> dict[str, int]:
     """Sweep every account, plus one pass for NULL-account loops (open/dev
     mode — list_account_ids can't see them). Fail-soft per account."""
-    totals = {"checked": 0, "abandoned": 0, "restated": 0}
+    totals = {"checked": 0, "abandoned": 0, "restated": 0, "rematched": 0, "titled": 0}
     account_ids: list[int | None] = list(database.list_account_ids())
     account_ids.append(None)
     for aid in account_ids:
@@ -419,3 +835,62 @@ def run_sweep() -> dict[str, int]:
         except Exception as e:  # noqa: BLE001
             logger.warning("[loops] sweep failed for account %s: %s", aid, e)
     return totals
+
+
+# ---------------------------------------------------------------------------
+# One-off: phantom reclassification (pre-grace-window stragglers)
+# ---------------------------------------------------------------------------
+
+
+def reclassify_phantom_loops(
+    account_id: int | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict[str, int]:
+    """One-off repair for the pre-grace-window phantoms: open loops whose
+    spans are exclusively late-exported model_call stragglers of a run whose
+    real loop closed just before. Left alone they'd sweep to a plain
+    'abandoned' — false history. Each clean match gets a system-attributed
+    loop_closed with payload.reason='ingestion_artifact' (plus the run and
+    real-loop pointers) and goes terminal; the reason string carries the
+    truth, and compute_loop_state maps it to 'abandoned' mechanically.
+
+    Guarded to run once: if any ingestion_artifact close already exists in
+    scope, the pass is skipped unless force=True (it is also idempotent by
+    construction — only OPEN loops ever match). Ambiguous candidates (the
+    signature isn't clean) are counted and left alone — no guessing. The
+    ~1,700 pre-0.5.5 loops that never had a close are NOT touched; plain
+    'abandoned' is honest for those.
+    """
+    if not force and database.any_artifact_closes(account_id):
+        return {"reclassified": 0, "skipped_ambiguous": 0, "examined": 0, "already_ran": 1}
+    reclassified = skipped = examined = 0
+    scopes: list[int | None]
+    if account_id is not None:
+        scopes = [account_id]
+    else:
+        scopes = list(database.list_account_ids())
+        scopes.append(None)
+    for aid in scopes:
+        for cand in database.find_phantom_candidates(aid):
+            examined += 1
+            if not cand.get("clean"):
+                skipped += 1
+                continue
+            if dry_run:
+                reclassified += 1
+                continue
+            try:
+                database.artifact_close_loop(
+                    cand["id"], cand["external_id"], cand["real_loop_id"], aid
+                )
+                reclassified += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[loops] reclassify failed for %s: %s", cand["id"], e)
+                skipped += 1
+    return {
+        "reclassified": reclassified,
+        "skipped_ambiguous": skipped,
+        "examined": examined,
+        "already_ran": 0,
+    }
