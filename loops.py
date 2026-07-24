@@ -305,7 +305,9 @@ def validate_stations(stations) -> list:
                 f"unknown holder_type {s.get('holder_type')!r}; "
                 f"one of: {', '.join(STATION_HOLDER_TYPES)}"
             )
-        for key in ("holder", "label"):
+        # carrier: how work travels to the NEXT station ("Slack", "email") —
+        # drawn as the label over the arrow leaving this station.
+        for key in ("holder", "label", "carrier"):
             if key in s and s[key] is not None and not isinstance(s[key], str):
                 raise ValueError(f"station {key} must be a string")
         tools = s.get("tools")

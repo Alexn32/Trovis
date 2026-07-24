@@ -446,6 +446,13 @@ class WorkflowSummary(BaseModel):
     archived_at: str | None = None
     loop_counts: dict[str, int] = Field(default_factory=dict)  # state -> count
     loops_today: int = 0
+    # The Work list renders each workflow's shape ("3 steps · triage-agent +
+    # you") without a per-workflow fetch, so the summary carries the current
+    # version's stations too.
+    stations: list[dict[str, Any]] = Field(default_factory=list)
+    # Seconds the oldest attention-state loop has sat unmoved (None when
+    # nothing needs a human) — the "· 3h" in the list's warm chip.
+    needs_you_for_s: int | None = None
 
 
 class WorkflowDetail(WorkflowSummary):

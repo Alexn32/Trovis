@@ -3401,8 +3401,9 @@ def archive_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any]
 
 def _workflow_loop_aggregates(
     cur, account_id: int | None, workflow_id: int | None = None,
-) -> tuple[dict, dict]:
-    """(state counts, loops-today counts) keyed by workflow_id."""
+) -> tuple[dict, dict, dict]:
+    """(state counts, loops-today counts, oldest-attention-age seconds)
+    keyed by workflow_id."""
     scope_sql = ""
     scope_args: list[Any] = []
     if account_id is not None:
@@ -3429,10 +3430,28 @@ def _workflow_loop_aggregates(
         tuple([midnight, *scope_args]),
     )
     today = {r["workflow_id"]: int(r["c"]) for r in cur.fetchall()}
-    return by_state, today
+    # Oldest attention-state loop per workflow — how long the warmest wait
+    # has sat. last_event_unix is unix nanoseconds; age lands in seconds.
+    cur.execute(
+        "SELECT workflow_id, MIN(last_event_unix) AS oldest FROM loops "
+        "WHERE workflow_id IS NOT NULL "
+        "AND cached_state IN ('stalled', 'awaiting_human', 'awaiting_system') "
+        f"AND last_event_unix IS NOT NULL {scope_sql} "
+        "GROUP BY workflow_id",
+        tuple(scope_args),
+    )
+    now_ns = _utcnow().timestamp() * 1e9
+    needs_age = {
+        r["workflow_id"]: max(0, int((now_ns - int(r["oldest"])) / 1e9))
+        for r in cur.fetchall()
+        if r["oldest"] is not None
+    }
+    return by_state, today, needs_age
 
 
-def _workflow_summary_row(r, by_state: dict, today: dict) -> dict[str, Any]:
+def _workflow_summary_row(
+    r, by_state: dict, today: dict, needs_age: dict,
+) -> dict[str, Any]:
     return {
         "id": r["id"],
         "name": r["name"],
@@ -3442,6 +3461,8 @@ def _workflow_summary_row(r, by_state: dict, today: dict) -> dict[str, Any]:
         "archived_at": _ts_to_str(r["archived_at"]),
         "loop_counts": by_state.get(r["id"], {}),
         "loops_today": today.get(r["id"], 0),
+        "stations": _parse_json_list(r["stations"]),
+        "needs_you_for_s": needs_age.get(r["id"]),
     }
 
 
@@ -3450,7 +3471,7 @@ def get_workflows(
 ) -> list[dict[str, Any]]:
     sql = (
         "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
-        "w.current_version FROM workflows w "
+        "w.current_version, v.stations FROM workflows w "
         "JOIN workflow_versions v ON v.workflow_id = w.id "
         "AND v.version = w.current_version WHERE 1=1"
     )
@@ -3464,8 +3485,8 @@ def get_workflows(
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, tuple(args))
         rows = cur.fetchall()
-        by_state, today = _workflow_loop_aggregates(cur, account_id)
-        return [_workflow_summary_row(r, by_state, today) for r in rows]
+        by_state, today, needs_age = _workflow_loop_aggregates(cur, account_id)
+        return [_workflow_summary_row(r, by_state, today, needs_age) for r in rows]
 
 
 def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | None:
@@ -3488,9 +3509,10 @@ def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | N
         row = cur.fetchone()
         if row is None:
             return None
-        by_state, today = _workflow_loop_aggregates(cur, account_id, workflow_id)
-        out = _workflow_summary_row(row, by_state, today)
-        out["stations"] = _parse_json_list(row["stations"])
+        by_state, today, needs_age = _workflow_loop_aggregates(
+            cur, account_id, workflow_id,
+        )
+        out = _workflow_summary_row(row, by_state, today, needs_age)
         out["match_hints"] = _parse_json_list(row["match_hints"])
         cur.execute(
             "SELECT version, note, created_by, created_at FROM workflow_versions "

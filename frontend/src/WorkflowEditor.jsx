@@ -17,7 +17,7 @@ const HINT_FIELDS = ['service_name', 'agent_id', 'title']
 const HINT_OPS = ['equals', 'contains', 'prefix']
 
 function emptyStation() {
-  return { holder_type: 'agent', holder: '', label: '', tools: '' }
+  return { holder_type: 'agent', holder: '', label: '', tools: '', carrier: '' }
 }
 function emptyHint() {
   return { field: 'service_name', op: 'equals', value: '' }
@@ -32,6 +32,7 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
       holder: s.holder || '',
       label: s.label || '',
       tools: (s.tools || []).join(', '),
+      carrier: s.carrier || '',
     })),
   )
   const [hints, setHints] = useState(
@@ -178,6 +179,12 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
                 value={s.tools}
                 onChange={(e) => updateStation(i, { tools: e.target.value })}
                 placeholder="tools, comma-separated (optional)"
+              />
+              <input
+                className="wfe-input"
+                value={s.carrier}
+                onChange={(e) => updateStation(i, { carrier: e.target.value })}
+                placeholder={WS.carrierLabel}
               />
             </div>
           </div>

@@ -286,80 +286,36 @@ test('cost: two decimals, omitted entirely when zero or sub-cent', () => {
   assert.equal(loopCostLabel(null), null)
 })
 
-// --- Board derivations (the board + story build) --------------------------------
+// --- Work-list + workflow-page derivations -----------------------------------
 
 import {
-  barSegments,
-  boardGroups,
-  boardGroupSummary,
+  WORKFLOW_STRINGS,
   boardTitle,
-  chainDots,
+  buildWorkflowPayload,
+  chainGlyph,
+  doneTodayLabel,
+  heatLabel,
+  inMotionLine,
+  isCreatedToday,
+  isDoneToday,
+  moreItemsLabel,
+  otherWorkLine,
+  saveVersionLabel,
+  stationHeat,
+  stationName,
+  workflowChip,
+  workflowShapeLine,
 } from '../src/loops.js'
 
 const N = 1e9 // ns per second
 
-test('bar geometry: proportional widths, normalized to 100', () => {
-  const mini = [
-    { holder_type: 'agent', start_ns: 0, end_ns: 60 * N, waiting: false },
-    { holder_type: 'human', start_ns: 60 * N, end_ns: 120 * N, waiting: true },
-    { holder_type: 'agent', start_ns: 120 * N, end_ns: 240 * N, waiting: false },
-  ]
-  const slices = barSegments(mini, 300 * N)
-  assert.equal(slices.length, 3)
-  const total = slices.reduce((a, s) => a + s.pct, 0)
-  assert.ok(Math.abs(total - 100) < 1e-6)
-  assert.deepEqual(slices.map((s) => s.kind), ['agent', 'wait', 'agent'])
-  assert.ok(Math.abs(slices[2].pct - 2 * slices[0].pct) < 1e-6) // 120s vs 60s
-})
-
-test('bar geometry: 3% minimum floor for slivers', () => {
-  const mini = [
-    { holder_type: 'agent', start_ns: 0, end_ns: 1 * N, waiting: false }, // 0.1%
-    { holder_type: 'agent', start_ns: 1 * N, end_ns: 1000 * N, waiting: false },
-  ]
-  const slices = barSegments(mini, 2000 * N)
-  assert.ok(slices[0].pct >= 2.9, `sliver got ${slices[0].pct}%`)
-})
-
-test('bar geometry: trailing unfinished agent segment renders pending; live wait stays warm', () => {
-  const running = barSegments(
-    [{ holder_type: 'agent', start_ns: 0, end_ns: null, waiting: false }], 100 * N)
-  assert.equal(running[0].kind, 'pending')
-  const waiting = barSegments(
-    [{ holder_type: 'human', start_ns: 0, end_ns: null, waiting: true }], 100 * N)
-  assert.equal(waiting[0].kind, 'wait')
-})
-
-test('bar geometry: abandoned loops color the final segment error', () => {
-  const slices = barSegments(
-    [
-      { holder_type: 'agent', start_ns: 0, end_ns: 50 * N, waiting: false },
-      { holder_type: 'agent', start_ns: 50 * N, end_ns: 100 * N, waiting: false },
-    ],
-    100 * N,
-    'abandoned',
+test('board title: server title wins; untitled open loops show agent identity', () => {
+  assert.equal(boardTitle(loop({ title: 'Reconcile July invoices' })), 'Reconcile July invoices')
+  assert.equal(boardTitle(loop({ title: null, service_name: 'ops-bot' })), 'ops-bot')
+  assert.equal(
+    boardTitle(loop({ title: null, service_name: 'ops-bot', agent_id: 'helper' })),
+    'ops-bot · helper',
   )
-  assert.equal(slices[1].kind, 'error')
-})
-
-test('bar geometry: empty/null segments_mini renders one neutral bar (legacy loops)', () => {
-  assert.deepEqual(barSegments(null), [{ kind: 'pending', pct: 100 }])
-  assert.deepEqual(barSegments([]), [{ kind: 'pending', pct: 100 }])
-})
-
-test('chain collapses past 4 dots, current holder marked', () => {
-  const seg = (i, waiting = false) => ({
-    holder_type: waiting ? 'human' : 'agent',
-    start_ns: i, end_ns: i + 1, waiting,
-  })
-  const short = chainDots([seg(0), seg(1, true), seg(2)])
-  assert.equal(short.dots.length, 3)
-  assert.equal(short.collapsed, false)
-  assert.ok(short.dots[2].current && !short.dots[0].current)
-  const long = chainDots([seg(0), seg(1), seg(2), seg(3), seg(4), seg(5)])
-  assert.equal(long.collapsed, true)
-  assert.equal(long.dots.length, 4)
-  assert.ok(long.dots[3].current)
 })
 
 test('unknown/future states render neutrally, never crash', () => {
@@ -381,76 +337,62 @@ test('awaiting_system: warning attention state, in the stuck set', () => {
   assert.equal(showMarkDone(loop({ cached_state: 'awaiting_system' }), true), true)
 })
 
-test('board groups: matched workflows sort above unmatched agent groups', () => {
-  const loops2 = [
-    loop({ id: 1, service_name: 'free-bot' }),
-    loop({ id: 2, service_name: 'wf-bot', workflow_id: 9, workflow_name: 'Invoice run' }),
-    loop({ id: 3, service_name: 'wf-bot', workflow_id: 9, workflow_name: 'Invoice run' }),
-  ]
-  const groups = boardGroups(loops2, NOW)
-  assert.equal(groups.length, 2)
-  assert.equal(groups[0].name, 'Invoice run')
-  assert.equal(groups[0].matched, true)
-  assert.equal(groups[0].loops.length, 2)
-  assert.equal(groups[1].name, 'free-bot')
-})
+// --- The Work list (level 1) ---------------------------------------------------
 
-test('board groups: attention-first within a group', () => {
-  const loops2 = [
-    loop({ id: 1, workflow_id: 9, workflow_name: 'W', cached_state: 'done' }),
-    loop({ id: 2, workflow_id: 9, workflow_name: 'W', cached_state: 'stalled', stalled_for_s: 100 }),
-  ]
-  const g = boardGroups(loops2, NOW)[0]
-  assert.equal(g.loops[0].id, 2)
-})
+const wfStations = [
+  { holder_type: 'agent', holder: 'triage-agent', label: 'scores the signup' },
+  { holder_type: 'human', holder: 'Sarah' },
+  { holder_type: 'agent', holder: 'triage-agent', label: 'files the outcome' },
+]
 
-test('group summary counts and grammar', () => {
-  const today = new Date(NOW).toISOString()
-  const g = {
-    loops: [
-      loop({ created_at: today, cached_state: 'awaiting_human', stalled_for_s: 5 }),
-      loop({ created_at: today, cached_state: 'done' }),
-      loop({ created_at: '2020-01-01 00:00:00', cached_state: 'done' }),
-    ],
-  }
-  assert.equal(boardGroupSummary(g, NOW), '2 today · 1 needs you')
-  const quiet = { loops: [loop({ created_at: today, cached_state: 'done' })] }
-  assert.equal(boardGroupSummary(quiet, NOW), '1 today · all moving')
-})
-
-test('board title: server title wins; untitled open loops show agent identity', () => {
-  assert.equal(boardTitle(loop({ title: 'Reconcile July invoices' })), 'Reconcile July invoices')
-  assert.equal(boardTitle(loop({ title: null, service_name: 'ops-bot' })), 'ops-bot')
+test('shape line: steps · cast · today', () => {
+  const wf = { stations: wfStations, loops_today: 14 }
+  assert.equal(workflowShapeLine(wf), '3 steps · triage-agent + you · 14 today')
   assert.equal(
-    boardTitle(loop({ title: null, service_name: 'ops-bot', agent_id: 'helper' })),
-    'ops-bot · helper',
+    workflowShapeLine({ stations: [], loops_today: 0 }),
+    '0 steps · none today',
+  )
+  assert.equal(
+    workflowShapeLine({ stations: [wfStations[0]], loops_today: 1 }),
+    '1 step · triage-agent · 1 today',
   )
 })
 
-test('jargon: no raw identifiers in board strings', () => {
-  const strings = [
-    boardGroupSummary({ loops: [loop({ cached_state: 'stalled', stalled_for_s: 5 })] }, NOW),
-    loopStateMeta(loop({ cached_state: 'awaiting_system' }), NOW).label,
-    boardTitle(loop({ title: null })),
-  ]
-  for (const s of strings) {
-    assert.ok(!/model_call|tool_call|llm_output|span|telemetry/i.test(s), s)
-    assert.ok(!s.includes('_'), `underscore leaked: ${s}`)
-  }
+test('chip: warm when a human holds work, with count and age', () => {
+  const c = workflowChip({
+    loop_counts: { awaiting_human: 1, working: 3 },
+    needs_you_for_s: 3 * 3600,
+  })
+  assert.equal(c.warm, true)
+  assert.equal(c.label, '1 waiting on you · 3h')
 })
 
-// --- Workflow map derivations (the station map build) -----------------------------
+test('chip: quiet running / quiet today otherwise', () => {
+  assert.deepEqual(workflowChip({ loop_counts: { working: 2 } }),
+    { label: 'running', warm: false })
+  assert.deepEqual(workflowChip({ loop_counts: { done: 9 } }),
+    { label: 'quiet today', warm: false })
+})
 
-import {
-  WORKFLOW_STRINGS,
-  buildWorkflowPayload,
-  doneTodayLabel,
-  mapDotLabel,
-  mapDots,
-  moreDotsLabel,
-  saveVersionLabel,
-  waitingStations,
-} from '../src/loops.js'
+test('other-work line grammar', () => {
+  assert.equal(otherWorkLine(6), 'Other agent work · 6 runs today ›')
+  assert.equal(otherWorkLine(1), 'Other agent work · 1 run today ›')
+})
+
+test('created-today / done-today calendar checks', () => {
+  assert.equal(isCreatedToday(loop({ created_at: new Date(NOW).toISOString() }), NOW), true)
+  assert.equal(isCreatedToday(loop({ created_at: '2020-01-01 00:00:00' }), NOW), false)
+  assert.equal(
+    isDoneToday(loop({ cached_state: 'done', closed_at: new Date(NOW).toISOString() }), NOW),
+    true,
+  )
+  assert.equal(
+    isDoneToday(loop({ cached_state: 'working', closed_at: new Date(NOW).toISOString() }), NOW),
+    false,
+  )
+})
+
+// --- The workflow drawing (level 2) ----------------------------------------------
 
 function mapLoop(over = {}) {
   return {
@@ -465,56 +407,59 @@ function mapLoop(over = {}) {
   }
 }
 
-test('dots position by station_index; off_path/no_stations get none', () => {
-  const dots = mapDots([
-    mapLoop({ id: 1, position: { status: 'on_path', station_index: 0 } }),
-    mapLoop({ id: 2, position: { status: 'on_path', station_index: 2 } }),
-    mapLoop({ id: 3, position: { status: 'off_path', station_index: null } }),
-    mapLoop({ id: 4, position: { status: 'no_stations', station_index: null } }),
-  ])
-  assert.deepEqual([...dots.keys()].sort(), [0, 2])
-  assert.equal(dots.get(0).dots.length, 1)
-  assert.equal(dots.get(2).dots.length, 1)
+test('heat: on-path loops warm their station with count + oldest age', () => {
+  const heat = stationHeat(
+    [
+      mapLoop({ id: 1, last_event_unix: (NOW - 3 * 3600 * 1000) * 1e6 }),
+      mapLoop({ id: 2, last_event_unix: (NOW - 600 * 1000) * 1e6 }),
+      mapLoop({ id: 3, position: { status: 'off_path', station_index: null } }),
+    ],
+    NOW,
+  )
+  assert.deepEqual([...heat.keys()], [0]) // off_path never warms a station
+  assert.equal(heat.get(0).count, 2)
+  assert.equal(heatLabel(heat.get(0)), '2 here · 3h')
 })
 
-test('stacking: waiting dots sort first; cap 3 with +n overflow', () => {
-  const stack = mapDots([
-    mapLoop({ id: 1, cached_state: 'working' }),
-    mapLoop({ id: 2, cached_state: 'awaiting_human', stalled_for_s: 100 }),
-    mapLoop({ id: 3, cached_state: 'working' }),
-    mapLoop({ id: 4, cached_state: 'working' }),
-    mapLoop({ id: 5, cached_state: 'working' }),
-  ]).get(0)
-  assert.equal(stack.dots.length, 3)
-  assert.equal(stack.dots[0].id, 2) // waiting first
-  assert.equal(stack.overflow, 2)
-  assert.equal(moreDotsLabel(stack.overflow), '+2 more')
+test('station names: holders win, honest fallbacks otherwise', () => {
+  assert.equal(stationName({ holder_type: 'agent', holder: 'triage-agent' }), 'triage-agent')
+  assert.equal(stationName({ holder_type: 'human' }), 'a person')
+  assert.equal(stationName({ holder_type: 'system' }), 'a system')
+  assert.equal(stationName({ holder_type: 'agent' }), 'an agent')
 })
 
-test('waiting vs working dot labels', () => {
-  const w = mapLoop({ cached_state: 'awaiting_human', stalled_for_s: 3 * 3600 })
-  assert.equal(mapDotLabel(w, NOW), 'Score the signup · waiting 3h')
-  assert.equal(mapDotLabel(mapLoop(), NOW), 'Score the signup')
+test('in-motion line: station position + age, honest fallback off the path', () => {
+  const l = loop({ last_event_unix: (NOW - 12 * 60 * 1000) * 1e6 })
+  assert.equal(inMotionLine(l, { holder_type: 'human', holder: 'Sarah' }, NOW), 'with Sarah · 12m')
+  assert.equal(inMotionLine(l, null, NOW), 'moving · 12m')
 })
 
-test('stations with waiting work get the warm treatment', () => {
-  const warm = waitingStations([
-    mapLoop({ id: 1, cached_state: 'awaiting_human',
-              position: { status: 'on_path', station_index: 1 } }),
-    mapLoop({ id: 2, cached_state: 'working',
-              position: { status: 'on_path', station_index: 0 } }),
-    mapLoop({ id: 3, cached_state: 'awaiting_system',
-              position: { status: 'off_path', station_index: null } }),
-  ])
-  assert.deepEqual([...warm], [1]) // off_path never warms a station
+test('chain glyph: readable breadcrumb from segments_mini, no names invented', () => {
+  const seg = (t, w = false) => ({ holder_type: t, start_ns: 0, end_ns: 1, waiting: w })
+  const l = loop({
+    service_name: 'triage-agent',
+    segments_mini: [seg('agent'), seg('human', true), seg('agent')],
+  })
+  assert.equal(chainGlyph(l), 'tr → you → tr')
+  assert.equal(chainGlyph(loop({ segments_mini: [] })), '')
+  const long = loop({
+    service_name: 'triage-agent',
+    segments_mini: [seg('agent'), seg('human'), seg('agent'), seg('system'), seg('agent'), seg('human')],
+  })
+  assert.equal(chainGlyph(long), 'tr → you → … → tr → you')
 })
 
-test('editor payload: shapes round-trip, empties dropped, tools split', () => {
+test('done + more labels', () => {
+  assert.equal(doneTodayLabel(4), 'Done today · 4')
+  assert.equal(moreItemsLabel(2), '+2 more ›')
+})
+
+test('editor payload: shapes round-trip, empties dropped, tools split, carrier kept', () => {
   const p = buildWorkflowPayload(
     '  Signup triage ',
     [
-      { holder_type: 'agent', holder: ' triage-bot ', label: 'scores it', tools: 'exec, read' },
-      { holder_type: 'human', holder: 'Sarah', label: '', tools: '' },
+      { holder_type: 'agent', holder: ' triage-bot ', label: 'scores it', tools: 'exec, read', carrier: ' Slack ' },
+      { holder_type: 'human', holder: 'Sarah', label: '', tools: '', carrier: '' },
     ],
     [
       { field: 'service_name', op: 'equals', value: ' triage-bot ' },
@@ -525,7 +470,7 @@ test('editor payload: shapes round-trip, empties dropped, tools split', () => {
   assert.deepEqual(p, {
     name: 'Signup triage',
     stations: [
-      { holder_type: 'agent', holder: 'triage-bot', label: 'scores it', tools: ['exec', 'read'] },
+      { holder_type: 'agent', holder: 'triage-bot', label: 'scores it', carrier: 'Slack', tools: ['exec', 'read'] },
       { holder_type: 'human', holder: 'Sarah' },
     ],
     match_hints: [{ field: 'service_name', op: 'equals', value: 'triage-bot' }],
@@ -538,15 +483,27 @@ test('version-bump button labeling', () => {
   assert.equal(saveVersionLabel(3), 'Save as v4')
 })
 
-test('jargon: workflow-surface strings are clean', () => {
+test('jargon: every workflow-surface string is clean', () => {
   const strings = [
     ...Object.values(WORKFLOW_STRINGS),
+    workflowShapeLine({ stations: wfStations, loops_today: 3 }),
+    workflowChip({ loop_counts: { stalled: 1 }, needs_you_for_s: 60 }).label,
+    workflowChip({ loop_counts: {} }).label,
+    otherWorkLine(2),
+    heatLabel({ count: 2, oldestS: 3600 }),
+    inMotionLine(loop(), { holder_type: 'agent', holder: 'ops-bot' }, NOW),
+    chainGlyph(loop({ segments_mini: [{ holder_type: 'system', start_ns: 0, end_ns: 1 }] })),
     doneTodayLabel(4),
-    moreDotsLabel(2),
+    moreItemsLabel(2),
     saveVersionLabel(2),
-    mapDotLabel(mapLoop({ cached_state: 'awaiting_system', stalled_for_s: 60 }), NOW),
+    boardTitle(loop({ title: null })),
+    loopStateMeta(loop({ cached_state: 'awaiting_system' }), NOW).label,
   ]
   for (const s of strings) {
-    assert.ok(!/model_call|tool_call|llm_output|span|telemetry|drift|conformance/i.test(s), s)
+    assert.ok(
+      !/model_call|tool_call|llm_output|span|telemetry|drift|conformance|loop_|cached|workflow_id/i.test(s),
+      `jargon leaked: ${s}`,
+    )
+    assert.ok(!/_/.test(s), `underscore leaked: ${s}`)
   }
 })

@@ -1,40 +1,88 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ArrowLeftIcon } from './Icons.jsx'
-import { BoardRow } from './LoopBoard.jsx'
+import StoryView from './StoryView.jsx'
 import {
+  ATTENTION_STATES,
+  TERMINAL_STATES,
   WORKFLOW_STRINGS as WS,
+  boardTitle,
+  chainGlyph,
   doneTodayLabel,
-  mapDotLabel,
-  mapDots,
-  moreDotsLabel,
+  fmtAge,
+  fmtDurationShort,
+  heatLabel,
+  inMotionLine,
+  isDoneToday,
+  loopAgeSeconds,
+  loopDurationSeconds,
+  moreItemsLabel,
+  showMarkDone,
   sortLoopsAttentionFirst,
-  waitingStations,
+  stationHeat,
+  stationName,
   workflowHeaderLine,
 } from './loops.js'
 
-// The workflow page: the declared process (stations left to right) with
-// live work positioned under its current station, and the loops list
-// below. Off-path loops carry no dot — they appear only as ordinary rows
-// in the list (that's the approved cut: no off-path lane, no conformance
-// UI). Dots and track are divs; refresh on the board's cadence.
+// The workflow page, level 2: the drawing IS the page. The declared path
+// renders as generous station boxes left to right; the only live-data
+// element on the drawing is heat — a warm fill + "{n} here · {age}" on
+// stations currently holding work. Under the drawing, the work in it,
+// simply: Needs you, In motion, Done today. Every item expands the loop's
+// story inline (the app's list-detail pattern).
 
 const REFRESH_MS = 30000
-const DOT_CAP = 3
+const DONE_SHOWN = 5
 
-function StationBox({ station, warm }) {
+function Station({ station, heat }) {
   return (
-    <div className={`wfmap-station ${warm ? 'is-warm' : ''}`}>
-      <div className="wfmap-station-name">
-        {station.holder || (station.holder_type === 'human' ? 'a human' : station.holder_type)}
+    <div className={`wfd-station ${heat ? 'is-warm' : ''}`}>
+      <div className="wfd-station-who">
+        {station.holder_type === 'agent' && (
+          <span className="wfd-agent-dot" aria-hidden="true" />
+        )}
+        {stationName(station)}
       </div>
-      {station.label && <div className="wfmap-station-label">{station.label}</div>}
-      {station.tools?.length > 0 && (
-        <div className="wfmap-station-tools">
-          {station.tools.map((t, i) => (
-            <span key={i} className="story-chip">{t}</span>
-          ))}
-        </div>
+      {station.label && <div className="wfd-station-what">{station.label}</div>}
+      {heat && <div className="wfd-station-heat">{heatLabel(heat)}</div>}
+    </div>
+  )
+}
+
+function Arrow({ carrier }) {
+  return (
+    <span className="wfd-arrow-cell">
+      {carrier && <span className="wfd-carrier">{carrier}</span>}
+      <span className="wfd-arrow" aria-hidden="true">→</span>
+    </span>
+  )
+}
+
+// One work item under the drawing. Clicking anywhere on the row expands
+// the loop's story inline; `meta` is the muted right-hand phrase.
+function WorkItem({ loop, meta, warm, sessionUser, onOpenAgent, onChanged, action }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`wfd-item-wrap ${warm ? 'is-warm' : ''}`}>
+      <div className="wfd-item-row">
+        <button
+          type="button"
+          className="wfd-item"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+        >
+          <span className="wfd-item-title">{boardTitle(loop)}</span>
+          {meta && <span className="wfd-item-meta">{meta}</span>}
+        </button>
+        {action}
+      </div>
+      {open && (
+        <StoryView
+          loop={loop}
+          sessionUser={sessionUser}
+          onOpenAgent={onOpenAgent}
+          onChanged={onChanged}
+        />
       )}
     </div>
   )
@@ -46,7 +94,8 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
   const [loops, setLoops] = useState(null)
   const [error, setError] = useState(null)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const listRef = useRef(null)
+  const [doneExpanded, setDoneExpanded] = useState(false)
+  const [closingId, setClosingId] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +119,19 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
     return () => clearInterval(id)
   }, [load])
 
+  async function markDone(loop) {
+    if (closingId) return
+    setClosingId(loop.id)
+    try {
+      await api.closeLoop(loop.id)
+      await load()
+    } catch (e) {
+      setError(e?.message || 'Could not mark this loop done')
+    } finally {
+      setClosingId(null)
+    }
+  }
+
   if (error && !wf) {
     return (
       <div className="dash">
@@ -89,10 +151,26 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
   }
 
   const stations = map?.stations || []
-  const mapLoops = map?.loops || []
-  const dots = mapDots(mapLoops, DOT_CAP)
-  const warm = waitingStations(mapLoops)
-  const ordered = sortLoopsAttentionFirst(loops || [])
+  const heat = stationHeat(map?.loops || [])
+  // Station position per loop id, for the In motion lines.
+  const positionById = new Map()
+  for (const l of map?.loops || []) {
+    if (l?.position?.status === 'on_path' && l.position.station_index != null) {
+      positionById.set(l.id, stations[l.position.station_index])
+    }
+  }
+
+  const all = loops || []
+  const needsYou = sortLoopsAttentionFirst(
+    all.filter((l) => ATTENTION_STATES.includes(l.cached_state)),
+  )
+  const inMotion = all.filter(
+    (l) =>
+      !ATTENTION_STATES.includes(l.cached_state) &&
+      !TERMINAL_STATES.includes(l.cached_state),
+  )
+  const doneToday = all.filter((l) => isDoneToday(l))
+  const doneShown = doneExpanded ? doneToday : doneToday.slice(0, DONE_SHOWN)
 
   return (
     <div className="dash wfpage">
@@ -102,8 +180,7 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
 
       <div className="wfp-titlerow">
         <span className="wfpage-head">
-          <span className="board-group-tick" aria-hidden="true" />
-          <h1 className="dash-hello" style={{ margin: 0 }}>{wf.name}</h1>
+          <h1 className="wfd-title">{wf.name}</h1>
           <button
             type="button"
             className="wfe-vchip is-btn"
@@ -119,7 +196,7 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
           </button>
         )}
       </div>
-      <div className="story-sub">{workflowHeaderLine(wf)}</div>
+      <div className="wfd-summary">{workflowHeaderLine(wf)}</div>
 
       {historyOpen && (
         <div className="dash-card wfpage-history">
@@ -136,7 +213,7 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
         </div>
       )}
 
-      <div className="dash-card wfmap-card">
+      <div className="wfd-drawing">
         {stations.length === 0 ? (
           <div className="dash-empty pad">
             {WS.mapEmpty}
@@ -150,79 +227,108 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
             )}
           </div>
         ) : (
-          <div className="wfmap-scroll">
-            <div className="wfmap-stations">
-              {stations.map((s, i) => (
-                <span className="wfmap-cell" key={i}>
-                  {i > 0 && <span className="wfmap-arrow" aria-hidden="true">→</span>}
-                  <StationBox station={s} warm={warm.has(i)} />
-                </span>
-              ))}
-            </div>
-            <div className="wfmap-track">
-              <span className="wfmap-line" aria-hidden="true" />
-              <div className="wfmap-slots">
-                {stations.map((s, i) => {
-                  const stack = dots.get(i)
-                  return (
-                    <div className="wfmap-slot" key={i}>
-                      {stack &&
-                        stack.dots.map((l) => {
-                          const waiting = l.cached_state !== 'working' && l.cached_state !== 'open'
-                          // Title ellipsizes; the waiting age must never
-                          // truncate away — it's the label's whole point.
-                          const title = l.title || `${l.service_name}`
-                          return (
-                            <div key={l.id} className={`wfmap-dotrow ${waiting ? 'is-wait' : ''}`}>
-                              <span className={`wfmap-dot ${waiting ? 'is-wait' : 'is-work'}`} />
-                              <span className="wfmap-dotlabel" title={mapDotLabel(l)}>{title}</span>
-                              {waiting && (
-                                <span className="wfmap-dotage">{mapDotLabel(l).split(' · ').pop()}</span>
-                              )}
-                            </div>
-                          )
-                        })}
-                      {stack && stack.overflow > 0 && (
-                        <button
-                          type="button"
-                          className="wfmap-more"
-                          onClick={() => listRef.current?.scrollIntoView({ behavior: 'smooth' })}
-                        >
-                          {moreDotsLabel(stack.overflow)}
-                        </button>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-              <div className="wfmap-done">
-                <span className="wfmap-dot is-done" aria-hidden="true" />
-                {doneTodayLabel(map?.done_today ?? 0)}
-              </div>
-            </div>
+          <div className="wfd-path">
+            {stations.map((s, i) => (
+              <span className="wfd-cell" key={i}>
+                {i > 0 && <Arrow carrier={stations[i - 1].carrier} />}
+                <Station station={s} heat={heat.get(i)} />
+              </span>
+            ))}
           </div>
         )}
       </div>
 
-      <section className="dash-section" ref={listRef}>
-        <div className="dash-section-head">
-          <span className="dash-section-title">{WS.loopList}</span>
-        </div>
-        <div className="dash-card">
-          {ordered.length === 0 ? (
-            <div className="dash-empty pad">No loops yet.</div>
-          ) : (
-            ordered.map((l) => (
-              <BoardRow
+      {needsYou.length > 0 && (
+        <section className="dash-section">
+          <div className="dash-section-head">
+            <span className="wfd-section-title is-warm">{WS.needsYou}</span>
+          </div>
+          <div className="dash-card">
+            {needsYou.map((l) => (
+              <WorkItem
                 key={l.id}
                 loop={l}
+                warm
+                meta={
+                  loopAgeSeconds(l) != null
+                    ? `${WS.waitingWord} ${fmtAge(loopAgeSeconds(l))}`
+                    : null
+                }
+                sessionUser={sessionUser}
+                onOpenAgent={onOpenAgent}
+                onChanged={load}
+                action={
+                  showMarkDone(l, sessionUser) ? (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => markDone(l)}
+                      disabled={closingId === l.id}
+                    >
+                      {closingId === l.id ? 'Marking…' : 'Mark done'}
+                    </button>
+                  ) : null
+                }
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {inMotion.length > 0 && (
+        <section className="dash-section">
+          <div className="dash-section-head">
+            <span className="wfd-section-title">{WS.inMotion}</span>
+          </div>
+          <div className="dash-card">
+            {inMotion.map((l) => (
+              <WorkItem
+                key={l.id}
+                loop={l}
+                meta={inMotionLine(l, positionById.get(l.id))}
                 sessionUser={sessionUser}
                 onOpenAgent={onOpenAgent}
                 onChanged={load}
               />
-            ))
-          )}
+            ))}
+          </div>
+        </section>
+      )}
+
+      <section className="dash-section">
+        <div className="dash-section-head">
+          <span className="wfd-section-title is-muted">{doneTodayLabel(doneToday.length)}</span>
         </div>
+        {doneToday.length > 0 && (
+          <div className="dash-card">
+            {doneShown.map((l) => {
+              const dur = fmtDurationShort(loopDurationSeconds(l))
+              const glyph = chainGlyph(l)
+              const bits = [glyph, dur]
+                .filter(Boolean)
+                .join(' · ')
+              return (
+                <WorkItem
+                  key={l.id}
+                  loop={l}
+                  meta={bits || null}
+                  sessionUser={sessionUser}
+                  onOpenAgent={onOpenAgent}
+                  onChanged={load}
+                />
+              )
+            })}
+            {!doneExpanded && doneToday.length > DONE_SHOWN && (
+              <button
+                type="button"
+                className="wfd-more"
+                onClick={() => setDoneExpanded(true)}
+              >
+                {moreItemsLabel(doneToday.length - DONE_SHOWN)}
+              </button>
+            )}
+          </div>
+        )}
       </section>
     </div>
   )

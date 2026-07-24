@@ -81,7 +81,7 @@ export function loopDurationSeconds(loop) {
   return Math.max(0, Math.floor((b - a) / 1000))
 }
 
-function fmtDurationShort(seconds) {
+export function fmtDurationShort(seconds) {
   if (seconds == null) return null
   const s = Math.max(0, Math.floor(seconds))
   // Round up, don't suppress: "done · 0 sec" is technically true for a
@@ -114,52 +114,8 @@ export function loopCostLabel(v) {
 }
 
 // ---------------------------------------------------------------------------
-// Board derivations (pure — the board and story render these)
+// Loop-row derivations (pure — list rows and the story render these)
 // ---------------------------------------------------------------------------
-
-/**
- * Possession-bar geometry from segments_mini. Returns proportional slices:
- *   [{kind: 'agent'|'wait'|'pending'|'error', pct: number}]
- * Widths are proportional to duration with a 3% floor, normalized to 100.
- * A trailing unfinished agent segment renders 'pending' (gray, pulsing edge);
- * a live wait keeps the warning kind — attention must stay visible. When the
- * loop is abandoned, the final slice becomes 'error'.
- */
-export function barSegments(mini, nowNs = Date.now() * 1e6, loopState = null) {
-  const segs = Array.isArray(mini) ? mini.filter((s) => s && s.start_ns != null) : []
-  if (segs.length === 0) return [{ kind: 'pending', pct: 100 }]
-  const start = Math.min(...segs.map((s) => s.start_ns))
-  const end = Math.max(...segs.map((s) => (s.end_ns == null ? nowNs : s.end_ns)))
-  const total = Math.max(1, end - start)
-  let slices = segs.map((s) => {
-    const ongoing = s.end_ns == null
-    const dur = Math.max(0, (ongoing ? nowNs : s.end_ns) - s.start_ns)
-    let kind = s.waiting ? 'wait' : 'agent'
-    if (ongoing && !s.waiting) kind = 'pending'
-    return { kind, pct: Math.max(3, (dur / total) * 100) }
-  })
-  if (loopState === 'abandoned' && slices.length > 0) {
-    slices[slices.length - 1] = { ...slices[slices.length - 1], kind: 'error' }
-  }
-  const sum = slices.reduce((a, s) => a + s.pct, 0)
-  slices = slices.map((s) => ({ ...s, pct: (s.pct / sum) * 100 }))
-  return slices
-}
-
-/**
- * Possession chain dots from segments_mini. Cap at 4 dots; longer chains
- * collapse the middle to a '··' marker. The current (last) holder is marked.
- */
-export function chainDots(mini, cap = 4) {
-  const segs = Array.isArray(mini) ? mini : []
-  const dots = segs.map((s, i) => ({
-    holder_type: s.holder_type || 'agent',
-    waiting: Boolean(s.waiting),
-    current: i === segs.length - 1,
-  }))
-  if (dots.length <= cap) return { dots, collapsed: false }
-  return { dots: [...dots.slice(0, 2), ...dots.slice(-2)], collapsed: true }
-}
 
 export function initialsOf(label) {
   const words = String(label || '')
@@ -183,54 +139,48 @@ export function boardTitle(loop) {
   return loop?.title || agentLabel(loop)
 }
 
-/**
- * Board grouping: loops matched to a declared workflow group under its name;
- * unmatched loops group under agent identity. Matched groups sort above
- * unmatched; group order and in-group order both derive from the
- * attention-first sorted list (first-encounter), so groups needing a human
- * float up and rows inside run attention-first then newest.
- */
-export function boardGroups(loops, nowMs = Date.now()) {
-  const ordered = sortLoopsAttentionFirst(loops, nowMs)
-  const groups = new Map()
-  for (const l of ordered) {
-    const matched = l?.workflow_id != null
-    const key = matched ? `wf:${l.workflow_id}` : `agent:${workflowGroupKey(l)}`
-    let g = groups.get(key)
-    if (!g) {
-      g = {
-        key,
-        matched,
-        name: matched ? l.workflow_name || 'Workflow' : agentLabel(l),
-        loops: [],
-      }
-      groups.set(key, g)
-    }
-    g.loops.push(l)
-  }
-  const all = [...groups.values()].filter((g) => g.loops.length > 0)
-  return [...all.filter((g) => g.matched), ...all.filter((g) => !g.matched)]
+// True when the loop's created_at falls on today's calendar date.
+export function isCreatedToday(loop, nowMs = Date.now()) {
+  const t = parseTs(loop?.created_at)
+  if (Number.isNaN(t)) return false
+  const d = new Date(t)
+  const today = new Date(nowMs)
+  return (
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate()
+  )
 }
 
-// "14 today · 1 needs you" / "14 today · all moving"
-export function boardGroupSummary(group, nowMs = Date.now()) {
+// True when the loop finished (closed done) on today's calendar date.
+export function isDoneToday(loop, nowMs = Date.now()) {
+  if (loop?.cached_state !== 'done') return false
+  const t = parseTs(loop?.closed_at)
+  if (Number.isNaN(t)) return false
+  const d = new Date(t)
   const today = new Date(nowMs)
-  const isToday = (iso) => {
-    const t = parseTs(iso)
-    if (Number.isNaN(t)) return false
-    const d = new Date(t)
-    return (
-      d.getFullYear() === today.getFullYear() &&
-      d.getMonth() === today.getMonth() &&
-      d.getDate() === today.getDate()
-    )
-  }
-  const n = group.loops.filter((l) => isToday(l.created_at)).length
-  const needs = stuckCount(group.loops)
-  const left = n === 1 ? '1 today' : `${n} today`
-  const right =
-    needs > 0 ? `${needs} ${needs === 1 ? 'needs' : 'need'} you` : 'all moving'
-  return `${left} · ${right}`
+  return (
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate()
+  )
+}
+
+/**
+ * The done-line chain glyph: who held the work, in order, compressed to a
+ * readable breadcrumb — "tr → you → tr". Agents show the first two letters
+ * of their identity; humans read "you" (segments_mini carries no names);
+ * systems read "sys". Chains past 5 holders collapse the middle to "…".
+ */
+export function chainGlyph(loop) {
+  const segs = Array.isArray(loop?.segments_mini) ? loop.segments_mini : []
+  if (segs.length === 0) return ''
+  const short = agentLabel(loop).replace(/[^a-z0-9]/gi, '').slice(0, 2).toLowerCase() || 'ag'
+  let parts = segs.map((s) =>
+    s.holder_type === 'human' ? 'you' : s.holder_type === 'system' ? 'sys' : short,
+  )
+  if (parts.length > 5) parts = [...parts.slice(0, 2), '…', ...parts.slice(-2)]
+  return parts.join(' → ')
 }
 
 // ---------------------------------------------------------------------------
@@ -249,21 +199,137 @@ export const WORKFLOW_STRINGS = {
   hintsExplainer: 'Loops matching these rules belong to this workflow.',
   noteLabel: 'What changed (optional)',
   mapEmpty: 'No stations declared yet — describe the process to see work move through it',
-  loopList: 'Loops in this workflow',
   historyLabel: 'history ›',
   waitingWord: 'waiting',
+  // The Work list (level 1)
+  listEmpty: 'No workflows yet.',
+  listEmptyCta: 'Describe how work gets done here →',
+  otherWork: 'Other agent work',
+  runningChip: 'running',
+  quietChip: 'quiet today',
+  // The workflow page (level 2)
+  needsYou: 'Needs you',
+  inMotion: 'In motion',
+  humanFallback: 'a person',
+  systemFallback: 'a system',
+  agentFallback: 'an agent',
+  movingWord: 'moving',
+  carrierLabel: 'how it travels to the next step — “Slack” (optional)',
 }
 
 export function saveVersionLabel(currentVersion) {
   return currentVersion ? `Save as v${currentVersion + 1}` : 'Create workflow'
 }
 
+// "Done today · 4" — the workflow page's finished-work section head.
 export function doneTodayLabel(n) {
-  return `${n} done today`
+  return `Done today · ${n}`
 }
 
-export function moreDotsLabel(n) {
-  return `+${n} more`
+// "+3 more ›" — compressed-list overflow, clicks through to the rest.
+export function moreItemsLabel(n) {
+  return `+${n} more ›`
+}
+
+// "Other agent work · 6 runs today ›" — the muted row under the Work list
+// that links to the plain list of loops no declared workflow matched.
+export function otherWorkLine(n) {
+  return `${WORKFLOW_STRINGS.otherWork} · ${n === 1 ? '1 run' : `${n} runs`} today ›`
+}
+
+// The attention-state sum a workflow's chip and heat derive from.
+function needsCount(loopCounts) {
+  return ATTENTION_STATES.reduce((a, s) => a + (loopCounts?.[s] || 0), 0)
+}
+
+/**
+ * The Work list's one status chip per workflow.
+ *   warm: a human is holding work — "1 waiting on you · 3h"
+ *   else: "running" while anything is moving, "quiet today" otherwise.
+ */
+export function workflowChip(wf) {
+  const needs = needsCount(wf?.loop_counts)
+  if (needs > 0) {
+    const age =
+      typeof wf?.needs_you_for_s === 'number' ? ` · ${fmtAge(wf.needs_you_for_s)}` : ''
+    return { label: `${needs} waiting on you${age}`, warm: true }
+  }
+  const live =
+    (wf?.loop_counts?.working || 0) +
+    (wf?.loop_counts?.open || 0) +
+    (wf?.loop_counts?.awaiting_agent || 0)
+  return { label: live > 0 ? WORKFLOW_STRINGS.runningChip : WORKFLOW_STRINGS.quietChip, warm: false }
+}
+
+// A station's display name: agents/systems by their declared identity,
+// humans by their name when given.
+export function stationName(station) {
+  if (station?.holder) return station.holder
+  if (station?.holder_type === 'human') return WORKFLOW_STRINGS.humanFallback
+  if (station?.holder_type === 'system') return WORKFLOW_STRINGS.systemFallback
+  return WORKFLOW_STRINGS.agentFallback
+}
+
+/**
+ * The Work list's muted shape line: "3 steps · triage-agent + you · 14 today".
+ * Derives entirely from the /workflows summary (stations + loops_today).
+ */
+export function workflowShapeLine(wf) {
+  const stations = Array.isArray(wf?.stations) ? wf.stations : []
+  const parts = []
+  parts.push(stations.length === 1 ? '1 step' : `${stations.length} steps`)
+  const cast = []
+  let hasHuman = false
+  for (const s of stations) {
+    if (s.holder_type === 'human') {
+      hasHuman = true
+      continue
+    }
+    const name = stationName(s)
+    if (!cast.includes(name)) cast.push(name)
+  }
+  if (hasHuman) cast.push('you')
+  if (cast.length > 0) {
+    const shown = cast.slice(0, 3)
+    const extra = cast.length - shown.length
+    parts.push(shown.join(' + ') + (extra > 0 ? ` + ${extra} more` : ''))
+  }
+  const n = wf?.loops_today ?? 0
+  parts.push(n === 0 ? 'none today' : `${n} today`)
+  return parts.join(' · ')
+}
+
+/**
+ * Heat for the drawing: which stations currently hold work, how much, and
+ * how long the oldest piece has sat. The map's ONLY live-data element.
+ * Returns Map(station_index -> { count, oldestS }).
+ */
+export function stationHeat(mapLoops, nowMs = Date.now()) {
+  const out = new Map()
+  for (const l of Array.isArray(mapLoops) ? mapLoops : []) {
+    if (l?.position?.status !== 'on_path' || l.position.station_index == null) continue
+    const idx = l.position.station_index
+    const age = loopAgeSeconds(l, nowMs)
+    const cur = out.get(idx) || { count: 0, oldestS: null }
+    cur.count += 1
+    if (age != null && (cur.oldestS == null || age > cur.oldestS)) cur.oldestS = age
+    out.set(idx, cur)
+  }
+  return out
+}
+
+// "2 here · 3h" — the heat line inside a station that holds work.
+export function heatLabel(heat) {
+  const base = `${heat.count} here`
+  return heat.oldestS != null ? `${base} · ${fmtAge(heat.oldestS)}` : base
+}
+
+// "with Sarah · 12m" — an in-motion row's position phrase. Falls back to
+// "moving · 12m" when the loop doesn't sit on a declared station.
+export function inMotionLine(loop, station, nowMs = Date.now()) {
+  const where = station ? `with ${stationName(station)}` : WORKFLOW_STRINGS.movingWord
+  const age = loopAgeSeconds(loop, nowMs)
+  return age != null ? `${where} · ${fmtAge(age)}` : where
 }
 
 export function workflowHeaderLine(wf, nowMs = Date.now()) {
@@ -281,63 +347,6 @@ export function workflowHeaderLine(wf, nowMs = Date.now()) {
   return parts.join(' · ')
 }
 
-// Dot label under the track: waiting dots carry the age; working dots just
-// the short title. Titles ellipsize in CSS; this is the text content.
-export function mapDotLabel(loop, nowMs = Date.now()) {
-  const title = loop?.title || agentLabel(loop)
-  const age = loopAgeSeconds(loop, nowMs)
-  const waiting = ATTENTION_STATES.includes(loop?.cached_state)
-  if (waiting && age != null) {
-    return `${title} · ${WORKFLOW_STRINGS.waitingWord} ${fmtAge(age)}`
-  }
-  return title
-}
-
-/**
- * Group the map's live loops into per-station dot stacks. Only on_path
- * loops get dots — off_path/no_stations render solely in the loop list.
- * Waiting dots sort first within a stack; stacks cap at `cap` dots with an
- * overflow count.
- */
-export function mapDots(mapLoops, cap = 3) {
-  const byStation = new Map()
-  for (const l of Array.isArray(mapLoops) ? mapLoops : []) {
-    if (l?.position?.status !== 'on_path') continue
-    const idx = l.position.station_index
-    if (idx == null) continue
-    if (!byStation.has(idx)) byStation.set(idx, [])
-    byStation.get(idx).push(l)
-  }
-  const out = new Map()
-  for (const [idx, ls] of byStation) {
-    const sorted = [...ls].sort((a, b) => {
-      const aw = ATTENTION_STATES.includes(a.cached_state) ? 0 : 1
-      const bw = ATTENTION_STATES.includes(b.cached_state) ? 0 : 1
-      return aw - bw
-    })
-    out.set(idx, {
-      dots: sorted.slice(0, cap),
-      overflow: Math.max(0, sorted.length - cap),
-    })
-  }
-  return out
-}
-
-// Stations that currently hold waiting work get the warm treatment.
-export function waitingStations(mapLoops) {
-  const set = new Set()
-  for (const l of Array.isArray(mapLoops) ? mapLoops : []) {
-    if (
-      l?.position?.status === 'on_path' &&
-      l.position.station_index != null &&
-      ATTENTION_STATES.includes(l.cached_state)
-    ) {
-      set.add(l.position.station_index)
-    }
-  }
-  return set
-}
-
 /**
  * Editor → API payload. Drops fully-empty station rows and hint rows with
  * no value; trims strings; tools split on commas. Shape matches
@@ -349,6 +358,7 @@ export function buildWorkflowPayload(name, stations, hints, note) {
       const out = { holder_type: s.holder_type || 'agent' }
       if (s.holder && s.holder.trim()) out.holder = s.holder.trim()
       if (s.label && s.label.trim()) out.label = s.label.trim()
+      if (s.carrier && s.carrier.trim()) out.carrier = s.carrier.trim()
       const tools = (Array.isArray(s.tools) ? s.tools : String(s.tools || '').split(','))
         .map((t) => String(t).trim())
         .filter(Boolean)
