@@ -44,7 +44,23 @@ import loops
 import pricing_sync
 # MCP server for ChatGPT agents. Two transports: Streamable HTTP (/mcp) for
 # standard MCP clients, SSE (/mcp/sse + /mcp/messages/) for ChatGPT Custom MCP.
-from mcp_server import mcp as oversee_mcp, http_app as oversee_mcp_app, sse_app as oversee_sse_app
+# Import-guarded (like stripe/resend/sentry): the MCP server is an OPTIONAL
+# integration and must never be able to take down the core app. If the `mcp`
+# package is missing or incompatible in the deployed env, the /mcp routes are
+# disabled but auth, ingest, and the dashboard all boot normally.
+try:
+    from mcp_server import (
+        mcp as oversee_mcp,
+        http_app as oversee_mcp_app,
+        sse_app as oversee_sse_app,
+    )
+except Exception as _mcp_err:  # noqa: BLE001 — any import failure must be non-fatal
+    import logging as _logging
+    _logging.getLogger("trovis").warning(
+        "MCP server unavailable (%s: %s) — /mcp routes disabled, core app unaffected.",
+        type(_mcp_err).__name__, _mcp_err,
+    )
+    oversee_mcp = oversee_mcp_app = oversee_sse_app = None
 from models import (
     AgentCosts,
     AgentDeleteResponse,
@@ -305,8 +321,11 @@ async def lifespan(app: FastAPI):
         loop_sweep_task = asyncio.create_task(_loop_sweep_loop())
     try:
         # Run the MCP Streamable-HTTP session manager for the app's lifetime so
-        # the /mcp mount can serve ChatGPT agents.
-        async with oversee_mcp.session_manager.run():
+        # the /mcp mount can serve ChatGPT agents — only when MCP is available.
+        if oversee_mcp is not None:
+            async with oversee_mcp.session_manager.run():
+                yield
+        else:
             yield
     finally:
         if refresh_task is not None:
@@ -485,7 +504,9 @@ class _MCPInterceptMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http":
+        # When MCP is unavailable (import guard tripped), skip all /mcp routing
+        # so requests fall through to the core app instead of hitting a None app.
+        if scope.get("type") == "http" and oversee_mcp_app is not None:
             path = scope.get("path", "")
             # Streamable HTTP transport at /mcp
             if path == "/mcp" or path == "/mcp/":
