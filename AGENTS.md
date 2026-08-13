@@ -19,7 +19,7 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 - **Frontend:** React + Vite (`frontend/`), CSS-variable theming (light/dark).
 - **Ingest:** OTLP/HTTP receiver at `POST /v1/traces`.
 - **Distribution:** `trovis-agents/` (pip SDK for OpenAI Agents SDK / Claude Agent SDK /
-  Claude Managed Agents / Hermes), `trovis-openclaw-plugin/` (TS plugin), `mcp_server.py`
+  Claude Managed Agents), `trovis-openclaw-plugin/` (TS plugin), `mcp_server.py`
   (MCP server for ChatGPT, mounted on the FastAPI app — currently unlisted in the UI).
 
 ## Repo map

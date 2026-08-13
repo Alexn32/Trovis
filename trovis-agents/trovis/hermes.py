@@ -1,4 +1,35 @@
-"""Hermes Agent support for Trovis.
+"""Hermes Agent support for Trovis — UNVERIFIED, NOT A SUPPORTED PLATFORM.
+
+Do not treat this module as a working integration, and do not re-add Hermes to
+any claim surface until the smoke test described below exists and passes.
+
+Verified against hermes-agent 0.19.0 (PyPI, installs cleanly, coexists with
+this repo's pinned backend deps). Discovery is fine: Hermes'
+ENTRY_POINTS_GROUP is literally "hermes_agent.plugins", which is what
+pyproject.toml declares, and the loader does call `register(ctx)` on a real
+PluginContext exposing register_hook / register_command / register_cli_command.
+
+What is broken — the reason no span has ever arrived through this path:
+
+  1. `_on_tool_call` cannot be called. PluginManager.invoke_hook() dispatches
+     with KEYWORD arguments, and Hermes' post_tool_call carries
+     `function_name` / `function_args` / `result` plus task_id, session_id,
+     tool_call_id, turn_id, api_request_id, duration_ms, status, error_type,
+     error_message, middleware_trace, telemetry_schema_version. This handler
+     takes positional `tool_name, params, result`, so every invocation raises
+     TypeError, which Hermes catches and logs. Confirmed by direct call.
+
+  2. `post_model_call` is not a hook. It is absent from VALID_HOOKS, so
+     register_hook() warns and stores a callback nothing ever fires. The real
+     hook is `post_llm_call` — and it carries session/turn ids, the message
+     text, and the model name, but NO token usage, so the cost story here
+     needs a different source entirely.
+
+Fixing (1) is mechanical; (2) needs a rethink of where Hermes cost comes from.
+Either way the bar for relisting is a passing test_connect_hermes.py that
+drives the real PluginManager and asserts a span lands — not a fake ctx. The
+existing fake-ctx coverage in test_smoke.py is exactly what let this ship
+broken: it asserted our own assumptions back at us.
 
 Hermes is a Python-based agent platform with its own plugin loader.
 Plugins are discovered either by being dropped into `~/.hermes/plugins/`

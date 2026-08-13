@@ -203,11 +203,18 @@ try:
     )
     check("platform='anthropic' init() returned without raising", True)
 
-    step(10, "Hermes plugin (entry point + ctx wiring)…")
-    # Hermes plugin doesn't need anthropic or openai-agents installed;
-    # it operates on a `ctx` object the Hermes runtime provides. We
-    # build a fake ctx that records which hook/command names were
-    # registered, then run `register(ctx)` and assert what landed.
+    step(10, "Hermes plugin — UNSUPPORTED; fake-ctx wiring only, proves nothing…")
+    # WARNING: this step is not evidence that Hermes works. It drives
+    # register() with a FAKE ctx of our own design, so it asserts our
+    # assumptions back at us — which is precisely how the Hermes adapter
+    # shipped broken. Against the real hermes-agent 0.19.0 API the
+    # post_tool_call handler raises TypeError on every call (Hermes dispatches
+    # by keyword: function_name/function_args), and post_model_call is not a
+    # real hook at all. See trovis/hermes.py's module docstring.
+    #
+    # Kept only to prove the module still imports and doesn't crash. Do not
+    # strengthen it — the bar for relisting Hermes is a test_connect_hermes.py
+    # that drives the REAL PluginManager and asserts a span actually lands.
     from trovis.hermes_plugin import register as hermes_register
 
     class FakeHermesCtx:

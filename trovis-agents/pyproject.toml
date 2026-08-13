@@ -31,9 +31,13 @@ dependencies = [
 # Per-platform extras so users only install what they need:
 #   pip install trovis-agents[openai]      → OpenAI Agents SDK support
 #   pip install trovis-agents[anthropic]   → Claude Managed Agents support
-#   pip install trovis-agents[hermes]      → Hermes Agent plugin (no extra
-#                                             deps — Hermes provides the ctx)
-#   pip install trovis-agents[all]         → every platform's extras
+#   pip install trovis-agents[all]         → every SUPPORTED platform's extras
+#
+# [hermes] is retained only so existing install commands keep resolving. Hermes
+# is NOT a supported platform: the adapter was written against an assumed
+# plugin API that doesn't match the real one, and no span has ever reached
+# Trovis through it. See the README section. It is deliberately excluded
+# from [all].
 [project.optional-dependencies]
 openai = [
     "openai-agents-opentelemetry>=0.2.0",
@@ -44,6 +48,7 @@ anthropic = [
 claude-agent-sdk = [
     "claude-agent-sdk>=0.1.0",
 ]
+# Unsupported — see the note above [project.optional-dependencies].
 hermes = []
 all = [
     "openai-agents-opentelemetry>=0.2.0",
@@ -57,9 +62,12 @@ dev = [
     "claude-agent-sdk>=0.1.0",
 ]
 
-# Hermes discovers plugins via Python entry points. Pointing at
-# `trovis.hermes_plugin` exposes that package's `register` function
-# to Hermes' loader.
+# Hermes discovers plugins via Python entry points, and this group name is
+# correct — verified against hermes-agent 0.19.0, whose ENTRY_POINTS_GROUP is
+# literally "hermes_agent.plugins". Discovery was never the broken part; the
+# hook handler signatures are (see the README). Kept so a future fixed adapter
+# is discoverable again without a packaging change. Hermes plugins are opt-in
+# per install, so this declaration alone loads nothing.
 [project.entry-points."hermes_agent.plugins"]
 trovis = "trovis.hermes_plugin"
 

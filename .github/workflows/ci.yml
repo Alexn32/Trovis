@@ -33,6 +33,11 @@ jobs:
       # Every door we advertise has a test_connect_<door>.py. Assert the set
       # is present BEFORE running anything: deleting a door test would
       # otherwise just shrink the loop below and still go green.
+      #
+      # Hermes is deliberately NOT in this list — it was delisted as an
+      # unverified integration, not merely left untested. Adding
+      # test_connect_hermes.py here is the correct way to bring it back, and
+      # it must drive the real Hermes PluginManager (see trovis/hermes.py).
       - name: Every claimed ingest door has a test
         run: |
           missing=()

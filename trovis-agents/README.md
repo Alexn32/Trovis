@@ -1,8 +1,8 @@
 # trovis-agents
 
 Connect your AI agents to Trovis in two lines of code. Supports
-three agent platforms today — the OpenAI Agents SDK, Anthropic
-Claude Agents, and Hermes. Extras pick which dependencies install.
+the OpenAI Agents SDK, Anthropic Claude Managed Agents, and the
+Claude Agent SDK. Extras pick which dependencies install.
 
 ## Install
 
@@ -15,9 +15,6 @@ pip install trovis-agents[anthropic]
 
 # Claude Agent SDK (query() + ClaudeSDKClient)
 pip install trovis-agents[claude-agent-sdk]
-
-# Hermes Agent (no extra deps — Hermes provides the runtime)
-pip install trovis-agents[hermes]
 
 # All Python-SDK platforms
 pip install trovis-agents[all]
@@ -126,48 +123,20 @@ run's token usage + cost (from the SDK's `ResultMessage`).
 `ClaudeSDKClient`'s streaming (`receive_response`) is instrumented the
 same way.
 
-## Hermes Agent
+## Hermes Agent — not currently supported
 
-Hermes discovers plugins via Python entry points, so installing
-this package is enough — no separate plugin scaffold to copy.
+The `trovis.hermes` adapter in this package is **unverified and not a
+supported integration**. It was written against an assumed Hermes plugin
+API that does not match the real one: its `post_tool_call` handler raises
+`TypeError` on every invocation (Hermes passes `function_name` /
+`function_args` as keyword arguments; the handler takes positional
+`tool_name` / `params`), and it registers a `post_model_call` hook that
+does not exist — the real hook is `post_llm_call`, which carries no token
+usage. No span has ever reached Trovis through it.
 
-```bash
-pip install trovis-agents[hermes]
-hermes plugins enable trovis
-```
-
-If you'd rather drop the plugin in by hand:
-
-```bash
-cp -r $(python -c "import trovis.hermes_plugin, os; \
-    print(os.path.dirname(trovis.hermes_plugin.__file__))") \
-    ~/.hermes/plugins/trovis
-```
-
-Configure via environment variables (Hermes will prompt for these
-on `plugins enable` thanks to `plugin.yaml`'s `requires_env`):
-
-```bash
-export TROVIS_API_KEY="ov_sk_your_key"
-export TROVIS_ENDPOINT="https://your-trovis/v1/traces"  # optional
-```
-
-Or from chat after the first start:
-
-```
-/trovis connect https://your-trovis/v1/traces
-/trovis apikey ov_sk_your_key
-/trovis capture on
-/trovis status
-```
-
-### What gets captured on Hermes
-
-- **Agent identity** — `~/.hermes/SOUL.md`, plus `memory.md` when
-  `capture_outputs` is on. Sent once on gateway start.
-- **Every `post_tool_call` hook** — tool name, parameter keys (not
-  values, unless capture is on), and the tool's result (capture-only).
-- **`/trovis status`** in chat to verify telemetry is flowing.
+The code is retained for a future verified return, but do not install it
+expecting telemetry. Use raw OTLP against `POST /v1/traces` if you need to
+instrument a Hermes agent today.
 
 ## Connecting agents across processes
 

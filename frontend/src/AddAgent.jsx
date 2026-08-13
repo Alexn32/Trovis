@@ -3,7 +3,6 @@ import { api, getApiKey } from './api.js'
 import {
   OpenAIIcon,
   AnthropicIcon,
-  ActivityIcon,
   OpenClawIcon,
   SparkleIcon,
   TrovisMark,
@@ -11,13 +10,11 @@ import {
 import ConnectGuide from './ConnectGuide.jsx'
 
 // Per-platform logo + brand color for the picker tiles. OpenClaw uses its own
-// full-color lobster mark; OpenAI / Claude use their logomarks tinted to brand;
-// Hermes (no public logo) gets a thematic glyph.
+// full-color lobster mark; OpenAI / Claude use their logomarks tinted to brand.
 const PLATFORM_LOGOS = {
   openclaw:        { Icon: OpenClawIcon }, // self-colored
   'openai-agents': { Icon: OpenAIIcon,    color: '#10a37f' },
   claude:          { Icon: AnthropicIcon, color: '#d97757' },
-  hermes:          { Icon: ActivityIcon,  color: 'var(--text-secondary)' },
   chatgpt:         { Icon: OpenAIIcon,    color: 'var(--text-primary)' },
 }
 
@@ -62,7 +59,6 @@ const PLATFORMS = [
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
   // One Claude tile; a sub-step then splits SDK vs Managed Agents.
   { id: 'claude',         label: 'Claude Agents',             subtitle: 'Claude Agent SDK or Managed Agents',             needsProvider: false },
-  { id: 'hermes',         label: 'Hermes Agent',              subtitle: 'Python agent platform — pip plugin',             needsProvider: false },
   // A custom GPT built in ChatGPT: via GPT Actions (OAuth) it both reports its
   // own activity to Trovis AND can ask about the fleet (askFleet). No code.
   { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor + query a GPT via Actions — no code',    needsProvider: false },
@@ -1052,121 +1048,6 @@ async for message in query(
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — Hermes Agent (trovis-agents pip package, entry point)
-// ---------------------------------------------------------------------------
-//
-// Hermes discovers plugins via Python entry points, so the install
-// is `pip install trovis-agents[hermes]` plus `hermes plugins enable
-// trovis` — no scaffold to copy around. Same span vocabulary as the
-// OpenClaw plugin (and same `/trovis` chat command) so muscle memory
-// transfers cleanly between platforms.
-
-function HermesAgentsInstructions({ agentName, endpoint }) {
-  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
-  const apiKey = getApiKey() || ''
-  const installCmd = 'pip install trovis-agents[hermes]'
-  const enableCmd = 'hermes plugins enable trovis'
-  // Hermes prompts for these env vars at `plugins enable` time per the
-  // plugin.yaml `requires_env` declaration; we also surface them here
-  // so operators who'd rather set the shell env directly have a clear
-  // recipe with their actual key/endpoint in place. The negative lookahead
-  // fills only the quoted VALUES — `fill()` would clobber the var names too.
-  const envExport =
-`export TROVIS_API_KEY="TROVIS_API_KEY"
-export TROVIS_ENDPOINT="TROVIS_ENDPOINT"
-export TROVIS_AGENT_NAME="AGENT_NAME"`
-    .replace(/TROVIS_API_KEY(?!=)/g, apiKey || 'ov_sk_…')
-    .replace(/TROVIS_ENDPOINT(?!=)/g, resolvedEndpoint)
-    .replace(/AGENT_NAME(?!=)/g, effectiveAgentName(agentName))
-  const chatCmds =
-`/trovis connect ${resolvedEndpoint}
-/trovis apikey ${apiKey || 'ov_sk_…'}
-/trovis capture on
-/trovis status`
-
-  return (
-    <>
-      <h2 className="instructions-title">Connect Hermes Agent</h2>
-      <p className="instructions-subtitle">
-        One <code>pip install</code> + one <code>hermes plugins enable</code>.
-        The plugin is bundled inside <code>trovis-agents</code> and exposed
-        via a Python entry point, so Hermes finds it automatically.
-      </p>
-
-      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
-      <PrefillBlock
-        label="Your API key"
-        value={apiKey}
-        placeholder="(no key in session — log in and try again)"
-      />
-
-      <NumberedStep n={1} title="Install the SDK">
-        <CodeBlock code={installCmd} />
-      </NumberedStep>
-
-      <NumberedStep n={2} title="Enable the Trovis plugin in Hermes">
-        <CodeBlock code={enableCmd} />
-        <p style={{ marginTop: 8 }}>
-          Hermes will prompt you for <code>TROVIS_API_KEY</code> the
-          first time. You can also set these in your shell ahead of
-          time:
-        </p>
-        <CodeBlock code={envExport} />
-      </NumberedStep>
-
-      <NumberedStep n={3} title="(Optional) Configure from chat">
-        <p>
-          Once Hermes is running, the plugin registers an{' '}
-          <code>/trovis</code> slash command so you can adjust the
-          connection without restarting:
-        </p>
-        <CodeBlock code={chatCmds} />
-      </NumberedStep>
-
-      <Callout variant="info">
-        <strong>What gets captured by default:</strong> agent identity
-        from <code>~/.hermes/SOUL.md</code> (sent once on gateway
-        start), every <code>post_tool_call</code> as a{' '}
-        <code>tool_call</code> span with the tool name and parameter
-        keys. Tool results and <code>memory.md</code> are <em>not</em>{' '}
-        captured unless you flip <code>TROVIS_CAPTURE_OUTPUTS=true</code>{' '}
-        or run <code>/trovis capture on</code>.
-      </Callout>
-
-      <h3 className="section-title section-title-spaced">Manual install (alternative)</h3>
-      <p>
-        If your Hermes setup doesn't pick up entry-point plugins, drop
-        the plugin directory in by hand:
-      </p>
-      <CodeBlock
-        code={`cp -r $(python -c "import trovis.hermes_plugin, os; print(os.path.dirname(trovis.hermes_plugin.__file__))") ~/.hermes/plugins/trovis`}
-      />
-
-      <h3 className="section-title section-title-spaced">Environment variables</h3>
-      <ul>
-        <li>
-          <code>TROVIS_API_KEY</code> — your Trovis API key
-        </li>
-        <li>
-          <code>TROVIS_ENDPOINT</code> — custom endpoint (defaults to
-          the Trovis cloud)
-        </li>
-        <li>
-          <code>TROVIS_AGENT_NAME</code> — default{' '}
-          <code>service.name</code> (defaults to <code>hermes-agent</code>)
-        </li>
-        <li>
-          <code>TROVIS_CAPTURE_OUTPUTS</code> — set to{' '}
-          <code>true</code> to include tool results + memory.md
-        </li>
-      </ul>
-
-      <SuccessCallout />
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Instructions page — ChatGPT custom GPT (GPT Actions + OAuth)
 // ---------------------------------------------------------------------------
 //
@@ -1597,9 +1478,6 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'claude-agent-sdk') {
     return <ClaudeAgentSdkInstructions agentName={agentName} endpoint={endpoint} />
-  }
-  if (platform === 'hermes') {
-    return <HermesAgentsInstructions agentName={agentName} endpoint={endpoint} />
   }
   if (platform === 'chatgpt') {
     return <ChatGPTInstructions />
