@@ -242,29 +242,108 @@ with TestClient(main.app) as c:
               "billing questions" in (reg.get("soul") or ""),
               f"soul={(reg.get('soul') or '')[:60]!r}")
 
-    print("\n[15] KNOWN DEFECT — the agent name does not survive a restart")
-    # main._action_agents is a module-level in-memory dict. /actions/connect
-    # writes the agent name into it; /actions/log reads it back, falling back
-    # to the literal "ChatGPT Agent" on a miss. The registration itself IS
-    # durable (agent_registrations, asserted above) — only this lookup is not.
+    print("\n[15] The agent name survives a restart (durable, not in-memory)")
+    # main._action_agents is a CACHE. /actions/connect names the agent once and
+    # every later /actions/log has to recover that name; when the dict was the
+    # only record, a process restart — or simply a second instance behind the
+    # load balancer — lost it and the same GPT began logging under the literal
+    # "ChatGPT Agent", splitting one agent into two in the fleet.
     #
-    # So after a process restart, or on any second instance behind the load
-    # balancer, the SAME ChatGPT agent starts logging under a different
-    # service_name and splits into two agents in the fleet. This is a
-    # structural fix (persist the mapping, or resolve it from the
-    # registration table), deliberately NOT made in this test-only commit.
-    #
-    # This block pins the CURRENT behavior so the defect is visible on every
-    # push. When it is fixed, this check flips to failing — at which point
-    # replace it with an assertion that the name survives.
-    main._action_agents.clear()   # stand-in for a restart / a second instance
-    r = c.post("/actions/log", json={"step_name": "after_restart"}, headers=AH)
-    check("post-restart log still returns 200", r.status_code == 200, f"got {r.status_code}")
-    names_after = [a["service_name"] for a in c.get("/agents", headers=KH).json()]
-    check("DEFECT PINNED: a second 'ChatGPT Agent' appears after a restart",
-          "ChatGPT Agent" in names_after,
-          f"agents={names_after} — if this FAILS, the in-memory _action_agents "
-          f"map was fixed; tighten this to assert the name survives instead")
+    # Clearing the dict is the stand-in for that restart. The lookup must now
+    # read through to agent_registrations, which is durable.
+    agents_before = sorted(a["service_name"] for a in c.get("/agents", headers=KH).json())
+    main._action_agents.clear()
+
+    check("cache really is empty (the restart actually happened)",
+          not main._action_agents, f"cache={main._action_agents}")
+    check("the name is recovered from the registration table, not the cache",
+          main._resolve_action_agent(account_id) == "Support Copilot",
+          f"resolved={main._resolve_action_agent(account_id)!r}")
+
+    r = c.post("/actions/log", json={
+        "step_name": "after_restart",
+        "description": "Logged after the process lost its in-memory state.",
+    }, headers=AH)
+    check("post-restart log returns 200", r.status_code == 200, f"got {r.status_code}")
+
+    agents_after = sorted(a["service_name"] for a in c.get("/agents", headers=KH).json())
+    check("NO new agent appeared — the fleet is unchanged",
+          agents_after == agents_before, f"before={agents_before} after={agents_after}")
+    check("no stray 'ChatGPT Agent' was created",
+          "ChatGPT Agent" not in agents_after, f"agents={agents_after}")
+
+    rows = c.get("/agents/Support Copilot/spans", headers=KH).json()
+    check("the post-restart span landed on the SAME agent",
+          any(s["span_name"] == "after_restart" for s in rows),
+          f"spans={sorted(s['span_name'] for s in rows)}")
+
+    print("\n[16] /actions/complete and /actions/status survive it too")
+    main._action_agents.clear()
+    r = c.get("/actions/status", headers=AH)
+    check("status still names the real agent after a restart",
+          (r.json() or {}).get("agent_name") == "Support Copilot", f"body={r.json()}")
+
+    main._action_agents.clear()
+    r = c.post("/actions/complete", json={"task_summary": "Refund done", "success": True},
+               headers=AH)
+    check("complete returns 200", r.status_code == 200, f"got {r.status_code}")
+    rows = c.get("/agents/Support Copilot/spans", headers=KH).json()
+    check("the completion span landed on the SAME agent",
+          any(s["span_name"] == "agent_run_complete" for s in rows),
+          f"spans={sorted(s['span_name'] for s in rows)}")
+    check("still no stray 'ChatGPT Agent'",
+          "ChatGPT Agent" not in [a["service_name"] for a in c.get("/agents", headers=KH).json()])
+
+    print("\n[17] An account that never connected still reports nothing")
+    # The read-through must not invent a name for an account with no
+    # registration — /actions/status has to be able to say "not connected".
+    check("no agent resolves for an unknown account",
+          main._resolve_action_agent(999999) is None,
+          f"resolved={main._resolve_action_agent(999999)!r}")
+
+    print("\n[18] The read-through is account-scoped")
+    # get_latest_agent_name_for_model() is a new per-tenant query, so it gets
+    # the same treatment as every other one: a second org's ChatGPT agent must
+    # never resolve for this account, and vice versa.
+    r = c.post("/auth/signup", json={
+        "email": "other@test.com", "password": "supersecret123",
+        "name": "Other Tester", "account_type": "individual", "org_name": "Other Co",
+    })
+    assert r.status_code == 201, r.text
+    other_key = r.json()["api_key"]
+    other_account_id = database.validate_api_key(other_key)["account_id"]
+    check("the two orgs really are distinct", other_account_id != account_id,
+          f"{other_account_id} vs {account_id}")
+
+    # Second org connects its own, differently-named GPT.
+    r2 = c.post("/oauth/authorize/submit", data={
+        "email": "other@test.com", "password": PASSWORD,
+        "client_id": CLIENT_ID, "redirect_uri": REDIRECT, "scope": "", "state": STATE,
+    }, follow_redirects=False)
+    other_code = urllib.parse.parse_qs(
+        urllib.parse.urlparse(r2.headers.get("location", "")).query
+    ).get("code", [""])[0]
+    other_tok = c.post("/oauth/token", data={
+        "grant_type": "authorization_code", "code": other_code,
+        "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET, "redirect_uri": REDIRECT,
+    }).json().get("access_token", "")
+    c.post("/actions/connect", json={"agent_name": "Other Org Bot"},
+           headers={"Authorization": f"Bearer {other_tok}"})
+
+    main._action_agents.clear()   # force both to go through the DB read
+    check("this account still resolves to ITS agent",
+          main._resolve_action_agent(account_id) == "Support Copilot",
+          f"resolved={main._resolve_action_agent(account_id)!r}")
+    main._action_agents.clear()
+    check("the other account resolves to ITS OWN agent",
+          main._resolve_action_agent(other_account_id) == "Other Org Bot",
+          f"resolved={main._resolve_action_agent(other_account_id)!r}")
+    main._action_agents.clear()
+    check("neither org's fleet contains the other's agent",
+          "Other Org Bot" not in [a["service_name"] for a in c.get("/agents", headers=KH).json()]
+          and "Support Copilot" not in [
+              a["service_name"] for a in
+              c.get("/agents", headers={"X-Trovis-Api-Key": other_key}).json()])
 
 print()
 if failures:

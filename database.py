@@ -5219,6 +5219,40 @@ def get_latest_registration(
     }
 
 
+def get_latest_agent_name_for_model(account_id: int | None, model: str) -> str | None:
+    """Return the service_name of this account's most recently registered agent
+    whose `model` column matches, or None.
+
+    Exists for the ChatGPT Actions flow, where the agent name arrives once at
+    /actions/connect and every later /actions/log has to recover it. Keying on
+    `model` works because that column is where the platform lands for
+    registration paths that have no real model id — /actions/connect writes
+    'chatgpt'. Newest wins, matching the semantics of the in-process cache this
+    backs: one current agent per account.
+
+    account_id is a required argument (not defaulted) because this is a
+    per-tenant lookup — see the account-scoping rule in AGENTS.md.
+    """
+    if not model:
+        return None
+    account_filter = f"AND account_id = {PH}" if account_id is not None else ""
+    sql = f"""
+        SELECT service_name
+        FROM agent_registrations
+        WHERE model = {PH}
+          {account_filter}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    """
+    args: tuple[Any, ...] = (
+        (model, account_id) if account_id is not None else (model,)
+    )
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, args)
+        row = cur.fetchone()
+    return row["service_name"] if row else None
+
+
 # ---------------------------------------------------------------------------
 # Agent display names (operator-editable per-agent labels)
 # ---------------------------------------------------------------------------

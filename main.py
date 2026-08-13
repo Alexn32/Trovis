@@ -3918,9 +3918,42 @@ def _resolve_action_account(request: Request) -> int | None:
     return None
 
 
-# Per-account agent name tracking for the ChatGPT action session (same
-# pattern as the MCP tools, but using request-scoped state).
+# Per-account agent name for the ChatGPT action session. A CACHE ONLY — never
+# the source of truth. /actions/connect names the agent once and every later
+# /actions/log has to recover that name; when this dict was the only record,
+# a process restart (or simply a second instance behind the load balancer)
+# lost it and the same GPT started logging under the literal fallback name,
+# splitting one agent into two in the fleet. _resolve_action_agent() reads
+# through to agent_registrations on a miss, which is durable.
 _action_agents: dict[int, str] = {}
+
+# Platform marker /actions/connect writes into the registration's `model`
+# column. It is what makes the read-through below able to find the agent.
+_CHATGPT_PLATFORM = "chatgpt"
+
+# Used only when an account has genuinely never called /actions/connect.
+_CHATGPT_FALLBACK_NAME = "ChatGPT Agent"
+
+
+def _resolve_action_agent(account_id: int | None) -> str | None:
+    """The service_name this account's ChatGPT agent logs under, or None when
+    the account has genuinely never called /actions/connect.
+
+    In-process cache first, then the registration table. The second step is
+    the point: the registration written by /actions/connect outlives the
+    process, so a restart no longer renames the agent.
+
+    Returns None rather than the fallback so /actions/status can still say
+    "no agent connected"; the write paths apply the fallback themselves.
+    """
+    cached = _action_agents.get(account_id)
+    if cached:
+        return cached
+    stored = database.get_latest_agent_name_for_model(account_id, _CHATGPT_PLATFORM)
+    if stored:
+        # Re-warm so the next call in this process skips the query.
+        _action_agents[account_id] = stored
+    return stored
 
 
 @app.post("/actions/connect")
@@ -3975,7 +4008,7 @@ async def action_log(request: Request):
     if account_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     body = await request.json()
-    service = _action_agents.get(account_id, "ChatGPT Agent")
+    service = _resolve_action_agent(account_id) or _CHATGPT_FALLBACK_NAME
     step = str(body.get("step_name", "activity")).strip() or "activity"
     desc = str(body.get("description", "")).strip()
 
@@ -4016,7 +4049,7 @@ async def action_complete(request: Request):
     if account_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     body = await request.json()
-    service = _action_agents.get(account_id, "ChatGPT Agent")
+    service = _resolve_action_agent(account_id) or _CHATGPT_FALLBACK_NAME
     summary = str(body.get("task_summary", "")).strip()
     success = body.get("success", True)
 
@@ -4052,7 +4085,7 @@ async def action_status(request: Request):
     account_id = _resolve_action_account(request)
     if account_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    service = _action_agents.get(account_id)
+    service = _resolve_action_agent(account_id)
     return {
         "status": "active",
         "agent_name": service,
