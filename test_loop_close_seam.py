@@ -106,7 +106,7 @@ with TestClient(main.app) as c:
     # close-carrying agent_run_complete, exactly as prod ordered it.
     r1 = c.post("/v1/traces", json=to_otlp(main_rows), headers=H)
     check("batch 1 (real prod payload) ingests", r1.status_code == 200
-          and r1.json()["spans_received"] == len(main_rows))
+          and r1.json()["accepted"] == len(main_rows))
 
     loops_now = database.get_loops(None, limit=50)
     check("one loop, closed done — close honored with llm_output after it",

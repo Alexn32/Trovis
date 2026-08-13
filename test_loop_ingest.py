@@ -148,7 +148,7 @@ with TestClient(main.app) as c:
         span("work2", T + MIN, {}),
     ])
     check("plain payload: 200 with correct span count",
-          r.status_code == 200 and r.json()["spans_received"] == 2)
+          r.status_code == 200 and r.json()["accepted"] == 2)
     import sqlite3
     conn = sqlite3.connect(_tmp.name)
     null_loops = conn.execute(

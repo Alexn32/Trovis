@@ -83,7 +83,7 @@ with TestClient(main.app) as c:
             }),
         ])
         assert resp.status_code == 200, resp.text
-        assert resp.json()["spans_received"] == 2
+        assert resp.json()["accepted"] == 2
 
     # 1. INGESTION NEVER GATED — all 6 agents recorded.
     groups = {g["service_name"]: g for g in c.get("/agents", headers=H).json()}

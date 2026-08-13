@@ -603,19 +603,35 @@ def _to_int_ns(ns: Any) -> int:
         return 0
 
 
-def _parse_otlp_json(payload: dict[str, Any]) -> list[dict[str, Any]]:
+# The only reason ingest silently discards a span. Named on the wire (see
+# IngestResponse.reason) so a caller whose telemetry vanishes learns why from
+# the response instead of from our logs, which they can't read.
+_DROP_REASON_NO_SERVICE_NAME = "missing service.name"
+
+
+def _parse_otlp_json(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
     """Walk an OTLP/JSON ExportTraceServiceRequest and flatten it to span rows.
 
     Spans missing a service.name are dropped — without one we can't attribute
     the span to an agent, which is the whole point of Oversee.
+
+    Returns `(parsed_spans, dropped_count)`. The count is of SPANS, not of
+    resource blocks: service.name lives on the resource, so one nameless
+    resource can carry many spans and reporting "1 dropped" would understate
+    the loss.
     """
     parsed: list[dict[str, Any]] = []
+    dropped = 0
 
     for rs in payload.get("resourceSpans", []) or []:
         resource = rs.get("resource") or {}
         resource_attrs = _attrs_to_dict(resource.get("attributes"))
         service_name = resource_attrs.get("service.name")
         if not service_name:
+            dropped += sum(
+                len(ss.get("spans", []) or [])
+                for ss in rs.get("scopeSpans", []) or []
+            )
             continue
 
         for scope_spans in rs.get("scopeSpans", []) or []:
@@ -638,7 +654,7 @@ def _parse_otlp_json(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     }
                 )
 
-    return parsed
+    return parsed, dropped
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +760,13 @@ def _extract_registrations(
     return described
 
 
-@app.post("/v1/traces", response_model=IngestResponse)
+@app.post(
+    "/v1/traces",
+    response_model=IngestResponse,
+    # `reason` is meaningful only alongside a non-zero `dropped`; excluding
+    # None keeps it off the wire on the (overwhelmingly common) clean batch.
+    response_model_exclude_none=True,
+)
 async def ingest_traces(request: Request) -> IngestResponse:
     """OTLP/JSON trace ingestion.
 
@@ -825,7 +847,17 @@ async def ingest_traces(request: Request) -> IngestResponse:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
 
-    spans = _parse_otlp_json(payload)
+    spans, dropped = _parse_otlp_json(payload)
+    if dropped:
+        # Partial acceptance: the good spans in this batch still land. The
+        # caller learns about the loss from the response; this line is so we
+        # can see WHICH tenant is emitting unattributable telemetry.
+        logger.warning(
+            "[Trovis] ingest dropped %d span(s) — %s (account_id=%s)",
+            dropped,
+            _DROP_REASON_NO_SERVICE_NAME,
+            account_id,
+        )
 
     # Snapshot which (service, agent) pairs in this batch are
     # "first-time" — no prior spans for this account. We check before
@@ -890,7 +922,12 @@ async def ingest_traces(request: Request) -> IngestResponse:
             agent_id=agent_id,
         )
 
-    return IngestResponse(status="ok", spans_received=inserted)
+    return IngestResponse(
+        status="ok",
+        accepted=inserted,
+        dropped=dropped,
+        reason=_DROP_REASON_NO_SERVICE_NAME if dropped else None,
+    )
 
 
 def _agent_id_for_span(span: dict[str, Any]) -> str:

@@ -87,13 +87,13 @@ with TestClient(main.app) as c:
     r1 = c.post("/v1/traces", json=payload("legacy-bot", "oversee", now),
                 headers={"X-Oversee-Api-Key": api_key})
     check("legacy ingest accepts X-Oversee-Api-Key (200)", r1.status_code == 200)
-    check("legacy ingest stored 3 spans", r1.json().get("spans_received") == 3)
+    check("legacy ingest stored 3 spans", r1.json().get("accepted") == 3)
 
     # New agent: trovis.* + X-Trovis-Api-Key.
     r2 = c.post("/v1/traces", json=payload("trovis-bot", "trovis", now),
                 headers={"X-Trovis-Api-Key": api_key})
     check("new ingest accepts X-Trovis-Api-Key (200)", r2.status_code == 200)
-    check("new ingest stored 3 spans", r2.json().get("spans_received") == 3)
+    check("new ingest stored 3 spans", r2.json().get("accepted") == 3)
 
     # An invalid key on either header must still 401 (dual-accept ≠ no-auth).
     rb = c.post("/v1/traces", json=payload("x", "trovis", now),

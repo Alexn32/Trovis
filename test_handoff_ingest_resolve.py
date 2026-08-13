@@ -216,7 +216,7 @@ with TestClient(main.app) as c:
         }),
     ])
     check("unknown resolve value does NOT reject the batch", r.status_code == 200)
-    check("both spans still stored", r.json()["spans_received"] == 2)
+    check("both spans still stored", r.json()["accepted"] == 2)
     check("no resolution event appended for an unknown value",
           not any(e["type"] in loops_mod._HANDOFF_RESOLUTIONS
                   for e in lifecycle(c, H, "junk-bot")))

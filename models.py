@@ -802,8 +802,29 @@ class AgentRecordsResponse(BaseModel):
 
 
 class IngestResponse(BaseModel):
+    """Response for POST /v1/traces.
+
+    `status` stays "ok" for a partially-accepted batch: a batch carrying some
+    unattributable spans is not a failed request, and rejecting the whole thing
+    would lose the good spans too. The counts are what make that honest —
+    "ok" alone used to hide the loss entirely.
+
+    `accepted` is the number of spans actually stored. `dropped` counts spans
+    discarded before insert (today: no service.name, so nothing to attribute
+    them to). `reason` names the cause in one line and is omitted when nothing
+    was dropped.
+
+    Renamed from `spans_received` in the same change that added the counts —
+    a bare received-count could not distinguish "we took all 40" from "we took
+    12 and binned 28". Neither the Python SDK nor the OpenClaw plugin reads
+    this body (both branch on HTTP status only), and third-party OTLP clients
+    read the OTLP-standard shape, not these fields.
+    """
+
     status: str
-    spans_received: int
+    accepted: int = 0
+    dropped: int = 0
+    reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
