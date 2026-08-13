@@ -419,6 +419,23 @@ class WorkflowCreate(BaseModel):
     note: str | None = None
 
 
+class WorkflowDraftRequest(BaseModel):
+    """POST /workflows/draft body — a plain-English description of the
+    process. Drafting only; nothing is persisted until the operator saves."""
+
+    description: str
+
+
+class WorkflowDraft(BaseModel):
+    """A drafted declaration, in the same shape WorkflowCreate accepts back.
+    Every field is editable in the UI before it's saved — the draft is a
+    starting point, never an authority."""
+
+    name: str = ""
+    stations: list[dict[str, Any]] = Field(default_factory=list)
+    match_hints: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class WorkflowVersionCreate(BaseModel):
     """POST /workflows/{id}/versions body — a FULL new definition (stations
     + hints), not a diff. note says what changed."""
