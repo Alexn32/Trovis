@@ -27,11 +27,23 @@ _tmp.close()
 import database
 database.SQLITE_PATH = _tmp.name
 
+import describer
 import main
 from fastapi.testclient import TestClient
 
-# No Claude calls from a test.
 main._auto_describe = lambda *a, **k: False
+
+# Stub the Claude boundary. GET /agents/{name}/summary regenerates a missing
+# description on read, so a test that merely READS an agent will otherwise
+# make a live Anthropic call — not hermetic, and it would burn a real key.
+describer.describe_agent = lambda service_name, account_id=None, agent_id=None: {
+    "service_name": service_name,
+    "description": "Stubbed description.",
+    "description_long": "Stubbed long description for a test agent.",
+    "span_count_analyzed": 1,
+    "source": "telemetry_only",
+}
+describer.record_summary = lambda user, agent: "Stubbed record summary"
 
 failures = []
 

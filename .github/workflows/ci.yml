@@ -25,6 +25,26 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install -r requirements.txt
+      # test_connect_sdk.py drives the real SDK against a live local server, so
+      # the SDK (and its OTEL deps) must be importable here. Without this it
+      # would skip — a green build for an unverified door.
+      - run: pip install -e ./trovis-agents
+
+      # Every door we advertise has a test_connect_<door>.py. Assert the set
+      # is present BEFORE running anything: deleting a door test would
+      # otherwise just shrink the loop below and still go green.
+      - name: Every claimed ingest door has a test
+        run: |
+          missing=()
+          for door in otlp sdk plugin actions; do
+            [ -f "test_connect_$door.py" ] || missing+=("test_connect_$door.py")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing door test(s): ${missing[*]}. Either add the"
+            echo "::error::test or remove the door from the claim surfaces."
+            exit 1
+          fi
+          echo "All claimed doors have a test."
 
       # The suite is standalone scripts, not pytest: each test_*.py sets its
       # own env and exits non-zero on failure. Run them all and report every
@@ -35,6 +55,8 @@ jobs:
           TROVIS_DISABLE_PRICING_SYNC: '1'
           TROVIS_DISABLE_ALERTS: '1'
           TROVIS_DISABLE_LOOP_SWEEP: '1'
+          # A door test must never skip its way to green in CI.
+          TROVIS_REQUIRE_SDK: '1'
         run: |
           failed=()
           for t in test_*.py; do
