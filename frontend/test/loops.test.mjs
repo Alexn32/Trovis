@@ -5,13 +5,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   LIFECYCLE_SENTENCES,
+  awaitingWho,
   groupLoopsByWorkflow,
+  handoffTerminalMessage,
   lifecycleSentence,
   loopCostLabel,
   loopStateMeta,
   loopStuckHeadline,
   loopTitle,
   showMarkDone,
+  showResolveHandoff,
   sortLoopsAttentionFirst,
   stuckCount,
   workflowGroupMeta,
@@ -56,14 +59,47 @@ test('real titles pass through untouched', () => {
 
 // --- 2. State → visual treatment -------------------------------------------
 
+// "waiting on you" is a claim about a PERSON. The server resolves the
+// handoff target against the authenticated user and sends the verdict as
+// awaiting_is_you / awaiting_human_name; these functions must never infer it
+// from cached_state alone. (They used to, which meant every member of an org
+// saw the same list and was each told it was theirs.)
 test('awaiting_human: warning tone + attention + age in label', () => {
-  const m = loopStateMeta(
-    loop({ cached_state: 'awaiting_human', last_event_unix: ns('2026-07-22T09:00:00Z') }),
-    NOW,
-  )
+  const base = {
+    cached_state: 'awaiting_human',
+    last_event_unix: ns('2026-07-22T09:00:00Z'),
+  }
+  const m = loopStateMeta(loop({ ...base, awaiting_is_you: true }), NOW)
   assert.equal(m.tone, 'warning')
   assert.equal(m.attention, true)
   assert.equal(m.label, 'waiting on you · 3h')
+})
+
+test('awaiting_human: says YOU only when the server says it is you', () => {
+  const base = {
+    cached_state: 'awaiting_human',
+    last_event_unix: ns('2026-07-22T09:00:00Z'),
+  }
+  // Resolved to someone else — name them, never "you".
+  assert.equal(
+    loopStateMeta(
+      loop({ ...base, awaiting_is_you: false, awaiting_human_name: 'Sarah' }),
+      NOW,
+    ).label,
+    'waiting on Sarah · 3h',
+  )
+  // Target present but unresolvable, or absent entirely — "a person".
+  assert.equal(
+    loopStateMeta(loop({ ...base }), NOW).label,
+    'waiting on a person · 3h',
+  )
+})
+
+test('awaitingWho: the three-way branch, in one place', () => {
+  assert.equal(awaitingWho({ awaiting_is_you: true, awaiting_human_name: 'Sarah' }), 'you')
+  assert.equal(awaitingWho({ awaiting_is_you: false, awaiting_human_name: 'Sarah' }), 'Sarah')
+  assert.equal(awaitingWho({ awaiting_is_you: false }), 'a person')
+  assert.equal(awaitingWho(undefined), 'a person')
 })
 
 test('stalled: warning tone, prefers backend stalled_for_s for the age', () => {
@@ -101,10 +137,96 @@ test('working/open: quiet live tone; abandoned: muted', () => {
 
 test('stuck headline leads with the age as the fact', () => {
   const h = loopStuckHeadline(
-    loop({ cached_state: 'awaiting_human', stalled_for_s: 3 * 3600 }),
+    loop({
+      cached_state: 'awaiting_human',
+      stalled_for_s: 3 * 3600,
+      awaiting_is_you: true,
+    }),
     NOW,
   )
   assert.equal(h, 'waiting on you for 3 hours')
+})
+
+test('stuck headline names the other person rather than claiming "you"', () => {
+  assert.equal(
+    loopStuckHeadline(
+      loop({
+        cached_state: 'awaiting_human',
+        stalled_for_s: 3 * 3600,
+        awaiting_human_name: 'Sarah',
+      }),
+      NOW,
+    ),
+    'waiting on Sarah for 3 hours',
+  )
+  assert.equal(
+    loopStuckHeadline(
+      loop({ cached_state: 'awaiting_human', stalled_for_s: 3 * 3600 }),
+      NOW,
+    ),
+    'waiting on a person for 3 hours',
+  )
+})
+
+// The 409 an already-terminal loop returns must read as its own explanation.
+// The person very likely DID the work; the record just never heard about it.
+test('terminal-handoff message explains abandonment, never generic error', () => {
+  const msg = handoffTerminalMessage({
+    state: 'abandoned',
+    closed_at: '2026-07-22 09:00:00',
+    close_reason: 'abandoned',
+  })
+  assert.match(msg, /marked abandoned on July 22/)
+  assert.match(msg, /48 hours with no activity/)
+  assert.match(msg, /the record didn't hear about it/)
+})
+
+// The resolve buttons write permanently to an append-only record, so the
+// gate is deliberately narrow: it must be YOUR handoff, addressable, live.
+test('resolve buttons appear only on your own live, addressable handoff', () => {
+  const mine = {
+    cached_state: 'awaiting_human',
+    awaiting_is_you: true,
+    awaiting_handoff_event_id: 42,
+  }
+  assert.equal(showResolveHandoff(mine, true), true)
+  assert.equal(showResolveHandoff(mine, false), false, 'no session user')
+  assert.equal(
+    showResolveHandoff({ ...mine, awaiting_is_you: false }, true), false,
+    "someone else's handoff",
+  )
+  assert.equal(
+    showResolveHandoff({ ...mine, awaiting_handoff_event_id: null }, true), false,
+    'nothing addressable to resolve',
+  )
+  assert.equal(
+    showResolveHandoff({ ...mine, cached_state: 'abandoned' }, true), false,
+    'terminal loops are frozen',
+  )
+  assert.equal(
+    showResolveHandoff({ ...mine, cached_state: 'done' }, true), false,
+    'terminal loops are frozen',
+  )
+})
+
+test('a stalled handoff is still resolvable — it is more waiting, not less', () => {
+  assert.equal(
+    showResolveHandoff(
+      { cached_state: 'stalled', awaiting_is_you: true, awaiting_handoff_event_id: 7 },
+      true,
+    ),
+    true,
+  )
+})
+
+test('terminal-handoff message distinguishes a deliberate close', () => {
+  const msg = handoffTerminalMessage({
+    state: 'done',
+    closed_at: '2026-07-22 09:00:00',
+    close_reason: 'closed_by_user',
+  })
+  assert.match(msg, /already closed on July 22/)
+  assert.doesNotMatch(msg, /abandoned/)
 })
 
 // --- 3. Attention-first sort -------------------------------------------------
@@ -358,13 +480,22 @@ test('shape line: steps · cast · today', () => {
   )
 })
 
-test('chip: warm when a human holds work, with count and age', () => {
+// The chip is a per-workflow AGGREGATE with no target resolution behind it,
+// and needsCount sums awaiting_system too — which is never waiting on a
+// person at all. So it says "needs attention", never "waiting on you".
+test('chip: warm when something needs attention, with count and age', () => {
   const c = workflowChip({
     loop_counts: { awaiting_human: 1, working: 3 },
     needs_you_for_s: 3 * 3600,
   })
   assert.equal(c.warm, true)
-  assert.equal(c.label, '1 waiting on you · 3h')
+  assert.equal(c.label, '1 needs attention · 3h')
+})
+
+test('chip: never claims "you" — it cannot know whose work it is', () => {
+  const c = workflowChip({ loop_counts: { awaiting_human: 2, awaiting_system: 1 } })
+  assert.equal(c.label, '3 need attention')
+  assert.doesNotMatch(c.label, /you/)
 })
 
 test('chip: quiet running / quiet today otherwise', () => {

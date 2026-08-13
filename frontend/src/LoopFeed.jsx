@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from './api.js'
 import { UserIcon, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
 import {
+  handoffTerminalMessage,
   lifecycleSentence,
   loopCostLabel,
   loopStateMeta,
@@ -9,6 +10,7 @@ import {
   loopTitle,
   parseTs,
   showMarkDone,
+  showResolveHandoff,
   splitActor,
   workflowGroupMeta,
 } from './loops.js'
@@ -121,6 +123,8 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
   const [detail, setDetail] = useState(null)
   const [detailErr, setDetailErr] = useState(null)
   const [closing, setClosing] = useState(false)
+  const [resolving, setResolving] = useState(null)
+  const [terminalNote, setTerminalNote] = useState(null)
 
   const meta = loopStateMeta(loop)
   const cost = loopCostLabel(loop.total_cost_usd)
@@ -154,10 +158,44 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
     }
   }
 
+  // Resolve a handoff that is actually this person's. A 409 means the sweep
+  // (or someone) already closed the loop — that is NOT a generic failure:
+  // the person very likely did the work and the record never heard, so it
+  // gets its own explanation rather than a red error string.
+  async function resolveHandoff(e, action) {
+    e.stopPropagation()
+    if (resolving) return
+    const eventId = current.awaiting_handoff_event_id
+    setResolving(action)
+    try {
+      const fn =
+        action === 'accept'
+          ? api.acceptHandoff
+          : action === 'complete'
+            ? api.completeHandoff
+            : api.declineHandoff
+      const updated = await fn(loop.id, eventId)
+      setDetail(updated)
+      setDetailErr(null)
+      setTerminalNote(null)
+      onChanged && onChanged()
+    } catch (err) {
+      if (err?.status === 409 && err.detail) {
+        setTerminalNote(handoffTerminalMessage(err.detail))
+        onChanged && onChanged()
+      } else {
+        setDetailErr(err?.message || 'Could not update this handoff')
+      }
+    } finally {
+      setResolving(null)
+    }
+  }
+
   // After a close the fresh detail is the truth for state/button rendering.
   const current = detail && detail.id === loop.id ? detail : loop
   const currentMeta = detail ? loopStateMeta(current) : meta
   const canClose = showMarkDone(current, sessionUser)
+  const canResolve = showResolveHandoff(current, sessionUser)
 
   return (
     <div className={`loop-row ${currentMeta.attention ? 'attn' : ''} ${open ? 'open' : ''}`}>
@@ -209,6 +247,34 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
                     ))}
                   </span>
                 )}
+                {canResolve && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={(e) => resolveHandoff(e, 'accept')}
+                      disabled={Boolean(resolving)}
+                    >
+                      {resolving === 'accept' ? 'Taking…' : 'I’ve got this'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={(e) => resolveHandoff(e, 'complete')}
+                      disabled={Boolean(resolving)}
+                    >
+                      {resolving === 'complete' ? 'Saving…' : 'Done'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={(e) => resolveHandoff(e, 'decline')}
+                      disabled={Boolean(resolving)}
+                    >
+                      {resolving === 'decline' ? 'Passing…' : 'Not mine'}
+                    </button>
+                  </>
+                )}
                 {canClose && (
                   <button
                     type="button"
@@ -220,6 +286,9 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
                   </button>
                 )}
               </div>
+              {terminalNote && (
+                <div className="loop-detail-note">{terminalNote}</div>
+              )}
               <div className="loop-stream">
                 {(detail.events || []).map((ev, i) =>
                   ev.type === 'activity' ? (

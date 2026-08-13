@@ -16,6 +16,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -27,6 +28,8 @@ from typing import Any, Iterator
 # ---------------------------------------------------------------------------
 # Backend selection
 # ---------------------------------------------------------------------------
+
+logger = logging.getLogger("trovis.database")
 
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 USE_POSTGRES = bool(_DATABASE_URL)
@@ -1220,6 +1223,10 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_loops_grouping ON loops(account_id, service_name, external_id)",
     "CREATE INDEX IF NOT EXISTS idx_loops_gap ON loops(account_id, service_name, agent_id, last_event_unix)",
     "CREATE INDEX IF NOT EXISTS idx_loop_events_loop_ts ON loop_events(loop_id, event_time_unix)",
+    # Handoff resolution + the assignee filter both ask "which of this loop's
+    # events are handoffs?" — a type predicate the (loop_id, event_time_unix)
+    # index above can't satisfy without reading every event row for the loop.
+    "CREATE INDEX IF NOT EXISTS idx_loop_events_loop_type ON loop_events(loop_id, type)",
     "CREATE INDEX IF NOT EXISTS idx_loop_participants_loop ON loop_participants(loop_id)",
     # Versioned workflows.
     "CREATE INDEX IF NOT EXISTS idx_workflows_account ON workflows(account_id, archived_at)",
@@ -3097,27 +3104,59 @@ def get_loops(
     state: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    viewer_user_id: int | None = None,
+    assignee_user_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """List loops for the org, newest first."""
-    sql = _LOOP_SELECT + " WHERE 1=1"
-    args: list[Any] = []
-    if account_id is not None:
-        sql += f" AND l.account_id = {PH}"
-        args.append(account_id)
-    if state:
-        sql += f" AND l.cached_state = {PH}"
-        args.append(state)
-    # id DESC tiebreak: SQLite created_at is second-granularity TEXT.
-    sql += f" ORDER BY l.created_at DESC, l.id DESC LIMIT {PH} OFFSET {PH}"
-    args.extend([int(limit), int(offset)])
+    """List loops for the org, newest first.
+
+    viewer_user_id decorates each row with awaiting_human_name /
+    awaiting_is_you (see _attach_awaiting_human) — the server owns the
+    "waiting on YOU" claim, the client never infers it.
+
+    assignee_user_id filters to loops whose latest unresolved to_human
+    handoff targets that user. The match runs BEFORE limit/offset, so
+    pagination is over the filtered set.
+    """
     with _connect() as conn, _cursor(conn) as cur:
+        assigned_ids: list[int] | None = None
+        if assignee_user_id is not None:
+            assigned_ids, truncated = _loops_assigned_to(
+                cur, account_id, assignee_user_id
+            )
+            if truncated:
+                logger.warning(
+                    "[loops] assignee filter hit the %d-loop scan cap for "
+                    "account=%s — results may be incomplete",
+                    _ASSIGNEE_SCAN_LIMIT, account_id,
+                )
+            if not assigned_ids:
+                return []
+
+        sql = _LOOP_SELECT + " WHERE 1=1"
+        args: list[Any] = []
+        if account_id is not None:
+            sql += f" AND l.account_id = {PH}"
+            args.append(account_id)
+        if state:
+            sql += f" AND l.cached_state = {PH}"
+            args.append(state)
+        if assigned_ids is not None:
+            ph_list = ", ".join([PH] * len(assigned_ids))
+            sql += f" AND l.id IN ({ph_list})"
+            args.extend(assigned_ids)
+        # id DESC tiebreak: SQLite created_at is second-granularity TEXT.
+        sql += f" ORDER BY l.created_at DESC, l.id DESC LIMIT {PH} OFFSET {PH}"
+        args.extend([int(limit), int(offset)])
         cur.execute(sql, tuple(args))
         rows = [_loop_row(dict(r)) for r in cur.fetchall()]
         _attach_segments_mini(cur, rows)
+        _attach_awaiting_human(cur, rows, account_id, viewer_user_id)
         return rows
 
 
-def get_loop(loop_id: int, account_id: int | None) -> dict[str, Any] | None:
+def get_loop(
+    loop_id: int, account_id: int | None, viewer_user_id: int | None = None
+) -> dict[str, Any] | None:
     sql = _LOOP_SELECT + f" WHERE l.id = {PH}"
     args: list[Any] = [loop_id]
     if account_id is not None:
@@ -3126,7 +3165,11 @@ def get_loop(loop_id: int, account_id: int | None) -> dict[str, Any] | None:
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, tuple(args))
         row = cur.fetchone()
-        return _loop_row(dict(row)) if row else None
+        if row is None:
+            return None
+        out = _loop_row(dict(row))
+        _attach_awaiting_human(cur, [out], account_id, viewer_user_id)
+        return out
 
 
 def get_loop_participants(
@@ -3209,6 +3252,329 @@ def _decorate_handoff_names(cur, events, account_id: int | None) -> None:
                 payload["target_name"] = names[tid]
 
 
+def _target_is_user(
+    cur, target_id: str, account_id: int | None, user_id: int
+) -> bool:
+    """True when a handoff target_id identifies THIS user, org-scoped.
+
+    Same identity path as _resolve_human_name (numeric -> users.id, email ->
+    users.email) minus the team_members leg: a team_member row has no login,
+    so it can never BE the authenticated user. Account-scoped like every
+    other lookup — another org's user with the same email never matches.
+    """
+    tid = str(target_id or "").strip()
+    if not tid:
+        return False
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    if tid.isdigit():
+        cur.execute(
+            f"SELECT id FROM users WHERE id = {PH} {acct_sql}",
+            tuple([int(tid), *acct_args]),
+        )
+        row = cur.fetchone()
+        return bool(row) and int(row["id"]) == int(user_id)
+    if "@" in tid:
+        cur.execute(
+            f"SELECT id FROM users WHERE LOWER(email) = LOWER({PH}) {acct_sql}",
+            tuple([tid, *acct_args]),
+        )
+        row = cur.fetchone()
+        return bool(row) and int(row["id"]) == int(user_id)
+    return False
+
+
+def _loop_events_with_ids(cur, loop_id: int) -> list[dict[str, Any]]:
+    """The loop's stored events, normalized, each carrying its row id as
+    `_row_id`. loops._unresolved_handoffs only reads type/payload, so the
+    extra key rides along harmlessly and lets callers map a returned
+    unresolved handoff back to the row the API addressed it by."""
+    lp = _loops_mod()
+    cur.execute(
+        "SELECT id, type, actor_type, actor, payload, event_time_unix "
+        f"FROM loop_events WHERE loop_id = {PH} ORDER BY event_time_unix, id",
+        (loop_id,),
+    )
+    out = []
+    for r in cur.fetchall():
+        ev = lp.normalize_loop_event(dict(r))
+        ev["_row_id"] = r["id"]
+        out.append(ev)
+    return out
+
+
+def _latest_unresolved_to_human(cur, loop_id: int) -> dict[str, Any] | None:
+    """The loop's most recent unresolved to_human handoff (normalized, with
+    _row_id), or None. Delegates the correlation to the same
+    loops._unresolved_handoffs the state machine uses — never reimplemented."""
+    lp = _loops_mod()
+    pending = lp._unresolved_handoffs(_loop_events_with_ids(cur, loop_id))
+    to_human = [
+        h for h in pending if (h.get("payload") or {}).get("direction") == "to_human"
+    ]
+    return to_human[-1] if to_human else None
+
+
+def _loop_close_reason(cur, loop_id: int) -> str | None:
+    """payload.reason of the loop's last loop_closed event (the 409 body's
+    close_reason). None when the loop was closed without one."""
+    cur.execute(
+        "SELECT payload FROM loop_events "
+        f"WHERE loop_id = {PH} AND type = 'loop_closed' "
+        "ORDER BY event_time_unix DESC, id DESC LIMIT 1",
+        (loop_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    return str(reason) if reason else None
+
+
+# Resolution event type per API verb. The vocabulary itself is enforced in
+# append_loop_event; this map is what the three endpoints share.
+HANDOFF_RESOLUTION_EVENTS = {
+    "accept": "handoff_accepted",
+    "complete": "handoff_completed",
+    "decline": "handoff_declined",
+}
+
+
+def resolve_handoff(
+    loop_id: int,
+    handoff_event_id: int,
+    account_id: int | None,
+    user_id: int,
+    action: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Human resolution of a handoff: append handoff_accepted/_completed/
+    _declined attributed to the user, then recompute cached_state.
+
+    Writes an EVENT; never mutates existing ones — same posture as
+    close_loop. Returns a status dict rather than raising so the route layer
+    owns the HTTP mapping:
+
+      {"status": "not_found"}        loop or handoff invisible to this account
+      {"status": "terminal", ...}    loop already closed -> 409, nothing written
+      {"status": "already_resolved"} this handoff is resolved -> no-op
+      {"status": "resolved", ...}    event appended
+
+    Correlation contract: when the initiating event's payload carries a uuid
+    handoff_id, the resolution carries the SAME uuid, so
+    loops._unresolved_handoffs pairs them by id exactly as it would for an
+    agent-emitted resolution. When it doesn't, we omit the key and the
+    existing most-recent-unresolved fallback applies. A human-emitted
+    resolution and an agent-emitted one are indistinguishable in the stream.
+    """
+    event_type = HANDOFF_RESOLUTION_EVENTS.get(action)
+    if event_type is None:
+        raise ValueError(f"unknown handoff action: {action!r}")
+
+    with _connect() as conn, _cursor(conn) as cur:
+        # 1. The loop, by the read convention (filter only when account_id is
+        #    set) so open/dev mode behaves like every other endpoint. This is
+        #    the ONLY tenant check we get — loop_events has a nullable
+        #    account_id and loop_participants has none at all, so every
+        #    downstream query below is scoped by having passed through here.
+        sql = f"SELECT id, cached_state, closed_at FROM loops WHERE id = {PH}"
+        args: list[Any] = [loop_id]
+        if account_id is not None:
+            sql += f" AND account_id = {PH}"
+            args.append(account_id)
+        cur.execute(sql, tuple(args))
+        loop = cur.fetchone()
+        if loop is None:
+            return {"status": "not_found"}
+
+        # 2. Terminal loops are frozen — the same invariant abandon_loop,
+        #    rematch_open_loop, and get_open_loops_for_sweep rely on. Report
+        #    it; append nothing; never un-abandon.
+        if loop["closed_at"] is not None:
+            return {
+                "status": "terminal",
+                "state": loop["cached_state"],
+                "closed_at": _ts_to_str(loop["closed_at"]),
+                "close_reason": _loop_close_reason(cur, loop_id),
+            }
+
+        # 3. The addressed event must be a handoff_initiated row belonging to
+        #    THIS loop (which step 1 proved belongs to this account). Anything
+        #    else is 404 — a wrong id and another tenant's id are
+        #    indistinguishable from outside.
+        cur.execute(
+            "SELECT id, type, payload FROM loop_events "
+            f"WHERE id = {PH} AND loop_id = {PH}",
+            (handoff_event_id, loop_id),
+        )
+        row = cur.fetchone()
+        if row is None or row["type"] != "handoff_initiated":
+            return {"status": "not_found"}
+        try:
+            init_payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            init_payload = {}
+        if not isinstance(init_payload, dict):
+            init_payload = {}
+
+        # 4. Idempotency: is this specific handoff still unresolved? Replay
+        #    the real correlation logic rather than a second implementation.
+        lp = _loops_mod()
+        pending = lp._unresolved_handoffs(_loop_events_with_ids(cur, loop_id))
+        if not any(h.get("_row_id") == handoff_event_id for h in pending):
+            return {"status": "already_resolved"}
+
+        # 5. Append. The uuid rides through when the initiator had one.
+        payload: dict[str, Any] = {}
+        uuid_id = init_payload.get("handoff_id")
+        if uuid_id is not None:
+            payload["handoff_id"] = str(uuid_id)
+        if reason:
+            payload["reason"] = str(reason)
+        append_loop_event(
+            cur, loop_id, event_type, "human", str(user_id),
+            payload=payload, account_id=account_id,
+        )
+        # The person is now in the cast. accept/complete held and did the
+        # work (executor); decline looked and passed it back (reviewer).
+        _upsert_loop_participant(
+            cur, loop_id, "human", str(user_id),
+            "reviewer" if action == "decline" else "executor",
+        )
+        # Same in-transaction recompute ingest runs. compute_loop_state is
+        # untouched — it already consumes these three event types.
+        new_state = recompute_loop_state(cur, loop_id)
+
+    return {
+        "status": "resolved",
+        "event_type": event_type,
+        "handoff_id": payload.get("handoff_id"),
+        "state": new_state,
+    }
+
+
+def _attach_awaiting_human(
+    cur,
+    rows: list[dict[str, Any]],
+    account_id: int | None,
+    viewer_user_id: int | None,
+) -> None:
+    """Add awaiting_human_name / awaiting_is_you to list rows.
+
+    "Waiting on you" is a claim about a PERSON, so the server — which owns
+    identity resolution — decides it; the client never guesses. Cost: one
+    bounded IN-list query over loop_events keyed on the page's loop ids
+    (idx_loop_events_loop_type), plus one memoized name lookup per distinct
+    target across the page.
+    """
+    for row in rows:
+        row["awaiting_human_name"] = None
+        row["awaiting_is_you"] = False
+        row["awaiting_handoff_event_id"] = None
+    if not rows:
+        return
+    lp = _loops_mod()
+    ids = [r["id"] for r in rows]
+    ph_list = ", ".join([PH] * len(ids))
+    by_loop: dict[int, list[dict]] = {i: [] for i in ids}
+    cur.execute(
+        "SELECT id, loop_id, type, actor_type, actor, payload, event_time_unix "
+        f"FROM loop_events WHERE loop_id IN ({ph_list}) "
+        "ORDER BY event_time_unix, id",
+        tuple(ids),
+    )
+    for r in cur.fetchall():
+        ev = lp.normalize_loop_event(dict(r))
+        ev["_row_id"] = r["id"]
+        by_loop[r["loop_id"]].append(ev)
+
+    names: dict[str, str | None] = {}
+    is_you: dict[str, bool] = {}
+    for row in rows:
+        pending = lp._unresolved_handoffs(by_loop.get(row["id"], []))
+        to_human = [
+            h
+            for h in pending
+            if (h.get("payload") or {}).get("direction") == "to_human"
+        ]
+        if not to_human:
+            continue
+        payload = to_human[-1].get("payload") or {}
+        row["awaiting_handoff_event_id"] = to_human[-1].get("_row_id")
+        tid = payload.get("target_id")
+        if not tid:
+            continue
+        tid = str(tid)
+        if tid not in names:
+            names[tid] = _resolve_human_name(cur, tid, account_id)
+            is_you[tid] = (
+                _target_is_user(cur, tid, account_id, viewer_user_id)
+                if viewer_user_id is not None
+                else False
+            )
+        row["awaiting_human_name"] = names[tid]
+        row["awaiting_is_you"] = is_you[tid]
+
+
+# Bound on the assignee prefilter. These are attention-state loops for one
+# account, so the realistic count is small — but the scan is unbounded by
+# construction, and a silent truncation would read as "you have nothing
+# waiting". Log when we hit it (see get_loops).
+_ASSIGNEE_SCAN_LIMIT = 500
+
+
+def _loops_assigned_to(
+    cur, account_id: int | None, user_id: int
+) -> tuple[list[int], bool]:
+    """Loop ids whose latest unresolved to_human handoff targets this user.
+
+    Two steps on purpose. SQL narrows to this account's open attention-state
+    loops that have at least one handoff event — served by
+    idx_loops_account_state, then idx_loop_events_loop_type for the EXISTS.
+    Python then replays loops._unresolved_handoffs per candidate, because
+    "latest UNRESOLVED handoff" is a stream fold, not a SQL predicate.
+
+    Returns (ids, truncated).
+    """
+    acct = ""
+    args: list[Any] = []
+    if account_id is not None:
+        acct = f" AND l.account_id = {PH}"
+        args.append(account_id)
+    cur.execute(
+        "SELECT l.id FROM loops l "
+        "WHERE l.closed_at IS NULL "
+        "  AND l.cached_state IN ('awaiting_human', 'stalled')"
+        f"  {acct}"
+        "  AND EXISTS (SELECT 1 FROM loop_events e "
+        "              WHERE e.loop_id = l.id AND e.type = 'handoff_initiated') "
+        f"ORDER BY l.id DESC LIMIT {PH}",
+        tuple([*args, _ASSIGNEE_SCAN_LIMIT + 1]),
+    )
+    candidates = [r["id"] for r in cur.fetchall()]
+    truncated = len(candidates) > _ASSIGNEE_SCAN_LIMIT
+    candidates = candidates[:_ASSIGNEE_SCAN_LIMIT]
+
+    matched: list[int] = []
+    verdict: dict[str, bool] = {}
+    for loop_id in candidates:
+        handoff = _latest_unresolved_to_human(cur, loop_id)
+        if handoff is None:
+            continue
+        tid = (handoff.get("payload") or {}).get("target_id")
+        if not tid:
+            continue
+        tid = str(tid)
+        if tid not in verdict:
+            verdict[tid] = _target_is_user(cur, tid, account_id, user_id)
+        if verdict[tid]:
+            matched.append(loop_id)
+    return matched, truncated
+
+
 def get_loop_stream(
     loop_id: int, account_id: int | None,
 ) -> list[dict[str, Any]] | None:
@@ -3229,7 +3595,7 @@ def get_loop_stream(
 
 
 def get_stalled_loops(
-    account_id: int | None, limit: int = 50,
+    account_id: int | None, limit: int = 50, viewer_user_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Loops needing attention (stalled, or waiting on a human), oldest
     stall first. stalled_for_s = now - last event timestamp."""
@@ -3255,6 +3621,7 @@ def get_stalled_loops(
             row["stalled_for_s"] = max(0, (now_ns - last) // _NS_PER_S) if last else None
             out.append(row)
         _attach_segments_mini(cur, out)
+        _attach_awaiting_human(cur, out, account_id, viewer_user_id)
         return out
 
 

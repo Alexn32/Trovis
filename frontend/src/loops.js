@@ -244,15 +244,21 @@ function needsCount(loopCounts) {
 
 /**
  * The Work list's one status chip per workflow.
- *   warm: a human is holding work — "1 waiting on you · 3h"
+ *   warm: something needs attention — "1 needs attention · 3h"
  *   else: "running" while anything is moving, "quiet today" otherwise.
+ *
+ * NOT "waiting on you": this is a per-workflow AGGREGATE with no per-loop
+ * target resolution behind it, and needsCount sums awaiting_system too —
+ * which is never waiting on a person at all. Per-loop "waiting on you" is
+ * decided server-side (see loopStateMeta / awaiting_is_you).
  */
 export function workflowChip(wf) {
   const needs = needsCount(wf?.loop_counts)
   if (needs > 0) {
     const age =
       typeof wf?.needs_you_for_s === 'number' ? ` · ${fmtAge(wf.needs_you_for_s)}` : ''
-    return { label: `${needs} waiting on you${age}`, warm: true }
+    const verb = needs === 1 ? 'needs' : 'need'
+    return { label: `${needs} ${verb} attention${age}`, warm: true }
   }
   const live =
     (wf?.loop_counts?.working || 0) +
@@ -388,13 +394,29 @@ export function buildWorkflowPayload(name, stations, hints, note) {
  *   'muted'   — terminal / waiting-on-agent, no color emphasis
  * label is the exact user-facing string.
  */
+/**
+ * Who an awaiting_human loop is waiting on, as a phrase: "you" when the
+ * server resolved the handoff target to the signed-in user, the person's
+ * name when it resolved to someone else, "a human" when it resolved to
+ * nobody. Never guesses from state — awaiting_is_you / awaiting_human_name
+ * are computed server-side, which is the only place identity is known.
+ */
+export function awaitingWho(loop) {
+  if (loop?.awaiting_is_you) return 'you'
+  return loop?.awaiting_human_name || WORKFLOW_STRINGS.humanFallback
+}
+
 export function loopStateMeta(loop, nowMs = Date.now()) {
   const state = loop?.cached_state
   const age = loopAgeSeconds(loop, nowMs)
   const withAge = (base) => (age != null ? `${base} · ${fmtAge(age)}` : base)
   switch (state) {
     case 'awaiting_human':
-      return { label: withAge('waiting on you'), tone: 'warning', attention: true }
+      return {
+        label: withAge(`waiting on ${awaitingWho(loop)}`),
+        tone: 'warning',
+        attention: true,
+      }
     case 'stalled':
       return { label: withAge('stalled'), tone: 'warning', attention: true }
     case 'awaiting_agent':
@@ -415,13 +437,38 @@ export function loopStateMeta(loop, nowMs = Date.now()) {
   }
 }
 
-// Stuck-view headline: the age IS the fact. "waiting on you for 3 hours".
+// Stuck-view headline: the age IS the fact. "waiting on you for 3 hours",
+// or "waiting on Sarah for 3 hours" when it isn't yours.
 export function loopStuckHeadline(loop, nowMs = Date.now()) {
   const age = loopAgeSeconds(loop, nowMs)
   const forPart = age != null ? ` for ${fmtAgeLong(age)}` : ''
   return loop?.cached_state === 'awaiting_human'
-    ? `waiting on you${forPart}`
+    ? `waiting on ${awaitingWho(loop)}${forPart}`
     : `stalled${forPart}`
+}
+
+/**
+ * The 409 an already-terminal loop returns when someone tries to resolve
+ * its handoff. Rendered as its own explanation, never as a generic error —
+ * the person very likely DID the work, and the record simply never heard.
+ * `detail` is the parsed {state, closed_at, close_reason} from api.js.
+ */
+export function handoffTerminalMessage(detail) {
+  const when = parseTs(detail?.closed_at)
+  const date = Number.isNaN(when)
+    ? 'earlier'
+    : new Date(when).toLocaleDateString(undefined, {
+        month: 'long',
+        day: 'numeric',
+      })
+  if (detail?.state === 'abandoned') {
+    return (
+      `This was marked abandoned on ${date} after 48 hours with no ` +
+      `activity. The work may have been done — the record didn't hear ` +
+      `about it.`
+    )
+  }
+  return `This loop was already closed on ${date}. Its record is final.`
 }
 
 // Attention first: stalled/awaiting_human float to the top, oldest stall
@@ -440,6 +487,22 @@ export function sortLoopsAttentionFirst(loops, nowMs = Date.now()) {
 // api-key auth with a 403) and only for loops that are actually waiting.
 export function showMarkDone(loop, hasSessionUser) {
   return Boolean(hasSessionUser) && ATTENTION_STATES.includes(loop?.cached_state)
+}
+
+/**
+ * Accept / Done / Decline are offered only when the work is genuinely THIS
+ * person's: a signed-in user, an unresolved handoff the server addressed
+ * (awaiting_handoff_event_id), and a target the server resolved to them.
+ * Showing them on someone else's handoff would recreate the "waiting on you"
+ * lie as a button — and the write is permanent.
+ */
+export function showResolveHandoff(loop, hasSessionUser) {
+  return (
+    Boolean(hasSessionUser) &&
+    Boolean(loop?.awaiting_is_you) &&
+    typeof loop?.awaiting_handoff_event_id === 'number' &&
+    !TERMINAL_STATES.includes(loop?.cached_state)
+  )
 }
 
 // ---------------------------------------------------------------------------

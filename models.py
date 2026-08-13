@@ -1007,6 +1007,15 @@ class LoopSummary(BaseModel):
     event_count: int = 0
     total_cost_usd: float = 0.0
     stalled_for_s: int | None = None  # populated by GET /loops/stalled only
+    # Who the loop is waiting on, resolved SERVER-side. "waiting on you" is a
+    # claim about a person, and only the server knows which person the
+    # authenticated caller is — the client must never infer it from state
+    # alone (that bug is why every member of an org saw the same list and was
+    # each told it was theirs). All three are null/false unless the loop has
+    # an unresolved to_human handoff.
+    awaiting_human_name: str | None = None   # resolved display name, when it resolves
+    awaiting_is_you: bool = False            # target IS the authenticated user
+    awaiting_handoff_event_id: int | None = None  # loop_events.id to resolve against
     # Possession bar data (loops.segments_mini) — enough for a proportional bar.
     segments_mini: list[SegmentMini] = Field(default_factory=list)
 
@@ -1020,6 +1029,13 @@ class LoopDetail(LoopSummary):
     # The possession chain (loops.compute_loop_segments) — computed live,
     # never stored.
     segments: list[LoopSegment] = Field(default_factory=list)
+
+
+class HandoffResolveRequest(BaseModel):
+    """Body for the handoff-resolution endpoints. Only decline uses `reason`;
+    accept/complete accept an empty body (the verb IS the payload)."""
+
+    reason: str | None = None
 
 
 class LoopTouch(BaseModel):

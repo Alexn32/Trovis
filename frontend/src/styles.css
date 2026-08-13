@@ -5897,6 +5897,19 @@ select.wf2-input { cursor: pointer; }
 }
 .loop-detail-loading, .loop-detail-err { font-size: 12px; color: var(--text-dim); padding: 6px 0; }
 .loop-detail-err { color: var(--error); }
+/* A terminal-loop 409 is an explanation, not a failure: the work may well
+   have been done and the record simply never heard. Reads as a quiet note
+   (warning rail, body text), never as red error copy. */
+.loop-detail-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface-2, transparent);
+  border-left: 2px solid var(--warning, var(--text-dim));
+  padding: 8px 10px;
+  margin: 6px 0 2px;
+  border-radius: 0 6px 6px 0;
+}
 
 .loop-parts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .loop-part {

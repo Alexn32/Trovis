@@ -82,6 +82,7 @@ from models import (
     CostOverview,
     CostResponse,
     DisplayNameRequest,
+    HandoffResolveRequest,
     HealthResponse,
     IngestResponse,
     InviteCreate,
@@ -877,17 +878,47 @@ def _agent_id_for_span(span: dict[str, Any]) -> str:
 async def list_loops(
     request: Request,
     state: str | None = Query(default=None),
+    assignee: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[LoopSummary]:
-    """List the org's loops, newest first, optionally filtered by state."""
+    """List the org's loops, newest first, optionally filtered by state.
+
+    `?assignee=me` narrows to loops whose latest UNRESOLVED to_human handoff
+    targets the authenticated user, matched on the same identity path as the
+    story's name resolution (numeric user id or email). Session auth only —
+    an API key has no user for "me" to mean.
+    """
     if state is not None and state not in loops.STATES:
         raise HTTPException(
             status_code=400,
             detail=f"unknown state {state!r}; one of: {', '.join(loops.STATES)}",
         )
     account_id = getattr(request.state, "account_id", None)
-    rows = database.get_loops(account_id, state=state, limit=limit, offset=offset)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    assignee_user_id: int | None = None
+    if assignee is not None:
+        if assignee != "me":
+            raise HTTPException(
+                status_code=400,
+                detail="assignee only supports 'me' — the authenticated user",
+            )
+        if not user:
+            # API-key auth carries no user, so "me" has no referent. Same
+            # 403-for-api-key posture as loop close.
+            raise HTTPException(
+                status_code=403, detail="sign in to filter by assignee",
+            )
+        assignee_user_id = user["id"]
+    rows = database.get_loops(
+        account_id,
+        state=state,
+        limit=limit,
+        offset=offset,
+        viewer_user_id=viewer_user_id,
+        assignee_user_id=assignee_user_id,
+    )
     return [LoopSummary(**r) for r in rows]
 
 
@@ -900,7 +931,13 @@ async def stalled_loops(
     oldest stall first. stalled_for_s = now minus the last event timestamp.
     The sweep keeps cached_state fresh within its 15-min interval."""
     account_id = getattr(request.state, "account_id", None)
-    return [LoopSummary(**r) for r in database.get_stalled_loops(account_id, limit=limit)]
+    user = getattr(request.state, "user", None)
+    return [
+        LoopSummary(**r)
+        for r in database.get_stalled_loops(
+            account_id, limit=limit, viewer_user_id=user["id"] if user else None,
+        )
+    ]
 
 
 @app.get("/loops/{loop_id}", response_model=LoopDetail)
@@ -910,7 +947,10 @@ async def loop_detail(loop_id: int, request: Request) -> LoopDetail:
     possession-segments chain — the loop's story. Segments and sentences are
     computed live, never stored."""
     account_id = getattr(request.state, "account_id", None)
-    row = database.get_loop(loop_id, account_id)
+    user = getattr(request.state, "user", None)
+    row = database.get_loop(
+        loop_id, account_id, viewer_user_id=user["id"] if user else None,
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="loop not found")
     participants = database.get_loop_participants(loop_id, account_id) or []
@@ -948,6 +988,127 @@ async def close_loop(loop_id: int, request: Request) -> LoopDetail:
         events=[LoopEventRecord(**e) for e in loops.narrate_events(stream)],
         segments=loops.compute_loop_segments(stream),
     )
+
+
+# ---------------------------------------------------------------------------
+# Handoff resolution — the human side of a workloop.
+# ---------------------------------------------------------------------------
+# Before these, only an AGENT could resolve a handoff (via the /v1/traces
+# attribute path), so a human who did the work and had nothing reporting it
+# watched their loop sit awaiting_human -> stalled -> force-closed
+# `abandoned` by the 48h sweep. These three endpoints are the missing half.
+#
+# {handoff_event_id} is loop_events.id — the integer PK of the
+# handoff_initiated row. The uuid in trovis.handoff.id is OPTIONAL (most
+# stored handoffs carry none), so it cannot address the resource; the PK
+# always can, and it is account-scopable through the loop join.
+#
+# The uuid still matters for CORRELATION: when the initiating event has one,
+# the resolution carries the same value in payload.handoff_id, so a
+# human-emitted resolution and an agent-emitted one are indistinguishable to
+# loops._unresolved_handoffs. See database.resolve_handoff.
+
+# Count + log every resolution attempt against an already-terminal loop.
+# A human reaching for a loop the sweep already abandoned is direct evidence
+# that ABANDON_THRESHOLD_S beat a real resolution — the measurement we want
+# BEFORE anyone argues about changing the threshold. The counter is
+# per-process (resets on deploy); the log line is the durable record.
+_handoff_409_count = 0
+
+
+def _handoff_detail(loop_id: int, handoff_event_id: int, request: Request,
+                    action: str, reason: str | None) -> LoopDetail:
+    """Shared body for accept / complete / decline. Session-auth only, same
+    403 shape as loop close; 404 hides cross-tenant existence; 409 on a
+    terminal loop; idempotent no-op when already resolved."""
+    global _handoff_409_count
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    if not user:
+        # API-key auth carries no user to attribute the resolution to. Agents
+        # resolve their own handoffs via the /v1/traces attribute path.
+        raise HTTPException(
+            status_code=403, detail="sign in to resolve a handoff",
+        )
+
+    result = database.resolve_handoff(
+        loop_id, handoff_event_id, account_id, user["id"], action, reason=reason,
+    )
+    if result["status"] == "not_found":
+        # Deliberately identical for "no such loop", "no such event", "event
+        # isn't a handoff", and "belongs to another account".
+        raise HTTPException(status_code=404, detail="handoff not found")
+    if result["status"] == "terminal":
+        _handoff_409_count += 1
+        logger.warning(
+            "[handoff-409] terminal-loop resolution attempt "
+            "account=%s loop=%s handoff_event=%s action=%s "
+            "loop_state=%s closed_at=%s close_reason=%s total=%d",
+            account_id, loop_id, handoff_event_id, action,
+            result["state"], result["closed_at"], result["close_reason"],
+            _handoff_409_count,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "state": result["state"],
+                "closed_at": result["closed_at"],
+                "close_reason": result["close_reason"],
+            },
+        )
+    # "resolved" and "already_resolved" both return the loop, 200 — same
+    # idempotent posture as re-closing a closed loop.
+    row = database.get_loop(loop_id, account_id, viewer_user_id=user["id"])
+    if row is None:
+        raise HTTPException(status_code=404, detail="handoff not found")
+    participants = database.get_loop_participants(loop_id, account_id) or []
+    stream = database.get_loop_stream(loop_id, account_id) or []
+    return LoopDetail(
+        **row,
+        participants=[LoopParticipant(**p) for p in participants],
+        events=[LoopEventRecord(**e) for e in loops.narrate_events(stream)],
+        segments=loops.compute_loop_segments(stream),
+    )
+
+
+@app.post(
+    "/loops/{loop_id}/handoffs/{handoff_event_id}/accept",
+    response_model=LoopDetail,
+)
+async def accept_handoff(
+    loop_id: int, handoff_event_id: int, request: Request,
+) -> LoopDetail:
+    """Take ownership of a handoff: append handoff_accepted attributed to the
+    authenticated user. The loop leaves awaiting_human."""
+    return _handoff_detail(loop_id, handoff_event_id, request, "accept", None)
+
+
+@app.post(
+    "/loops/{loop_id}/handoffs/{handoff_event_id}/complete",
+    response_model=LoopDetail,
+)
+async def complete_handoff(
+    loop_id: int, handoff_event_id: int, request: Request,
+) -> LoopDetail:
+    """Report the handed-off work done: append handoff_completed attributed
+    to the authenticated user. The loop leaves awaiting_human."""
+    return _handoff_detail(loop_id, handoff_event_id, request, "complete", None)
+
+
+@app.post(
+    "/loops/{loop_id}/handoffs/{handoff_event_id}/decline",
+    response_model=LoopDetail,
+)
+async def decline_handoff(
+    loop_id: int,
+    handoff_event_id: int,
+    request: Request,
+    body: HandoffResolveRequest | None = None,
+) -> LoopDetail:
+    """Hand the work back: append handoff_declined attributed to the
+    authenticated user, with an optional free-text reason."""
+    reason = (body.reason if body else None) or None
+    return _handoff_detail(loop_id, handoff_event_id, request, "decline", reason)
 
 
 # ---------------------------------------------------------------------------

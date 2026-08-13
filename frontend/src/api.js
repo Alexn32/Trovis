@@ -109,10 +109,18 @@ async function request(path, options = {}) {
     } catch {
       // fall through to status text
     }
-    // FastAPI uses `detail`; our auth middleware uses `error`.
-    const msg = body?.detail || body?.error || `${res.status} ${res.statusText}`
+    // FastAPI uses `detail`; our auth middleware uses `error`. `detail` is
+    // usually a string, but a structured 409 (handoff-vs-terminal-loop)
+    // sends an object — String()ing that yields "[object Object]", so keep
+    // the parsed value on the error and only stringify for `message`.
+    const detail = body?.detail ?? body?.error
+    const msg =
+      typeof detail === 'string' && detail
+        ? detail
+        : `${res.status} ${res.statusText}`
     const err = new Error(msg)
     err.status = res.status
+    err.detail = detail
     throw err
   }
   // 204 No Content and other empty-body responses return null —
@@ -395,15 +403,33 @@ export const api = {
   getActivity: (hours = 24, limit = 200) =>
     request(`/dashboard/activity?hours=${hours}&limit=${limit}`),
   // --- workloops (units of work derived from the event stream) ---
-  getLoops: (state = null, limit = 50, offset = 0) =>
+  // `assignee: 'me'` narrows to loops whose unresolved handoff targets the
+  // signed-in user. Session auth only — an api key has no "me".
+  getLoops: (state = null, limit = 50, offset = 0, assignee = null) =>
     request(
-      `/loops?limit=${limit}&offset=${offset}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
+      `/loops?limit=${limit}&offset=${offset}` +
+        `${state ? `&state=${encodeURIComponent(state)}` : ''}` +
+        `${assignee ? `&assignee=${encodeURIComponent(assignee)}` : ''}`,
     ),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
   getLoop: (loopId) => request(`/loops/${loopId}`),
   // Session auth only (the backend 403s api-key auth). Idempotent.
   closeLoop: (loopId) => request(`/loops/${loopId}/close`, { method: 'POST' }),
+  // --- handoff resolution (the human half of a workloop) ---
+  // handoffEventId is loop_events.id, served as awaiting_handoff_event_id on
+  // any loop summary/detail. All three are session-only and idempotent;
+  // they 409 with {state, closed_at, close_reason} when the loop is already
+  // terminal (see handoffTerminalMessage in loops.js).
+  acceptHandoff: (loopId, handoffEventId) =>
+    request(`/loops/${loopId}/handoffs/${handoffEventId}/accept`, { method: 'POST' }),
+  completeHandoff: (loopId, handoffEventId) =>
+    request(`/loops/${loopId}/handoffs/${handoffEventId}/complete`, { method: 'POST' }),
+  declineHandoff: (loopId, handoffEventId, reason = null) =>
+    request(`/loops/${loopId}/handoffs/${handoffEventId}/decline`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   // --- dedicated cost page ---
   getCostOverview: () => request('/cost/overview'),
   // Per-day / per-model cost audit — surfaces tokens that landed unpriced
