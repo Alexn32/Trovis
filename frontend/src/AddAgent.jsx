@@ -640,23 +640,28 @@ with tracer.start_as_current_span("my-operation") as span:
 // Instruction pages — OpenClaw
 // ---------------------------------------------------------------------------
 
-// The OTEL ingest endpoint agents send telemetry to. This is the Trovis
-// API (Railway), NOT the dashboard origin (Vercel) — so we use VITE_API_URL
-// (set at build time) and fall back to the production API, never the page
-// origin, which would be wrong for the hosted dashboard.
-const PRODUCTION_API = 'https://web-production-e6bc4.up.railway.app'
+// The canonical public host for the Trovis API. Every snippet a user copies
+// out of this wizard points here — never at the raw platform hostname the app
+// happens to be deployed on, whose lifetime we don't control and which leaks
+// infra detail into our users' configs. Verified: the deployed backend
+// advertises exactly this host as the `servers` URL in /actions/openapi.json,
+// and /v1/traces answers on it. If the domain ever changes, update it here
+// and in the backend's API_URL env together.
+const TROVIS_API_HOST = 'https://api.trovisai.com'
 
+// The OTEL ingest endpoint agents send telemetry to. This is the Trovis API,
+// NOT the dashboard origin (Vercel) — so we use VITE_API_URL (set at build
+// time) and fall back to the canonical host, never the page origin, which
+// would be wrong for the hosted dashboard.
 export function computeOverseeEndpoint() {
-  const base = import.meta.env.VITE_API_URL || PRODUCTION_API
+  const base = import.meta.env.VITE_API_URL || TROVIS_API_HOST
   return base.replace(/\/+$/, '') + '/v1/traces'
 }
 
-// Canonical custom-domain host for the OAuth / GPT-Actions flow. Deliberately
-// NOT derived from VITE_API_URL: ChatGPT users must never see the raw platform
-// hostname, and this must match the `servers` URL the backend advertises in
-// /actions/openapi.json (set via the API_URL env var). If that domain ever
-// changes, update it here and in the backend env together.
-const TROVIS_ACTIONS_HOST = 'https://api.trovisai.com'
+// Host for the OAuth / GPT-Actions flow. Same domain, but deliberately NOT
+// derived from VITE_API_URL: a local dev build points VITE_API_URL at
+// localhost, and a ChatGPT Action must still be told the real public host.
+const TROVIS_ACTIONS_HOST = TROVIS_API_HOST
 
 // The OAuth client_id the GPT Action authenticates with. Public (not a secret)
 // and must match the backend's OAUTH_CLIENT_ID (default "oversee-chatgpt" — a
