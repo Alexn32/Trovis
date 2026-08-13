@@ -43,11 +43,23 @@ if USE_POSTGRES:
 else:
     import sqlite3
 
-    SQLITE_PATH = "trovis.db"
+    # TROVIS_DB_PATH (legacy: OVERSEE_DB_PATH) points the SQLite backend at an
+    # explicit file. Without it the path is relative to the working directory,
+    # so running a throwaway server from the repo root silently reads and
+    # WRITES the developer's real dev DB. Set it for any scratch run.
+    # Read inline rather than via env() — that helper is defined below, and
+    # this module-level branch runs at import.
+    SQLITE_PATH = os.environ.get(
+        "TROVIS_DB_PATH", os.environ.get("OVERSEE_DB_PATH", "trovis.db")
+    )
     # Back-compat: if a pre-rename local DB exists and the new one doesn't,
     # keep using it so a developer's existing SQLite data isn't orphaned.
     # (Prod uses Postgres via DATABASE_URL, so this branch never runs there.)
-    if not os.path.exists(SQLITE_PATH) and os.path.exists("oversee.db"):
+    if (
+        SQLITE_PATH == "trovis.db"
+        and not os.path.exists(SQLITE_PATH)
+        and os.path.exists("oversee.db")
+    ):
         SQLITE_PATH = "oversee.db"
 
 # Bind-parameter placeholder for the active backend. Used in SQL strings via
@@ -656,9 +668,18 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 # is claude-opus-4-1) — confirmed against the live price list.
 _PRICING_SEED = [
     # model_name,         input/1k,  output/1k   — Anthropic published list
-    # prices (platform.claude.com/docs/.../pricing). Opus 4.5–4.8 share
+    # prices (platform.claude.com/docs/.../pricing). Opus 4.5–5 share
     # $5/$25 per 1M; Opus 4/4.1 are the older $15/$75. Cache tokens are
     # priced as multiples of the base input rate (see _CACHE_* below).
+    #
+    # Fable 5 is listed explicitly because _family_fallback would otherwise
+    # price it off the newest 'opus' row at $5/$25 — half its real rate.
+    ("claude-fable-5",    0.010,     0.050),    # $10 / $50 per 1M
+    ("claude-opus-5",     0.005,     0.025),    # $5 / $25 per 1M
+    # Sonnet 5 list price. An introductory $2/$10 runs through 2026-08-31;
+    # we seed the standard rate (correct from Sep 1, and the daily LiteLLM
+    # sync carries the promo in the meantime).
+    ("claude-sonnet-5",   0.003,     0.015),    # $3 / $15 per 1M
     ("claude-opus-4-8",   0.005,     0.025),    # $5 / $25 per 1M
     ("claude-opus-4-7",   0.005,     0.025),    # $5 / $25 per 1M
     ("claude-opus-4-6",   0.005,     0.025),    # $5 / $25 per 1M
@@ -2474,6 +2495,10 @@ def ingest_spans_with_loops(
         closes: dict[int, tuple[str, str, int]] = {}  # loop_id -> (actor, value, ts)
         handoff_loops: set[int] = set()  # first-handoff title trigger (post-tx)
         tool_pairs: set[tuple[int, str]] = set()  # (loop_id, tool) cast upserts
+        # Agent-declared handoff resolutions, applied AFTER the span loop so
+        # they see every handoff this batch opened and can honor the terminal
+        # freeze: (loop_id, kind, actor, handoff_uuid|None, ts).
+        resolutions: list[tuple[int, str, str, str | None, int]] = []
 
         for s in spans:
             attrs = s.get("attributes") or {}
@@ -2517,6 +2542,33 @@ def ingest_spans_with_loops(
                 )
                 handoff_loops.add(loop_id)
 
+            # handoff.resolve -> handoff_accepted/_completed/_declined. The
+            # mirror of the direction block above: an agent reporting that an
+            # open handoff is resolved. Only QUEUED here — applied after the
+            # span loop so it sees handoffs this same batch opened and can
+            # respect the terminal freeze. Correlation is payload.handoff_id,
+            # exactly as the human path writes it (see resolve_handoff), so
+            # an agent- and a human-emitted resolution differ only in
+            # actor_type/actor.
+            resolve = attr(attrs, "handoff.resolve")
+            if resolve is not None:
+                kind = str(resolve).strip().lower()
+                if kind in lp.HANDOFF_RESOLUTION_KINDS:
+                    hid = attr(attrs, "handoff.id")
+                    resolutions.append(
+                        (loop_id, kind, actor, str(hid) if hid is not None else None, ts)
+                    )
+                else:
+                    # Drop, never reject: a malformed attribute must not fail
+                    # a telemetry batch (same posture as an unknown
+                    # handoff.direction). Logged because, unlike direction,
+                    # this one silently loses a state transition.
+                    logger.warning(
+                        "[loops] ignoring unknown trovis.handoff.resolve=%r "
+                        "on loop %s (expected one of %s)",
+                        resolve, loop_id, ", ".join(lp.HANDOFF_RESOLUTION_KINDS),
+                    )
+
             # trovis.loop.close -> agent completed the loop. Without this,
             # every agent-finished task would sit idle until the sweep
             # mislabels it abandoned 48h later.
@@ -2543,6 +2595,46 @@ def ingest_spans_with_loops(
             row = cur.fetchone()
             if row is not None and row["closed_at"] is not None:
                 frozen.add(loop_id)
+
+        # Handoff resolutions — after `frozen` so the terminal freeze holds,
+        # and before the close pass so a batch carrying "resolved, then done"
+        # records both in that order.
+        for loop_id, kind, actor, hid, ts in resolutions:
+            if loop_id in frozen:
+                # Same invariant the 409 respects: a terminal loop's record
+                # is final. Never append, never reopen.
+                logger.warning(
+                    "[loops] dropping handoff_%s for loop %s — loop is "
+                    "already terminal (the record is frozen at close)",
+                    kind, loop_id,
+                )
+                continue
+            # There must be something to resolve. Correlate the way the
+            # reader will: by uuid when one is given, else "is anything
+            # open at all" (compute_loop_state's fallback resolves the most
+            # recent). A resolution matching nothing is dropped rather than
+            # guessed at — a wrong resolution is permanent.
+            pending = lp._unresolved_handoffs(_loop_events_with_ids(cur, loop_id))
+            if hid is not None:
+                matched = any(
+                    (h.get("payload") or {}).get("handoff_id") == hid for h in pending
+                )
+            else:
+                matched = bool(pending)
+            if not matched:
+                logger.warning(
+                    "[loops] dropping handoff_%s for loop %s — no unresolved "
+                    "handoff%s to resolve",
+                    kind, loop_id, f" with id {hid!r}" if hid else "",
+                )
+                continue
+            res_payload: dict[str, Any] = {}
+            if hid is not None:
+                res_payload["handoff_id"] = hid
+            append_loop_event(
+                cur, loop_id, f"handoff_{kind}", "agent", actor,
+                payload=res_payload, account_id=account_id, event_time_unix=ts,
+            )
 
         # Workflow matching — same transaction, and deliberately BEFORE the
         # close pass below: a loop that closes in its creation batch still

@@ -98,6 +98,8 @@ from models import (
     MeResponse,
     WorkflowCreate,
     WorkflowDetail,
+    WorkflowDraft,
+    WorkflowDraftRequest,
     WorkflowMap,
     WorkflowSummary,
     WorkflowVersionCreate,
@@ -749,8 +751,24 @@ async def ingest_traces(request: Request) -> IngestResponse:
                                 read time. Unresolvable values are kept but
                                 displayed as "a human".
       trovis.handoff.reason     free text (optional)
-      trovis.handoff.id         correlation id for a later
-                                handoff_accepted/completed/declined (optional)
+      trovis.handoff.id         correlation id, echoed back on the matching
+                                trovis.handoff.resolve span (optional, but
+                                the only way to resolve a SPECIFIC handoff
+                                when a loop has more than one open)
+      trovis.handoff.resolve    'accepted' | 'completed' | 'declined' ->
+                                appends the matching handoff_* event,
+                                agent-attributed, releasing the loop from
+                                awaiting_*. Pair it with trovis.handoff.id to
+                                resolve a specific handoff; without one it
+                                resolves the most recent unresolved handoff.
+                                Ignored (logged, batch still succeeds) when
+                                the value is unknown, the loop is already
+                                terminal, or nothing is open to resolve.
+                                This is the AGENT half of the same event
+                                types a human writes via
+                                POST /loops/{id}/handoffs/{event_id}/*: the
+                                two are indistinguishable in the stream apart
+                                from actor_type ('agent' vs 'human').
 
     Spans carrying none of these still get a loop: they join the agent's most
     recent open implicit loop when its last event is < 30 min old, else a new
@@ -1147,6 +1165,39 @@ async def declare_workflow(request: Request, body: WorkflowCreate) -> WorkflowDe
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return WorkflowDetail(**wf)
+
+
+@app.post("/workflows/draft", response_model=WorkflowDraft)
+async def draft_workflow(
+    request: Request, body: WorkflowDraftRequest
+) -> WorkflowDraft:
+    """Draft a declaration from a plain-English description of the process.
+
+    Pure drafting — nothing is persisted. The operator edits the result and
+    saves it through POST /workflows like any hand-built workflow. Hand-
+    authoring match hints is the friction that keeps workflows from being
+    declared at all; this is the on-ramp, not a replacement for the editor.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    _require_session_user(request)
+    description = (body.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="describe the process first")
+    known = [g["service_name"] for g in database.get_agents(account_id=account_id)]
+    try:
+        draft = describer.workflow_draft_from_description(description, known)
+    except describer.APIKeyMissingError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    # The draft is model output: validate it against the same rules a save
+    # goes through, so a malformed station can't reach the editor and fail
+    # confusingly at save time instead.
+    try:
+        loops.validate_stations(draft["stations"])
+        loops.validate_match_hints(draft["match_hints"])
+    except ValueError as e:
+        logger.warning("[Trovis] discarding malformed workflow draft: %s", e)
+        draft = {"name": draft.get("name", ""), "stations": [], "match_hints": []}
+    return WorkflowDraft(**draft)
 
 
 @app.get("/workflows", response_model=list[WorkflowSummary])

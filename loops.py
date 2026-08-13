@@ -67,6 +67,13 @@ ACTOR_TYPES = ("agent", "human", "system")
 ACTIVITY = "activity"
 
 _HANDOFF_RESOLUTIONS = ("handoff_accepted", "handoff_completed", "handoff_declined")
+# The values an AGENT may send in the `trovis.handoff.resolve` span attribute
+# (dual-read with `oversee.handoff.resolve`). Stored event type is
+# f"handoff_{kind}" — the same three types a HUMAN writes through
+# database.resolve_handoff, so the two paths are indistinguishable in the
+# event stream apart from actor_type/actor. Enforced in code like every other
+# grown vocabulary here.
+HANDOFF_RESOLUTION_KINDS = ("accepted", "completed", "declined")
 # to_system: a genuine blocking wait on an external system (rate limit,
 # slow export, unfired webhook). Declared, never inferred — same posture as
 # human handoffs. target_id is conventionally the system's name.
