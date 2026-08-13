@@ -4,7 +4,13 @@ pydantic
 anthropic
 psycopg2-binary
 python-dotenv
-mcp
+# PINNED, and it must stay pinned. mcp 2.0.0 removed `mcp.server.fastmcp`,
+# which mcp_server.py imports at module scope — main.py imports mcp_server,
+# so an unpinned resolve takes the ENTIRE API down at boot with
+# ModuleNotFoundError, not just the MCP surface. That is exactly what
+# happened on the 2026-08-13 rebuild: no code change, just a new major on
+# PyPI. 1.27.2 and 1.29.0 both carry the module; 2.0.0 does not.
+mcp==1.27.2
 stripe
 resend
 sentry-sdk[fastapi]
