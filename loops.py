@@ -700,6 +700,27 @@ TOOL_SENTENCES = {
 }
 
 
+# A failed run's marker in the story. Deliberately an `activity` entry (the
+# existing span-derived synthetic type) — NOT a new loop_events type: the
+# span already records the failure, spans ARE the activity record, and the
+# state machine must not learn a new word for this.
+RUN_FAILED_SENTENCE = "The run failed"
+# Bound the error summary: status_message can carry a whole stack trace, and
+# this renders as one line in the story.
+_ERROR_SUMMARY_MAX = 140
+
+
+def run_failed_sentence(error: str | None = None) -> str:
+    """"The run failed" — plus the runtime's own error text when there is
+    one, whitespace-collapsed and truncated."""
+    summary = " ".join(str(error or "").split())
+    if not summary:
+        return RUN_FAILED_SENTENCE
+    if len(summary) > _ERROR_SUMMARY_MAX:
+        summary = summary[: _ERROR_SUMMARY_MAX - 1].rstrip() + "…"
+    return f"{RUN_FAILED_SENTENCE} — {summary}"
+
+
 def tool_sentence(name: str, count: int = 1) -> str:
     base = TOOL_SENTENCES.get(name)
     if base is None and name.startswith("mcp__"):
@@ -779,6 +800,18 @@ def narrate_events(events: list[dict]) -> list[dict]:
         p = ev.get("payload") or {}
         name = p.get("span_name") or ""
         if name == "agent_run_complete":
+            # A SUCCESSFUL run's completion is covered by the loop_closed
+            # line, so it stays omitted. A FAILED run has no close line —
+            # nothing closes it, and the sweep won't touch it for 48h — so
+            # dropping this one left the story silent at exactly the moment
+            # the work stopped. Keep it, and say so.
+            if not p.get("failed"):
+                continue
+            entry = dict(ev)
+            entry["payload"] = dict(p)
+            entry["sentence"] = run_failed_sentence(p.get("error"))
+            entry["_group"] = None  # standalone; never collapsed into a run
+            out.append(entry)
             continue
         kind = activity_kind(ev)
         group = (

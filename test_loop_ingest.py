@@ -226,6 +226,40 @@ with TestClient(main.app) as c:
                 detail_ok = True
     check("loop_closed payload.detail carries the reason string", detail_ok)
 
+    # --- a failed run is visible in the story ------------------------------
+    # A failed run emits no close and no handoff — the sweep owns its
+    # lifecycle. But the story must not go silent at the moment the work
+    # stopped, so the span's OTLP error status surfaces as an `activity`
+    # entry. Keyed off the OTEL-standard status, not a vendor attribute.
+    err_span = span("agent_run_complete", NOW - 60 * NS, {"trovis.run.id": "failrun"})
+    err_span["status"] = {
+        "code": "STATUS_CODE_ERROR",
+        "message": "RuntimeError: upstream 503 from billing API",
+    }
+    check("failed-run batch ingests normally",
+          post(c, key, "failer", [
+              span("tool_call", NOW - 120 * NS,
+                   {"trovis.run.id": "failrun", "trovis.tool.name": "exec"}),
+              err_span,
+          ]).status_code == 200)
+    fl = loops_for(account_id, "failer")[0]
+    stream = database.get_loop_stream(fl["id"], account_id)
+    failed_evs = [e for e in stream if (e.get("payload") or {}).get("failed")]
+    check("the failed span carries failed+error into the stream",
+          len(failed_evs) == 1
+          and failed_evs[0]["payload"]["error"].startswith("RuntimeError: upstream 503"))
+    check("failure rides the existing 'activity' type — no new event type",
+          failed_evs[0]["type"] == "activity"
+          and not any(e["type"].startswith("run_") for e in stream))
+    sentences = [e["sentence"] for e in loops_mod.narrate_events(stream)]
+    check("the story says the run failed, with the error",
+          any(s.startswith("The run failed — RuntimeError: upstream 503")
+              for s in sentences))
+    check("a failed run is NOT closed — the sweep owns its lifecycle",
+          fl["closed_at"] is None and fl["cached_state"] == "working")
+    check("no handoff was invented for a failure",
+          not any(e["type"].startswith("handoff") for e in stream))
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")

@@ -217,6 +217,75 @@ check("template title with no tools",
       loops.template_title({"agent": "a", "tools": [], "action_count": 1})
       == "a · run · 1 actions")
 
+# ---------------------------------------------------------------------------
+# A failed run is visible in the story.
+# ---------------------------------------------------------------------------
+# A successful run's agent_run_complete stays omitted — the loop_closed line
+# covers it. A FAILED run has no close line (nothing closes it, and the sweep
+# ignores it for 48h), so dropping it left the story silent at exactly the
+# moment the work stopped. Uses the existing `activity` type — no new
+# loop_events vocabulary, no state-machine change.
+NS_ = 1_000_000_000
+def _act(name, ts, **p):
+    return {"type": "activity", "ts": ts, "actor_type": "agent",
+            "actor": "a:main", "payload": {"span_name": name, **p}}
+
+_ok = narrate_events([
+    {"type": "loop_opened", "ts": NS_, "actor_type": "agent", "actor": "a:main",
+     "payload": {}},
+    _act("exec", 2 * NS_, tool="exec"),
+    _act("agent_run_complete", 3 * NS_),
+])
+check("successful agent_run_complete is still omitted",
+      [e["sentence"] for e in _ok] == ["Started", "Ran a command"])
+
+_bad = narrate_events([
+    {"type": "loop_opened", "ts": NS_, "actor_type": "agent", "actor": "a:main",
+     "payload": {}},
+    _act("exec", 2 * NS_, tool="exec"),
+    _act("agent_run_complete", 3 * NS_, failed=True,
+         error="RuntimeError: upstream 503"),
+])
+check("failed run is NOT silent — the story says so",
+      [e["sentence"] for e in _bad]
+      == ["Started", "Ran a command", "The run failed — RuntimeError: upstream 503"])
+check("failure entry stays an activity event (no new event type)",
+      _bad[-1]["type"] == "activity")
+check("failure entry is never collapsed into a preceding run",
+      len(_bad) == 3 and _bad[-1]["payload"].get("count") is None)
+
+check("failure with no error text still renders",
+      narrate_events([_act("agent_run_complete", NS_, failed=True)])[0]["sentence"]
+      == "The run failed")
+check("a stack trace is collapsed and truncated, not dumped into the line",
+      len(loops.run_failed_sentence("boom\n  at x\n  at y" + "z" * 500)) <= 160)
+check("the failure line never leaks a raw identifier",
+      "agent_run_complete" not in
+      narrate_events([_act("agent_run_complete", NS_, failed=True)])[0]["sentence"])
+
+# Two consecutive failed runs each get their own line (grouping must not eat
+# the second one).
+_two = narrate_events([
+    _act("agent_run_complete", NS_, failed=True, error="first"),
+    _act("agent_run_complete", 2 * NS_, failed=True, error="second"),
+])
+check("consecutive failures are not collapsed",
+      [e["sentence"] for e in _two]
+      == ["The run failed — first", "The run failed — second"])
+
+# State is untouched: `failed` in the payload must not change the derivation.
+check("a failed activity event does not alter computed state",
+      loops.compute_loop_state([
+          {"type": "loop_opened", "ts": NS_, "actor_type": "agent",
+           "actor": "a:main", "payload": {}},
+          _act("agent_run_complete", 2 * NS_, failed=True, error="boom"),
+      ], now_ns=3 * NS_)
+      == loops.compute_loop_state([
+          {"type": "loop_opened", "ts": NS_, "actor_type": "agent",
+           "actor": "a:main", "payload": {}},
+          _act("agent_run_complete", 2 * NS_),
+      ], now_ns=3 * NS_) == "working")
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")

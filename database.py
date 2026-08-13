@@ -189,6 +189,11 @@ def _ts_to_epoch(v: Any) -> float | None:
 # timestamps from first-seen computations at the source.
 _FIRST_SEEN_FLOOR_NS = 1_735_689_600_000_000_000  # 2025-01-01T00:00:00Z
 
+# OTLP STATUS_CODE_ERROR (the ingest mapping lives in main._OTLP_STATUS_CODES).
+# Mirrored here so the read model can spot a failed span without importing
+# from main — the OTEL-standard signal, not a vendor attribute.
+_OTLP_STATUS_ERROR = 2
+
 
 # ---------------------------------------------------------------------------
 # Password hashing + opaque tokens (stdlib only — no bcrypt/passlib dep)
@@ -2732,7 +2737,8 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
     if full:
         cur.execute(
             "SELECT id, trace_id, span_id, span_name, service_name, agent_id, "
-            "start_time_unix, estimated_cost_usd, attributes "
+            "start_time_unix, estimated_cost_usd, attributes, "
+            "status_code, status_message "
             f"FROM spans WHERE loop_id = {PH} ORDER BY start_time_unix, id",
             (loop_id,),
         )
@@ -2742,6 +2748,10 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
             except (TypeError, ValueError):
                 attrs = {}
             tool = attr(attrs, "tool.name") if isinstance(attrs, dict) else None
+            # OTLP STATUS_CODE_ERROR. Keyed off the OTEL-standard status
+            # rather than any vendor attribute, so a failure is legible from
+            # any runtime that sets it — not just the OpenClaw plugin.
+            failed = int(r["status_code"] or 0) == _OTLP_STATUS_ERROR
             ev = lp.activity_event(
                 r["start_time_unix"],
                 actor=lp.agent_actor(r["service_name"], r["agent_id"] or "main"),
@@ -2751,6 +2761,20 @@ def _fetch_loop_stream(cur, loop_id: int, full: bool = False) -> list[dict[str, 
                     "span_id": r["span_id"],
                     "cost_usd": r["estimated_cost_usd"],
                     **({"tool": str(tool)} if tool else {}),
+                    # Only carried when it actually failed, so the common
+                    # payload stays exactly the size it was.
+                    **(
+                        {
+                            "failed": True,
+                            **(
+                                {"error": str(r["status_message"])}
+                                if r["status_message"]
+                                else {}
+                            ),
+                        }
+                        if failed
+                        else {}
+                    ),
                 },
             )
             keyed.append(((1, ev["ts"], 1, r["id"]), ev))
