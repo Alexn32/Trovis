@@ -44,12 +44,12 @@ def register(ctx: Any) -> None:
     # operators set the endpoint + key in their shell or via the
     # `requires_env` declaration in plugin.yaml (which Hermes prompts
     # for at install time).
-    from trovis.core import _env  # TROVIS_* with legacy OVERSEE_* fallback
+    # DEFAULT_ENDPOINT (not a second hardcoded copy) — this module had its own
+    # duplicate of the raw Railway hostname, so fixing core.py alone would have
+    # left Hermes installs still pointed at the infra host.
+    from trovis.core import DEFAULT_ENDPOINT, _env  # TROVIS_*, legacy OVERSEE_*
 
-    endpoint = _env(
-        "ENDPOINT",
-        "https://web-production-e6bc4.up.railway.app/v1/traces",
-    )
+    endpoint = _env("ENDPOINT", DEFAULT_ENDPOINT)
     api_key = _env("API_KEY", "")
     agent_name = _env("AGENT_NAME", "hermes-agent")
     capture_outputs = (_env("CAPTURE_OUTPUTS", "") or "").lower() == "true"

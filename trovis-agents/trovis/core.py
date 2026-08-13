@@ -12,8 +12,10 @@ Wires three things in order:
   3. Agent identity registration: monkey-patches Agent.__init__ so
      each unique agent registers itself once on first construction.
 
-The whole thing is idempotent and never raises on misconfiguration —
-worst case is a warning log and partial telemetry.
+The whole thing is idempotent. It raises exactly once, for exactly one
+reason: a missing agent_name, which has no safe default (see init()).
+Every other misconfiguration degrades — worst case is a loud warning and
+partial telemetry, never a dead host agent.
 """
 
 from __future__ import annotations
@@ -35,7 +37,12 @@ from trovis.registration import (
 )
 from trovis.version import __version__
 
-DEFAULT_ENDPOINT = "https://web-production-e6bc4.up.railway.app/v1/traces"
+# The canonical public ingest host — NOT the raw Railway hostname the app
+# happens to be deployed on today. api.trovisai.com fronts the same FastAPI
+# app (verified: /health and /v1/traces both answer there), and it survives a
+# platform migration. Shipping the infra hostname as the default meant every
+# unconfigured install hardcoded a URL we don't control the lifetime of.
+DEFAULT_ENDPOINT = "https://api.trovisai.com/v1/traces"
 
 logger = logging.getLogger("trovis")
 
@@ -173,9 +180,12 @@ def init(
         api_key: Trovis API key. Falls back to TROVIS_API_KEY (legacy
             OVERSEE_API_KEY) env var. None is allowed for local dev.
         agent_name: service.name resource attribute. Falls back to
-            TROVIS_AGENT_NAME (legacy OVERSEE_AGENT_NAME), then "openai-agent".
+            TROVIS_AGENT_NAME (legacy OVERSEE_AGENT_NAME). REQUIRED — with
+            neither set, init() raises ValueError rather than defaulting every
+            unconfigured install to one shared name.
         endpoint: OTLP/HTTP traces endpoint. Falls back to TROVIS_ENDPOINT
-            (legacy OVERSEE_ENDPOINT), then the Trovis cloud default.
+            (legacy OVERSEE_ENDPOINT), then the Trovis cloud default
+            (DEFAULT_ENDPOINT, the api.trovisai.com ingest URL).
         capture_outputs: When True, the CaptureProcessor emits
             additional Trovis-named spans with the actual message /
             response / tool-result content (truncated to 10 000 chars).
@@ -199,11 +209,23 @@ def init(
         or DEFAULT_ENDPOINT
     )
     resolved_api_key = api_key or _env("API_KEY")
-    resolved_agent_name = (
-        agent_name
-        or _env("AGENT_NAME")
-        or "openai-agent"
-    )
+    # No silent default. agent_name becomes service.name, which is the key the
+    # backend derives an agent from — so a shared fallback ("openai-agent")
+    # collapsed every unconfigured install in an org into one indistinguishable
+    # agent, and the operator had no signal that it happened. Nothing about a
+    # Python process is a reliable per-agent name (argv[0] is often
+    # "python"/"uvicorn", the cwd is often shared), so there is nothing safe to
+    # derive: refuse to start instead of guessing wrong.
+    resolved_agent_name = agent_name or _env("AGENT_NAME")
+    if not resolved_agent_name or not str(resolved_agent_name).strip():
+        raise ValueError(
+            "[Trovis] agent_name is required. It becomes this agent's "
+            "service.name — the identity everything in the dashboard hangs "
+            "off — so Trovis will not pick one for you.\n"
+            "  Pass it:  trovis.init(agent_name='billing-triage')\n"
+            "  Or set:   TROVIS_AGENT_NAME=billing-triage"
+        )
+    resolved_agent_name = str(resolved_agent_name).strip()
     resolved_capture = bool(
         capture_outputs
         or (_env("CAPTURE_OUTPUTS", "") or "").lower() == "true"

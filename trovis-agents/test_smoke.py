@@ -361,7 +361,60 @@ try:
         )
     check("inject/extract exported by package", hasattr(trovis, "continue_trace"))
 
-    step(13, "Flushing spans before exit…")
+    step(13, "0.4.5 fail-loud posture (required agent_name, canonical default)…")
+    # These two defaults were removed in 0.4.5 because each failed silently:
+    # a shared fallback name collapsed every unconfigured install into one
+    # agent, and the endpoint default hardcoded the raw platform hostname.
+    from trovis.core import DEFAULT_ENDPOINT
+
+    check(
+        "DEFAULT_ENDPOINT is the canonical public host, not the infra hostname",
+        DEFAULT_ENDPOINT == "https://api.trovisai.com/v1/traces",
+        f"got {DEFAULT_ENDPOINT!r}",
+    )
+    check(
+        "DEFAULT_ENDPOINT carries no raw platform hostname",
+        "railway.app" not in DEFAULT_ENDPOINT,
+    )
+
+    # init() resolves the name before its idempotency early-return, so this
+    # raises even though init() already ran above. Clear the env fallbacks
+    # first, or a configured shell would mask the check.
+    _saved_env = {
+        k: os.environ.pop(k)
+        for k in ("TROVIS_AGENT_NAME", "OVERSEE_AGENT_NAME")
+        if k in os.environ
+    }
+    try:
+        for label, kwargs in (
+            ("omitted", {}),
+            ("empty string", {"agent_name": ""}),
+            ("whitespace only", {"agent_name": "   "}),
+        ):
+            try:
+                trovis.init(api_key="test-key", **kwargs)
+                check(f"init() rejects agent_name {label}", False, "no raise")
+            except ValueError as e:
+                check(
+                    f"init() rejects agent_name {label}",
+                    "agent_name is required" in str(e),
+                    f"message: {str(e).splitlines()[0]}",
+                )
+    finally:
+        os.environ.update(_saved_env)
+
+    # The env var must satisfy the requirement on its own.
+    os.environ["TROVIS_AGENT_NAME"] = "env-named-agent"
+    try:
+        trovis.init(api_key="test-key")
+        check("TROVIS_AGENT_NAME alone satisfies the requirement", True)
+    except ValueError as e:
+        check("TROVIS_AGENT_NAME alone satisfies the requirement", False, str(e))
+    finally:
+        os.environ.pop("TROVIS_AGENT_NAME", None)
+        os.environ.update(_saved_env)
+
+    step(14, "Flushing spans before exit…")
     try:
         provider.shutdown()
         check("provider shutdown clean", True)

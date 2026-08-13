@@ -50,7 +50,7 @@ result = await Runner.run(agent, "Help me with my order")
 import anthropic
 from trovis import init
 
-init(api_key="ov_sk_your_key", platform="anthropic")
+init(api_key="ov_sk_your_key", agent_name="my-agent", platform="anthropic")
 
 # Your existing code — no changes needed
 client = anthropic.Anthropic()
@@ -83,7 +83,7 @@ client at a time:
 ```python
 from trovis import init, monitor
 
-init(api_key="ov_sk_...", platform="anthropic")
+init(api_key="ov_sk_...", agent_name="my-agent", platform="anthropic")
 client = monitor(anthropic.Anthropic())
 # Only this client emits Trovis spans.
 ```
@@ -211,8 +211,8 @@ By default, **message content is NOT captured** — only metadata. Enable with `
 | Variable                   | Purpose                                                                 |
 | -------------------------- | ----------------------------------------------------------------------- |
 | `TROVIS_API_KEY`          | Your Trovis API key. Sent as the `X-Trovis-Api-Key` header.            |
-| `TROVIS_ENDPOINT`         | Custom OTLP/HTTP endpoint. Defaults to the Trovis cloud.                |
-| `TROVIS_AGENT_NAME`       | Default `service.name` for spans. Defaults to `openai-agent`.            |
+| `TROVIS_ENDPOINT`         | Custom OTLP/HTTP endpoint. Defaults to `https://api.trovisai.com/v1/traces`. |
+| `TROVIS_AGENT_NAME`       | **Required** `service.name` for spans, unless you pass `agent_name=` to `init()`. There is no default — `init()` raises if neither is set. |
 | `TROVIS_CAPTURE_OUTPUTS`  | Set to `true` (case-insensitive) to enable content capture.              |
 
 Explicit arguments to `init()` always win over environment variables.
