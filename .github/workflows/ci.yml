@@ -1,0 +1,101 @@
+name: CI
+
+# Every test in this repo is hermetic: an isolated temp SQLite DB, the Claude
+# and Stripe boundaries stubbed, no network. So CI needs no secrets — if a job
+# here ever wants an API key, something has stopped being hermetic.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Match runtime.txt / the Railway dyno, not the newest Python.
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # The suite is standalone scripts, not pytest: each test_*.py sets its
+      # own env and exits non-zero on failure. Run them all and report every
+      # failure rather than stopping at the first.
+      - name: Run test scripts
+        env:
+          OVERSEE_DISABLE_PRICING_SYNC: '1'
+          TROVIS_DISABLE_PRICING_SYNC: '1'
+          TROVIS_DISABLE_ALERTS: '1'
+          TROVIS_DISABLE_LOOP_SWEEP: '1'
+        run: |
+          failed=()
+          for t in test_*.py; do
+            echo "::group::$t"
+            if python "$t"; then echo "PASS $t"; else failed+=("$t"); echo "FAIL $t"; fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::${#failed[@]} test script(s) failed: ${failed[*]}"
+            exit 1
+          fi
+          echo "All test scripts passed."
+
+  frontend:
+    name: Frontend build + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: node --test test/*.test.mjs
+
+  plugin:
+    name: OpenClaw plugin tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: trovis-openclaw-plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: trovis-openclaw-plugin/package-lock.json
+      - run: npm ci
+      # `npm test` rebuilds dist/index.test.mjs from index.ts before running.
+      # The plugin ships a committed dist/, so testing the artifact directly
+      # would let a stale build pass while the source is broken.
+      - run: npm test
+
+  sdk:
+    name: trovis-agents smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: trovis-agents
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e .
+      # The exporter points at a dead port on purpose: the smoke test asserts
+      # the SDK degrades quietly instead of taking the host agent down.
+      - run: python test_smoke.py
