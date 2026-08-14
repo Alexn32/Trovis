@@ -260,6 +260,84 @@ with TestClient(main.app) as c:
     check("no handoff was invented for a failure",
           not any(e["type"].startswith("handoff") for e in stream))
 
+    # --- the 0.6.0 upgrade seam ------------------------------------------
+    # Plugin 0.6.0 moves the loop grain from per-run to per-conversation by
+    # sending trovis.loop.external_id = sessionKey. Loops recorded under the
+    # OLD grain must not be absorbed into the new one: the event record is
+    # append-only, so the seam is permanent data and has to be clean by
+    # construction, not by luck. An old loop left OPEN at the moment of
+    # upgrade keeps its own identity and ages out through the sweep exactly
+    # as it would have.
+    check("pre-upgrade turn ingests (run-keyed, closed each turn)",
+          post(c, key, "seam", [
+              span("message_received", NOW - 900 * NS, {"trovis.run.id": "old-1"}),
+              span("agent_run_complete", NOW - 880 * NS,
+                   {"trovis.run.id": "old-1", "trovis.loop.close": "done"}),
+          ]).status_code == 200)
+    check("a pre-upgrade loop left OPEN ingests",
+          post(c, key, "seam", [
+              span("message_received", NOW - 800 * NS, {"trovis.run.id": "old-2"}),
+          ]).status_code == 200)
+    pre_ids = {l["id"] for l in loops_for(account_id, "seam")}
+    check("two old-grain loops exist before the upgrade", len(pre_ids) == 2)
+
+    # First post-upgrade turn, same conversation, now session-keyed.
+    check("post-upgrade turn ingests (session-keyed)",
+          post(c, key, "seam", [
+              span("message_received", NOW - 600 * NS,
+                   {"trovis.loop.external_id": "sess-A", "trovis.run.id": "new-1"}),
+              span("agent_run_complete", NOW - 580 * NS, {
+                  "trovis.loop.external_id": "sess-A", "trovis.run.id": "new-1",
+                  "trovis.handoff.direction": "to_human",
+                  "trovis.handoff.id": "SEAM-1",
+                  "trovis.handoff.reason": "turn_end",
+                  "trovis.handoff.target_id": "user-1",
+              }),
+          ]).status_code == 200)
+    after = loops_for(account_id, "seam")
+    new_loops = [l for l in after if l["id"] not in pre_ids]
+    check("the first post-upgrade turn opens a NEW loop, hijacking nothing",
+          len(after) == 3 and len(new_loops) == 1
+          and new_loops[0]["external_id"] == "sess-A")
+    old_open = [l for l in after if l["external_id"] == "old-2"][0]
+    check("the old OPEN loop keeps its own identity and its own grain",
+          old_open["id"] in pre_ids and old_open["external_id"] == "old-2")
+    check("the old open loop is untouched — no new events attached to it",
+          old_open["event_count"] == 2 and old_open["closed_at"] is None)
+    old_done = [l for l in after if l["external_id"] == "old-1"][0]
+    check("the old CLOSED loop stays closed and frozen",
+          old_done["cached_state"] == "done" and old_done["closed_at"] is not None)
+
+    # Second post-upgrade turn: the human replies, resolving the handoff,
+    # and the agent hands back. One loop, the full chain.
+    check("the human's reply resolves and the agent hands off again",
+          post(c, key, "seam", [
+              span("message_received", NOW - 400 * NS, {
+                  "trovis.loop.external_id": "sess-A", "trovis.run.id": "new-2",
+                  "trovis.handoff.resolve": "completed",
+                  "trovis.handoff.id": "SEAM-1",
+              }),
+              span("agent_run_complete", NOW - 380 * NS, {
+                  "trovis.loop.external_id": "sess-A", "trovis.run.id": "new-2",
+                  "trovis.handoff.direction": "to_human",
+                  "trovis.handoff.id": "SEAM-2",
+                  "trovis.handoff.reason": "turn_end",
+                  "trovis.handoff.target_id": "user-1",
+              }),
+          ]).status_code == 200)
+    final = loops_for(account_id, "seam")
+    check("a second turn adds NO new loop — the conversation is one loop",
+          len(final) == 3)
+    convo = [l for l in final if l["external_id"] == "sess-A"][0]
+    segs = loops_mod.compute_loop_segments(
+        database.get_loop_stream(convo["id"], account_id)
+    )
+    check("the chain reads agent -> human -> agent -> human",
+          [s["holder_type"] for s in segs]
+          == ["agent", "human", "agent", "human"])
+    check("the conversation waits on the human, not 'done' every turn",
+          convo["cached_state"] == "awaiting_human")
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")

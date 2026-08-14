@@ -52,10 +52,20 @@ import { randomUUID } from "node:crypto"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.5.5"
+const PLUGIN_VERSION = "0.6.0"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
-const DEFAULT_AGENT_NAME = "openclaw-agent"
+//
+// There is deliberately no DEFAULT_AGENT_NAME. It used to be the constant
+// "openclaw-agent", which meant every install that didn't set agentName
+// reported under the SAME service.name — and since an agent in Trovis is
+// derived from service.name, all of them collapsed into one agent: spans
+// merged, descriptions overwrote each other, costs summed into one bucket,
+// and the plan limit counted them as a single instance. endpoint was
+// required-and-fail-loud while agentName was optional-with-silent-default;
+// this closes that asymmetry. We now derive a name from the gateway's own
+// workspace/agent config, and go inert with an actionable message when we
+// cannot.
 const LOG = "[Trovis]"
 const OBSERVATION_PRIORITY = 0
 // OTLP backends typically cap individual attribute values; 32 KB keeps us
@@ -312,6 +322,10 @@ const state: {
   sdk: NodeSDK | null
   endpoint: string
   agentName: string
+  // 'configured' | 'derived' — reported by `/trovis status` so an operator
+  // can see at a glance whether the identity came from their config or from
+  // the workspace name.
+  agentNameSource: "configured" | "derived"
   apiKey: string | undefined
   readUserData: boolean
   captureOutputs: boolean
@@ -338,7 +352,8 @@ const state: {
   tracer: null,
   sdk: null,
   endpoint: "",
-  agentName: DEFAULT_AGENT_NAME,
+  agentName: "",
+  agentNameSource: "derived",
   apiKey: undefined,
   readUserData: false,
   captureOutputs: false,
@@ -444,10 +459,28 @@ function ensureInit(ctx: OpenClawContext | undefined): Tracer | null {
   }
 
   state.endpoint = endpoint
-  state.agentName =
-    pluginConfig?.agentName ??
-    (process.env.TROVIS_AGENT_NAME ?? process.env.OVERSEE_AGENT_NAME) ??
-    DEFAULT_AGENT_NAME
+  // agentName: configured > derived from the gateway's own config > inert.
+  // Same posture as endpoint. A wrong-but-plausible shared default is worse
+  // than no telemetry: it silently merges unrelated agents into one record,
+  // and the backend cannot tell a deliberate "openclaw-agent" from an
+  // unconfigured one.
+  const configuredName =
+    pickStr(pluginConfig?.agentName) ??
+    pickStr(process.env.TROVIS_AGENT_NAME ?? process.env.OVERSEE_AGENT_NAME)
+  const derivedName = deriveAgentName(ctx)
+  if (!configuredName && !derivedName) {
+    state.disabled = true
+    console.error(
+      `${LOG} No agentName configured and none could be derived from the ` +
+        `gateway config. Telemetry is OFF. Set ` +
+        `plugins.entries.trovis.config.agentName (or TROVIS_AGENT_NAME) to ` +
+        `a name unique to this agent — it becomes the agent's identity in ` +
+        `Trovis, and a shared name merges separate agents into one record.`,
+    )
+    return null
+  }
+  state.agentName = (configuredName ?? derivedName) as string
+  state.agentNameSource = configuredName ? "configured" : "derived"
   state.apiKey = pluginConfig?.apiKey ?? (process.env.TROVIS_API_KEY ?? process.env.OVERSEE_API_KEY)
   // USER.md and MEMORY.md may carry personal data; the operator has to
   // explicitly opt in to having those files shipped to Trovis.
@@ -771,6 +804,64 @@ function trackRun(set: Set<string>, key: string): void {
   set.add(key)
 }
 
+// Structural turn_end handoffs waiting on a human reply: sessionKey -> uuid.
+// agent_end opens one, the next message_received on the same session resolves
+// it. Keyed by SESSION, not run, because the run that opens it and the run
+// that resolves it are different runs — that is the entire point.
+//
+// KNOWN LIMITATION, deliberately not worked around: this map is in-memory.
+// A gateway restart between the agent's turn and the human's reply loses the
+// pending entry, so no resolve is emitted and that loop sits awaiting_human
+// until the sweep. The obvious "fix" — emitting a uuid-less resolve on any
+// unmatched message_received — is worse: it would resolve the most recent
+// unresolved handoff, which may be a real, unrelated one, and loop_events has
+// no deletion path. A stuck loop is recoverable by a human through the
+// handoff-resolution API; a wrongly-resolved one is not. See CHANGELOG.
+const pendingTurnHandoffs = new Map<string, string>()
+// sessionKey -> the human we last heard from, so agent_end can name who it is
+// waiting on. Sourced from message_received's senderId — never from tool
+// parameter values.
+const lastSenderBySession = new Map<string, string>()
+
+function trackMapEntry(map: Map<string, string>, key: string, value: string): void {
+  if (map.size >= RUN_TRACKING_MAX) map.clear() // same bound as trackRun
+  map.set(key, value)
+}
+
+/** Derive an agent name from the gateway's own configuration, so a normal
+ * install needs no agentName setting and still gets a DISTINCT identity.
+ * Order: an explicitly configured agent id, then the workspace directory's
+ * basename. Returns undefined when neither is available — the caller then
+ * goes inert rather than inventing a shared default. */
+function deriveAgentName(ctx?: OpenClawContext): string | undefined {
+  const listed = ctx?.config?.agents?.list
+  if (Array.isArray(listed)) {
+    for (const a of listed) {
+      const id = pickStr(a?.id)
+      if (id) return id
+    }
+  }
+  const ws =
+    pickStr(ctx?.workspaceDir) ??
+    pickStr(ctx?.config?.agents?.defaults?.workspace)
+  if (ws) {
+    const base = path.basename(ws.replace(/[/\\]+$/, ""))
+    if (base && base !== "." && base !== ".." && base !== path.sep) return base
+  }
+  return undefined
+}
+
+/** The conversation this hook belongs to. Stable ACROSS runs — that is what
+ * makes a multi-turn conversation one loop instead of one loop per reply.
+ * undefined when the gateway gives no session/thread continuity, which is
+ * how a one-shot run is recognized. */
+function sessionKeyOf(event: unknown, ctx?: OpenClawContext): string | undefined {
+  const ev = (event ?? {}) as { threadId?: unknown }
+  return (
+    pickStr(ctx?.sessionKey) ?? pickStr(ev.threadId) ?? pickStr(ctx?.sessionId)
+  )
+}
+
 /** The run id OpenClaw assigned to this hook's execution unit, verbatim.
  * undefined (attribute omitted) when the gateway didn't provide one. */
 function pickRunId(event: unknown, ctx?: OpenClawContext): string | undefined {
@@ -817,6 +908,14 @@ function parseHandoffTools(
  */
 function applyLoopSignals(span: Span, event: unknown, ctx?: OpenClawContext): void {
   setIfPresent(span, "trovis.run.id", pickRunId(event, ctx))
+  // Loop grain: a CONVERSATION, not a turn. The backend keys loops on
+  // loop.external_id in preference to run.id, so sending the session key
+  // makes every turn of one conversation land in one loop — which is the
+  // only shape in which "agent handed to human, human replied, agent picked
+  // it back up" can be a single readable chain. Omitted when the gateway
+  // gives no session continuity, and the run.id fallback then applies
+  // unchanged (that is the one-shot case).
+  setIfPresent(span, "trovis.loop.external_id", sessionKeyOf(event, ctx))
   if (pendingHandoff) {
     const h = pendingHandoff
     pendingHandoff = null
@@ -1522,6 +1621,28 @@ function wireEvents(api: OpenClawApi): void {
     // per-agent virtual service names (`<service>-<agent_id>`).
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
     applyLoopSignals(span, event, ctx)
+    // The human replied. Two things follow.
+    const skey = sessionKeyOf(event, ctx)
+    if (skey) {
+      // 1. Remember who they are, so the NEXT agent_end can say which
+      //    person it is waiting on. senderId is the answer to "who is this
+      //    conversation with" — not a proxy for it — and reading it costs
+      //    us nothing from the privacy line: it is an identity field on the
+      //    event, never a tool parameter value.
+      const sender = pickStr(event?.senderId) ?? pickStr(ctx?.senderId)
+      if (sender) trackMapEntry(lastSenderBySession, skey, sender)
+      // 2. Resolve the turn_end handoff their reply just answered. Emitted
+      //    with the STORED uuid so the backend correlates it to that exact
+      //    handoff — never uuid-less, which would resolve whatever happened
+      //    to be open. No pending entry means nothing to resolve: stay
+      //    silent rather than guess.
+      const pending = pendingTurnHandoffs.get(skey)
+      if (pending) {
+        pendingTurnHandoffs.delete(skey)
+        span.setAttribute("trovis.handoff.resolve", "completed")
+        span.setAttribute("trovis.handoff.id", pending)
+      }
+    }
     // Capture inbound message text when the operator opted in.
     if (
       state.captureOutputs &&
@@ -1825,16 +1946,52 @@ function wireEvents(api: OpenClawApi): void {
         })
       }
     }
-    // Automatic workloop completion: agent_end IS OpenClaw's observable
-    // "unit of work finished" signal, and this span is the run's final
-    // span. Close as done UNLESS (a) the run failed — the backend's
-    // stall/abandon sweep is the honest state for that, a fake `done`
-    // would be wrong data in the permanent record; (b) the run declared a
-    // handoff — the loop must stay awaiting_human/awaiting_agent, not
-    // flip to done the moment the agent's turn ends; or (c) the run
-    // already closed explicitly via trovisCloseLoop() — never two closes.
+    // What agent_end actually means, and what it does NOT.
+    //
+    // AgentEndEvent carries exactly {runId?, success?, error?}. Nothing in
+    // it distinguishes "the task is finished" from "my turn is finished and
+    // I'm waiting for you" — so closing the loop as `done` here was an
+    // assertion the plugin could not observe. For a conversational agent it
+    // was wrong on every turn: the work wasn't done, the human just hadn't
+    // replied yet.
+    //
+    // The discriminator we DO have is session continuity, on the context
+    // rather than the event. With a session, the turn ended inside an
+    // ongoing conversation and the honest signal is a handoff to the human.
+    // Without one, there is no conversation to wait on and `done` remains
+    // correct — that is the one-shot / cron case, and its behavior here is
+    // unchanged.
     const key = runKey(event, ctx)
-    if (success !== false && !handoffActiveRuns.has(key) && !closedRuns.has(key)) {
+    const skey = sessionKeyOf(event, ctx)
+    if (success === false) {
+      // A crash hands work to nobody. No close (the sweep owns the
+      // lifecycle — a fake `done` would be wrong data in a permanent
+      // record) and no handoff (nobody has been asked for anything;
+      // inventing one would put a phantom item in a person's queue). The
+      // span already carries ERROR status + the message, which the backend
+      // renders as "The run failed" in the loop's story, so the failure is
+      // visible rather than silent.
+    } else if (closedRuns.has(key)) {
+      // trovisCloseLoop() already closed it — never two closes.
+    } else if (handoffActiveRuns.has(key)) {
+      // The run declared its own handoff via trovisHandoff() or a mapped
+      // tool. That declaration wins; don't stack a structural one on top.
+    } else if (skey) {
+      // Conversational turn end -> hand to the human and wait.
+      const id = randomUUID()
+      span.setAttribute("trovis.handoff.direction", "to_human")
+      span.setAttribute("trovis.handoff.id", id)
+      span.setAttribute("trovis.handoff.reason", "turn_end")
+      // Who we're waiting on. ctx.senderId when the gateway supplies it on
+      // agent_end, else the last human we heard from in this session.
+      setIfPresent(
+        span,
+        "trovis.handoff.target_id",
+        pickStr(ctx?.senderId) ?? lastSenderBySession.get(skey),
+      )
+      trackMapEntry(pendingTurnHandoffs, skey, id)
+    } else {
+      // No session continuity: a one-shot run really did finish.
       span.setAttribute("trovis.loop.close", "done")
     }
     handoffActiveRuns.delete(key)
@@ -1964,7 +2121,7 @@ function wireCommands(api: OpenClawApi): void {
           ``,
           `• Endpoint: \`${state.endpoint || "(not set)"}\``,
           `• API key: \`${maskKey(state.apiKey)}\``,
-          `• Agent name: \`${state.agentName}\``,
+          `• Agent name: \`${state.agentName}\` (${state.agentNameSource})`,
           `• Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
           `• User data: **${state.readUserData ? "on" : "off"}**`,
           `• Conversation access: **${
@@ -2141,7 +2298,27 @@ function wireCommands(api: OpenClawApi): void {
 // parsed config without standing up a gateway or the OTEL SDK. Not part of
 // the public API — subject to change without a version bump.
 
-export const __internal = { state, parseHandoffTools }
+export const __internal = {
+  state,
+  parseHandoffTools,
+  deriveAgentName,
+  sessionKeyOf,
+  // Exposed so tests can assert isolation between simulated conversations;
+  // never read by plugin code outside this module.
+  pendingTurnHandoffs,
+  lastSenderBySession,
+  /** Test-only: clear every piece of cross-hook bookkeeping. All of it is
+   * module-level and intentionally survives individual hook firings, which
+   * makes a test suite order-dependent unless it resets between cases. */
+  resetForTest(): void {
+    pendingTurnHandoffs.clear()
+    lastSenderBySession.clear()
+    handoffActiveRuns.clear()
+    closedRuns.clear()
+    pendingHandoff = null
+    pendingClose = null
+  },
+}
 
 // ---------------------------------------------------------------------------
 // Plugin entry

@@ -60,7 +60,7 @@ Add an `trovis` entry under `plugins.entries` in your `openclaw.json`:
 | ---------------- | ------- | -------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `endpoint`       | string  | **yes**  | —                | Your Trovis OTLP/HTTP traces endpoint. The plugin is inert until this is set.                                                              |
 | `apiKey`         | string  | no       | —                | Sent as the `X-Trovis-Api-Key` header on every export. Required by hosted Trovis deployments.                                              |
-| `agentName`      | string  | no       | `openclaw-agent` | Identifies this gateway in the Trovis dashboard.                                                                                            |
+| `agentName`      | string  | see note | *(derived)*      | The agent's identity in Trovis. Derived from your gateway's configured agent id, else the workspace directory name. **If neither is available the plugin goes inert** — it will not fall back to a shared default. |
 | `enabled`        | boolean | no       | `true`           | Set to `false` to load the plugin without emitting telemetry.                                                                                |
 | `captureOutputs` | boolean | no       | `false`          | When `true`, include message text and tool results in spans (see [Output capture](#output-capture)). Off by default.                          |
 | `readUserData`   | boolean | no       | `false`          | When `true`, include `USER.md` and `MEMORY.md` in the startup registration. May contain personal data — opt-in only.                          |
@@ -185,17 +185,26 @@ two small hooks for the parts only your agent knows.
 
 **Automatic (no setup):**
 
-- Every span carries OpenClaw's own run id as `trovis.run.id`, so one
-  message-handling cycle = one loop. Spans without a run id fall back to
-  the backend's 30-minute gap rule.
+- **A conversation is one loop, not one loop per reply.** Every span
+  carries the session key as `trovis.loop.external_id`, so all the turns of
+  one conversation group together. Spans with no session continuity fall
+  back to the run id, then to the backend's 30-minute gap rule.
 - When `captureOutputs` is on, the inbound message (collapsed, first 80
   chars) becomes the loop's title. With capture off no title is sent —
   titles are content-derived and follow the same opt-in.
-- When a run ends without error (`agent_end`), the loop is closed as
-  `done` — unless the run declared a handoff (the loop stays
-  `awaiting_human` / `awaiting_agent`) or was already closed explicitly.
-  Failed runs are never closed; the backend's sweep handles genuinely
-  abandoned loops.
+- **When a conversational turn ends (`agent_end`), the loop hands off to
+  the human** — `to_human`, `reason: "turn_end"`, targeted at the sender
+  we last heard from. The loop sits `awaiting_human` until the person
+  replies; `message_received` then resolves that handoff by its id and
+  possession returns to the agent. The story reads
+  agent → human → agent, which is what actually happened.
+- A run with **no session continuity** (one-shot, cron) still closes as
+  `done` — there is no conversation to wait on.
+- A **failed** run emits neither a close nor a handoff. A crash hands work
+  to nobody, so the backend's sweep owns the lifecycle; the run's error
+  status surfaces in the loop story as "The run failed".
+- A run that declared its own handoff (helper or mapped tool) keeps that
+  declaration — no structural handoff is stacked on top.
 
 **Declared handoffs — helper:**
 
@@ -235,5 +244,5 @@ Spans are exported via the OpenTelemetry `BatchSpanProcessor`, which batches in 
 
 ## Links
 
-- Trovis → https://oversee.dev
+- Trovis → https://trovisai.com
 - OpenTelemetry → https://opentelemetry.io

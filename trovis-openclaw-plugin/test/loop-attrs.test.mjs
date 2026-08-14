@@ -67,6 +67,11 @@ function prime({ captureOutputs = false, handoffTools = "" } = {}) {
   __internal.state.tracer = makeFakeTracer(spans)
   __internal.state.captureOutputs = captureOutputs
   __internal.state.handoffTools = __internal.parseHandoffTools(handoffTools)
+  // All cross-hook bookkeeping (pending handoffs/closes, per-run
+  // suppression, conversation state) is module-level and survives between
+  // tests. Reset it so each case starts from a known state and the suite is
+  // order-independent.
+  __internal.resetForTest()
   return spans
 }
 
@@ -295,4 +300,168 @@ test("every span still ends exactly once (zero behavior change to span lifecycle
   for (const s of spans) {
     assert.equal(s.ended, true, `${s.name} ended`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// 7. Structural turn-end handoffs (0.6.0)
+// ---------------------------------------------------------------------------
+// agent_end used to assert `done` on every successful run. AgentEndEvent
+// carries only {runId, success, error} — nothing that distinguishes "the task
+// finished" from "my turn finished". The discriminator is session continuity,
+// on the context: with a session, the honest signal is a handoff to the human.
+
+const convo = (sessionKey, runId, senderId) => ({ sessionKey, runId, senderId })
+
+test("agent_end emits a turn_end handoff to the human, targeted at the sender", () => {
+  const spans = prime()
+  const ctx = convo("s-1", "run-t1", "user-42")
+  fire("message_received", { content: "hi", senderId: "user-42" }, ctx)
+  fire("agent_end", { runId: "run-t1", success: true }, ctx)
+  const end = spans.find((s) => s.name === "agent_run_complete")
+  assert.equal(end.attributes["trovis.handoff.direction"], "to_human")
+  assert.equal(end.attributes["trovis.handoff.reason"], "turn_end")
+  assert.equal(end.attributes["trovis.handoff.target_id"], "user-42")
+  assert.match(end.attributes["trovis.handoff.id"], /^[0-9a-f-]{36}$/)
+})
+
+test("agent_end no longer closes the loop in the conversational path", () => {
+  const spans = prime()
+  const ctx = convo("s-2", "run-t2", "user-1")
+  fire("message_received", { content: "hi", senderId: "user-1" }, ctx)
+  fire("agent_end", { runId: "run-t2", success: true }, ctx)
+  const end = spans.find((s) => s.name === "agent_run_complete")
+  assert.ok(
+    !("trovis.loop.close" in end.attributes),
+    "a finished TURN is not a finished unit of work",
+  )
+})
+
+test("the human's reply resolves the pending handoff by its uuid", () => {
+  const spans = prime()
+  const ctx = convo("s-3", "run-t3", "user-7")
+  fire("message_received", { content: "first", senderId: "user-7" }, ctx)
+  fire("agent_end", { runId: "run-t3", success: true }, ctx)
+  const uuid = spans.find((s) => s.name === "agent_run_complete")
+    .attributes["trovis.handoff.id"]
+
+  // Next turn: same session, DIFFERENT run — the whole point.
+  const ctx2 = convo("s-3", "run-t4", "user-7")
+  fire("message_received", { content: "second", senderId: "user-7" }, ctx2)
+  const reply = spans.filter((s) => s.name === "message_received").at(-1)
+  assert.equal(reply.attributes["trovis.handoff.resolve"], "completed")
+  assert.equal(
+    reply.attributes["trovis.handoff.id"], uuid,
+    "resolves THAT handoff by id, never uuid-less",
+  )
+})
+
+test("a conversation is one loop: every turn shares one loop.external_id", () => {
+  const spans = prime()
+  fire("message_received", { content: "a", senderId: "u" }, convo("s-4", "r1", "u"))
+  fire("agent_end", { runId: "r1", success: true }, convo("s-4", "r1", "u"))
+  fire("message_received", { content: "b", senderId: "u" }, convo("s-4", "r2", "u"))
+  fire("agent_end", { runId: "r2", success: true }, convo("s-4", "r2", "u"))
+  const keys = new Set(spans.map((s) => s.attributes["trovis.loop.external_id"]))
+  assert.deepEqual([...keys], ["s-4"], "one loop key across both runs")
+  const runIds = new Set(spans.map((s) => s.attributes["trovis.run.id"]))
+  assert.deepEqual([...runIds].sort(), ["r1", "r2"], "run ids still distinct")
+})
+
+test("no session continuity: still closes as done, no handoff invented", () => {
+  const spans = prime()
+  fire("agent_end", { runId: "one-shot", success: true }, { runId: "one-shot" })
+  const end = spans.find((s) => s.name === "agent_run_complete")
+  assert.equal(end.attributes["trovis.loop.close"], "done")
+  assert.ok(!("trovis.handoff.direction" in end.attributes))
+  assert.ok(!("trovis.loop.external_id" in end.attributes))
+})
+
+test("a failed conversational run emits neither a close nor a handoff", () => {
+  const spans = prime()
+  const ctx = convo("s-5", "run-f", "user-9")
+  fire("message_received", { content: "go", senderId: "user-9" }, ctx)
+  fire("agent_end", { runId: "run-f", success: false, error: "boom" }, ctx)
+  const end = spans.find((s) => s.name === "agent_run_complete")
+  assert.ok(!("trovis.loop.close" in end.attributes), "a crash is not done")
+  assert.ok(
+    !("trovis.handoff.direction" in end.attributes),
+    "a crash hands work to nobody — no phantom item in a person's queue",
+  )
+  assert.equal(end.status?.code, 2, "but the failure IS recorded on the span")
+})
+
+test("an explicit handoff wins — no structural handoff stacked on top", () => {
+  const spans = prime({ handoffTools: "request_approval:to_human" })
+  const ctx = convo("s-6", "run-h", "user-3")
+  fire("message_received", { content: "x", senderId: "user-3" }, ctx)
+  fire("before_tool_call", { toolName: "request_approval", toolCallId: "t1" }, ctx)
+  fire("after_tool_call", { toolCallId: "t1" }, ctx)
+  fire("agent_end", { runId: "run-h", success: true }, ctx)
+  const end = spans.find((s) => s.name === "agent_run_complete")
+  assert.ok(!("trovis.handoff.direction" in end.attributes))
+  assert.ok(!("trovis.loop.close" in end.attributes))
+})
+
+test("mapped tool handoffs stay target-less; only the structural one has a target", () => {
+  const spans = prime({ handoffTools: "request_approval:to_human" })
+  const ctx = convo("s-7", "run-m", "user-5")
+  fire("message_received", { content: "x", senderId: "user-5" }, ctx)
+  fire("before_tool_call", { toolName: "request_approval", toolCallId: "t2" }, ctx)
+  const tool = spans.find((s) => s.name === "tool_call")
+  assert.equal(tool.attributes["trovis.handoff.direction"], "to_human")
+  assert.equal(tool.attributes["trovis.handoff.reason"], "tool:request_approval")
+  assert.ok(
+    !("trovis.handoff.target_id" in tool.attributes),
+    "the recipient lives in parameter VALUES, which we never read",
+  )
+})
+
+test("unconfigured tools never emit a handoff — the allowlist ships empty", () => {
+  const spans = prime()
+  const ctx = convo("s-8", "run-n", "user-2")
+  fire("before_tool_call", { toolName: "send_slack_message", toolCallId: "t3" }, ctx)
+  const tool = spans.find((s) => s.name === "tool_call")
+  assert.ok(
+    !("trovis.handoff.direction" in tool.attributes),
+    "no default handoffTools — the plugin still never guesses",
+  )
+})
+
+test("an unmatched reply emits no resolve (the restart limitation, made explicit)", () => {
+  const spans = prime()
+  // No preceding agent_end for this session — as after a gateway restart.
+  fire("message_received", { content: "hello?", senderId: "u" }, convo("s-9", "r", "u"))
+  const msg = spans.find((s) => s.name === "message_received")
+  assert.ok(
+    !("trovis.handoff.resolve" in msg.attributes),
+    "silent rather than resolving whatever happens to be open",
+  )
+})
+
+// ---------------------------------------------------------------------------
+// 8. Agent identity (0.6.0)
+// ---------------------------------------------------------------------------
+
+test("agentName derives from a configured agent id, else the workspace name", () => {
+  const { deriveAgentName } = __internal
+  assert.equal(
+    deriveAgentName({ config: { agents: { list: [{ id: "billing-bot" }] } } }),
+    "billing-bot",
+  )
+  assert.equal(deriveAgentName({ workspaceDir: "/home/me/agents/support" }), "support")
+  assert.equal(deriveAgentName({ workspaceDir: "/home/me/agents/support/" }), "support")
+  assert.equal(
+    deriveAgentName({ config: { agents: { defaults: { workspace: "/srv/triage" } } } }),
+    "triage",
+  )
+})
+
+test("agentName has NO shared fallback — undefined rather than 'openclaw-agent'", () => {
+  const { deriveAgentName } = __internal
+  assert.equal(deriveAgentName({}), undefined)
+  assert.equal(deriveAgentName(undefined), undefined)
+  // The old constant collapsed every unconfigured install into one agent.
+  assert.ok(
+    !JSON.stringify(deriveAgentName({}) ?? "").includes("openclaw-agent"),
+  )
 })

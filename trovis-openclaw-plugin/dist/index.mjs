@@ -23290,9 +23290,9 @@ var require_src19 = __commonJS({
 var require_module_details_from_path = __commonJS({
   "node_modules/module-details-from-path/index.js"(exports, module) {
     "use strict";
-    var sep = __require("path").sep;
+    var sep2 = __require("path").sep;
     module.exports = function(file) {
-      var segments = file.split(sep);
+      var segments = file.split(sep2);
       var index = segments.lastIndexOf("node_modules");
       if (index === -1) return;
       if (!segments[index + 1]) return;
@@ -23305,7 +23305,7 @@ var require_module_details_from_path = __commonJS({
         if (i === lastBaseDirSegmentIndex) {
           basedir += segments[i];
         } else {
-          basedir += segments[i] + sep;
+          basedir += segments[i] + sep2;
         }
       }
       var path2 = "";
@@ -23314,7 +23314,7 @@ var require_module_details_from_path = __commonJS({
         if (i2 === lastSegmentIndex) {
           path2 += segments[i2];
         } else {
-          path2 += segments[i2] + sep;
+          path2 += segments[i2] + sep2;
         }
       }
       return {
@@ -66149,8 +66149,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
-var PLUGIN_VERSION = "0.5.5";
-var DEFAULT_AGENT_NAME = "openclaw-agent";
+var PLUGIN_VERSION = "0.6.0";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
 var ATTR_BYTE_LIMIT = 32 * 1024;
@@ -66180,7 +66179,8 @@ var state = {
   tracer: null,
   sdk: null,
   endpoint: "",
-  agentName: DEFAULT_AGENT_NAME,
+  agentName: "",
+  agentNameSource: "derived",
   apiKey: void 0,
   readUserData: false,
   captureOutputs: false,
@@ -66245,7 +66245,17 @@ function ensureInit(ctx) {
     return null;
   }
   state.endpoint = endpoint;
-  state.agentName = pluginConfig?.agentName ?? (process.env.TROVIS_AGENT_NAME ?? process.env.OVERSEE_AGENT_NAME) ?? DEFAULT_AGENT_NAME;
+  const configuredName = pickStr(pluginConfig?.agentName) ?? pickStr(process.env.TROVIS_AGENT_NAME ?? process.env.OVERSEE_AGENT_NAME);
+  const derivedName = deriveAgentName(ctx);
+  if (!configuredName && !derivedName) {
+    state.disabled = true;
+    console.error(
+      `${LOG} No agentName configured and none could be derived from the gateway config. Telemetry is OFF. Set plugins.entries.trovis.config.agentName (or TROVIS_AGENT_NAME) to a name unique to this agent \u2014 it becomes the agent's identity in Trovis, and a shared name merges separate agents into one record.`
+    );
+    return null;
+  }
+  state.agentName = configuredName ?? derivedName;
+  state.agentNameSource = configuredName ? "configured" : "derived";
   state.apiKey = pluginConfig?.apiKey ?? (process.env.TROVIS_API_KEY ?? process.env.OVERSEE_API_KEY);
   state.readUserData = Boolean(pluginConfig?.readUserData);
   state.captureOutputs = Boolean(
@@ -66399,6 +66409,31 @@ function trackRun(set, key) {
   if (set.size >= RUN_TRACKING_MAX) set.clear();
   set.add(key);
 }
+var pendingTurnHandoffs = /* @__PURE__ */ new Map();
+var lastSenderBySession = /* @__PURE__ */ new Map();
+function trackMapEntry(map, key, value) {
+  if (map.size >= RUN_TRACKING_MAX) map.clear();
+  map.set(key, value);
+}
+function deriveAgentName(ctx) {
+  const listed = ctx?.config?.agents?.list;
+  if (Array.isArray(listed)) {
+    for (const a of listed) {
+      const id = pickStr(a?.id);
+      if (id) return id;
+    }
+  }
+  const ws = pickStr(ctx?.workspaceDir) ?? pickStr(ctx?.config?.agents?.defaults?.workspace);
+  if (ws) {
+    const base = path.basename(ws.replace(/[/\\]+$/, ""));
+    if (base && base !== "." && base !== ".." && base !== path.sep) return base;
+  }
+  return void 0;
+}
+function sessionKeyOf(event, ctx) {
+  const ev = event ?? {};
+  return pickStr(ctx?.sessionKey) ?? pickStr(ev.threadId) ?? pickStr(ctx?.sessionId);
+}
 function pickRunId(event, ctx) {
   const ev = event ?? {};
   return pickStr(ev.runId) ?? pickStr(ctx?.runId);
@@ -66426,6 +66461,7 @@ function parseHandoffTools(raw) {
 }
 function applyLoopSignals(span, event, ctx) {
   setIfPresent(span, "trovis.run.id", pickRunId(event, ctx));
+  setIfPresent(span, "trovis.loop.external_id", sessionKeyOf(event, ctx));
   if (pendingHandoff) {
     const h = pendingHandoff;
     pendingHandoff = null;
@@ -66861,6 +66897,17 @@ function wireEvents(api) {
     setIfPresent(span, "trovis.trace.parent_span_id", ctx.parentSpanId);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
     applyLoopSignals(span, event, ctx);
+    const skey = sessionKeyOf(event, ctx);
+    if (skey) {
+      const sender = pickStr(event?.senderId) ?? pickStr(ctx?.senderId);
+      if (sender) trackMapEntry(lastSenderBySession, skey, sender);
+      const pending = pendingTurnHandoffs.get(skey);
+      if (pending) {
+        pendingTurnHandoffs.delete(skey);
+        span.setAttribute("trovis.handoff.resolve", "completed");
+        span.setAttribute("trovis.handoff.id", pending);
+      }
+    }
     if (state.captureOutputs && typeof event?.content === "string" && event.content.length > 0) {
       span.setAttribute(
         "trovis.message.content",
@@ -67074,7 +67121,22 @@ function wireEvents(api) {
       }
     }
     const key = runKey(event, ctx);
-    if (success !== false && !handoffActiveRuns.has(key) && !closedRuns.has(key)) {
+    const skey = sessionKeyOf(event, ctx);
+    if (success === false) {
+    } else if (closedRuns.has(key)) {
+    } else if (handoffActiveRuns.has(key)) {
+    } else if (skey) {
+      const id = randomUUID();
+      span.setAttribute("trovis.handoff.direction", "to_human");
+      span.setAttribute("trovis.handoff.id", id);
+      span.setAttribute("trovis.handoff.reason", "turn_end");
+      setIfPresent(
+        span,
+        "trovis.handoff.target_id",
+        pickStr(ctx?.senderId) ?? lastSenderBySession.get(skey)
+      );
+      trackMapEntry(pendingTurnHandoffs, skey, id);
+    } else {
       span.setAttribute("trovis.loop.close", "done");
     }
     handoffActiveRuns.delete(key);
@@ -67161,7 +67223,7 @@ USER.md and MEMORY.md are read at gateway start during agent registration, so **
           ``,
           `\u2022 Endpoint: \`${state.endpoint || "(not set)"}\``,
           `\u2022 API key: \`${maskKey(state.apiKey)}\``,
-          `\u2022 Agent name: \`${state.agentName}\``,
+          `\u2022 Agent name: \`${state.agentName}\` (${state.agentNameSource})`,
           `\u2022 Capture outputs: **${state.captureOutputs ? "on" : "off"}**`,
           `\u2022 User data: **${state.readUserData ? "on" : "off"}**`,
           `\u2022 Conversation access: **${state.allowConversationAccess === true ? "on" : "off"}** (required for tokens, cost & model)`,
@@ -67285,7 +67347,27 @@ Setting commands update in-memory state immediately. To make permanent, run \`op
     );
   }
 }
-var __internal = { state, parseHandoffTools };
+var __internal = {
+  state,
+  parseHandoffTools,
+  deriveAgentName,
+  sessionKeyOf,
+  // Exposed so tests can assert isolation between simulated conversations;
+  // never read by plugin code outside this module.
+  pendingTurnHandoffs,
+  lastSenderBySession,
+  /** Test-only: clear every piece of cross-hook bookkeeping. All of it is
+   * module-level and intentionally survives individual hook firings, which
+   * makes a test suite order-dependent unless it resets between cases. */
+  resetForTest() {
+    pendingTurnHandoffs.clear();
+    lastSenderBySession.clear();
+    handoffActiveRuns.clear();
+    closedRuns.clear();
+    pendingHandoff = null;
+    pendingClose = null;
+  }
+};
 var index_default = definePluginEntry({
   id: "trovis",
   name: "Trovis Agent Management",
