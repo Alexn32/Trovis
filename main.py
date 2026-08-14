@@ -98,6 +98,9 @@ from models import (
     CostOverview,
     CostResponse,
     DisplayNameRequest,
+    BoardCard,
+    BoardColumn,
+    BoardWorkflow,
     HandoffResolveRequest,
     HealthResponse,
     IngestResponse,
@@ -111,6 +114,7 @@ from models import (
     LoopEventRecord,
     LoopParticipant,
     LoopSummary,
+    WorkBoard,
     MeResponse,
     WorkflowCreate,
     WorkflowDetail,
@@ -1064,6 +1068,148 @@ async def close_loop(loop_id: int, request: Request) -> LoopDetail:
         events=[LoopEventRecord(**e) for e in loops.narrate_events(stream)],
         segments=loops.compute_loop_segments(stream),
     )
+
+
+# ---------------------------------------------------------------------------
+# The work board
+# ---------------------------------------------------------------------------
+# The Work tab's landing surface: a board of TASKS. Every mapping below is
+# DISPLAY ONLY — loops.py's state machine is untouched, and none of these
+# column names exist as engine states.
+#
+# The vocabulary rule this enforces: a stranger reads the board without
+# knowing a single Trovis word. No loops, no possession, no handoffs, no
+# stations. Work, waiting, stuck, done.
+_BOARD_COLUMNS = (
+    ("working", "Working"),
+    ("waiting_person", "Waiting on a person"),
+    ("stuck", "Stuck"),
+    ("done", "Done today"),
+)
+
+# Engine state -> column. `awaiting_agent` / `awaiting_system` deliberately
+# land in Working: from the outside the task IS still moving, it is just
+# blocked on something, and the card carries that as a note instead of
+# inventing two more columns nobody asked for.
+_STATE_TO_COLUMN = {
+    "open": "working",
+    "working": "working",
+    "awaiting_agent": "working",
+    "awaiting_system": "working",
+    "awaiting_human": "waiting_person",
+    "stalled": "stuck",
+    "done": "done",
+    "abandoned": "done",
+}
+
+
+def _board_stuck_reason(row: dict, age_s: int | None) -> str | None:
+    """Why a stuck task is stuck, in plain words — the name when we know it,
+    the honest version when we don't. Same posture as the abandoned-task
+    message: never a mechanism, never a shrug.
+
+    Returns None when the card's own holder + age already say it. A card that
+    reads "Sarah Chen · 2d" does not also need "waiting on Sarah Chen, 2d"
+    underneath it; repeating yourself is how a board turns into wallpaper."""
+    if row.get("holder_type") == "human":
+        return None  # the holder line already names her, with the age
+    if row.get("waiting_on"):
+        return f"waiting on {row['waiting_on']}{_board_for(age_s)}"
+    if age_s:
+        return f"no activity for {_humanize_seconds(age_s)}"
+    return None
+
+
+def _board_for(age_s: int | None) -> str:
+    return f", {_humanize_seconds(age_s)}" if age_s else ""
+
+
+@app.get("/work/board", response_model=WorkBoard)
+async def work_board(
+    request: Request,
+    workflow_id: int | None = Query(default=None),
+) -> WorkBoard:
+    """The whole Work board in one request: every open task plus whatever
+    finished today, already sorted and bucketed.
+
+    One endpoint on purpose — the board would otherwise be a request per
+    column plus one per card to resolve who holds it, and 'who holds it' is a
+    question only the server can answer.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    now_ns = time.time_ns()
+
+    rows = database.get_work_board(
+        account_id, viewer_user_id=viewer_user_id, workflow_id=workflow_id
+    )
+
+    buckets: dict[str, list[BoardCard]] = {k: [] for k, _ in _BOARD_COLUMNS}
+    wf_counts: dict[int, dict] = {}
+    for r in rows:
+        column = _STATE_TO_COLUMN.get(r.get("cached_state") or "", "working")
+        since = r.get("state_since_unix") or r.get("last_event_unix")
+        age_s = max(0, int((now_ns - int(since)) // 1_000_000_000)) if since else None
+        card = BoardCard(
+            id=r["id"],
+            title=loops_title_for_board(r),
+            column=column,
+            state=r.get("cached_state") or "",
+            holder_type=r.get("holder_type") or "agent",
+            holder_name=r.get("holder_name") or r.get("service_name") or "an agent",
+            waiting_on=r.get("waiting_on"),
+            age_seconds=age_s,
+            cost_usd=round(float(r.get("total_cost_usd") or 0.0), 4),
+            is_yours=bool(r.get("awaiting_is_you")),
+            handoff_event_id=r.get("awaiting_handoff_event_id"),
+            workflow_id=r.get("workflow_id"),
+            workflow_name=r.get("workflow_name"),
+            stuck_reason=_board_stuck_reason(r, age_s) if column == "stuck" else None,
+            closed_at=r.get("closed_at"),
+        )
+        buckets[column].append(card)
+        if r.get("workflow_id"):
+            wf = wf_counts.setdefault(
+                r["workflow_id"],
+                {"id": r["workflow_id"], "name": r.get("workflow_name") or "Workflow",
+                 "count": 0},
+            )
+            wf["count"] += 1
+
+    # Sorting IS the product here. Anything waiting on the person reading the
+    # board comes first; after that the oldest thing in its current state,
+    # because age is the urgency signal. Done is the exception: newest first,
+    # since it's a record of what just happened.
+    for key in buckets:
+        if key == "done":
+            buckets[key].sort(key=lambda c: c.closed_at or "", reverse=True)
+        else:
+            buckets[key].sort(key=lambda c: (not c.is_yours, -(c.age_seconds or 0)))
+
+    columns = [
+        BoardColumn(key=k, label=label, cards=buckets[k], count=len(buckets[k]))
+        for k, label in _BOARD_COLUMNS
+    ]
+    return WorkBoard(
+        columns=columns,
+        workflows=[
+            BoardWorkflow(**w)
+            for w in sorted(wf_counts.values(), key=lambda w: -w["count"])
+        ],
+        total=sum(len(v) for v in buckets.values()),
+        has_agents=bool(database.get_agents(account_id=account_id)),
+    )
+
+
+def loops_title_for_board(row: dict) -> str:
+    """A card's title is the card. Fall back to something a person can read
+    rather than an identifier when the generated title is missing."""
+    title = (row.get("title") or "").strip()
+    if title:
+        return title
+    who = row.get("holder_name") or row.get("service_name") or "An agent"
+    return f"Task from {who}"
 
 
 # ---------------------------------------------------------------------------

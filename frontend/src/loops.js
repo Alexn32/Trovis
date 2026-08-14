@@ -1,5 +1,5 @@
-// Workloop presentation logic — pure functions, no React, no DOM.
-// Everything user-facing about a loop (title fallback, state labels,
+// Work presentation logic — pure functions, no React, no DOM.
+// Everything user-facing about a task (title fallback, state labels,
 // lifecycle-event sentences, sort order, close-button visibility) lives
 // here in one place so copy stays consistent and node --test can cover it
 // without a component framework.
@@ -191,14 +191,24 @@ export function chainGlyph(loop) {
 // constants module) so the jargon test can sweep them.
 export const WORKFLOW_STRINGS = {
   newWorkflow: 'New workflow',
-  editStations: 'Edit stations',
+  editStations: 'Edit steps',
   nameLabel: 'Name',
-  stationsLabel: 'Stations',
-  stationsEmptyNudge: 'No stations yet — the map stays empty until you describe the process.',
+  stationsLabel: 'Steps',
+  stationsEmptyNudge: 'No steps yet — describe the process and the map fills in.',
   hintsTitle: 'How Trovis recognizes this work',
-  hintsExplainer: 'Loops matching these rules belong to this workflow.',
+  hintsExplainer: 'Work matching these rules belongs to this workflow.',
+  // The draft-from-description on-ramp (create mode only).
+  describeLabel: 'Describe the process',
+  describeNudge:
+    'Plain English. Trovis drafts the steps and the rules that recognize this work — you edit everything before saving.',
+  describePlaceholder:
+    'e.g. triage-agent scores every new signup, a person reviews anything it flags, and approved ones go to onboarding-agent over Slack',
+  draftCta: 'Draft it',
+  draftingCta: 'Drafting…',
+  draftEmpty:
+    "Couldn't draft that one — try naming the agents involved, or build the steps by hand below.",
   noteLabel: 'What changed (optional)',
-  mapEmpty: 'No stations declared yet — describe the process to see work move through it',
+  mapEmpty: 'No steps yet — describe the process to see work move through it',
   historyLabel: 'history ›',
   waitingWord: 'waiting',
   // The Work list (level 1)
@@ -468,7 +478,7 @@ export function handoffTerminalMessage(detail) {
       `about it.`
     )
   }
-  return `This loop was already closed on ${date}. Its record is final.`
+  return `This was already finished on ${date}. Its record is final.`
 }
 
 // Attention first: stalled/awaiting_human float to the top, oldest stall
@@ -510,7 +520,13 @@ export function showResolveHandoff(loop, hasSessionUser) {
 // and no raw event-type identifiers ever reach the UI.
 // ---------------------------------------------------------------------------
 
-const HANDOFF_TARGET = { to_human: 'a human', to_agent: 'another agent' }
+const HANDOFF_TARGET = { to_human: 'a person', to_agent: 'another agent', to_system: 'a system' }
+
+// Machine tokens the plugin sets as a handoff `reason`. They are wire values,
+// not prose — "Handed to Sarah — turn_end" is exactly the kind of leak the
+// board's language rule exists to stop. A structural turn end needs no
+// explanation: "Handed to Sarah" already says it.
+const MACHINE_REASONS = new Set(['turn_end'])
 
 export const LIFECYCLE_SENTENCES = {
   loop_opened: () => 'Started',
@@ -518,12 +534,14 @@ export const LIFECYCLE_SENTENCES = {
     // target_name is the backend's org-scoped resolution of target_id to a
     // real person ("Handed to Sarah"). Absent → the honest generic.
     const who = p?.target_name || HANDOFF_TARGET[p?.direction] || 'someone'
-    const reason = p?.reason ? ` — ${p.reason}` : ''
-    return `Handed to ${who}${reason}`
+    const raw = (p?.reason || '').trim()
+    // Drop machine tokens, and anything shaped like one (snake_case, no spaces).
+    const wordy = raw && !MACHINE_REASONS.has(raw) && !/^[a-z0-9]+(_[a-z0-9]+)+$/.test(raw)
+    return `Handed to ${who}${wordy ? ` — ${raw}` : ''}`
   },
-  handoff_accepted: () => 'Handoff accepted',
-  handoff_completed: () => 'Handoff completed',
-  handoff_declined: () => 'Handoff declined',
+  handoff_accepted: () => 'Picked up by a person',
+  handoff_completed: () => 'Finished by a person',
+  handoff_declined: () => 'Passed back',
   loop_closed: (p) => {
     if (p?.reason === 'abandoned') return 'Closed automatically — no activity for 2 days'
     if (p?.reason === 'closed_by_user') return 'Marked done'

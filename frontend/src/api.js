@@ -236,91 +236,29 @@ export const api = {
   },
 
   // --- workflows ---
-  // Named, ordered process flows (agent + human steps), auto-generated
-  // from telemetry + identity and operator-editable.
+  // A workflow is a named, VERSIONED declaration of a recurring process:
+  // ordered stations (who holds the work at each step) + match hints (how a
+  // loop is recognized as an instance). Definitions are append-only.
   getWorkflows: () => request('/workflows'),
   getWorkflow: (id) => request(`/workflows/${id}`),
   // Live station map: where every non-terminal matched loop currently sits.
   getWorkflowMap: (id) => request(`/workflows/${id}/map`),
   getWorkflowLoops: (id, state = null) =>
     request(`/workflows/${id}/loops${state ? `?state=${encodeURIComponent(state)}` : ''}`),
+  createWorkflow: (data) =>
+    request('/workflows', { method: 'POST', body: JSON.stringify(data) }),
   // Every edit is a new version (full definition, not a diff).
   createWorkflowVersion: (id, data) =>
     request(`/workflows/${id}/versions`, { method: 'POST', body: JSON.stringify(data) }),
-  // Live telemetry stats for a workflow's source agent.
-  getWorkflowStats: (id) => request(`/workflows/${id}/stats`),
-  createWorkflow: (data) =>
-    request('/workflows', { method: 'POST', body: JSON.stringify(data) }),
-  updateWorkflow: (id, data) =>
-    request(`/workflows/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteWorkflow: (id) => request(`/workflows/${id}`, { method: 'DELETE' }),
-  // Auto-build a workflow from one agent's telemetry. data:
-  // { name, agent_service_name, agent_id }. Returns the full workflow.
-  // Single-agent (legacy) OR multi-agent: { method:'agents', agents:[...], human_roles:[...] }.
-  generateWorkflow: (data) =>
-    request('/workflows/generate', { method: 'POST', body: JSON.stringify(data) }),
-  // AI builds a full multi-agent graph (participants + steps + edges + positions).
-  describeWorkflow: (data) =>
-    request('/workflows/describe', { method: 'POST', body: JSON.stringify(data) }),
-  // Legacy: draft a vertical step list from a description.
-  createWorkflowFromDescription: (data) =>
-    request('/workflows/from-description', { method: 'POST', body: JSON.stringify(data) }),
-  // Drag-to-reposition a node on the canvas.
-  updateStepPosition: (workflowId, stepId, pos) =>
-    request(`/workflows/${workflowId}/steps/${stepId}/position`, {
-      method: 'PUT',
-      body: JSON.stringify(pos),
-    }),
-  addWorkflowStep: (workflowId, data) =>
-    request(`/workflows/${workflowId}/steps`, {
+  archiveWorkflow: (id) =>
+    request(`/workflows/${id}/archive`, { method: 'POST' }),
+  // Draft a declaration from plain English. Returns { name, stations,
+  // match_hints } for the editor to prefill — nothing is persisted until
+  // the operator saves through createWorkflow.
+  draftWorkflow: (description) =>
+    request('/workflows/draft', {
       method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  updateWorkflowStep: (workflowId, stepId, data) =>
-    request(`/workflows/${workflowId}/steps/${stepId}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
-  deleteWorkflowStep: (workflowId, stepId) =>
-    request(`/workflows/${workflowId}/steps/${stepId}`, { method: 'DELETE' }),
-  reorderWorkflowSteps: (workflowId, stepIds) =>
-    request(`/workflows/${workflowId}/steps/reorder`, {
-      method: 'POST',
-      body: JSON.stringify({ step_ids: stepIds }),
-    }),
-  // --- workflow graph editing (manual editor) ---
-  // Create an edge. data: { from_step_id, to_step_id, label?, is_branch? }.
-  // A backward edge (target before source in flow order) is a loop.
-  addWorkflowEdge: (workflowId, data) =>
-    request(`/workflows/${workflowId}/edges`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  // Patch an edge's label / is_branch.
-  updateWorkflowEdge: (workflowId, edgeId, data) =>
-    request(`/workflows/${workflowId}/edges/${edgeId}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
-  deleteWorkflowEdge: (workflowId, edgeId) =>
-    request(`/workflows/${workflowId}/edges/${edgeId}`, { method: 'DELETE' }),
-  // Add an agent or human role to the workflow roster. data:
-  // { type:'agent'|'human', agent_service_name?, agent_id?, role_name? }.
-  addWorkflowParticipant: (workflowId, data) =>
-    request(`/workflows/${workflowId}/participants`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  deleteWorkflowParticipant: (workflowId, participantId) =>
-    request(`/workflows/${workflowId}/participants/${participantId}`, {
-      method: 'DELETE',
-    }),
-  // Apply a plain-English edit instruction to a workflow. Returns
-  // { summary, applied, workflow } — the workflow is the full updated graph.
-  aiEditWorkflow: (workflowId, instruction) =>
-    request(`/workflows/${workflowId}/ai-edit`, {
-      method: 'POST',
-      body: JSON.stringify({ instruction }),
+      body: JSON.stringify({ description }),
     }),
 
   // --- team + ownership ---
@@ -411,6 +349,10 @@ export const api = {
         `${state ? `&state=${encodeURIComponent(state)}` : ''}` +
         `${assignee ? `&assignee=${encodeURIComponent(assignee)}` : ''}`,
     ),
+  // The whole Work board in one request: open work + today's finished work,
+  // already bucketed, sorted, and with holders resolved server-side.
+  getWorkBoard: (workflowId = null) =>
+    request(`/work/board${workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''}`),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
   getLoop: (loopId) => request(`/loops/${loopId}`),
