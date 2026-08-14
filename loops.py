@@ -710,15 +710,30 @@ RUN_FAILED_SENTENCE = "The run failed"
 _ERROR_SUMMARY_MAX = 140
 
 
-def run_failed_sentence(error: str | None = None) -> str:
-    """"The run failed" — plus the runtime's own error text when there is
-    one, whitespace-collapsed and truncated."""
+def _error_summary(error: str | None) -> str:
+    """The runtime's own error text, whitespace-collapsed and bounded. Empty
+    string when there isn't one."""
     summary = " ".join(str(error or "").split())
-    if not summary:
-        return RUN_FAILED_SENTENCE
     if len(summary) > _ERROR_SUMMARY_MAX:
         summary = summary[: _ERROR_SUMMARY_MAX - 1].rstrip() + "…"
-    return f"{RUN_FAILED_SENTENCE} — {summary}"
+    return summary
+
+
+def run_failed_sentence(error: str | None = None) -> str:
+    """"The run failed" — plus the runtime's own error text when there is
+    one."""
+    summary = _error_summary(error)
+    return f"{RUN_FAILED_SENTENCE} — {summary}" if summary else RUN_FAILED_SENTENCE
+
+
+def failed_suffix(error: str | None = None) -> str:
+    """The " — failed" tail on any activity whose span carried an OTLP error
+    status: "Ran a command — failed", or "— failed: connection refused" when
+    the runtime told us why. Kept as a SUFFIX so every existing sentence
+    (tools, LLM calls, unmapped activity) reads correctly with it appended —
+    the failure is an adjective on what happened, not a different event."""
+    summary = _error_summary(error)
+    return f" — failed: {summary}" if summary else " — failed"
 
 
 def tool_sentence(name: str, count: int = 1) -> str:
@@ -814,12 +829,17 @@ def narrate_events(events: list[dict]) -> list[dict]:
             out.append(entry)
             continue
         kind = activity_kind(ev)
+        # `failed` is part of the group key on purpose: three successful
+        # `exec` calls and one that blew up must NOT collapse into
+        # "Ran a command · 4×", which would hide the failure entirely. Same
+        # tool, different outcome, different line.
+        failed = bool(p.get("failed"))
         group = (
-            ("tool", str(p.get("tool") or name))
+            ("tool", str(p.get("tool") or name), failed)
             if kind == "tool"
-            else ("llm", None)
+            else ("llm", None, failed)
             if kind == "llm"
-            else ("other", name)
+            else ("other", name, failed)
         )
         if out and out[-1].get("_group") == group:
             prev = out[-1]
@@ -835,16 +855,19 @@ def narrate_events(events: list[dict]) -> list[dict]:
         group = entry.pop("_group", None)
         if not group:
             continue
-        kind, name = group
-        n = int((entry.get("payload") or {}).get("count") or 1)
+        kind, name, failed = group
+        p = entry.get("payload") or {}
+        n = int(p.get("count") or 1)
         if kind == "llm":
-            entry["sentence"] = (
-                "Thought it through" if n <= 1 else f"Worked through it ({n} steps)"
-            )
+            base = "Thought it through" if n <= 1 else f"Worked through it ({n} steps)"
         elif kind == "tool":
-            entry["sentence"] = tool_sentence(name, n)
+            base = tool_sentence(name, n)
         else:
-            entry["sentence"] = str(name or "activity").replace("_", " ").capitalize()
+            base = str(name or "activity").replace("_", " ").capitalize()
+        # A failed step said so on its span; say so in the story. Without
+        # this, a tool call that blew up rendered as a cheerful
+        # "Ran a command" and the only clue was the loop never finishing.
+        entry["sentence"] = base + failed_suffix(p.get("error")) if failed else base
     return out
 
 

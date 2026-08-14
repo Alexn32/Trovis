@@ -273,6 +273,50 @@ check("consecutive failures are not collapsed",
       [e["sentence"] for e in _two]
       == ["The run failed — first", "The run failed — second"])
 
+# ---------------------------------------------------------------------------
+# Failed STEPS, not just failed runs.
+# ---------------------------------------------------------------------------
+# Every span carries an OTLP status, and a tool call that blew up used to
+# render as a cheerful "Ran a command" — the only clue was the loop never
+# finishing. Same failed/error payload as the run-failure line; the failure
+# reads as an adjective on what happened, not a separate event.
+check("a failed tool call says so, with the runtime's reason",
+      narrate_events([_act("tool_call", NS_, tool="exec", failed=True,
+                           error="connection refused")])[0]["sentence"]
+      == "Ran a command — failed: connection refused")
+check("a failed tool call with no error text still says failed",
+      narrate_events([_act("tool_call", NS_, tool="write", failed=True)])[0]["sentence"]
+      == "Wrote a file — failed")
+check("a failed LLM call says so too",
+      narrate_events([_act("model_call", NS_, failed=True, error="429 rate limited")]
+                     )[0]["sentence"] == "Thought it through — failed: 429 rate limited")
+check("an unmapped activity keeps its own wording plus the failure",
+      narrate_events([_act("custom_step", NS_, failed=True)])[0]["sentence"]
+      == "Custom step — failed")
+
+# The grouping rule is the load-bearing part: collapsing a failure into a
+# run of successes would hide it completely.
+_mixed = narrate_events(
+    [_act("tool_call", i * NS_, tool="exec") for i in range(1, 4)]
+    + [_act("tool_call", 4 * NS_, tool="exec", failed=True, error="disk full")]
+)
+check("a failure is NEVER collapsed into a run of successful calls",
+      [e["sentence"] for e in _mixed]
+      == ["Ran a command · 3×", "Ran a command — failed: disk full"])
+_allbad = narrate_events(
+    [_act("tool_call", i * NS_, tool="exec", failed=True, error="disk full")
+     for i in range(1, 4)]
+)
+check("consecutive failures of the same tool still collapse, with the count",
+      [e["sentence"] for e in _allbad] == ["Ran a command · 3× — failed: disk full"])
+check("successful calls are completely unchanged",
+      [e["sentence"] for e in narrate_events(
+          [_act("tool_call", NS_, tool="exec"),
+           _act("tool_call", 2 * NS_, tool="exec")])] == ["Ran a command · 2×"])
+check("a tool error is truncated like the run error",
+      len(narrate_events([_act("tool_call", NS_, tool="exec", failed=True,
+                               error="x" * 500)])[0]["sentence"]) <= 180)
+
 # State is untouched: `failed` in the payload must not change the derivation.
 check("a failed activity event does not alter computed state",
       loops.compute_loop_state([
