@@ -15,18 +15,18 @@ export function relativeTime(iso) {
 // Status freshness for an agent: green ≤5m, yellow ≤1h, gray otherwise.
 // Bumped to yellow if the agent has a high enough error rate, regardless
 // of recency.
+// THE agent status comes from the server (`status` on the agent payload):
+// 'healthy' | 'degraded' | 'idle'. This maps it to a dot color.
+//
+// It used to be derived here, with thresholds (>5%, >20%, 5min, 1h) that
+// matched neither the backend's nor the dashboard's. Three classifiers, three
+// answers for the same agent — and this one had a 'gray' bucket the Fleet
+// header counted in neither column, which is how five agents rendered "0 / 2".
+// Do not re-derive status on the client.
+const STATUS_DOT = { healthy: 'green', degraded: 'red', idle: 'gray' }
+
 export function statusFor(agent) {
-  const errorRate = agent.span_count
-    ? (agent.error_count / agent.span_count) * 100
-    : 0
-  if (errorRate > 20) return 'red'
-  if (!agent.last_seen) return 'gray'
-  const diffSec = (Date.now() - new Date(agent.last_seen).getTime()) / 1000
-  if (diffSec <= 300) {
-    return errorRate > 5 ? 'yellow' : 'green'
-  }
-  if (diffSec <= 3600 || errorRate > 5) return 'yellow'
-  return 'gray'
+  return STATUS_DOT[agent?.status] || 'gray'
 }
 
 export function errorRatePercent(agent) {
@@ -125,4 +125,24 @@ export function bucketSpansByDay(spans, days = 14) {
     if (idx >= 0 && idx < days) buckets[idx] += 1
   }
   return buckets
+}
+
+/**
+ * Fleet health as a sentence that accounts for every agent.
+ *
+ * Replaces the "healthy / degraded" pair, which was two independent counts
+ * joined by a slash — it read as a fraction ("0 of 2") while actually meaning
+ * "0 healthy, 2 degraded", and idle agents appeared in neither number. With
+ * five agents, three of them idle, it rendered "0 / 2" and lost three.
+ */
+export function fleetHealthLabel({ healthy = 0, degraded = 0, idle = 0 } = {}) {
+  const total = healthy + degraded + idle
+  if (total === 0) return 'No agents yet'
+  const parts = []
+  if (degraded) parts.push(`${degraded} need${degraded === 1 ? 's' : ''} attention`)
+  if (healthy) parts.push(`${healthy} healthy`)
+  if (idle) parts.push(`${idle} idle`)
+  // Lead with the count that needs a person, and always name the total so a
+  // reader can see nothing was dropped.
+  return degraded ? `${parts[0]} of ${total} · ${parts.slice(1).join(', ')}` : parts.join(', ')
 }

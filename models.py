@@ -154,6 +154,14 @@ class AgentGroup(BaseModel):
     # locked_count drives the "N recording" hint on a partially-locked group.
     locked: bool = False
     locked_count: int = 0
+    # THE agent status — computed server-side so every surface agrees.
+    # 'healthy' | 'degraded' | 'idle'. There used to be three independent
+    # classifiers (main._agent_status, Dashboard.deriveStatus,
+    # utils.statusFor) with different thresholds and different bucket sets,
+    # which is how the same agent in the same minute could be "healthy" on
+    # one page and uncounted on another. Clients render this; they never
+    # re-derive it.
+    status: str = "idle"
 
 
 class AccountUsage(BaseModel):

@@ -17,22 +17,12 @@ import {
 // All visuals key off CSS variables so the page works in light and dark.
 // ---------------------------------------------------------------------------
 
-// Status thresholds MUST mirror main.py's _agent_status: offline when no
-// telemetry in 24h, degraded when error rate > 2%, else healthy.
-function lastSeenAgeDays(iso) {
-  if (!iso) return null
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return null
-  return (Date.now() - t) / 86400000
-}
-
+// The server sends `status` on every agent ('healthy' | 'degraded' | 'idle').
+// This used to re-derive it here from last_seen + error rate, kept in sync
+// with the backend by a comment — one of three classifiers that disagreed
+// about the same agent. Render the server's verdict; never recompute it.
 function deriveStatus(a) {
-  const age = lastSeenAgeDays(a.last_seen)
-  if (age === null || age > 1) return 'offline'
-  const spans = a.total_spans || 0
-  const errs = a.total_errors || 0
-  const rate = spans ? (errs / spans) * 100 : 0
-  return rate > 2 ? 'degraded' : 'healthy'
+  return a?.status || 'idle'
 }
 
 function fmtRel(iso) {

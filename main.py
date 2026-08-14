@@ -1357,7 +1357,13 @@ async def list_agents(request: Request) -> list[AgentGroup]:
     sub-agents inside each instance.
     """
     account_id = getattr(request.state, "account_id", None)
-    return [AgentGroup(**a) for a in database.get_agents(account_id=account_id)]
+    # `status` is attached here rather than derived client-side, so the Fleet
+    # page, the dashboard and the briefing all read the same verdict for the
+    # same agent. See _agent_status for what they used to disagree about.
+    return [
+        AgentGroup(**a, status=_agent_status(a))
+        for a in database.get_agents(account_id=account_id)
+    ]
 
 
 def _humanize_seconds(s: float) -> str:
@@ -3055,27 +3061,47 @@ def _agent_error_rate(a: dict) -> float:
 
 
 def _agent_status(a: dict) -> str:
-    """healthy | degraded | offline — must match the frontend deriveStatus():
-    offline when no telemetry in 24h, degraded when error rate > 2%."""
+    """THE agent status: healthy | degraded | idle. Computed here and served on
+    the agent payload — clients render it, they never re-derive it.
+
+    There used to be three classifiers with different thresholds AND different
+    bucket sets: this one (healthy/degraded/offline, >24h, >2%), the
+    dashboard's deriveStatus (a copy of this one, kept in sync by a comment),
+    and the Fleet page's statusFor (green/yellow/red/gray, >5min, >5%, >20%).
+    The Fleet header then counted green as "healthy" and yellow+red as
+    "degraded" and silently dropped gray — which is how five agents rendered
+    as "0 / 2".
+
+    'idle' replaces 'offline': an agent that hasn't run today is usually
+    finished or between jobs, not broken, and calling that offline made a
+    quiet fleet look like a failing one.
+    """
     age = _last_seen_age_days(a.get("last_seen"))
     if age is None or age > 1.0:
-        return "offline"
+        return "idle"
     if _agent_error_rate(a) > 2.0:
         return "degraded"
     return "healthy"
 
 
+def _fleet_health(agents: list[dict]) -> dict:
+    """Every agent in exactly one bucket, and they sum to the total. The old
+    "healthy / degraded" pair was two independent counts rendered with a slash
+    that read as a fraction, with a whole bucket missing from both sides."""
+    counts = {"healthy": 0, "degraded": 0, "idle": 0}
+    for a in agents:
+        counts[_agent_status(a)] += 1
+    counts["total"] = len(agents)
+    return counts
+
+
 def _briefing_stats(
     agents: list[dict], tasks_yesterday: int, tasks_last_week: int, tasks_delta: str
 ) -> dict:
-    healthy = degraded = offline = 0
+    health = _fleet_health(agents)
     top_errors: list[dict] = []
     cost_today = 0.0
     for a in agents:
-        st = _agent_status(a)
-        healthy += st == "healthy"
-        degraded += st == "degraded"
-        offline += st == "offline"
         rate = _agent_error_rate(a)
         if rate > 2.0 and (a.get("total_spans") or 0) > 0:
             top_errors.append(
@@ -3085,9 +3111,9 @@ def _briefing_stats(
     top_errors.sort(key=lambda x: x["error_rate_pct"], reverse=True)
     return {
         "agent_count": len(agents),
-        "healthy": healthy,
-        "degraded": degraded,
-        "offline": offline,
+        "healthy": health["healthy"],
+        "degraded": health["degraded"],
+        "idle": health["idle"],
         "top_error_agents": top_errors[:5],
         "cost_today_usd": round(cost_today, 4),
         "tasks_last_24h": tasks_yesterday,
@@ -3106,8 +3132,8 @@ def _briefing_fallback(stats: dict) -> str:
         )
     bits = [f"{n} agent{'s' if n != 1 else ''} reporting"]
     bits.append(f"{stats['tasks_last_24h']} tasks in the last 24 hours")
-    if stats["degraded"] or stats["offline"]:
-        bits.append(f"{stats['degraded']} degraded and {stats['offline']} offline")
+    if stats["degraded"] or stats["idle"]:
+        bits.append(f"{stats['degraded']} needing attention and {stats['idle']} idle")
     return ", ".join(bits) + "."
 
 

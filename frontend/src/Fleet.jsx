@@ -6,6 +6,7 @@ import {
   formatDuration,
   relativeTime,
   statusFor,
+  fleetHealthLabel,
   statusColor,
   errorRatePercent,
 } from './utils.js'
@@ -102,9 +103,13 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
     return weighted / tot
   })()
 
-  const statuses = groups.map((g) => statusFor(groupForStatus(g)))
-  const healthy = statuses.filter((s) => s === 'green').length
-  const degraded = statuses.filter((s) => s === 'yellow' || s === 'red').length
+  // Every agent lands in exactly one bucket and the three sum to the total.
+  // The old pair counted green as healthy and yellow+red as degraded, and
+  // dropped gray from both — five agents rendered as "0 / 2".
+  const statuses = groups.map((g) => g.status || 'idle')
+  const healthy = statuses.filter((s) => s === 'healthy').length
+  const degraded = statuses.filter((s) => s === 'degraded').length
+  const idle = statuses.filter((s) => s === 'idle').length
   const fleetCostToday = groups.reduce((a, g) => a + (g.cost_today || 0), 0)
 
   return (
@@ -116,6 +121,7 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
             subAgents: totalSubAgents,
             healthy,
             degraded,
+            idle,
             spans: totalSpans,
             errors: totalErrors,
             avgMs: weightedAvgMs,
@@ -210,8 +216,8 @@ function FleetSummary({ counts, usage, onUpgrade }) {
         }
       />
       <Stat
-        label="Healthy / degraded"
-        value={`${counts.healthy} / ${counts.degraded}`}
+        label="Fleet health"
+        value={fleetHealthLabel(counts)}
         tone={counts.degraded > 0 ? 'warn' : undefined}
       />
       <Stat label="Total spans" value={counts.spans.toLocaleString()} />

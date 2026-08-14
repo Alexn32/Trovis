@@ -19,6 +19,7 @@ import {
   stuckCount,
   workflowGroupMeta,
 } from '../src/loops.js'
+import { fleetHealthLabel, statusFor } from '../src/utils.js'
 
 const NOW = Date.parse('2026-07-22T12:00:00Z')
 const ns = (iso) => Date.parse(iso) * 1e6
@@ -637,4 +638,43 @@ test('jargon: every workflow-surface string is clean', () => {
     )
     assert.ok(!/_/.test(s), `underscore leaked: ${s}`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// Fleet health counter
+// ---------------------------------------------------------------------------
+// "0 / 2" with five agents: the old pair counted green as healthy and
+// yellow+red as degraded, and dropped gray from BOTH sides. Three of five
+// agents simply vanished, behind a slash that read as a fraction.
+
+test('fleet health accounts for every agent', () => {
+  // The exact production shape: 1 degraded, 0 healthy, 4 idle.
+  const label = fleetHealthLabel({ healthy: 0, degraded: 1, idle: 4 })
+  assert.match(label, /1 needs attention of 5/)
+  assert.match(label, /4 idle/)
+})
+
+test('fleet health never renders a bare a/b fraction', () => {
+  const label = fleetHealthLabel({ healthy: 2, degraded: 1, idle: 2 })
+  assert.doesNotMatch(label, /^\d+ \/ \d+$/)
+  assert.match(label, /of 5/)
+  for (const n of ['1 need', '2 healthy', '2 idle']) assert.ok(label.includes(n), n)
+})
+
+test('an all-healthy fleet reads plainly, with no attention clause', () => {
+  assert.equal(fleetHealthLabel({ healthy: 3, degraded: 0, idle: 0 }), '3 healthy')
+})
+
+test('an empty fleet says so', () => {
+  assert.equal(fleetHealthLabel({}), 'No agents yet')
+  assert.equal(fleetHealthLabel(), 'No agents yet')
+})
+
+test('statusFor renders the SERVER verdict, never re-derives it', () => {
+  assert.equal(statusFor({ status: 'healthy' }), 'green')
+  assert.equal(statusFor({ status: 'degraded' }), 'red')
+  assert.equal(statusFor({ status: 'idle' }), 'gray')
+  // A high error rate must NOT override the server; that was the old bug.
+  assert.equal(statusFor({ status: 'healthy', error_count: 999, span_count: 1000 }), 'green')
+  assert.equal(statusFor({}), 'gray')
 })
