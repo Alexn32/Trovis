@@ -194,6 +194,49 @@ _FIRST_SEEN_FLOOR_NS = 1_735_689_600_000_000_000  # 2025-01-01T00:00:00Z
 # from main — the OTEL-standard signal, not a vendor attribute.
 _OTLP_STATUS_ERROR = 2
 
+# ---------------------------------------------------------------------------
+# Known-mislabeled error spans (read-model exclusion)
+# ---------------------------------------------------------------------------
+# OpenClaw plugin <= 0.6.0 allowlisted the model-call outcomes "ok"/"success"
+# and flagged every other outcome as a failure. OpenClaw's actual success
+# value is "completed", so EVERY successful model call was written with
+# status_code=2 and status_message='completed'.
+#
+# Measured in production 2026-08-14 (read-only audit):
+#   103,311 of 103,557 model_call spans carried outcome='completed'
+#   100% of them were marked ERROR
+#   fleet error rate SHOWN 43.5%  /  TRUE 1.6%
+#   96.4% of every "error" in the system was this one bug
+#
+# The spans are never rewritten — the record is append-only and what was
+# ingested is what was ingested. But the INTERPRETATION must stop repeating a
+# proven bug, so every error computation excludes this exact signature. It is
+# deliberately narrow: status_code=2 AND status_message='completed'. A span
+# that genuinely failed never carries the word "completed" as its status
+# message, and the seven real outcome='error' spans in that window are
+# untouched by this filter.
+#
+# Fixed at the source in plugin 0.6.1. This exclusion stays permanently:
+# historical spans keep the bad status forever, and older plugins remain
+# deployed in the wild.
+_MISLABELED_ERROR_MSG = "completed"
+# SQL fragment appended inside any "is this span an error" test.
+_NOT_MISLABELED = f"AND status_message <> '{_MISLABELED_ERROR_MSG}'"
+# The canonical error predicate. Use this everywhere instead of a bare
+# `status_code = 2` so the exclusion can never drift between call sites.
+_ERROR_PREDICATE = f"(status_code = {_OTLP_STATUS_ERROR} {_NOT_MISLABELED})"
+
+
+def is_error_span(span: dict[str, Any]) -> bool:
+    """Row-level twin of _ERROR_PREDICATE, for the callers that classify spans
+    in Python rather than SQL (the alert sweep's error rule, and the span
+    listings Ask shows Claude). Same exclusion, one definition — a span whose
+    status message is 'completed' is a plugin<=0.6.0 mislabel, not a failure.
+    """
+    if int(span.get("status_code") or 0) != _OTLP_STATUS_ERROR:
+        return False
+    return (span.get("status_message") or "") != _MISLABELED_ERROR_MSG
+
 
 # ---------------------------------------------------------------------------
 # Password hashing + opaque tokens (stdlib only — no bcrypt/passlib dep)
@@ -4296,7 +4339,7 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             service_name,
             COALESCE(agent_id, 'main')                       AS agent_id,
             COUNT(*)                                         AS span_count,
-            SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
+            SUM(CASE WHEN {_ERROR_PREDICATE} THEN 1 ELSE 0 END) AS error_count,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
             MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS} THEN start_time_unix END) AS first_seen_ns,
             MAX(start_time_unix)                             AS last_seen_ns,
@@ -4732,7 +4775,7 @@ def get_agent_records(
                MAX(end_time_unix)                              AS rec_end_ns,
                SUM(total_tokens)                               AS tokens,
                SUM(estimated_cost_usd)                         AS cost,
-               SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_spans,
+               SUM(CASE WHEN {_ERROR_PREDICATE} THEN 1 ELSE 0 END) AS error_spans,
                COUNT(*)                                        AS span_count
         FROM spans
         WHERE service_name = {PH} {acct} {agent}
@@ -4853,7 +4896,7 @@ def get_agent_record_stats(
     recent_sql = f"""
         SELECT trace_id,
                MIN(start_time_unix)                            AS rec_start_ns,
-               SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_spans
+               SUM(CASE WHEN {_ERROR_PREDICATE} THEN 1 ELSE 0 END) AS error_spans
         FROM spans
         WHERE service_name = {PH} {acct} {agent}
           AND span_name NOT IN ('agent_registration', 'heartbeat')
@@ -4881,7 +4924,7 @@ def get_agent_record_stats(
         SELECT span_name
         FROM spans
         WHERE service_name = {PH} {acct} {agent}
-          AND status_code = 2
+          AND {_ERROR_PREDICATE}
         ORDER BY start_time_unix DESC
         LIMIT 1
     """
@@ -4940,7 +4983,7 @@ def get_agent_summary(
     agg_sql = f"""
         SELECT
             COUNT(*)                                       AS span_count,
-            SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
+            SUM(CASE WHEN {_ERROR_PREDICATE} THEN 1 ELSE 0 END) AS error_count,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms,
             MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS} THEN start_time_unix END) AS first_seen_ns,
             MAX(start_time_unix)                           AS last_seen_ns,
@@ -5739,7 +5782,7 @@ def get_window_aggregate(
     agg_sql = f"""
         SELECT
             COUNT(*)                                       AS runs,
-            SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS errors,
+            SUM(CASE WHEN {_ERROR_PREDICATE} THEN 1 ELSE 0 END) AS errors,
             AVG((end_time_unix - start_time_unix) / 1000000.0) AS avg_duration_ms
         FROM spans
         WHERE service_name = {PH}

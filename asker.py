@@ -24,8 +24,21 @@ import database
 
 # The Ask assistant is a primary product surface (global ⌘K pill) — use the
 # most capable model. Setup walkthroughs need more room than quick answers.
-MODEL = "claude-opus-4-8"
-MAX_TOKENS = 1500
+MODEL = "claude-opus-5"
+
+# Thinking stays ON here, unlike describer.py — this module is the one that
+# calls tools. On the Opus 5 line, disabling thinking can make the model write
+# a tool call into its visible text instead of emitting a tool_use block: the
+# turn succeeds, the call silently never runs, and _agentic_answer returns
+# that text as the answer. Thinking on avoids it.
+#
+# The cost of thinking-on is paid two ways. `effort: low` keeps the ⌘K pill
+# responsive (low/medium are strong on this model), and the token budgets
+# below carry headroom because max_tokens now caps thinking + response text
+# together — the pre-Opus-5 values (1500 / 2200) left no room for both.
+THINKING = {"type": "adaptive"}
+OUTPUT_CONFIG = {"effort": "low"}
+MAX_TOKENS = 6000
 
 # How many recent spans to include in the per-agent context. 30 covers the
 # most common "why did this fail" question without bloating prompts.
@@ -590,7 +603,7 @@ def _format_agent_context(
             duration_ms = (
                 (s["end_time_unix"] - s["start_time_unix"]) / 1_000_000
             )
-            status = "OK" if s["status_code"] != 2 else "ERROR"
+            status = "ERROR" if database.is_error_span(s) else "OK"
             line = f"- {s['span_name']} | {duration_ms:.0f}ms | {status}"
             # Compact attribute dump: keys + short values, capped per-line
             # so a single fat attribute doesn't blow up the prompt.
@@ -618,7 +631,7 @@ def _format_agent_context(
 # the model, so a tool can only ever read the caller's own data.
 
 _ASK_MAX_ITERS = 6
-_ASK_TOOL_TOKENS = 2200      # per-turn cap while looping
+_ASK_TOOL_TOKENS = 8000      # per-turn cap while looping (incl. thinking)
 _TOOL_CONTENT_CAP = 1600     # max chars of captured content per item
 _TOOL_ITEMS_CAP = 25         # max items any single tool returns
 
@@ -806,7 +819,7 @@ def _run_tool(name: str, inp: dict[str, Any] | None, account_id: int | None) -> 
             spans = database.get_agent_spans(svc, limit=limit, account_id=account_id, agent_id=aid)
             out = []
             for s in spans:
-                status = "error" if s.get("status_code") == 2 else "ok"
+                status = "error" if database.is_error_span(s) else "ok"
                 if errors_only and status != "error":
                     continue
                 dur = (int(s.get("end_time_unix") or 0) - int(s.get("start_time_unix") or 0)) / 1e6
@@ -857,6 +870,8 @@ def _agentic_answer(
     for _ in range(_ASK_MAX_ITERS):
         resp = client.messages.create(
             model=MODEL,
+            thinking=THINKING,
+            output_config=OUTPUT_CONFIG,
             max_tokens=_ASK_TOOL_TOKENS,
             system=system,
             tools=_ASK_TOOLS,
@@ -879,6 +894,8 @@ def _agentic_answer(
     # Iteration cap hit — force a final answer from what's been gathered.
     resp = client.messages.create(
         model=MODEL,
+        thinking=THINKING,
+        output_config=OUTPUT_CONFIG,
         max_tokens=MAX_TOKENS,
         system=system + "\n\nWrap up NOW: give your best answer from what you've gathered.",
         messages=convo,
@@ -911,6 +928,8 @@ def _call_claude(
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
+        thinking=THINKING,
+        output_config=OUTPUT_CONFIG,
         max_tokens=MAX_TOKENS,
         system=full_system,
         messages=cleaned,

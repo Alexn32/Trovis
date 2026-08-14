@@ -223,7 +223,7 @@ def _recent_ops(account_id: int, svc: str, agent_id: str, since_ns: int) -> tupl
             continue
         name = s.get("span_name") or "operation"
         counts[name] = counts.get(name, 0) + 1
-        if s.get("status_code") == 2:  # OTEL ERROR
+        if database.is_error_span(s):  # OTEL ERROR, minus known mislabels
             errors += 1
     return counts, errors
 
