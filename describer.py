@@ -16,9 +16,25 @@ from typing import Any
 import anthropic
 
 import database
+# Station/hint vocabularies live in loops.py — the workflow draft below shapes
+# its output to them rather than keeping a second copy that could drift. Safe
+# at module level: loops imports describer lazily, inside a function.
+import loops
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 MAX_TOKENS = 1024
+
+# Thinking is explicit, not omitted — and must stay that way.
+#
+# On Sonnet 5 (and the Opus 5 line) omitting `thinking` means the model DOES
+# think, and max_tokens caps thinking + response text together. Every call in
+# this module is a short structured extraction on a tight budget — the loop
+# title and record summary run on 40 tokens — so a default-on thinking pass
+# would eat the whole budget and return an empty string. Nothing here needs
+# multi-step reasoning, and none of these calls use tools (the one failure
+# mode that makes disabled thinking risky), so we turn it off deliberately.
+# Do not "clean this up" by dropping the parameter.
+THINKING = {"type": "disabled"}
 
 SYSTEM_PROMPT = (
     "You are an AI analyst for Trovis, an agent management system. "
@@ -284,6 +300,7 @@ def describe_agent(
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
+        thinking=THINKING,
         max_tokens=MAX_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
@@ -346,6 +363,7 @@ def record_summary(
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model=MODEL,
+            thinking=THINKING,
             max_tokens=40,
             system=RECORD_SUMMARY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
@@ -448,6 +466,7 @@ def weekly_summary(
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
+        thinking=THINKING,
         max_tokens=300,
         system=WEEKLY_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
@@ -525,6 +544,7 @@ def capabilities(
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
+        thinking=THINKING,
         max_tokens=600,
         system=CAPABILITIES_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
@@ -559,22 +579,10 @@ def capabilities(
 
 
 # ---------------------------------------------------------------------------
-# Workflow generation — infer a step-by-step process from telemetry + identity
+# Telemetry analysis — operation stats and the long gaps that hint at a human
 # ---------------------------------------------------------------------------
 
 
-WORKFLOW_SYSTEM_PROMPT = (
-    "You are a process analyst for Trovis, an agent management system. You "
-    "reconstruct the end-to-end process an AI agent participates in — "
-    "including the HUMAN steps around it — from its telemetry and identity "
-    "files. Agent steps come from observed tool calls. Human steps are "
-    "inferred from long time-gaps after outbound operations (Slack/email/"
-    "webhook sends, approval requests) and from identity files that describe "
-    "review, approval, handoff, or escalation. Be concrete: use the actual "
-    "tool names. Return ONLY valid JSON — no markdown, no prose."
-)
-
-_VALID_STEP_TYPES = {"trigger", "agent", "human", "decision", "output"}
 _GAP_THRESHOLD_S = 30.0
 
 
@@ -767,169 +775,6 @@ def detect_drift(
     return _normalize_drift(parsed)
 
 
-def _build_workflow_prompt(
-    summary: dict[str, Any],
-    registration: dict[str, Any] | None,
-    analysis: dict[str, Any],
-) -> str:
-    reg = registration or {}
-    identity_block = (
-        f"SOUL.md (personality and purpose):\n{(reg.get('soul') or '(none)')[:2000]}\n\n"
-        f"IDENTITY.md (role definition):\n{(reg.get('identity') or '(none)')[:2000]}\n\n"
-        f"AGENTS.md (operating manual):\n{(reg.get('operating_manual') or '(none)')[:2000]}"
-    )
-
-    if analysis["operations"]:
-        ops_lines = "\n".join(
-            f"- {o['operation']}: {o['calls']} call(s), avg {o['avg_ms']:.0f}ms"
-            for o in analysis["operations"]
-        )
-    else:
-        ops_lines = "(no operations observed)"
-    seq_block = (
-        "\nTypical sequence(s) of operations across recent runs:\n"
-        + "\n".join(f"- {s}" for s in analysis["sequences"])
-        if analysis["sequences"]
-        else ""
-    )
-    gaps_block = (
-        "\n".join(f"- {g}" for g in analysis["gaps"])
-        if analysis["gaps"]
-        else "(no notable gaps > 30s observed)"
-    )
-
-    return (
-        f"This agent ({summary['service_name']}) has the following identity and "
-        f"configuration:\n{identity_block}\n\n"
-        f"Its telemetry shows these operations:\n{ops_lines}{seq_block}\n\n"
-        f"Time gaps between consecutive operations:\n{gaps_block}\n\n"
-        "Generate a complete workflow showing every step this agent's process "
-        "involves — both automated AND human steps. Analyze:\n"
-        "1. Tool calls that send to external channels (Slack, email, webhooks) "
-        "followed by gaps — these indicate human review or approval\n"
-        "2. Identity files that mention human approval, review, handoff, or "
-        "escalation processes\n"
-        "3. Operations like wait_for_approval, get_response, check_status that "
-        "imply external input\n"
-        "4. Long gaps (>30s) between fast operations — something external "
-        "happened in between\n"
-        "5. The overall pattern: what triggers this agent, what sequence does "
-        "it follow, where does output go\n\n"
-        "Return ONLY valid JSON, no markdown:\n"
-        "{\n"
-        '  "steps": [\n'
-        "    {\n"
-        '      "step_type": "trigger|agent|human|decision|output",\n'
-        '      "label": "Short title for this step",\n'
-        '      "description": "What happens in this step",\n'
-        '      "operation": "tool_name if agent step, null otherwise",\n'
-        '      "duration_estimate_ms": 2000,\n'
-        '      "inferred_from": "telemetry|identity|gap_analysis"\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "Be specific. Use actual tool names from the telemetry. Infer human "
-        "steps from gaps and identity files. Mark each step with how you "
-        "inferred it."
-    )
-
-
-def generate_workflow(
-    service_name: str,
-    account_id: int | None = None,
-    agent_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """Analyze an agent's telemetry + identity and ask Claude to reconstruct
-    its full process as an ordered list of steps (agent + inferred human).
-
-    Returns a list of step dicts ({step_type, label, description, operation,
-    duration_estimate_ms, inferred_from}). Raises AgentNotFoundError when the
-    agent has no telemetry, APIKeyMissingError when the key is unset.
-    """
-    summary = database.get_agent_summary(
-        service_name, account_id=account_id, agent_id=agent_id
-    )
-    if summary is None:
-        raise AgentNotFoundError(service_name)
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise APIKeyMissingError(
-            "ANTHROPIC_API_KEY is not set. Export it before generating workflows."
-        )
-
-    spans = database.get_agent_spans(
-        service_name, limit=200, account_id=account_id, agent_id=agent_id
-    )
-    registration = database.get_latest_registration(
-        service_name, account_id=account_id, agent_id=agent_id
-    )
-    analysis = _analyze_telemetry(spans)
-    user_prompt = _build_workflow_prompt(summary, registration, analysis)
-
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2000,
-        system=WORKFLOW_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    raw = "".join(
-        block.text for block in response.content if getattr(block, "type", None) == "text"
-    ).strip()
-
-    # Tolerate ```json fences.
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-
-    import json as _json
-
-    try:
-        parsed = _json.loads(raw)
-    except (TypeError, ValueError):
-        parsed = {}
-
-    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
-    if not isinstance(raw_steps, list):
-        raw_steps = []
-
-    steps: list[dict[str, Any]] = []
-    for s in raw_steps:
-        if not isinstance(s, dict):
-            continue
-        step_type = str(s.get("step_type") or "agent").strip().lower()
-        if step_type not in _VALID_STEP_TYPES:
-            step_type = "agent"
-        label = str(s.get("label") or "").strip()
-        if not label:
-            continue
-        dur = s.get("duration_estimate_ms")
-        try:
-            dur = int(dur) if dur is not None else None
-        except (TypeError, ValueError):
-            dur = None
-        inferred = str(s.get("inferred_from") or "telemetry").strip().lower()
-        if inferred not in {"telemetry", "identity", "gap_analysis", "manual"}:
-            inferred = "telemetry"
-        steps.append(
-            {
-                "step_type": step_type,
-                "label": label[:200],
-                "description": (str(s["description"]) if s.get("description") else None),
-                "operation": (str(s["operation"]) if s.get("operation") else None),
-                "duration_estimate_ms": dur,
-                "inferred_from": inferred,
-                # Carry the agent identity onto agent steps so the UI can pill it.
-                "agent_service_name": service_name if step_type == "agent" else None,
-                "agent_id": (agent_id or "main") if step_type == "agent" else None,
-            }
-        )
-    return steps
-
-
 # ---------------------------------------------------------------------------
 # AI builder — create workflows & connections from a plain-English description
 # ---------------------------------------------------------------------------
@@ -946,6 +791,7 @@ def _claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 2000) -
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
+        thinking=THINKING,
         max_tokens=max_tokens,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
@@ -964,71 +810,115 @@ def _claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 2000) -
         return {}
 
 
-WORKFLOW_DESC_SYSTEM_PROMPT = (
-    "You are a process analyst for Trovis. Turn a plain-English description "
-    "of how work flows into an ordered list of workflow steps — both "
-    "automated (agent) and human steps. Reference the provided agent names "
-    "when relevant. Mark review/approval/handoff steps as 'human'. Return "
-    "ONLY valid JSON, no markdown."
+WORKFLOW_DRAFT_SYSTEM_PROMPT = (
+    "You are a process analyst for Trovis. An operator describes, in plain "
+    "English, a recurring process their AI agents and people run together. "
+    "Turn it into a DECLARED WORKFLOW: an ordered list of stations (who "
+    "holds the work at each step) plus match hints (how Trovis recognizes a "
+    "unit of work as an instance of this process).\n\n"
+    "Stations are the drawing — one per step, in the order work actually "
+    "moves. holder_type is 'agent' (an AI agent), 'human' (a person or "
+    "role), or 'system' (an external service the work waits on). holder is "
+    "who that is; label is what happens there, as a short verb phrase "
+    "(\"scores the signup\"). carrier is how work travels to the NEXT "
+    "station (\"Slack\", \"email\") — omit it unless the description says.\n\n"
+    "Match hints are ANDed: a loop must satisfy EVERY hint to match, so "
+    "prefer one or two precise hints over a long list. service_name and "
+    "agent_id hints MUST use an exact name from the known-agents list — a "
+    "hint naming an agent that does not exist means the workflow silently "
+    "never matches anything. When no known agent fits, emit a single "
+    "'title contains' hint instead. Return ONLY valid JSON, no markdown."
 )
 
 
-def workflow_from_description(
+def workflow_draft_from_description(
     description: str, known_agents: list[str] | None = None
-) -> list[dict[str, Any]]:
-    """Draft workflow steps from a natural-language description. Raises
-    APIKeyMissingError when the key is unset."""
+) -> dict[str, Any]:
+    """Draft a declared workflow — name, stations, match hints — from a
+    plain-English description of the process.
+
+    Returns {"name": str, "stations": [...], "match_hints": [...]} shaped to
+    the vocabularies in loops.py. Fail-soft throughout: anything the model
+    returns off-schema is dropped rather than raised, so a bad reply yields a
+    thin draft the operator can finish by hand — never a 500. Raises
+    APIKeyMissingError when the key is unset.
+    """
+    known = [a for a in (known_agents or []) if a]
     agents_line = (
-        "Known agents you can reference: " + ", ".join(known_agents)
-        if known_agents
-        else "No known agents — describe steps generically."
+        "Known agents (use these EXACT names in agent stations and in "
+        "service_name/agent_id hints): " + ", ".join(known)
+        if known
+        else "No agents have reported telemetry yet — describe stations "
+        "generically and use a single 'title contains' hint."
     )
     user_prompt = (
         f"{agents_line}\n\n"
         f"Process description:\n{(description or '').strip()}\n\n"
-        "Produce the workflow as JSON, ordered logically (a trigger first and "
-        "an output last when sensible):\n"
+        "Produce the workflow as JSON:\n"
         "{\n"
-        '  "steps": [\n'
-        '    {"step_type": "trigger|agent|human|decision|output", '
-        '"label": "short title", "description": "what happens", '
-        '"operation": "tool name if an agent step, else null", '
-        '"duration_estimate_ms": 2000}\n'
+        '  "name": "short name for the process, 2-4 words",\n'
+        '  "stations": [\n'
+        f'    {{"holder_type": "{"|".join(loops.STATION_HOLDER_TYPES)}", '
+        '"holder": "who", "label": "what happens here", '
+        '"tools": ["tool names, omit if unknown"], '
+        '"carrier": "how it travels to the next station, omit if unsaid"}\n'
+        "  ],\n"
+        '  "match_hints": [\n'
+        f'    {{"field": "{"|".join(loops.MATCH_FIELDS)}", '
+        f'"op": "{"|".join(loops.MATCH_OPS)}", "value": "..."}}\n'
         "  ]\n"
         "}\n"
         "Return ONLY the JSON."
     )
-    parsed = _claude_json(WORKFLOW_DESC_SYSTEM_PROMPT, user_prompt)
-    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
-    if not isinstance(raw_steps, list):
-        raw_steps = []
+    parsed = _claude_json(WORKFLOW_DRAFT_SYSTEM_PROMPT, user_prompt)
+    if not isinstance(parsed, dict):
+        parsed = {}
 
-    steps: list[dict[str, Any]] = []
-    for s in raw_steps:
+    stations: list[dict[str, Any]] = []
+    for s in parsed.get("stations") or []:
         if not isinstance(s, dict):
             continue
-        step_type = str(s.get("step_type") or "agent").strip().lower()
-        if step_type not in _VALID_STEP_TYPES:
-            step_type = "agent"
-        label = str(s.get("label") or "").strip()
-        if not label:
+        holder_type = str(s.get("holder_type") or "agent").strip().lower()
+        if holder_type not in loops.STATION_HOLDER_TYPES:
+            holder_type = "agent"
+        station: dict[str, Any] = {"holder_type": holder_type}
+        for key, cap in (("holder", 120), ("label", 200), ("carrier", 60)):
+            val = s.get(key)
+            if isinstance(val, str) and val.strip():
+                station[key] = val.strip()[:cap]
+        tools = [
+            t.strip()[:80]
+            for t in (s.get("tools") or [])
+            if isinstance(t, str) and t.strip()
+        ]
+        if tools:
+            station["tools"] = tools
+        # A station with no holder AND no label is an empty box — drop it.
+        if station.get("holder") or station.get("label"):
+            stations.append(station)
+
+    hints: list[dict[str, Any]] = []
+    for h in parsed.get("match_hints") or []:
+        if not isinstance(h, dict):
             continue
-        dur = s.get("duration_estimate_ms")
-        try:
-            dur = int(dur) if dur is not None else None
-        except (TypeError, ValueError):
-            dur = None
-        steps.append(
-            {
-                "step_type": step_type,
-                "label": label[:200],
-                "description": (str(s["description"]) if s.get("description") else None),
-                "operation": (str(s["operation"]) if s.get("operation") else None),
-                "duration_estimate_ms": dur,
-                "inferred_from": "manual",  # operator-described, not telemetry
-            }
-        )
-    return steps
+        field = str(h.get("field") or "").strip()
+        op = str(h.get("op") or "").strip()
+        value = h.get("value")
+        if field not in loops.MATCH_FIELDS or op not in loops.MATCH_OPS:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()[:200]
+        # An identity hint naming an agent that doesn't exist matches nothing
+        # and the workflow just sits empty — the exact failure the operator
+        # can't debug. Drop it and let them add one by hand.
+        if field in ("service_name", "agent_id") and known and value not in known:
+            continue
+        hints.append({"field": field, "op": op, "value": value})
+
+    name = parsed.get("name")
+    name = name.strip()[:120] if isinstance(name, str) else ""
+    return {"name": name, "stations": stations, "match_hints": hints}
 
 
 CONNECTIONS_DESC_SYSTEM_PROMPT = (
@@ -1105,8 +995,40 @@ DASHBOARD_ATTENTION_SYSTEM_PROMPT = (
     "You are an SRE-minded analyst for Trovis. For each flagged agent, write a "
     "short title, a one-sentence detail explaining the likely problem, a concrete "
     "recommendation, and a brief impact estimate. Be specific and use the numbers "
-    "provided. Plain prose, no markdown. Return ONLY valid JSON."
+    "provided. Plain prose, no markdown. Return ONLY valid JSON.\n"
+    "\n"
+    "You are writing for a manager, not an engineer reading a database:\n"
+    "- NEVER echo a field name from the input. Write 'last active 3 days ago', "
+    "never 'days_since_seen of 3'. If a phrase would only make sense to someone "
+    "looking at the JSON, rewrite it.\n"
+    "- Distinguish TOOL FRICTION from AGENT FAILURE. A handful of failed "
+    "operations inside runs that finished is friction — expected, low stakes, "
+    "worth a mention at most. An agent that cannot complete its work is a "
+    "failure. Say which one this is, and do not describe friction in the "
+    "language of an outage.\n"
+    "- Respect the severity you are given. It already accounts for how long the "
+    "agent has been silent, so do not escalate an 'info' item with urgent "
+    "language. An agent nobody has run in months is a housekeeping question, "
+    "not an incident.\n"
+    "- When an agent has been silent a long time, lead with that fact — it is "
+    "usually the real story, not the ratio."
 )
+
+
+def _humanize_days(days: float | None) -> str:
+    """Days-since-last-activity as a phrase, so nothing numeric-looking or
+    field-shaped can be pasted into manager-facing prose. None -> 'unknown'."""
+    if days is None:
+        return "unknown"
+    if days < 1:
+        return "today"
+    if days < 2:
+        return "yesterday"
+    if days < 14:
+        return f"{int(round(days))} days ago"
+    if days < 60:
+        return f"{int(round(days / 7))} weeks ago"
+    return f"{int(round(days / 30))} months ago"
 
 
 def attention_items(flagged: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1119,15 +1041,24 @@ def attention_items(flagged: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
     import json as _json
 
+    # Prose-safe keys. These land verbatim in a manager-facing sentence when
+    # the model echoes a field name, and it does: "days_since_seen of 0" was
+    # shipping to users. Every key here reads as English if it leaks, and the
+    # system prompt forbids echoing them at all. Values are pre-formatted so
+    # there is no raw ratio or ISO stamp to paste either.
     payload = [
         {
             "agent": f["agent"],
             "severity": f["severity"],
-            "error_rate_pct": f.get("error_rate_pct"),
-            "span_count": f.get("span_count"),
-            "error_count": f.get("error_count"),
-            "days_since_seen": f.get("days_since_seen"),
-            "description": f.get("description"),
+            "error rate": (
+                f"{f.get('error_rate_pct')}%"
+                if f.get("error_rate_pct") is not None
+                else "unknown"
+            ),
+            "operations recorded": f.get("span_count"),
+            "failed operations": f.get("error_count"),
+            "last active": _humanize_days(f.get("days_since_seen")),
+            "what it does": f.get("description"),
         }
         for f in flagged
     ]
@@ -1189,335 +1120,6 @@ def work_feed_summary(agent_label: str, activity: dict[str, Any]) -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Workflow graph builder — full multi-agent graph (participants + steps + edges
-# + positions) from a description or from multi-agent telemetry.
-# ---------------------------------------------------------------------------
-
-
-WORKFLOW_GRAPH_SYSTEM_PROMPT = (
-    "You build a workflow graph: an ordered set of typed steps (trigger, agent, "
-    "human, decision, output) connected by directed edges, laid out left-to-right "
-    "for a canvas. Match agent steps to the provided agent names. Mark review/"
-    "approval/handoff/escalation steps as human. Every workflow starts with a "
-    "trigger and ends with an output. Return ONLY valid JSON, no markdown."
-)
-
-_WORKFLOW_LOOP_RULES = (
-    "LOOPS: If the description includes revision cycles, retries, or 'goes back to' "
-    "patterns (e.g. 'if QA fails it goes back to the writer', 'rejected drafts return "
-    "for revision'), create an edge where to_index < from_index. Mark it "
-    '"is_branch": true and give it a short label describing the loop (e.g. "failed QA", '
-    '"revision requested"). Loops are normal — most real workflows have them. Do NOT '
-    "duplicate steps to avoid a backward edge.\n"
-    "Layout for loops: do not adjust positions for loop edges. Keep all steps on the "
-    "main left-to-right line. The frontend routes loop edges below the flow automatically."
-)
-
-_WORKFLOW_LAYOUT_RULES = (
-    "Layout rules: flow left to right. Start at x=60 and add 230 for each sequential "
-    "step, all at y=200. Decision branches: the escalation/yes path goes to y=80 and "
-    "the default/no path stays at y=200; converge back to y=200 when paths rejoin. "
-    "Use node_width=170 and node_height=72.\n"
-    f"{_WORKFLOW_LOOP_RULES}"
-)
-
-
-def _workflow_graph_shape() -> str:
-    return (
-        "{\n"
-        '  "participants": [\n'
-        '    {"type": "agent", "service_name": "...", "agent_id": "main"},\n'
-        '    {"type": "human", "role_name": "Support Manager"}\n'
-        "  ],\n"
-        '  "steps": [\n'
-        '    {"step_type": "trigger|agent|human|decision|output", "label": "Short name (3-5 words)", '
-        '"description": "one sentence", "operation": "tool name for agent steps else null", '
-        '"agent_service_name": "only for agent steps", "agent_id": "only for agent steps", '
-        '"role_name": "only for human steps", "pos_x": 60, "pos_y": 200}\n'
-        "  ],\n"
-        '  "edges": [\n'
-        '    {"from_index": 0, "to_index": 1, "label": null, "is_branch": false}\n'
-        "  ]\n"
-        "}"
-    )
-
-
-def workflow_graph_from_description(
-    description: str, agents_context: list[dict[str, Any]] | None = None
-) -> dict[str, Any]:
-    """Build a full workflow graph from a plain-English description. Returns
-    {participants, steps, edges}. Raises APIKeyMissingError when unset."""
-    lines = []
-    for a in agents_context or []:
-        nm = a.get("display_name") or a.get("service_name")
-        desc = (a.get("description") or "").strip()
-        lines.append(
-            f"- {a.get('service_name')} ({nm}): {desc[:200]}"
-            if desc
-            else f"- {a.get('service_name')} ({nm})"
-        )
-    agent_list = "\n".join(lines) if lines else "(no agents reporting telemetry yet)"
-    user_prompt = (
-        f"Available agents in this organization:\n{agent_list}\n\n"
-        f'The user described this workflow:\n"{(description or "").strip()}"\n\n'
-        f"Return a JSON object with this exact structure:\n{_workflow_graph_shape()}\n\n"
-        f"{_WORKFLOW_LAYOUT_RULES}\n"
-        "Match agent names to the available agents list. If the description mentions a role "
-        "like 'manager' or 'lead', create a human step. Return ONLY the JSON."
-    )
-    parsed = _claude_json(WORKFLOW_GRAPH_SYSTEM_PROMPT, user_prompt, max_tokens=3000)
-    known = {a.get("service_name") for a in (agents_context or [])}
-    return _parse_workflow_graph(parsed, known, default_inferred="manual")
-
-
-def workflow_graph_from_agents(
-    agents_context: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Build a multi-agent workflow graph from the telemetry + identity of
-    several agents in ONE Claude call. Returns {participants, steps, edges}."""
-    blocks = []
-    for a in agents_context or []:
-        nm = a.get("display_name") or a.get("service_name")
-        ops = ", ".join(a.get("top_operations") or [])
-        desc = (a.get("description") or "").strip()
-        reg = (a.get("registration_excerpt") or "").strip()
-        b = [f"## {a.get('service_name')} / {a.get('agent_id', 'main')} ({nm})"]
-        if desc:
-            b.append(f"description: {desc[:300]}")
-        if ops:
-            b.append(f"top operations: {ops}")
-        if reg:
-            b.append(f"identity: {reg[:400]}")
-        blocks.append("\n".join(b))
-    body = "\n\n".join(blocks) if blocks else "(no telemetry)"
-    user_prompt = (
-        "Reconstruct how these agents work together as ONE workflow, including the human "
-        "steps (review/approval/handoff) implied by their identity files.\n\n"
-        f"Agents:\n{body}\n\n"
-        f"Return a JSON object with this exact structure:\n{_workflow_graph_shape()}\n\n"
-        f"{_WORKFLOW_LAYOUT_RULES}\n"
-        "Use ONLY these agent names for agent steps. Return ONLY the JSON."
-    )
-    parsed = _claude_json(WORKFLOW_GRAPH_SYSTEM_PROMPT, user_prompt, max_tokens=3000)
-    known = {a.get("service_name") for a in (agents_context or [])}
-    return _parse_workflow_graph(parsed, known, default_inferred="telemetry")
-
-
-def _parse_workflow_graph(
-    parsed: Any, known_agents: set, default_inferred: str = "manual"
-) -> dict[str, Any]:
-    """Validate + normalize a Claude workflow graph into {participants, steps,
-    edges}. Steps carry positions (fallback sequential), agent assignments are
-    filtered to known agents, human roles go into config.role_name, and edges
-    reference steps by index."""
-
-    def _num(v: Any, default: float) -> float:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return default
-
-    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
-    if not isinstance(raw_steps, list):
-        raw_steps = []
-
-    only_agent = next(iter(known_agents)) if len(known_agents) == 1 else None
-    steps: list[dict[str, Any]] = []
-    participants: list[dict[str, Any]] = []
-    seen_agents: set = set()
-    seen_roles: set = set()
-
-    def add_agent(svc, aid):
-        aid = aid or "main"
-        if svc and svc in known_agents and (svc, aid) not in seen_agents:
-            seen_agents.add((svc, aid))
-            participants.append({"type": "agent", "agent_service_name": svc, "agent_id": aid})
-
-    def add_human(role):
-        r = (role or "").strip()
-        if r and r.lower() not in seen_roles:
-            seen_roles.add(r.lower())
-            participants.append({"type": "human", "role_name": r})
-
-    # Participants explicitly listed by Claude.
-    raw_parts = parsed.get("participants") if isinstance(parsed, dict) else None
-    if isinstance(raw_parts, list):
-        for p in raw_parts:
-            if not isinstance(p, dict):
-                continue
-            if str(p.get("type") or "").strip().lower() == "human":
-                add_human(p.get("role_name"))
-            else:
-                add_agent(p.get("service_name") or p.get("agent_service_name"), p.get("agent_id"))
-
-    for s in raw_steps[:40]:
-        if not isinstance(s, dict):
-            continue
-        st = str(s.get("step_type") or "agent").strip().lower()
-        if st not in _VALID_STEP_TYPES:
-            st = "agent"
-        label = str(s.get("label") or "").strip()
-        if not label:
-            continue
-        asn = None
-        aid = None
-        role = None
-        config = None
-        if st == "agent":
-            asn = s.get("agent_service_name")
-            if asn not in known_agents:
-                asn = only_agent
-            aid = (s.get("agent_id") or "main") if asn else None
-            if asn:
-                add_agent(asn, aid)
-        elif st == "human":
-            role = (s.get("role_name") or "").strip() or None
-            if role:
-                add_human(role)
-                config = {"role_name": role}
-        steps.append(
-            {
-                "step_type": st,
-                "label": label[:200],
-                "description": (str(s["description"]) if s.get("description") else None),
-                "operation": (str(s["operation"]) if s.get("operation") else None),
-                "agent_service_name": asn,
-                "agent_id": aid,
-                "inferred_from": default_inferred,
-                "config": config,
-                "pos_x": _num(s.get("pos_x"), 60.0 + len(steps) * 230.0),
-                "pos_y": _num(s.get("pos_y"), 200.0),
-                "node_width": _num(s.get("node_width"), 170.0),
-                "node_height": _num(s.get("node_height"), 72.0),
-            }
-        )
-
-    n = len(steps)
-    raw_edges = parsed.get("edges") if isinstance(parsed, dict) else None
-    edges: list[dict[str, Any]] = []
-    if isinstance(raw_edges, list):
-        for e in raw_edges:
-            if not isinstance(e, dict):
-                continue
-            try:
-                fi = int(e.get("from_index"))
-                ti = int(e.get("to_index"))
-            except (TypeError, ValueError):
-                continue
-            if 0 <= fi < n and 0 <= ti < n and fi != ti:
-                edges.append(
-                    {
-                        "from_index": fi,
-                        "to_index": ti,
-                        "label": (str(e["label"]) if e.get("label") else None),
-                        "is_branch": bool(e.get("is_branch")),
-                    }
-                )
-
-    return {"participants": participants, "steps": steps, "edges": edges}
-
-
-# ---------------------------------------------------------------------------
-# Conversational workflow editing — turn a plain-English instruction into a
-# minimal set of edit operations against an EXISTING graph (ids preserved).
-# ---------------------------------------------------------------------------
-
-
-WORKFLOW_EDIT_SYSTEM_PROMPT = (
-    "You edit an EXISTING workflow graph from a plain-English instruction. You are "
-    "given the current steps (each with a numeric id), edges (each with a numeric "
-    "id), and participants. Return the MINIMAL list of operations that apply the "
-    "requested change. Do NOT rebuild the graph and do NOT touch steps the "
-    "instruction doesn't mention. Preserve existing step ids. Keep the trigger "
-    "first and the output last. Return ONLY valid JSON, no markdown."
-)
-
-_WORKFLOW_EDIT_OPS_SPEC = (
-    "Return JSON: {\"summary\": \"one sentence describing the change\", "
-    "\"operations\": [ ... ]}. Each operation is one of:\n"
-    '- {"op":"add_step","tmp_id":"t1","step_type":"trigger|agent|human|decision|output",'
-    '"label":"...","description":"...","operation":"tool name or null",'
-    '"agent_service_name":"only for agent steps","agent_id":"main",'
-    '"role_name":"only for human steps"}\n'
-    '- {"op":"update_step","step_id":<existing id>, ...only the fields to change...}\n'
-    '- {"op":"delete_step","step_id":<existing id>}\n'
-    '- {"op":"add_edge","from":<step id or "t1">,"to":<step id or "t1">,'
-    '"label":null,"is_branch":false}\n'
-    '- {"op":"delete_edge","edge_id":<existing edge id>}\n'
-    '- {"op":"add_participant","type":"agent|human","agent_service_name":"...",'
-    '"agent_id":"main","role_name":"..."}\n\n'
-    "Rules:\n"
-    "- Reference existing steps by their numeric id; give NEW steps a string "
-    'tmp_id ("t1","t2",...) and reference them in edges by that tmp_id.\n'
-    "- To INSERT a step between A and B: add_step (with a tmp_id), delete_edge for "
-    "the existing A→B edge, then add_edge A→tmp and add_edge tmp→B (carry the old "
-    "edge's label onto the second new edge when it was a branch label).\n"
-    "- To remove a step from the middle: delete_step, then add_edge from its "
-    "predecessor to its successor so the flow stays connected.\n"
-    "- Loops are allowed: an edge whose target comes earlier in the flow is a "
-    'revision/retry loop — set "is_branch":true and give it a short label.\n'
-    "- For agent steps use ONLY an agent name from the available list. Adding an "
-    "agent step automatically adds that agent to the roster — you need add_participant "
-    "only to add a worker WITHOUT a step.\n"
-    "- Omit operations entirely if the instruction requires no change."
-)
-
-
-def _serialize_workflow_graph(wf: dict[str, Any]) -> str:
-    """Compact, id-annotated rendering of the current graph for the edit prompt."""
-    lines = ["Current steps (in flow order):"]
-    for s in sorted(wf.get("steps") or [], key=lambda x: x.get("step_order", 0)):
-        bits = [f"  id={s['id']} [{s.get('step_type')}] \"{s.get('label')}\""]
-        if s.get("agent_service_name"):
-            bits.append(f"agent={s['agent_service_name']}/{s.get('agent_id') or 'main'}")
-        role = (s.get("config") or {}).get("role_name") if isinstance(s.get("config"), dict) else None
-        if role:
-            bits.append(f"role={role}")
-        if s.get("operation"):
-            bits.append(f"op={s['operation']}")
-        lines.append(" ".join(bits))
-    lines.append("Current edges:")
-    for e in wf.get("edges") or []:
-        tag = " (branch)" if e.get("is_branch") else ""
-        lbl = f' "{e["label"]}"' if e.get("label") else ""
-        lines.append(f"  id={e['id']} {e['from_step_id']}->{e['to_step_id']}{lbl}{tag}")
-    parts = []
-    for p in wf.get("participants") or []:
-        if p.get("type") == "human":
-            parts.append(f"human:{p.get('role_name')}")
-        else:
-            parts.append(f"agent:{p.get('agent_service_name')}/{p.get('agent_id') or 'main'}")
-    lines.append("Participants: " + (", ".join(parts) if parts else "(none)"))
-    return "\n".join(lines)
-
-
-def workflow_edit_operations(
-    wf: dict[str, Any], instruction: str, agents_context: list[dict[str, Any]] | None = None
-) -> dict[str, Any]:
-    """Ask Claude for a minimal set of edit operations that apply `instruction`
-    to the existing workflow `wf` (as returned by database.get_workflow).
-    Returns {"operations": list, "summary": str}. Raises APIKeyMissingError."""
-    avail = sorted(
-        {
-            (a.get("service_name") or "").strip()
-            for a in (agents_context or [])
-            if a.get("service_name")
-        }
-    )
-    avail_block = ", ".join(avail) if avail else "(no other agents reporting telemetry)"
-    user_prompt = (
-        f"{_serialize_workflow_graph(wf)}\n\n"
-        f"Available agent names you may assign to agent steps: {avail_block}\n\n"
-        f'Instruction: "{(instruction or "").strip()}"\n\n'
-        f"{_WORKFLOW_EDIT_OPS_SPEC}"
-    )
-    parsed = _claude_json(WORKFLOW_EDIT_SYSTEM_PROMPT, user_prompt, max_tokens=2500)
-    ops = parsed.get("operations") if isinstance(parsed, dict) else None
-    summary = str(parsed.get("summary") or "").strip() if isinstance(parsed, dict) else ""
-    return {"operations": ops if isinstance(ops, list) else [], "summary": summary}
-
-
 def loop_title(shape: dict[str, Any]) -> str | None:
     """One short plain-English title for a workloop, from its SHAPE only.
 
@@ -1558,6 +1160,7 @@ def loop_title(shape: dict[str, Any]) -> str | None:
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=MODEL,
+            thinking=THINKING,
             max_tokens=40,
             messages=[{"role": "user", "content": prompt}],
         )

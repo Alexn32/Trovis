@@ -147,6 +147,65 @@ with TestClient(main.app) as c:
     check("an agent whose only 'errors' were mislabels reads 0 errors",
           g2["total_errors"] == 0 and g2["total_spans"] == 2)
 
+# ---------------------------------------------------------------------------
+# Severity decay + prose-safe payload
+# ---------------------------------------------------------------------------
+# Severity used to be decided by error rate ALONE: the `info` branch for a
+# dormant agent was unreachable whenever the agent had ANY error rate above
+# 2%, so "High Error Rate on Dormant Content Agent, Last Active 91 Days Ago"
+# rendered as CRITICAL. A problem nobody has been able to hit in three months
+# is not an incident.
+print("\n--- severity decays with staleness ---")
+check("a live agent keeps critical",
+      main._decay_severity("critical", 0.2) == "critical")
+check("past 30 days, critical caps at warning",
+      main._decay_severity("critical", 31.0) == "warning")
+check("past 60 days, critical caps at info",
+      main._decay_severity("critical", 91.4) == "info")
+check("past 60 days, warning also caps at info",
+      main._decay_severity("warning", 70.0) == "info")
+check("decay NEVER raises a severity",
+      main._decay_severity("info", 0.1) == "info"
+      and main._decay_severity("warning", 0.1) == "warning")
+check("unknown age is left alone, not silently downgraded",
+      main._decay_severity("critical", None) == "critical")
+
+print("\n--- the production case that started this ---")
+flagged = main._flag_attention([{
+    "service_name": "hammocks-content-agent",
+    "total_spans": 264, "total_errors": 95,
+    "last_seen": "2026-05-14 12:00:00", "description": "writes content",
+}])
+check("the 91-day-dormant agent is no longer CRITICAL",
+      flagged and flagged[0]["severity"] != "critical")
+check("...it is INFO", flagged and flagged[0]["severity"] == "info")
+
+print("\n--- the LLM payload is prose-safe ---")
+import describer
+check("days are a phrase, never a number to paste",
+      describer._humanize_days(91.4) == "3 months ago"
+      and describer._humanize_days(0.2) == "today"
+      and describer._humanize_days(None) == "unknown")
+_keys = set()
+_orig = describer._claude_json
+def _capture(system, user, max_tokens=2000):
+    import json as _j, re as _re
+    _keys.update(_re.findall(r'"([a-z][a-z _]+)":', user))
+    return {"items": []}
+describer._claude_json = _capture
+describer.attention_items(flagged)
+describer._claude_json = _orig
+leaky = {k for k in _keys if "_" in k}
+check(f"no snake_case field names reach the prompt (found: {sorted(leaky)})",
+      not leaky)
+check("the keys that DO reach it read as English",
+      {"error rate", "operations recorded", "last active"} <= _keys)
+check("the prompt forbids echoing field names",
+      "NEVER echo a field name" in describer.DASHBOARD_ATTENTION_SYSTEM_PROMPT)
+check("the prompt separates tool friction from agent failure",
+      "TOOL FRICTION" in describer.DASHBOARD_ATTENTION_SYSTEM_PROMPT
+      and "AGENT FAILURE" in describer.DASHBOARD_ATTENTION_SYSTEM_PROMPT)
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}):")

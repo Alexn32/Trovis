@@ -3111,9 +3111,32 @@ def _briefing_fallback(stats: dict) -> str:
     return ", ".join(bits) + "."
 
 
+# Severity decays with staleness. A problem on an agent nobody has run in
+# three months is not the same problem as one happening right now, however bad
+# the ratio looks — and before this, severity was decided by error rate ALONE:
+# the `info` branch for a dormant agent was unreachable whenever the agent had
+# any error rate above 2%, so a 91-day-dead agent rendered as CRITICAL.
+_SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}
+# Days since last activity -> the WORST severity still allowed.
+_STALENESS_CAPS = ((60.0, "info"), (30.0, "warning"))
+
+
+def _decay_severity(severity: str, age_days: float | None) -> str:
+    """Cap severity by how long the agent has been silent. Never raises a
+    severity — only lowers it."""
+    if age_days is None:
+        return severity
+    for threshold, cap in _STALENESS_CAPS:
+        if age_days >= threshold:
+            return max(severity, cap, key=lambda s: _SEVERITY_RANK.get(s, 9))
+    return severity
+
+
 def _flag_attention(agents: list[dict]) -> list[dict]:
     """Derive needs-attention flags: error rate > 10% critical, > 2% warning,
-    offline > 30 days info. Sorted critical → warning → info, then by error rate."""
+    silent > 30 days info — then decayed by staleness (see _decay_severity),
+    so a long-dormant agent can never outrank a live one. Sorted
+    critical → warning → info, then by error rate."""
     flagged: list[dict] = []
     for a in agents:
         spans = a.get("total_spans") or 0
@@ -3127,6 +3150,7 @@ def _flag_attention(agents: list[dict]) -> list[dict]:
             severity = "info"
         else:
             continue
+        severity = _decay_severity(severity, age)
         flagged.append(
             {
                 "agent": a["service_name"],
@@ -3139,8 +3163,9 @@ def _flag_attention(agents: list[dict]) -> list[dict]:
                 "last_seen": a.get("last_seen"),
             }
         )
-    rank = {"critical": 0, "warning": 1, "info": 2}
-    flagged.sort(key=lambda f: (rank.get(f["severity"], 9), -f["error_rate_pct"]))
+    flagged.sort(
+        key=lambda f: (_SEVERITY_RANK.get(f["severity"], 9), -f["error_rate_pct"])
+    )
     return flagged
 
 
