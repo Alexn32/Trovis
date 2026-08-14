@@ -465,3 +465,50 @@ test("agentName has NO shared fallback — undefined rather than 'openclaw-agent
     !JSON.stringify(deriveAgentName({}) ?? "").includes("openclaw-agent"),
   )
 })
+
+// ---------------------------------------------------------------------------
+// 9. Model-call outcome classification (0.6.1)
+// ---------------------------------------------------------------------------
+// Until 0.6.1 this allowlisted "ok"/"success" and flagged everything else.
+// OpenClaw's success value is "completed", so every successful model call was
+// recorded as an error — 103,311 spans in production, a 43.5% fleet error
+// rate against a true 1.6%. Now only KNOWN-BAD outcomes are flagged.
+
+function modelCall(outcome, { callId = `c-${Math.abs(outcome.length)}-${outcome}` } = {}) {
+  const spans = prime()
+  const ctx = { runId: `r-${outcome}`, sessionKey: `s-${outcome}` }
+  fire("model_call_started", { callId, model: "m", provider: "p" }, ctx)
+  fire("model_call_ended", { callId, durationMs: 5, outcome }, ctx)
+  return spans.find((s) => s.name === "model_call")
+}
+
+test("outcome 'completed' is a SUCCESS — the bug that caused 43.5%", () => {
+  const span = modelCall("completed")
+  assert.equal(span.attributes["trovis.model.outcome"], "completed")
+  assert.equal(span.status, null, "must not be marked ERROR")
+})
+
+test("other non-failure outcomes are also not errors", () => {
+  for (const o of ["ok", "success", "stop", "end_turn", "tool_use", "max_tokens"]) {
+    assert.equal(modelCall(o).status, null, `${o} must not be an error`)
+  }
+})
+
+test("known-bad outcomes ARE still flagged", () => {
+  for (const o of ["error", "failed", "failure", "timeout", "aborted", "cancelled"]) {
+    const span = modelCall(o)
+    assert.equal(span.status?.code, 2, `${o} must be an error`)
+    assert.equal(span.status?.message, o)
+  }
+})
+
+test("failure matching is case- and whitespace-insensitive", () => {
+  assert.equal(modelCall(" ERROR ").status?.code, 2)
+  assert.equal(modelCall("Failed").status?.code, 2)
+})
+
+test("an unknown outcome is not an error, and the outcome is still recorded", () => {
+  const span = modelCall("some_future_outcome")
+  assert.equal(span.status, null)
+  assert.equal(span.attributes["trovis.model.outcome"], "some_future_outcome")
+})

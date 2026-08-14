@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- **Every successful model call was being recorded as an error.**
+  `model_call_ended` allowlisted the outcomes `"ok"` and `"success"` and
+  flagged everything else as a failure. OpenClaw's actual success value is
+  **`"completed"`**, which wasn't on the list — so essentially every model
+  call the agent made was written to the record as an error.
+
+  Measured in production on 2026-08-14: **103,311 of 103,557 `model_call`
+  spans carried `outcome="completed"`, and 100% of them were marked ERROR.**
+  That single line produced a fleet-wide error rate of **43.5%** against a
+  true rate of **1.6%** — on a fleet that was completing ~23,000 tasks a day
+  while the dashboard called it degraded.
+
+  The check is now inverted: only outcomes that are *known* to mean failure
+  are flagged (`error`, `failed`, `failure`, `exception`, `timeout`,
+  `timed_out`, `aborted`, `cancelled`, `canceled`, `rejected`, `errored`),
+  matched case- and whitespace-insensitively. Anything else is treated as a
+  normal completion.
+
+  This direction is deliberate. `outcome` is typed as a bare `string` and
+  OpenClaw publishes no enumeration, so the set of "good" values cannot be
+  known from here — an allowlist was guaranteed to be wrong the moment a
+  gateway used a word we hadn't guessed. A denylist fails safe: under-
+  detecting a real failure is recoverable, mislabeling success as failure
+  poisons every health number downstream.
+
+  Unknown outcomes are logged once per distinct value (`[Trovis] model_call
+  outcome '<x>' is not a known failure value…`) so the vocabulary can be
+  learned from real gateways instead of guessed at. If you see one of these
+  that genuinely means failure, please report it.
+
+### What you'll see after upgrading
+
+Your error rates will drop, sharply, and the new numbers are the real ones.
+An agent that showed 43% errors will likely show 1–2%. Nothing about your
+agents changed — the plugin was mislabeling successful model calls, and now
+it isn't. Agents that the dashboard called "degraded" purely because of this
+should return to healthy.
+
+Spans already recorded keep their incorrect status; the event record is
+append-only and is never rewritten. The Trovis backend excludes the known
+mislabeled spans (`status_code=2` with the message `completed`) from error
+computations, so historical numbers correct themselves without touching the
+record.
+
 ## 0.6.0
 
 **This release changes what your loops look like.** It is a behavior change

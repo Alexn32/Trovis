@@ -52,7 +52,7 @@ import { randomUUID } from "node:crypto"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.6.0"
+const PLUGIN_VERSION = "0.6.1"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 //
@@ -826,6 +826,45 @@ const lastSenderBySession = new Map<string, string>()
 function trackMapEntry(map: Map<string, string>, key: string, value: string): void {
   if (map.size >= RUN_TRACKING_MAX) map.clear() // same bound as trackRun
   map.set(key, value)
+}
+
+// Model-call outcomes that MEAN failure. Deliberately a denylist: OpenClaw
+// types `outcome` as a bare `string` and publishes no enumeration, so the set
+// of "good" values is unknowable from here — but these words are unambiguous
+// wherever they appear. Anything not listed is treated as a normal completion.
+// Under-detecting a failure is recoverable; mislabeling success as failure is
+// what produced a 43.5% error rate on a healthy fleet (see 0.6.1 notes).
+const MODEL_OUTCOME_FAILURES = new Set([
+  "error",
+  "errored",
+  "failed",
+  "failure",
+  "exception",
+  "timeout",
+  "timed_out",
+  "aborted",
+  "cancelled",
+  "canceled",
+  "rejected",
+])
+
+// Unknown outcomes are NOT errors, but we do want to learn the vocabulary
+// rather than keep guessing at it. Log each distinct value once per process,
+// so a gateway using a word we haven't seen surfaces it in the operator's log
+// without polluting telemetry. Bounded: the set of distinct outcome strings a
+// gateway emits is tiny, and the cap stops a pathological one from growing.
+const seenUnknownOutcomes = new Set<string>()
+
+function noteUnknownModelOutcome(outcome: string): void {
+  const key = outcome.trim().toLowerCase()
+  if (!key || seenUnknownOutcomes.has(key)) return
+  if (seenUnknownOutcomes.size >= 50) return
+  seenUnknownOutcomes.add(key)
+  console.log(
+    `${LOG} model_call outcome '${outcome}' is not a known failure value — ` +
+      `treating it as a normal completion. If this DOES mean failure, please ` +
+      `report it so it can be added to the failure list.`,
+  )
 }
 
 /** Derive an agent name from the gateway's own configuration, so a normal
@@ -1843,12 +1882,24 @@ function wireEvents(api: OpenClawApi): void {
     entry.endedAtMs = Date.now()
     entry.span.setAttribute("trovis.model.duration_ms", event.durationMs)
     setIfPresent(entry.span, "trovis.model.outcome", event.outcome)
-    if (
-      typeof event.outcome === "string" &&
-      event.outcome !== "ok" &&
-      event.outcome !== "success"
-    ) {
-      entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome })
+    // Flag ONLY outcomes we know mean failure. An unrecognized string is not
+    // evidence of anything and must never become an error.
+    //
+    // This was inverted until 0.6.1: it allowlisted "ok"/"success" and flagged
+    // everything else. OpenClaw's success value is "completed", which wasn't
+    // on the list — so EVERY successful model call was recorded as an error.
+    // Measured in production 2026-08-14: 103,311 of 103,557 model_call spans
+    // carried outcome="completed" and 100% of them were marked ERROR, which
+    // alone produced a fleet-wide 43.5% error rate against a true rate of
+    // 1.6%. `outcome` is typed as a bare `string` with no enumeration
+    // available in this repo, so an allowlist of "good" values is unknowable
+    // by construction; a denylist of "bad" ones fails safe.
+    if (typeof event.outcome === "string" && event.outcome) {
+      if (MODEL_OUTCOME_FAILURES.has(event.outcome.trim().toLowerCase())) {
+        entry.span.setStatus({ code: SpanStatusCode.ERROR, message: event.outcome })
+      } else {
+        noteUnknownModelOutcome(event.outcome)
+      }
     }
 
     // If a future gateway DOES carry usage on the event, use it and end now.
