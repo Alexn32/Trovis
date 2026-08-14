@@ -3281,11 +3281,23 @@ async def dashboard_briefing(request: Request) -> BriefingResponse:
         max_age_seconds=_DASHBOARD_TTL_SECONDS,
     )
     if cached and cached["data"].get("summary"):
+        # Render the prose and the stats from ONE snapshot.
+        #
+        # The prose is a cached LLM rendering of the counts as they were when
+        # it was written; the counts underneath were recomputed live on every
+        # request. Both read `tasks_yesterday`, a ROLLING 24h window that can
+        # fall as old spans age out — so the same card routinely disagreed
+        # with itself (23,607 in the sentence, 23,605 in the stat beneath it).
+        #
+        # A cached summary now carries the numbers it was generated from, and
+        # they are served together. Fresh counts are only shown alongside
+        # freshly generated prose, below.
+        snap = cached["data"].get("counts") or {}
         return BriefingResponse(
             summary=cached["data"]["summary"],
-            tasks_yesterday=tasks_yesterday,
-            tasks_last_week=tasks_last_week,
-            tasks_delta=tasks_delta,
+            tasks_yesterday=snap.get("tasks_yesterday", tasks_yesterday),
+            tasks_last_week=snap.get("tasks_last_week", tasks_last_week),
+            tasks_delta=snap.get("tasks_delta", tasks_delta),
             generated_at=cached["generated_at"],
         )
 
@@ -3305,7 +3317,17 @@ async def dashboard_briefing(request: Request) -> BriefingResponse:
             service_name=_DASHBOARD_SENTINEL,
             agent_id="main",
             kind="briefing",
-            data={"summary": summary},
+            # Store the counts the prose was written from, so a later read
+            # serves both together instead of pairing stale prose with live
+            # numbers. See the cache-hit branch above.
+            data={
+                "summary": summary,
+                "counts": {
+                    "tasks_yesterday": tasks_yesterday,
+                    "tasks_last_week": tasks_last_week,
+                    "tasks_delta": tasks_delta,
+                },
+            },
         )
     else:
         summary = _briefing_fallback(stats)
