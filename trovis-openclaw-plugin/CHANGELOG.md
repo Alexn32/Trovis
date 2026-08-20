@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+
+- **Manifest validation warnings from ClawHub.** `openclaw.plugin.json`
+  declared three keys the OpenClaw manifest schema does not support, which
+  surfaced as `manifest-unknown-fields` (`author`, `homepage`) and
+  `manifest-unknown-contracts` (`contracts.commands`) at publish time.
+
+  Removed all three from the manifest. Package metadata belongs in
+  `package.json` — `homepage` was already there, and `author` is now carried
+  there too, so nothing is lost. The `/trovis` slash command was never driven
+  by the manifest anyway: it registers at runtime via `api.registerCommand`,
+  so `contracts.commands` was redundant declarative metadata. No runtime
+  behavior changes.
+
+  `clawhub package validate` now reports PASS with zero findings.
+
 ## 0.6.1
 
 ### Fixed

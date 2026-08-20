@@ -52,7 +52,7 @@ import { randomUUID } from "node:crypto"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.6.1"
+const PLUGIN_VERSION = "0.6.2"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 //

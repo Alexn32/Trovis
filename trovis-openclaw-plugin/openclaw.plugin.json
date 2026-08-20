@@ -2,16 +2,9 @@
   "id": "trovis",
   "name": "Trovis Agent Management",
   "description": "Automatic agent monitoring and management. Captures telemetry, reads agent identity, and sends everything to your Trovis dashboard.",
-  "version": "0.6.1",
-  "author": "Trovis",
-  "homepage": "https://trovisai.com",
+  "version": "0.6.2",
   "activation": {
     "onStartup": true
-  },
-  "contracts": {
-    "commands": [
-      "trovis"
-    ]
   },
   "configSchema": {
     "type": "object",
