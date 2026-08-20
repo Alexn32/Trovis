@@ -142,7 +142,7 @@ export default function StoryView({ loop, sessionUser, onChanged }) {
     api
       .getLoop(loop.id)
       .then((d) => alive && setDetail(d))
-      .catch((e) => alive && setErr(e?.message || 'Could not load this loop'))
+      .catch((e) => alive && setErr(e?.message || 'Could not load this task'))
     return () => {
       alive = false
     }
@@ -156,7 +156,7 @@ export default function StoryView({ loop, sessionUser, onChanged }) {
       setDetail(await api.closeLoop(loop.id))
       onChanged && onChanged()
     } catch (error) {
-      setErr(error?.message || 'Could not mark this loop done')
+      setErr(error?.message || 'Could not mark this task done')
     } finally {
       setClosing(false)
     }

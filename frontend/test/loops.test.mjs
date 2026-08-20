@@ -226,7 +226,7 @@ test('terminal-handoff message distinguishes a deliberate close', () => {
     closed_at: '2026-07-22 09:00:00',
     close_reason: 'closed_by_user',
   })
-  assert.match(msg, /already closed on July 22/)
+  assert.match(msg, /already finished on July 22/)
   assert.doesNotMatch(msg, /abandoned/)
 })
 
@@ -289,7 +289,7 @@ test('sentences reflect payload: handoff direction/reason, close reasons', () =>
       type: 'handoff_initiated',
       payload: { direction: 'to_human', reason: 'needs approval' },
     }),
-    'Handed to a human — needs approval',
+    'Handed to a person — needs approval',
   )
   assert.equal(
     lifecycleSentence({ type: 'handoff_initiated', payload: { direction: 'to_agent' } }),
@@ -309,7 +309,7 @@ test('sentences reflect payload: handoff direction/reason, close reasons', () =>
       type: 'handoff_initiated',
       payload: { direction: 'to_human', target_id: 'nobody@else.com' },
     }),
-    'Handed to a human',
+    'Handed to a person',
   )
   assert.equal(
     lifecycleSentence({ type: 'loop_closed', payload: { reason: 'closed_by_user' } }),

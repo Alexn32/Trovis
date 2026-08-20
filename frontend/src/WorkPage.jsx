@@ -142,7 +142,7 @@ export default function WorkPage({ view, onViewChange, onOpenAgent, sessionUser,
       {stuckOnly ? (
         <div className="dash-card">
           {stuck === 0 ? (
-            <div className="dash-empty pad">Nothing is stuck. All loops are moving.</div>
+            <div className="dash-empty pad">Nothing is stuck. Everything is moving.</div>
           ) : (
             <LoopList
               loops={loops.filter((l) => ATTENTION_STATES.includes(l.cached_state))}

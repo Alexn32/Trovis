@@ -1137,3 +1137,47 @@ class WorkflowMap(BaseModel):
     stations: list[dict[str, Any]] = Field(default_factory=list)
     loops: list[WorkflowMapLoop] = Field(default_factory=list)
     done_today: int = 0
+
+class BoardCard(BaseModel):
+    """One task on the Work board. Four facts and the actions — nothing that
+    requires Trovis vocabulary to read. `state` is the raw engine state, kept
+    for client-side logic only; nothing renders it."""
+
+    id: int
+    title: str
+    column: str            # working | waiting_person | stuck | done
+    state: str             # raw cached_state — logic only, never displayed
+    holder_type: str       # agent | human
+    holder_name: str
+    waiting_on: str | None = None   # blocked-on note for agent/system waits
+    age_seconds: int | None = None  # time in the current state
+    cost_usd: float = 0.0
+    is_yours: bool = False
+    handoff_event_id: int | None = None
+    workflow_id: int | None = None
+    workflow_name: str | None = None
+    stuck_reason: str | None = None  # why, in plain words, for the Stuck column
+    closed_at: str | None = None
+
+
+class BoardColumn(BaseModel):
+    key: str
+    label: str
+    cards: list[BoardCard] = Field(default_factory=list)
+    count: int = 0
+
+
+class BoardWorkflow(BaseModel):
+    id: int
+    name: str
+    count: int = 0
+
+
+class WorkBoard(BaseModel):
+    """GET /work/board — the whole board in one request."""
+
+    columns: list[BoardColumn] = Field(default_factory=list)
+    workflows: list[BoardWorkflow] = Field(default_factory=list)
+    total: int = 0
+    has_agents: bool = False
+

@@ -138,7 +138,7 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
         setDetail(await api.getLoop(loop.id))
         setDetailErr(null)
       } catch (e) {
-        setDetailErr(e?.message || 'Could not load this loop')
+        setDetailErr(e?.message || 'Could not load this task')
       }
     }
   }
@@ -152,7 +152,7 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
       setDetail(updated)
       onChanged && onChanged()
     } catch (err) {
-      setDetailErr(err?.message || 'Could not mark this loop done')
+      setDetailErr(err?.message || 'Could not mark this task done')
     } finally {
       setClosing(false)
     }
@@ -184,7 +184,7 @@ export function LoopRow({ loop, onOpenAgent, sessionUser, headline = false, onCh
         setTerminalNote(handoffTerminalMessage(err.detail))
         onChanged && onChanged()
       } else {
-        setDetailErr(err?.message || 'Could not update this handoff')
+        setDetailErr(err?.message || 'Could not update this task')
       }
     } finally {
       setResolving(null)

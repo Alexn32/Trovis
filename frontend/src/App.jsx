@@ -3,7 +3,7 @@ import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
-import WorkPage from './WorkPage.jsx'
+import Board from './Board.jsx'
 import WorkflowPage from './WorkflowPage.jsx'
 import WorkflowEditor from './WorkflowEditor.jsx'
 import Fleet from './Fleet.jsx'
@@ -15,8 +15,6 @@ import TrovisLanding from './TrovisLanding.jsx'
 import TrovisLegal from './TrovisLegal.jsx'
 import UpgradeModal from './UpgradeModal.jsx'
 import Team from './Team.jsx'
-// Workflows.jsx (the workflow-mapping visualization) is parked — unrouted,
-// awaiting reintegration under the Work tab's By-workflow view.
 import Settings from './Settings.jsx'
 import Onboarding from './Onboarding.jsx'
 import {
@@ -349,14 +347,9 @@ function AppInner() {
     )
   } else if (tab === 'work') {
     mainContent = (
-      <WorkPage
-        view={workView}
-        onViewChange={setWorkView}
-        onOpenAgent={openDetail}
-        sessionUser={Boolean(me?.user)}
+      <Board
         onConnectAgent={openAddAgent}
         onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
-        onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
       />
     )
   } else if (tab === 'dashboard') {

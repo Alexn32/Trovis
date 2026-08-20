@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -749,11 +750,31 @@ def tool_sentence(name: str, count: int = 1) -> str:
     return base if count <= 1 else f"{base} · {count}×"
 
 
+# Handoff `reason` values the plugin sets as WIRE tokens, not prose. They must
+# never reach a sentence: "Handed to Sarah — turn_end" is the exact leak the
+# product's language rule exists to stop. A structural turn end needs no
+# explanation — "Handed to Sarah" already says it.
+_MACHINE_REASONS = frozenset({"turn_end"})
+_TOKEN_SHAPED = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)+$")
+
+
 def _handoff_sentence(p: dict) -> str:
-    targets = {"to_human": "a human", "to_agent": "another agent"}
+    targets = {
+        "to_human": "a person",
+        "to_agent": "another agent",
+        "to_system": "a system",
+    }
     who = p.get("target_name") or targets.get(p.get("direction"), "someone")
-    reason = f" — {p['reason']}" if p.get("reason") else ""
-    return f"Handed to {who}{reason}"
+    raw = str(p.get("reason") or "").strip()
+    # Drop known tokens, and anything shaped like one (snake_case, no spaces) —
+    # tool-mapped handoffs send "tool:send_slack_message", which is also wire.
+    wordy = (
+        raw
+        and raw not in _MACHINE_REASONS
+        and not _TOKEN_SHAPED.match(raw)
+        and not raw.startswith("tool:")
+    )
+    return f"Handed to {who}{f' — {raw}' if wordy else ''}"
 
 
 def _close_sentence(p: dict) -> str:

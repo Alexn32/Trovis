@@ -126,7 +126,7 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
       await api.closeLoop(loop.id)
       await load()
     } catch (e) {
-      setError(e?.message || 'Could not mark this loop done')
+      setError(e?.message || 'Could not mark this task done')
     } finally {
       setClosingId(null)
     }

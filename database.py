@@ -3734,6 +3734,134 @@ def _loops_assigned_to(
     return matched, truncated
 
 
+# ---------------------------------------------------------------------------
+# The work board
+# ---------------------------------------------------------------------------
+# One query path for the Work tab's board. It exists so the board is a single
+# request instead of one per column plus one per card: everything a card shows
+# — who holds it, how long, what it cost, whether it is yours — is resolved
+# here, server-side, where identity actually lives.
+
+
+def _attach_holders(
+    cur, rows: list[dict[str, Any]], account_id: int | None
+) -> None:
+    """Resolve WHO holds each task, and who it is waiting on.
+
+    A card names a person or an agent, never a mechanism. Rules:
+      - an unresolved handoff to a human -> that person holds it
+      - an unresolved handoff to an agent/system -> the agent still holds it,
+        and we surface what it is blocked on as a note
+      - otherwise -> the agent holds it, by its operator-set display name
+        when there is one
+
+    Cost: one bounded IN-list over loop_events for the page, plus one small
+    display-name lookup. No per-card queries.
+    """
+    if not rows:
+        return
+    lp = _loops_mod()
+    ids = [r["id"] for r in rows]
+    ph_list = ", ".join([PH] * len(ids))
+
+    # Operator-set agent names, so a card can say "Support Bot" not "cs-agent".
+    acct_sql = f"WHERE account_id = {PH}" if account_id is not None else ""
+    cur.execute(
+        f"SELECT service_name, agent_id, display_name FROM agent_display_names {acct_sql}",
+        (account_id,) if account_id is not None else (),
+    )
+    names = {(r["service_name"], r["agent_id"]): r["display_name"] for r in cur.fetchall()}
+
+    by_loop: dict[int, list[dict]] = {i: [] for i in ids}
+    cur.execute(
+        "SELECT id, loop_id, type, actor_type, actor, payload, event_time_unix "
+        f"FROM loop_events WHERE loop_id IN ({ph_list}) "
+        "ORDER BY event_time_unix, id",
+        tuple(ids),
+    )
+    for r in cur.fetchall():
+        ev = lp.normalize_loop_event(dict(r))
+        ev["_row_id"] = r["id"]
+        by_loop[r["loop_id"]].append(ev)
+
+    resolved: dict[str, str | None] = {}
+    for row in rows:
+        agent_label = (
+            names.get((row["service_name"], row.get("agent_id") or "main"))
+            or row["service_name"]
+        )
+        row["holder_type"] = "agent"
+        row["holder_name"] = agent_label
+        row["waiting_on"] = None
+        row["state_since_unix"] = row.get("last_event_unix")
+
+        pending = lp._unresolved_handoffs(by_loop.get(row["id"], []))
+        if not pending:
+            continue
+        h = pending[-1]
+        p = h.get("payload") or {}
+        direction = p.get("direction")
+        row["state_since_unix"] = h.get("ts") or row.get("last_event_unix")
+        if direction == "to_human":
+            row["holder_type"] = "human"
+            row["holder_name"] = (
+                row.get("awaiting_human_name") or p.get("target_name") or "a person"
+            )
+        elif direction in ("to_agent", "to_system"):
+            # The agent still holds the task; it is blocked on something.
+            target = p.get("target_id")
+            if target:
+                target = str(target)
+                if target not in resolved:
+                    resolved[target] = (
+                        _resolve_human_name(cur, target, account_id) or target
+                    )
+                row["waiting_on"] = resolved[target]
+            else:
+                row["waiting_on"] = (
+                    "another agent" if direction == "to_agent" else "a system"
+                )
+
+
+def get_work_board(
+    account_id: int | None,
+    viewer_user_id: int | None = None,
+    workflow_id: int | None = None,
+    done_limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Every task the board shows: everything still open, plus whatever
+    finished today. Deliberately NOT paginated — a board that hides a column's
+    tail is lying about the shape of the work. Bounded instead by the fact
+    that open work is small and 'done' is capped to today."""
+    sql = _LOOP_SELECT + " WHERE 1=1"
+    args: list[Any] = []
+    if account_id is not None:
+        sql += f" AND l.account_id = {PH}"
+        args.append(account_id)
+    if workflow_id is not None:
+        sql += f" AND l.workflow_id = {PH}"
+        args.append(workflow_id)
+    # Open work, plus today's finished work. `date(...)` on the SQLite side and
+    # date_trunc on Postgres both compare against the server's current day.
+    day_start = (
+        "date_trunc('day', NOW())" if USE_POSTGRES else "date('now', 'start of day')"
+    )
+    sql += (
+        " AND (l.closed_at IS NULL"
+        f"      OR l.closed_at >= {day_start})"
+        " ORDER BY l.created_at DESC, l.id DESC"
+        f" LIMIT {PH}"
+    )
+    args.append(int(done_limit) + 500)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        rows = [_loop_row(dict(r)) for r in cur.fetchall()]
+        _attach_segments_mini(cur, rows)
+        _attach_awaiting_human(cur, rows, account_id, viewer_user_id)
+        _attach_holders(cur, rows, account_id)
+        return rows
+
+
 def get_loop_stream(
     loop_id: int, account_id: int | None,
 ) -> list[dict[str, Any]] | None:

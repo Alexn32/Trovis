@@ -4,7 +4,7 @@ import { ArrowLeftIcon } from './Icons.jsx'
 import { WORKFLOW_STRINGS as WS, buildWorkflowPayload, saveVersionLabel } from './loops.js'
 
 // Stations-first workflow editor. Create ("New workflow" on the board) and
-// edit ("Edit stations" on the workflow page — every save is a NEW VERSION,
+// edit ("Edit steps" on the workflow page — every save is a NEW VERSION,
 // hence "Save as v{n+1}"; definitions are never mutated). Session-auth only,
 // like all workflow writes.
 
@@ -43,6 +43,11 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
   const [agentNames, setAgentNames] = useState([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
+  // Draft-from-description (create mode only — in edit mode the operator is
+  // revising a definition that already exists, so prefilling would clobber).
+  const [description, setDescription] = useState('')
+  const [drafting, setDrafting] = useState(false)
+  const [draftNote, setDraftNote] = useState(null)
 
   // Known agent identities for the holder autocomplete (agents only).
   useEffect(() => {
@@ -73,6 +78,41 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
       ;[next[i], next[j]] = [next[j], next[i]]
       return next
     })
+  }
+
+  // Prefill the form from a plain-English description. The draft is a
+  // starting point: it never overwrites a name the operator already typed,
+  // and it opens the hints panel so the inferred match rules are visible
+  // rather than silently applied.
+  async function draft() {
+    const text = description.trim()
+    if (!text || drafting) return
+    setDrafting(true)
+    setError(null)
+    setDraftNote(null)
+    try {
+      const d = await api.draftWorkflow(text)
+      if (!name.trim() && d.name) setName(d.name)
+      const drafted = (d.stations || []).map((s) => ({
+        holder_type: s.holder_type || 'agent',
+        holder: s.holder || '',
+        label: s.label || '',
+        tools: (s.tools || []).join(', '),
+        carrier: s.carrier || '',
+      }))
+      if (drafted.length > 0) setStations(drafted)
+      const draftedHints = (d.match_hints || []).map((h) => ({ ...h }))
+      if (draftedHints.length > 0) {
+        setHints(draftedHints)
+        setHintsOpen(true)
+      }
+      if (drafted.length === 0 && draftedHints.length === 0) {
+        setDraftNote(WS.draftEmpty)
+      }
+    } catch (e) {
+      setError(e?.message || 'Could not draft the workflow')
+    }
+    setDrafting(false)
   }
 
   async function save() {
@@ -110,6 +150,34 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
       </div>
 
       <div className="dash-card wfe-card">
+        {!editing && (
+          <div className="wfe-draft">
+            <label className="wfe-label" htmlFor="wfe-describe">
+              {WS.describeLabel}
+            </label>
+            <div className="wfe-nudge">{WS.describeNudge}</div>
+            <textarea
+              id="wfe-describe"
+              className="wfe-input wfe-textarea"
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder={WS.describePlaceholder}
+            />
+            <div className="wfe-draft-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={draft}
+                disabled={drafting || !description.trim()}
+              >
+                {drafting ? WS.draftingCta : WS.draftCta}
+              </button>
+              {draftNote && <span className="wfe-nudge">{draftNote}</span>}
+            </div>
+          </div>
+        )}
+
         <label className="wfe-label" htmlFor="wfe-name">
           {WS.nameLabel}
         </label>
@@ -161,7 +229,7 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
                   type="button"
                   className="btn-icon-sm"
                   onClick={() => setStations((st) => st.filter((_, j) => j !== i))}
-                  aria-label="Remove station"
+                  aria-label="Remove step"
                 >
                   ×
                 </button>
