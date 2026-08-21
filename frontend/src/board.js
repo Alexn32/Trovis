@@ -60,3 +60,65 @@ export function boardEmpty(board) {
     cta: null,
   }
 }
+
+// ---------------------------------------------------------------------------
+// Level 1 — the Work screen: one card per kind of work
+// ---------------------------------------------------------------------------
+
+/**
+ * A kind-of-work card's rollup, as display segments. All four counts are
+ * always present — the shape teaches what a kind of work is — but a zero is
+ * muted and only a NONZERO waiting/stuck count gets semantic color. A calm
+ * card is a quiet card.
+ *
+ * Returns [{ label, value, tone }] where tone is 'warn' | 'stuck' | 'muted'.
+ * Cost is appended only when nonzero.
+ */
+export function kindRollup(card) {
+  const c = card || {}
+  const seg = (value, label, tone) => ({
+    value: value || 0,
+    label,
+    tone: value ? tone : 'muted',
+  })
+  const parts = [
+    seg(c.in_motion, 'in motion', 'live'),
+    seg(c.waiting_person, c.waiting_person === 1 ? 'waiting on a person' : 'waiting on a person', 'warn'),
+    seg(c.stuck, 'stuck', 'stuck'),
+    seg(c.done_today, 'done today', 'muted'),
+  ]
+  const cost = boardCostLabel(c.cost_today)
+  if (cost) parts.push({ value: null, label: `${cost} today`, tone: 'muted' })
+  return parts
+}
+
+// True when a kind of work has anything a person needs to look at.
+export function kindNeedsAttention(card) {
+  return (card?.waiting_person || 0) + (card?.stuck || 0) > 0
+}
+
+// The one quiet line under "Other work" when its undeclared pile is the
+// biggest — never a nag, just an offer. Empty string when not warranted.
+export function otherNudge(card) {
+  return card?.suggest_declare
+    ? 'A lot of work here — declare a workflow to organize it'
+    : ''
+}
+
+// Level-1 empty state, same three-way honesty as the board.
+export function workScreenEmpty(summary) {
+  if (!summary) return null
+  if ((summary.total || 0) > 0) return null
+  if (!summary.has_agents) {
+    return {
+      lead: 'No work yet — nothing is connected.',
+      sub: 'Connect an agent and its work shows up here on its own, sorted into the kinds of work your company does.',
+      cta: 'Connect an agent',
+    }
+  }
+  return {
+    lead: 'No work yet.',
+    sub: 'Your agents are connected. As they start working, each kind of work appears here with a live count of what is moving, waiting, and done.',
+    cta: null,
+  }
+}

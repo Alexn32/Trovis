@@ -1173,6 +1173,36 @@ class BoardWorkflow(BaseModel):
     count: int = 0
 
 
+class WorkKindCard(BaseModel):
+    """One kind of work on the Level-1 Work screen — a workflow, or the
+    catch-all "Other work". Rollups are live counts of the tasks underneath
+    it; nothing here needs Trovis vocabulary to read."""
+
+    workflow_id: int | None = None   # None = the "Other work" catch-all
+    name: str
+    in_motion: int = 0
+    waiting_person: int = 0
+    stuck: int = 0
+    done_today: int = 0
+    cost_today: float = 0.0
+    is_other: bool = False
+    # Only the "Other work" card, and only when its in-motion pile is bigger
+    # than every declared kind's — the nudge to declare a workflow.
+    suggest_declare: bool = False
+
+
+class WorkSummary(BaseModel):
+    """GET /work/summary — the Work tab's Level-1 landing, in one request.
+    `yours` is the cross-workflow strip of tasks waiting on the caller,
+    reusing the board's card so it renders identically."""
+
+    yours: list[BoardCard] = Field(default_factory=list)
+    kinds: list[WorkKindCard] = Field(default_factory=list)
+    other: WorkKindCard | None = None
+    has_agents: bool = False
+    total: int = 0
+
+
 class WorkBoard(BaseModel):
     """GET /work/board — the whole board in one request."""
 

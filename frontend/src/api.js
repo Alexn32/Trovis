@@ -353,6 +353,9 @@ export const api = {
   // already bucketed, sorted, and with holders resolved server-side.
   getWorkBoard: (workflowId = null) =>
     request(`/work/board${workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''}`),
+  // Level 1 of the Work tab: one rollup card per kind of work + the cross-
+  // workflow strip of tasks waiting on you. One request; the server groups.
+  getWorkSummary: () => request('/work/summary'),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
   getLoop: (loopId) => request(`/loops/${loopId}`),

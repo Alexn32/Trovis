@@ -184,10 +184,12 @@ function TaskPanel({ card, onClose, onResolved }) {
 
 // ---------------------------------------------------------------------------
 
-export default function Board({ onConnectAgent, onOpenWorkflow }) {
+export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowId = '', onBack }) {
   const [board, setBoard] = useState(null)
   const [err, setErr] = useState(null)
-  const [workflowId, setWorkflowId] = useState('')
+  // Seeded by the Level-1 card the user clicked; the filter dropdown can
+  // still change it. Entry wiring only — the board itself is unchanged.
+  const [workflowId, setWorkflowId] = useState(initialWorkflowId ? String(initialWorkflowId) : '')
   const [open, setOpen] = useState(null)
 
   const load = useCallback(async () => {
@@ -213,7 +215,13 @@ export default function Board({ onConnectAgent, onOpenWorkflow }) {
   return (
     <div className="view board-view">
       <div className="board-head">
-        <h1>Work</h1>
+        {onBack ? (
+          <button type="button" className="board-back" onClick={onBack}>
+            ← All work
+          </button>
+        ) : (
+          <h1>Work</h1>
+        )}
         {board.workflows.length > 0 && (
           <div className="board-filter">
             <select

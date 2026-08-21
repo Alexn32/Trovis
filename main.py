@@ -115,6 +115,8 @@ from models import (
     LoopParticipant,
     LoopSummary,
     WorkBoard,
+    WorkSummary,
+    WorkKindCard,
     MeResponse,
     WorkflowCreate,
     WorkflowDetail,
@@ -1124,6 +1126,120 @@ def _board_for(age_s: int | None) -> str:
     return f", {_humanize_seconds(age_s)}" if age_s else ""
 
 
+def _row_to_board_card(r: dict, now_ns: int) -> BoardCard:
+    """One task row (from database.get_work_board) -> a board card. Shared by
+    the board and the Level-1 summary so a card means the same thing on both."""
+    column = _STATE_TO_COLUMN.get(r.get("cached_state") or "", "working")
+    since = r.get("state_since_unix") or r.get("last_event_unix")
+    age_s = max(0, int((now_ns - int(since)) // 1_000_000_000)) if since else None
+    return BoardCard(
+        id=r["id"],
+        title=loops_title_for_board(r),
+        column=column,
+        state=r.get("cached_state") or "",
+        holder_type=r.get("holder_type") or "agent",
+        holder_name=r.get("holder_name") or r.get("service_name") or "an agent",
+        waiting_on=r.get("waiting_on"),
+        age_seconds=age_s,
+        cost_usd=round(float(r.get("total_cost_usd") or 0.0), 4),
+        is_yours=bool(r.get("awaiting_is_you")),
+        handoff_event_id=r.get("awaiting_handoff_event_id"),
+        workflow_id=r.get("workflow_id"),
+        workflow_name=r.get("workflow_name"),
+        stuck_reason=_board_stuck_reason(r, age_s) if column == "stuck" else None,
+        closed_at=r.get("closed_at"),
+    )
+
+
+@app.get("/work/summary", response_model=WorkSummary)
+async def work_summary(request: Request) -> WorkSummary:
+    """Level 1 of the Work tab: one card per kind of work (per workflow),
+    plus an 'Other work' catch-all, plus the cross-workflow strip of tasks
+    waiting on the caller.
+
+    ONE fetch. This reuses database.get_work_board UNFILTERED — the exact two
+    bounded queries the board runs — and groups the result in memory. No
+    per-workflow query, no N+1. The board (Level 2) is the same fetch with a
+    workflow_id filter; this is that fetch, grouped a different way.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    now_ns = time.time_ns()
+
+    rows = database.get_work_board(account_id, viewer_user_id=viewer_user_id)
+    cards = [_row_to_board_card(r, now_ns) for r in rows]
+
+    # Group into kinds. workflow_id None -> the "Other work" catch-all.
+    kinds: dict[int | None, dict] = {}
+    for c in cards:
+        key = c.workflow_id
+        k = kinds.setdefault(
+            key,
+            {
+                "workflow_id": key,
+                "name": c.workflow_name or "Other work",
+                "in_motion": 0, "waiting_person": 0, "stuck": 0,
+                "done_today": 0, "cost_today": 0.0,
+            },
+        )
+        # column -> rollup field. 'working' covers open + agent/system waits.
+        field = {
+            "working": "in_motion",
+            "waiting_person": "waiting_person",
+            "stuck": "stuck",
+            "done": "done_today",
+        }.get(c.column, "in_motion")
+        k[field] += 1
+        k["cost_today"] += c.cost_usd or 0.0
+
+    def _card(d: dict, is_other: bool) -> WorkKindCard:
+        return WorkKindCard(
+            workflow_id=d["workflow_id"],
+            name=d["name"],
+            in_motion=d["in_motion"],
+            waiting_person=d["waiting_person"],
+            stuck=d["stuck"],
+            done_today=d["done_today"],
+            cost_today=round(d["cost_today"], 4),
+            is_other=is_other,
+        )
+
+    declared = [_card(d, False) for wid, d in kinds.items() if wid is not None]
+    other = _card(kinds[None], True) if None in kinds else None
+
+    # The nudge: only when the undeclared pile in motion is bigger than every
+    # declared kind's. A quiet fleet gets no nagging.
+    if other is not None:
+        max_declared = max((k.in_motion for k in declared), default=0)
+        other.suggest_declare = other.in_motion > max_declared
+
+    # Sort: kinds needing a person (waiting_person + stuck) first, then by
+    # activity today. Same instinct as the board — surface what needs eyes.
+    declared.sort(
+        key=lambda k: (
+            -(k.waiting_person + k.stuck),
+            -(k.in_motion + k.done_today),
+            k.name.lower(),
+        )
+    )
+
+    # The Yours strip: every task waiting on the caller, across ALL kinds,
+    # oldest first (most urgent). Reuses the board card verbatim.
+    yours = sorted(
+        (c for c in cards if c.is_yours),
+        key=lambda c: -(c.age_seconds or 0),
+    )
+
+    return WorkSummary(
+        yours=yours,
+        kinds=declared,
+        other=other,
+        has_agents=bool(database.get_agents(account_id=account_id)),
+        total=len(cards),
+    )
+
+
 @app.get("/work/board", response_model=WorkBoard)
 async def work_board(
     request: Request,
@@ -1148,27 +1264,8 @@ async def work_board(
     buckets: dict[str, list[BoardCard]] = {k: [] for k, _ in _BOARD_COLUMNS}
     wf_counts: dict[int, dict] = {}
     for r in rows:
-        column = _STATE_TO_COLUMN.get(r.get("cached_state") or "", "working")
-        since = r.get("state_since_unix") or r.get("last_event_unix")
-        age_s = max(0, int((now_ns - int(since)) // 1_000_000_000)) if since else None
-        card = BoardCard(
-            id=r["id"],
-            title=loops_title_for_board(r),
-            column=column,
-            state=r.get("cached_state") or "",
-            holder_type=r.get("holder_type") or "agent",
-            holder_name=r.get("holder_name") or r.get("service_name") or "an agent",
-            waiting_on=r.get("waiting_on"),
-            age_seconds=age_s,
-            cost_usd=round(float(r.get("total_cost_usd") or 0.0), 4),
-            is_yours=bool(r.get("awaiting_is_you")),
-            handoff_event_id=r.get("awaiting_handoff_event_id"),
-            workflow_id=r.get("workflow_id"),
-            workflow_name=r.get("workflow_name"),
-            stuck_reason=_board_stuck_reason(r, age_s) if column == "stuck" else None,
-            closed_at=r.get("closed_at"),
-        )
-        buckets[column].append(card)
+        card = _row_to_board_card(r, now_ns)
+        buckets[card.column].append(card)
         if r.get("workflow_id"):
             wf = wf_counts.setdefault(
                 r["workflow_id"],
