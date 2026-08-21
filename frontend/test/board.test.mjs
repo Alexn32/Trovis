@@ -122,3 +122,63 @@ test('machine tokens never reach a step sentence', async () => {
     'Handed to Sarah Chen — needs approval')
   assert.equal(h({ direction: 'to_system' }), 'Handed to a system')
 })
+
+// ---------------------------------------------------------------------------
+// Level 1 — kind-of-work cards
+// ---------------------------------------------------------------------------
+import { kindRollup, kindNeedsAttention, otherNudge, workScreenEmpty } from '../src/board.js'
+
+test('rollup shows all four counts; a calm card stays muted', () => {
+  const parts = kindRollup({ in_motion: 2, waiting_person: 0, stuck: 0, done_today: 5, cost_today: 0 })
+  const byLabel = Object.fromEntries(parts.map((p) => [p.label, p]))
+  assert.equal(byLabel['in motion'].value, 2)
+  assert.equal(byLabel['done today'].value, 5)
+  // zero waiting/stuck are present but muted — quiet, not colored
+  assert.equal(byLabel['waiting on a person'].tone, 'muted')
+  assert.equal(byLabel['stuck'].tone, 'muted')
+  // no cost segment when zero
+  assert.ok(!parts.some((p) => /today/.test(p.label) && /\$/.test(p.label)))
+})
+
+test('semantic color appears ONLY on nonzero waiting/stuck', () => {
+  const parts = kindRollup({ in_motion: 1, waiting_person: 3, stuck: 1, done_today: 0, cost_today: 1.2 })
+  const byLabel = Object.fromEntries(parts.map((p) => [p.label, p]))
+  assert.equal(byLabel['waiting on a person'].tone, 'warn')
+  assert.equal(byLabel['stuck'].tone, 'stuck')
+  assert.ok(parts.some((p) => p.label === '$1.20 today'), 'cost shown when nonzero')
+})
+
+test('a kind needs attention only when someone is waiting or stuck', () => {
+  assert.equal(kindNeedsAttention({ waiting_person: 0, stuck: 0 }), false)
+  assert.equal(kindNeedsAttention({ waiting_person: 1, stuck: 0 }), true)
+  assert.equal(kindNeedsAttention({ waiting_person: 0, stuck: 2 }), true)
+})
+
+test('the Other-work nudge is an offer, and only when warranted', () => {
+  assert.equal(otherNudge({ suggest_declare: true }), 'A lot of work here — declare a workflow to organize it')
+  assert.equal(otherNudge({ suggest_declare: false }), '')
+  assert.equal(otherNudge({}), '')
+})
+
+test('Level-1 empty state distinguishes "nothing connected" from "nothing yet"', () => {
+  const noAgents = workScreenEmpty({ total: 0, has_agents: false })
+  assert.match(noAgents.lead, /nothing is connected/i)
+  assert.ok(noAgents.cta)
+  const noWork = workScreenEmpty({ total: 0, has_agents: true })
+  assert.doesNotMatch(noWork.lead, /nothing is connected/i)
+  assert.equal(noWork.cta, null)
+  assert.equal(workScreenEmpty({ total: 4, has_agents: true }), null)
+})
+
+test('no Trovis jargon in the Level-1 helpers', () => {
+  const strings = [
+    ...kindRollup({ in_motion: 1, waiting_person: 1, stuck: 1, done_today: 1, cost_today: 1 }).map((p) => p.label),
+    otherNudge({ suggest_declare: true }),
+    workScreenEmpty({ total: 0, has_agents: false }).lead,
+    workScreenEmpty({ total: 0, has_agents: false }).sub,
+    workScreenEmpty({ total: 0, has_agents: true }).sub,
+  ]
+  for (const s of strings) {
+    assert.ok(!/\b(loops?|possession|segments?|stations?|handoffs?)\b/i.test(s), `jargon: ${s}`)
+  }
+})

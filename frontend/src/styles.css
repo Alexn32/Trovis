@@ -6024,3 +6024,84 @@ select.wf2-input { cursor: pointer; }
 }
 .bps-none, .bpanel-loading, .bpanel-err { font-size: 12.5px; color: var(--text-muted); }
 .bpanel-err { color: var(--error); }
+
+/* ==========================================================================
+   WORK — LEVEL 1 (the Work screen) + the "waiting on you" strip
+   ========================================================================== */
+
+/* --- the strip: your desk, on both levels --- */
+.yours-strip { margin: 0 0 20px; }
+.yours-head {
+  font-size: 10.5px; font-weight: 650; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--warning); margin: 0 0 8px;
+}
+.yours-rail {
+  display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px;
+  scrollbar-width: thin;
+}
+.yc {
+  flex: 0 0 auto; min-width: 240px; max-width: 320px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--warning); border-radius: 10px;
+  box-shadow: inset 3px 0 0 var(--warning); padding: 11px 13px;
+}
+.yc:hover { border-color: var(--warning); filter: brightness(1.04); }
+.yc:focus-visible { outline: 2px solid var(--warning); outline-offset: 2px; }
+.yc-title { font-size: 13px; font-weight: 550; line-height: 1.35; color: var(--text-primary); }
+.yc-age { font-size: 11px; color: var(--text-muted); }
+.yc-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.yc-actions button {
+  font: inherit; font-size: 11.5px; cursor: pointer; padding: 4px 9px;
+  color: var(--text-primary); background: var(--bg-surface-hover);
+  border: 1px solid var(--border-default); border-radius: 7px;
+}
+.yc-actions button:hover:not(:disabled) { border-color: var(--text-muted); }
+.yc-actions button:disabled { opacity: 0.55; cursor: default; }
+.yc-note { font-size: 11px; color: var(--warning); }
+
+/* --- Level 1 kind-of-work cards --- */
+.kinds {
+  display: grid; gap: 12px; align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+.kind {
+  display: flex; flex-direction: column; gap: 9px; cursor: pointer;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  border-radius: 12px; padding: 15px 16px;
+  transition: border-color 120ms ease;
+}
+.kind:hover { border-color: var(--text-muted); }
+.kind:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Only a card that needs a person gets the warning rail. A calm card is quiet. */
+.kind.attn { box-shadow: inset 3px 0 0 var(--warning); }
+.kind.is-other { border-style: dashed; }
+.kind-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.kind-name { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-primary); }
+.kind-top svg { color: var(--text-muted); flex: 0 0 auto; }
+.kind-rollup { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.kr { font-size: 12px; color: var(--text-muted); }
+.kr b { font-weight: 650; font-variant-numeric: tabular-nums; }
+/* Semantic color ONLY on nonzero waiting/stuck (the tone is set to 'muted'
+   server-agnostically when the count is zero). */
+.kr-live b { color: var(--brand-accent); }
+.kr-warn { color: var(--warning); }
+.kr-stuck { color: var(--error); }
+.kind-nudge {
+  align-self: flex-start; font: inherit; font-size: 12px; cursor: pointer;
+  text-align: left; color: var(--brand-accent); background: none;
+  border: none; padding: 2px 0; text-decoration: underline;
+}
+.kind-nudge:hover { color: var(--brand-accent-hover); }
+
+/* --- the Level-2 back affordance --- */
+.board-back {
+  font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
+  color: var(--text-muted); background: none; border: none; padding: 4px 0;
+}
+.board-back:hover { color: var(--text-primary); }
+
+@media (max-width: 700px) {
+  .kinds { grid-template-columns: minmax(0, 1fr); }
+  .yc { min-width: 200px; }
+}

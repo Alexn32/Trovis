@@ -3,7 +3,7 @@ import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
 import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
-import Board from './Board.jsx'
+import WorkTab from './WorkTab.jsx'
 import WorkflowPage from './WorkflowPage.jsx'
 import WorkflowEditor from './WorkflowEditor.jsx'
 import Fleet from './Fleet.jsx'
@@ -347,8 +347,9 @@ function AppInner() {
     )
   } else if (tab === 'work') {
     mainContent = (
-      <Board
+      <WorkTab
         onConnectAgent={openAddAgent}
+        onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
         onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
       />
     )
