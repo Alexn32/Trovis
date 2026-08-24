@@ -87,9 +87,21 @@ export function kindRollup(card) {
     seg(c.stuck, 'stuck', 'stuck'),
     seg(c.done_today, 'done today', 'muted'),
   ]
+  // Always-on work reads as a quiet count — never colored, never an alarm.
+  // Its abnormal states (waiting/stuck) have already left "ongoing" and show
+  // in those counts above.
+  if (c.ongoing) parts.push({ value: c.ongoing, label: 'ongoing', tone: 'muted' })
   const cost = boardCostLabel(c.cost_today)
   if (cost) parts.push({ value: null, label: `${cost} today`, tone: 'muted' })
   return parts
+}
+
+// The board's quiet line for a kind's always-on work: "3 ongoing, running
+// normally". Empty when there is none. Human words only.
+export function ongoingLine(count) {
+  const n = count || 0
+  if (n <= 0) return ''
+  return `${n} ongoing, running normally`
 }
 
 // True when a kind of work has anything a person needs to look at.

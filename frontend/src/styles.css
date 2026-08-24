@@ -6105,3 +6105,23 @@ select.wf2-input { cursor: pointer; }
   .kinds { grid-template-columns: minmax(0, 1fr); }
   .yc { min-width: 200px; }
 }
+
+/* --- always-on (ongoing) work: quiet line above the board, expands to cards --- */
+.board-ongoing { margin: 0 0 12px; }
+.board-ongoing-line {
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-muted); background: none; border: none; padding: 4px 0;
+}
+.board-ongoing-line:hover { color: var(--text-primary); }
+.board-ongoing-caret { font-size: 10px; opacity: 0.7; }
+.board-ongoing-cards {
+  display: grid; gap: 8px; margin-top: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+/* Level 3: the "treated as ongoing work" line — calm, not an error. */
+.bpanel-standing {
+  font-size: 12px; line-height: 1.5; color: var(--text-muted);
+  background: var(--bg-surface-hover); border-radius: 8px;
+  padding: 8px 10px; margin: 8px 0 0;
+}

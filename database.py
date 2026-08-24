@@ -3743,8 +3743,63 @@ def _loops_assigned_to(
 # here, server-side, where identity actually lives.
 
 
+# ---------------------------------------------------------------------------
+# Standing (always-on) work — display classification, biased hard toward finite
+# ---------------------------------------------------------------------------
+# Some work is never "done": support coverage, monitors, recurring duties. Left
+# as normal cards it sits forever in Working and poisons the rollups. We mark it
+# so the board can keep its NORMAL state quiet and only surface its EXCEPTIONS.
+#
+# THE ASYMMETRY (read before touching the thresholds): misclassifying standing
+# work as finite is merely annoying — a card lingers in Working. Misclassifying
+# FINITE work as standing is dangerous — a genuinely stuck task gets hidden
+# behind a calm "ongoing" line, and the record hiding stuck work is the exact
+# disease this product exists to cure. So every threshold below is biased to
+# UNDER-classify: when in doubt, finite. Only a task that is in motion, has
+# NEVER involved a human, has been open a long time, AND shows sustained
+# activity is treated as standing. Anything waiting on a person or stuck has,
+# by construction, a non-working state and is never standing — its exception
+# surfaces as a card normally.
+_STANDING_MIN_AGE_S = 3 * 24 * 3600   # open at least ~3 days
+_STANDING_MIN_SPANS = 20              # sustained activity, not a forgotten one-shot
+
+
+def _classify_standing(
+    row: dict[str, Any], events: list[dict], now_ns: int
+) -> tuple[bool, str | None]:
+    """(is_standing, human_readable_reason). Display-only; never touches state.
+
+    Conversation-grain guard: a long-lived conversation is one open task for
+    days, but it HAS human handoffs (turn_end), so the to_human check below
+    excludes it regardless of age. A conversation is finite work, always.
+    """
+    state = row.get("cached_state")
+    # Only work that is actively in motion can be standing. Waiting-on-a-person,
+    # stuck, done and abandoned are all either exceptions (must show) or closed.
+    if state not in ("working", "open"):
+        return False, None
+    # Any human involvement, ever -> a conversation or an escalation, i.e.
+    # finite work with a person in the loop. Never standing. (Rule 1b.)
+    for e in events or []:
+        if e.get("type") == "handoff_initiated" and (
+            (e.get("payload") or {}).get("direction") == "to_human"
+        ):
+            return False, None
+    spans = int(row.get("span_count") or 0)
+    birth_ns = min((int(e.get("ts") or 0) for e in events or []), default=0)
+    age_s = (now_ns - birth_ns) / 1_000_000_000 if birth_ns else 0
+    if age_s >= _STANDING_MIN_AGE_S and spans >= _STANDING_MIN_SPANS:
+        days = int(age_s // 86400)
+        return True, (
+            f"Ongoing work — running continuously for {days} "
+            f"day{'s' if days != 1 else ''} with no one waiting on it"
+        )
+    return False, None
+
+
 def _attach_holders(
-    cur, rows: list[dict[str, Any]], account_id: int | None
+    cur, rows: list[dict[str, Any]], account_id: int | None,
+    now_ns: int | None = None,
 ) -> None:
     """Resolve WHO holds each task, and who it is waiting on.
 
@@ -3761,6 +3816,7 @@ def _attach_holders(
     if not rows:
         return
     lp = _loops_mod()
+    _standing_now_ns = now_ns if now_ns is not None else time.time_ns()
     ids = [r["id"] for r in rows]
     ph_list = ", ".join([PH] * len(ids))
 
@@ -3795,6 +3851,14 @@ def _attach_holders(
         row["waiting_on"] = None
         row["state_since_unix"] = row.get("last_event_unix")
 
+        # Standing classification uses the same events already loaded here —
+        # no extra query. Biased hard toward finite (see _classify_standing).
+        standing, reason = _classify_standing(
+            row, by_loop.get(row["id"], []), _standing_now_ns
+        )
+        row["standing"] = standing
+        row["standing_reason"] = reason
+
         pending = lp._unresolved_handoffs(by_loop.get(row["id"], []))
         if not pending:
             continue
@@ -3828,6 +3892,7 @@ def get_work_board(
     viewer_user_id: int | None = None,
     workflow_id: int | None = None,
     done_limit: int = 50,
+    now_ns: int | None = None,
 ) -> list[dict[str, Any]]:
     """Every task the board shows: everything still open, plus whatever
     finished today. Deliberately NOT paginated — a board that hides a column's
@@ -3858,7 +3923,7 @@ def get_work_board(
         rows = [_loop_row(dict(r)) for r in cur.fetchall()]
         _attach_segments_mini(cur, rows)
         _attach_awaiting_human(cur, rows, account_id, viewer_user_id)
-        _attach_holders(cur, rows, account_id)
+        _attach_holders(cur, rows, account_id, now_ns=now_ns)
         return rows
 
 

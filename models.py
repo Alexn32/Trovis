@@ -1158,6 +1158,11 @@ class BoardCard(BaseModel):
     workflow_name: str | None = None
     stuck_reason: str | None = None  # why, in plain words, for the Stuck column
     closed_at: str | None = None
+    # Standing (always-on) work — display classification only. A standing
+    # task keeps its normal state quiet (see WorkBoard.ongoing) and shows the
+    # reason on its Level-3 detail so a misclassification is one click to spot.
+    standing: bool = False
+    standing_reason: str | None = None
 
 
 class BoardColumn(BaseModel):
@@ -1184,6 +1189,7 @@ class WorkKindCard(BaseModel):
     waiting_person: int = 0
     stuck: int = 0
     done_today: int = 0
+    ongoing: int = 0   # always-on work; quiet, not a finite card
     cost_today: float = 0.0
     is_other: bool = False
     # Only the "Other work" card, and only when its in-motion pile is bigger
@@ -1208,6 +1214,11 @@ class WorkBoard(BaseModel):
 
     columns: list[BoardColumn] = Field(default_factory=list)
     workflows: list[BoardWorkflow] = Field(default_factory=list)
+    # Always-on work, kept OUT of the Working column so it can't accumulate as
+    # permanent cards. Its normal state is quiet (a collapsed line); its
+    # exceptions (waiting on a person / stuck) leave "standing" and appear as
+    # ordinary cards. See database._classify_standing.
+    ongoing: list[BoardCard] = Field(default_factory=list)
     total: int = 0
     has_agents: bool = False
 
