@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ChevronRightIcon, UserIcon } from './Icons.jsx'
-import { boardAge, boardCostLabel, boardEmpty, holderLine } from './board.js'
+import { boardAge, boardCostLabel, boardEmpty, holderLine, ongoingLine } from './board.js'
 import { lifecycleSentence } from './loops.js'
 
 // The Work board — the Work tab's landing surface.
@@ -164,6 +164,9 @@ function TaskPanel({ card, onClose, onResolved }) {
           </button>
           <h2>{card.title}</h2>
           <p className="bpanel-sub">{holderLine(card)}</p>
+          {card.standing && card.standing_reason && (
+            <p className="bpanel-standing">{card.standing_reason}</p>
+          )}
         </header>
         {err && <div className="bpanel-err">{err}</div>}
         {!detail && !err && <div className="bpanel-loading">Loading…</div>}
@@ -179,6 +182,29 @@ function TaskPanel({ card, onClose, onResolved }) {
         )}
       </aside>
     </>
+  )
+}
+
+// Always-on work. Quiet by default — a single line — and expandable to the
+// cards so a misclassified task is one click from view (density rule: calm at
+// a glance, rich one click away). Never colored: ongoing work is not an alarm.
+function OngoingLine({ items, onOpen }) {
+  const [open, setOpen] = useState(false)
+  if (!items || items.length === 0) return null
+  return (
+    <div className="board-ongoing">
+      <button type="button" className="board-ongoing-line" onClick={() => setOpen((v) => !v)}>
+        {ongoingLine(items.length)}
+        <span className="board-ongoing-caret">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="board-ongoing-cards">
+          {items.map((c) => (
+            <Card key={c.id} card={c} onOpen={onOpen} onResolved={() => {}} />
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -260,6 +286,8 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
           )}
         </div>
       )}
+
+      <OngoingLine items={board.ongoing} onOpen={setOpen} />
 
       <div className="board">
         {board.columns.map((c) => (

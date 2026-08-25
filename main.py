@@ -1148,6 +1148,8 @@ def _row_to_board_card(r: dict, now_ns: int) -> BoardCard:
         workflow_name=r.get("workflow_name"),
         stuck_reason=_board_stuck_reason(r, age_s) if column == "stuck" else None,
         closed_at=r.get("closed_at"),
+        standing=bool(r.get("standing")),
+        standing_reason=r.get("standing_reason"),
     )
 
 
@@ -1167,7 +1169,7 @@ async def work_summary(request: Request) -> WorkSummary:
     viewer_user_id = user["id"] if user else None
     now_ns = time.time_ns()
 
-    rows = database.get_work_board(account_id, viewer_user_id=viewer_user_id)
+    rows = database.get_work_board(account_id, viewer_user_id=viewer_user_id, now_ns=now_ns)
     cards = [_row_to_board_card(r, now_ns) for r in rows]
 
     # Group into kinds. workflow_id None -> the "Other work" catch-all.
@@ -1180,16 +1182,21 @@ async def work_summary(request: Request) -> WorkSummary:
                 "workflow_id": key,
                 "name": c.workflow_name or "Other work",
                 "in_motion": 0, "waiting_person": 0, "stuck": 0,
-                "done_today": 0, "cost_today": 0.0,
+                "done_today": 0, "ongoing": 0, "cost_today": 0.0,
             },
         )
-        # column -> rollup field. 'working' covers open + agent/system waits.
-        field = {
-            "working": "in_motion",
-            "waiting_person": "waiting_person",
-            "stuck": "stuck",
-            "done": "done_today",
-        }.get(c.column, "in_motion")
+        # Standing work is counted quietly as `ongoing` and kept OUT of
+        # in_motion, so always-on coverage can't inflate the "in motion" pile.
+        if c.standing:
+            field = "ongoing"
+        else:
+            # column -> rollup field. 'working' covers open + agent/system waits.
+            field = {
+                "working": "in_motion",
+                "waiting_person": "waiting_person",
+                "stuck": "stuck",
+                "done": "done_today",
+            }.get(c.column, "in_motion")
         k[field] += 1
         k["cost_today"] += c.cost_usd or 0.0
 
@@ -1201,6 +1208,7 @@ async def work_summary(request: Request) -> WorkSummary:
             waiting_person=d["waiting_person"],
             stuck=d["stuck"],
             done_today=d["done_today"],
+            ongoing=d["ongoing"],
             cost_today=round(d["cost_today"], 4),
             is_other=is_other,
         )
@@ -1258,14 +1266,23 @@ async def work_board(
     now_ns = time.time_ns()
 
     rows = database.get_work_board(
-        account_id, viewer_user_id=viewer_user_id, workflow_id=workflow_id
+        account_id, viewer_user_id=viewer_user_id, workflow_id=workflow_id,
+        now_ns=now_ns,
     )
 
     buckets: dict[str, list[BoardCard]] = {k: [] for k, _ in _BOARD_COLUMNS}
+    ongoing: list[BoardCard] = []
     wf_counts: dict[int, dict] = {}
     for r in rows:
         card = _row_to_board_card(r, now_ns)
-        buckets[card.column].append(card)
+        # Standing work never accumulates as a Working card. Its normal state
+        # lives in the quiet `ongoing` bucket; its exceptions (waiting/stuck)
+        # have a non-working state, so they were never standing and land in
+        # their real column above.
+        if card.standing:
+            ongoing.append(card)
+        else:
+            buckets[card.column].append(card)
         if r.get("workflow_id"):
             wf = wf_counts.setdefault(
                 r["workflow_id"],
@@ -1288,13 +1305,15 @@ async def work_board(
         BoardColumn(key=k, label=label, cards=buckets[k], count=len(buckets[k]))
         for k, label in _BOARD_COLUMNS
     ]
+    ongoing.sort(key=lambda c: -(c.age_seconds or 0))
     return WorkBoard(
         columns=columns,
         workflows=[
             BoardWorkflow(**w)
             for w in sorted(wf_counts.values(), key=lambda w: -w["count"])
         ],
-        total=sum(len(v) for v in buckets.values()),
+        ongoing=ongoing,
+        total=sum(len(v) for v in buckets.values()) + len(ongoing),
         has_agents=bool(database.get_agents(account_id=account_id)),
     )
 

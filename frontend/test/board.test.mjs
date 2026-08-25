@@ -182,3 +182,40 @@ test('no Trovis jargon in the Level-1 helpers', () => {
     assert.ok(!/\b(loops?|possession|segments?|stations?|handoffs?)\b/i.test(s), `jargon: ${s}`)
   }
 })
+
+// ---------------------------------------------------------------------------
+// Standing (always-on) work — Level 1 rollup + the ongoing line
+// ---------------------------------------------------------------------------
+import { ongoingLine } from '../src/board.js'
+
+test('ongoing shows as a quiet count on a kind card, never colored', () => {
+  const parts = kindRollup({ in_motion: 2, waiting_person: 0, stuck: 0, done_today: 1, ongoing: 3 })
+  const seg = parts.find((p) => p.label === 'ongoing')
+  assert.ok(seg, 'ongoing segment present when >0')
+  assert.equal(seg.value, 3)
+  assert.equal(seg.tone, 'muted', 'ongoing is never an alarm color')
+})
+
+test('no ongoing segment when there is no standing work', () => {
+  const parts = kindRollup({ in_motion: 1, waiting_person: 0, stuck: 0, done_today: 0, ongoing: 0 })
+  assert.ok(!parts.some((p) => p.label === 'ongoing'))
+})
+
+test('ongoing does not count toward a kind needing attention', () => {
+  // Always-on work is not, by itself, something a person must look at.
+  assert.equal(kindNeedsAttention({ waiting_person: 0, stuck: 0, ongoing: 9 }), false)
+})
+
+test('the ongoing line is human, and empty when there is none', () => {
+  assert.equal(ongoingLine(3), '3 ongoing, running normally')
+  assert.equal(ongoingLine(1), '1 ongoing, running normally')
+  assert.equal(ongoingLine(0), '')
+  assert.equal(ongoingLine(), '')
+})
+
+test('no Trovis jargon in the standing-work copy', () => {
+  const strings = [ongoingLine(3), 'ongoing']
+  for (const s of strings) {
+    assert.ok(!/\b(loops?|possession|segments?|stations?|handoffs?)\b/i.test(s), `jargon: ${s}`)
+  }
+})
