@@ -3954,12 +3954,17 @@ async def dashboard_activity(
 
 @app.post("/dashboard/ask", response_model=AskResponse)
 async def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
-    """The floating Ask pill — concise, plain-prose fleet Q&A. Reuses the
-    fleet context builder with a tighter system prompt."""
+    """The floating Ask pill — concise, plain-prose fleet Q&A plus the live
+    work record (what's waiting on the signed-in user, why a task is stuck).
+    Reuses the fleet context builder with a tighter system prompt."""
     account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
     msgs = [m.model_dump() for m in body.messages]
     try:
-        result = asker.ask_about_fleet(account_id, msgs, concise=True)
+        result = asker.ask_about_fleet(
+            account_id, msgs, concise=True, viewer_user_id=viewer_user_id,
+        )
     except asker.AskApiKeyMissingError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
@@ -3987,9 +3992,13 @@ async def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
 async def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
     """Answer a question about the user's whole fleet."""
     account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
     msgs = [m.model_dump() for m in body.messages]
     try:
-        result = asker.ask_about_fleet(account_id, msgs)
+        result = asker.ask_about_fleet(
+            account_id, msgs, viewer_user_id=viewer_user_id,
+        )
     except asker.AskApiKeyMissingError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
@@ -4007,10 +4016,13 @@ async def ask_agent(
     """Answer a question scoped to one instance, or one sub-agent when
     `?agent_id=` is set."""
     account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
     msgs = [m.model_dump() for m in body.messages]
     try:
         answer = asker.ask_about_agent(
-            service_name, account_id, msgs, agent_id=agent_id
+            service_name, account_id, msgs, agent_id=agent_id,
+            viewer_user_id=viewer_user_id,
         )
     except asker.AgentNotFoundError:
         raise HTTPException(
@@ -4444,7 +4456,8 @@ async def action_ask(request: Request):
         raise HTTPException(status_code=400, detail="question is required")
     try:
         result = asker.ask_about_fleet(
-            account_id, [{"role": "user", "content": question}], concise=True
+            account_id, [{"role": "user", "content": question}], concise=True,
+            viewer_user_id=None,
         )
     except asker.AskApiKeyMissingError as e:
         raise HTTPException(status_code=503, detail=str(e))
