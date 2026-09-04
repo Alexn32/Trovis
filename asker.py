@@ -1,10 +1,16 @@
-"""Claude-powered Q&A over agent telemetry.
+"""Claude-powered Q&A over agent telemetry and the live work record.
 
 Two entry points:
-  - ask_about_fleet(account_id, messages) — context = every agent's summary
-  - ask_about_agent(service_name, account_id, messages) — context = one
-    agent's full payload (summary + description + registration files + last
-    ~30 spans)
+  - ask_about_fleet(account_id, messages, viewer_user_id=...) — context =
+    every agent's summary, plus read-only tools over telemetry AND the
+    work board / loops
+  - ask_about_agent(service_name, account_id, messages, viewer_user_id=...)
+    — context = one agent's full payload (summary + description +
+    registration files + last ~30 spans)
+
+`viewer_user_id` is the signed-in session user. It is required for
+"waiting on me" / is_yours. API-key auth has no person, so those tools
+return an explicit sign-in message rather than faking identity.
 
 Stateless on the backend. The caller passes the full chat thread on every
 request so we can support multi-turn conversations without server-side
@@ -16,11 +22,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
 
 import anthropic
 
 import database
+import loops
 
 # The Ask assistant is a primary product surface (global ⌘K pill) — use the
 # most capable model. Setup walkthroughs need more room than quick answers.
@@ -55,9 +63,12 @@ class AgentNotFoundError(LookupError):
 
 SYSTEM_FLEET = (
     "You are an analyst for Trovis, an agent management system. You have "
-    "read access to summaries for every AI agent the user is running. "
-    "Answer the user's question using only the telemetry data provided below.\n"
-    "- Be direct and specific. Refer to agents by their service_name.\n"
+    "read access to summaries for every AI agent the user is running, and "
+    "(via tools) the live work record — tasks, who holds them, and what is "
+    "waiting on the signed-in user. Answer using that data; never invent "
+    "work-record claims from agent summaries.\n"
+    "- Be direct and specific. Refer to agents by their service_name and "
+    "tasks by their title.\n"
     "- Prefer concrete numbers (\"85% error rate on lead-scorer\") over "
     "vague qualifications.\n"
     "- If the data doesn't support a confident answer, say so plainly.\n"
@@ -175,11 +186,14 @@ _SETUP_KNOWLEDGE = (
 
 SYSTEM_FLEET_CONCISE = (
     "You are the Trovis assistant — an expert analyst for the user's AI agent "
-    "fleet and their guide to the product. You have read access to telemetry "
-    "summaries for every agent the user runs (provided below), and you know "
-    "how Trovis works end to end.\n"
-    "- Ground every claim about the user's agents in the telemetry data. Use "
-    "specific numbers and refer to agents by name. Never invent data.\n"
+    "fleet, their live work record (tasks on the Work board), and their guide "
+    "to the product. You have read access to telemetry summaries for every "
+    "agent the user runs (provided below), and tools for the work record. "
+    "You know how Trovis works end to end.\n"
+    "- Ground every claim about the user's agents in the telemetry data. "
+    "Ground every claim about tasks, what's waiting, or why something is "
+    "stuck in the work-record tools — never guess from agent summaries. Use "
+    "specific numbers and refer to agents and tasks by name. Never invent data.\n"
     "- Default to 2-4 sentences. For how-do-I/setup questions, give complete "
     "step-by-step instructions instead — exact commands and code on their own "
     "lines (use \\n line breaks; the UI renders plain text, so no markdown "
@@ -355,15 +369,20 @@ def ask_about_fleet(
     account_id: int | None,
     messages: list[dict[str, str]],
     concise: bool = False,
+    viewer_user_id: int | None = None,
 ) -> dict[str, Any]:
     """Answer a question about the whole fleet. Returns {answer, visual} —
     `visual` is a {type, props} dict (Dashboard pill, concise prompt) or None.
-    When `concise` is set, use the short plain-prose + generative-UI prompt."""
+    When `concise` is set, use the short plain-prose + generative-UI prompt.
+    `viewer_user_id` is the signed-in session user (needed for is_yours)."""
     api_key = _require_api_key()
     agents = database.get_agents(account_id=account_id)
     seed = _format_fleet_context(agents)
     system = SYSTEM_FLEET_CONCISE if concise else SYSTEM_FLEET
-    raw = _agentic_answer(api_key, system, account_id, messages, seed)
+    raw = _agentic_answer(
+        api_key, system, account_id, messages, seed,
+        viewer_user_id=viewer_user_id,
+    )
     return _parse_ask_response(raw)
 
 
@@ -451,9 +470,10 @@ def ask_about_agent(
     account_id: int | None,
     messages: list[dict[str, str]],
     agent_id: str | None = None,
+    viewer_user_id: int | None = None,
 ) -> str:
     """Answer a question scoped to one instance, or one sub-agent when
-    `agent_id` is set."""
+    `agent_id` is set. `viewer_user_id` threads through to work-record tools."""
     api_key = _require_api_key()
     summary = database.get_agent_summary(
         service_name, account_id=account_id, agent_id=agent_id
@@ -480,7 +500,10 @@ def ask_about_agent(
         "wider fleet.\n\n"
     )
     seed = focus + _format_agent_context(summary, spans, registration)
-    return _agentic_answer(api_key, SYSTEM_AGENT, account_id, messages, seed)
+    return _agentic_answer(
+        api_key, SYSTEM_AGENT, account_id, messages, seed,
+        viewer_user_id=viewer_user_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -624,16 +647,37 @@ def _format_agent_context(
 # ---------------------------------------------------------------------------
 # Agentic Ask — read-only tools + a bounded retrieval loop
 # ---------------------------------------------------------------------------
-# The assistant gets tools to pull live telemetry on demand — the ACTUAL
-# captured message/response/tool content, spans (incl. errors + status
-# messages), costs, and the fleet list — and loops until it has what it needs
-# to answer. `account_id` is bound server-side per call and NEVER exposed to
-# the model, so a tool can only ever read the caller's own data.
+# The assistant gets tools to pull live telemetry AND the live work record
+# on demand — captured message/response/tool content, spans, costs, the
+# fleet list, and board/loop state — and loops until it has what it needs
+# to answer. `account_id` and `viewer_user_id` are bound server-side per
+# call and NEVER exposed to the model, so a tool can only ever read the
+# caller's own data. is_yours is only true when viewer_user_id is set.
 
 _ASK_MAX_ITERS = 6
 _ASK_TOOL_TOKENS = 8000      # per-turn cap while looping (incl. thinking)
 _TOOL_CONTENT_CAP = 1600     # max chars of captured content per item
 _TOOL_ITEMS_CAP = 25         # max items any single tool returns
+_TOOL_EVENTS_CAP = 12        # last N narrated loop events in get_task_story
+_TOOL_SEGMENTS_CAP = 8
+
+# Same engine-state → board-column map as main._STATE_TO_COLUMN. Display
+# only — is_yours still comes from get_work_board's awaiting_is_you.
+_STATE_TO_COLUMN = {
+    "open": "working",
+    "working": "working",
+    "awaiting_agent": "working",
+    "awaiting_system": "working",
+    "awaiting_human": "waiting_person",
+    "stalled": "stuck",
+    "done": "done",
+    "abandoned": "done",
+}
+
+_SIGN_IN_FOR_ME = (
+    "Sign in to see what's waiting on you. An API key cannot identify a person, "
+    "so Trovis will not guess which tasks are yours."
+)
 
 
 def _cap(s: Any, n: int) -> str | None:
@@ -716,35 +760,463 @@ _ASK_TOOLS = [
             "required": ["service_name"],
         },
     },
+    {
+        "name": "get_waiting_on_me",
+        "description": (
+            "Tasks currently waiting on the signed-in user (the Work tab "
+            "'yours' strip: is_yours). Returns id, title, age_seconds, holder, "
+            "workflow, handoff_event_id. Use for 'what's waiting on me', 'my "
+            "desk', 'assigned to me'. If the caller is not signed in, this "
+            "returns a sign-in message — tell them to sign in; never invent "
+            "is_yours from agent summaries."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_work_overview",
+        "description": (
+            "Work-record rollups like the Work tab summary: counts by kind "
+            "(workflow) for in_motion / waiting_person / stuck / done_today / "
+            "ongoing, plus the Other work catch-all. Does not claim any task "
+            "is 'yours' unless a signed-in viewer is present. Use for 'how "
+            "much is stuck', 'what's in flight', fleet-of-work shape."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "find_tasks",
+        "description": (
+            "Search the live work board by title or id substring. Optional "
+            "workflow_id filter. Returns up to 25 tasks with column, state, "
+            "stuck_reason, waiting_on, holder. Use to locate a task before "
+            "calling get_task_story."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Title or id substring (case-insensitive). Empty = all board tasks, capped.",
+                },
+                "workflow_id": {
+                    "type": "integer",
+                    "description": "Optional workflow filter.",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_task_story",
+        "description": (
+            "Live story for one task (loop): current state, holder, "
+            "waiting_on / awaiting_human_name, age, stuck_reason, recent "
+            "events and possession segments. Cite this for 'why is X stuck' "
+            "/ 'what's blocking this' — never guess from spans or agent "
+            "summaries."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "loop_id": {
+                    "type": "integer",
+                    "description": "Task id (the board card / loop id).",
+                },
+            },
+            "required": ["loop_id"],
+        },
+    },
 ]
 
 _AGENTIC_INSTRUCTIONS = (
-    "\n\n---\n\nTOOLS — you can fetch live telemetry on demand:\n"
-    "list_agents, get_agent_details, get_recent_exchanges (the ACTUAL "
-    "message/response/tool text), get_recent_spans (incl. errors + status "
-    "messages), get_costs.\n"
+    "\n\n---\n\nTOOLS — you can fetch live telemetry AND the live work "
+    "record on demand:\n"
+    "Telemetry: list_agents, get_agent_details, get_recent_exchanges (the "
+    "ACTUAL message/response/tool text), get_recent_spans (incl. errors + "
+    "status messages), get_costs.\n"
+    "Work record: get_waiting_on_me, get_work_overview, find_tasks, "
+    "get_task_story.\n"
     "Ground every answer in real data:\n"
     "- Asked what an agent said/did/produced/received → call "
     "get_recent_exchanges and quote it.\n"
-    "- Asked why it failed / what's wrong → call get_recent_spans with "
-    "errors_only:true and read the status messages.\n"
+    "- Asked why an agent failed / what's wrong with an agent → call "
+    "get_recent_spans with errors_only:true and read the status messages.\n"
     "- Asked about spend → call get_costs. Fleet/cross-agent → list_agents.\n"
+    "- Asked what's waiting on me / my desk / assigned to me → call "
+    "get_waiting_on_me. If it says to sign in, tell the user to sign in. "
+    "NEVER invent is_yours from agent summaries.\n"
+    "- Asked about work shape / how much is stuck or waiting → "
+    "get_work_overview.\n"
+    "- Asked why a task is stuck / what's blocking it / the story of a "
+    "task → find_tasks then get_task_story. Cite holder, waiting_on, "
+    "stuck_reason, and recent events from the story. Do not guess from "
+    "fleet or agent summaries.\n"
     "Prefer fetching over guessing; make a few targeted calls, not many. Be "
     "decisive and specific — cite exact numbers and quote real content. If the "
-    "data genuinely isn't there (capture off, no runs, every call errored), "
-    "say so plainly and say how to get it. NEVER invent content you didn't "
-    "retrieve."
+    "data genuinely isn't there (capture off, no runs, every call errored, "
+    "not signed in for 'me'), say so plainly and say how to get it. NEVER "
+    "invent content you didn't retrieve."
 )
 
 
-def _run_tool(name: str, inp: dict[str, Any] | None, account_id: int | None) -> str:
+def _as_int(v: Any) -> int | None:
+    try:
+        if v is None or v is False:
+            return None
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _humanize_age(s: int | None) -> str | None:
+    if s is None:
+        return None
+    s = max(0, int(s))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
+def _work_title(row: dict[str, Any]) -> str:
+    title = (row.get("title") or "").strip()
+    if title:
+        return title
+    who = row.get("holder_name") or row.get("service_name") or "An agent"
+    return f"Task from {who}"
+
+
+def _work_age_seconds(row: dict[str, Any], now_ns: int) -> int | None:
+    since = row.get("state_since_unix") or row.get("last_event_unix")
+    if not since:
+        return None
+    return max(0, int((now_ns - int(since)) // 1_000_000_000))
+
+
+def _work_stuck_reason(row: dict[str, Any], column: str, age_s: int | None) -> str | None:
+    """Same posture as main._board_stuck_reason — display only."""
+    if column != "stuck":
+        return None
+    if row.get("holder_type") == "human":
+        return None
+    age_bit = f", {_humanize_age(age_s)}" if age_s else ""
+    if row.get("waiting_on"):
+        return f"waiting on {row['waiting_on']}{age_bit}"
+    if age_s:
+        return f"no activity for {_humanize_age(age_s)}"
+    return None
+
+
+def _work_card(row: dict[str, Any], now_ns: int) -> dict[str, Any]:
+    """Project a get_work_board row the same way /work/summary cards do.
+
+    is_yours is awaiting_is_you from the board helper — we do not classify
+    'yours' here. Without a viewer, get_work_board leaves awaiting_is_you False.
+    """
+    column = _STATE_TO_COLUMN.get(row.get("cached_state") or "", "working")
+    age_s = _work_age_seconds(row, now_ns)
+    return {
+        "id": row["id"],
+        "title": _work_title(row),
+        "column": column,
+        "state": row.get("cached_state") or "",
+        "holder": row.get("holder_name") or row.get("service_name") or "an agent",
+        "holder_type": row.get("holder_type") or "agent",
+        "waiting_on": row.get("waiting_on"),
+        "age_seconds": age_s,
+        "is_yours": bool(row.get("awaiting_is_you")),
+        "handoff_event_id": row.get("awaiting_handoff_event_id"),
+        "workflow_id": row.get("workflow_id"),
+        "workflow": row.get("workflow_name"),
+        "stuck_reason": _work_stuck_reason(row, column, age_s),
+        "standing": bool(row.get("standing")),
+        "awaiting_human_name": row.get("awaiting_human_name"),
+    }
+
+
+def _fetch_work_cards(
+    account_id: int | None,
+    viewer_user_id: int | None,
+    workflow_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Same fetch as GET /work/summary / GET /work/board — one unfiltered
+    (or workflow-filtered) get_work_board, then the card projection."""
+    now_ns = time.time_ns()
+    rows = database.get_work_board(
+        account_id,
+        viewer_user_id=viewer_user_id,
+        workflow_id=workflow_id,
+        now_ns=now_ns,
+    )
+    return [_work_card(r, now_ns) for r in rows]
+
+
+def _kind_rollups(cards: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Kind/stuck/waiting rollups matching GET /work/summary grouping."""
+    kinds: dict[int | None, dict[str, Any]] = {}
+    for c in cards:
+        key = c.get("workflow_id")
+        k = kinds.setdefault(
+            key,
+            {
+                "workflow_id": key,
+                "name": c.get("workflow") or "Other work",
+                "in_motion": 0, "waiting_person": 0, "stuck": 0,
+                "done_today": 0, "ongoing": 0,
+            },
+        )
+        if c.get("standing"):
+            field = "ongoing"
+        else:
+            field = {
+                "working": "in_motion",
+                "waiting_person": "waiting_person",
+                "stuck": "stuck",
+                "done": "done_today",
+            }.get(c.get("column"), "in_motion")
+        k[field] += 1
+
+    def _card(d: dict[str, Any], is_other: bool) -> dict[str, Any]:
+        return {
+            "workflow_id": d["workflow_id"],
+            "name": d["name"],
+            "in_motion": d["in_motion"],
+            "waiting_person": d["waiting_person"],
+            "stuck": d["stuck"],
+            "done_today": d["done_today"],
+            "ongoing": d["ongoing"],
+            "is_other": is_other,
+        }
+
+    declared = [_card(d, False) for wid, d in kinds.items() if wid is not None]
+    other = _card(kinds[None], True) if None in kinds else None
+    declared.sort(
+        key=lambda k: (
+            -(k["waiting_person"] + k["stuck"]),
+            -(k["in_motion"] + k["done_today"]),
+            k["name"].lower(),
+        )
+    )
+    return declared, other
+
+
+def _slim_event(ev: dict[str, Any]) -> dict[str, Any]:
+    payload = ev.get("payload") or {}
+    slim_payload = {
+        k: payload.get(k)
+        for k in (
+            "direction", "target_id", "target_name", "handoff_id",
+            "span_name", "tool", "failed", "error", "reason",
+        )
+        if payload.get(k) not in (None, "", False)
+    }
+    out = {
+        "type": ev.get("type"),
+        "sentence": _cap(ev.get("sentence"), 240),
+        "actor_type": ev.get("actor_type"),
+        "actor": ev.get("actor"),
+        "ts": ev.get("ts"),
+    }
+    if slim_payload:
+        out["payload"] = slim_payload
+    return out
+
+
+def _slim_segment(seg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "holder_type": seg.get("holder_type"),
+        "holder": seg.get("holder"),
+        "waiting": bool(seg.get("waiting")),
+        "start_ns": seg.get("start_ns"),
+        "end_ns": seg.get("end_ns"),
+        "event_count": seg.get("event_count") or 0,
+    }
+
+
+def _yours_strip(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Same filter/sort as GET /work/summary `yours`."""
+    yours = [c for c in cards if c.get("is_yours")]
+    yours.sort(key=lambda c: -(c.get("age_seconds") or 0))
+    return [
+        {
+            "id": c["id"],
+            "title": c["title"],
+            "age_seconds": c.get("age_seconds"),
+            "holder": c.get("holder"),
+            "workflow": c.get("workflow"),
+            "handoff_event_id": c.get("handoff_event_id"),
+        }
+        for c in yours
+    ]
+
+
+def _find_tasks(
+    cards: list[dict[str, Any]],
+    query: str,
+    include_yours: bool,
+) -> list[dict[str, Any]]:
+    q = (query or "").strip().lower()
+    matched = cards
+    if q:
+        matched = [
+            c for c in cards
+            if q in (c.get("title") or "").lower() or q in str(c.get("id"))
+        ]
+    out: list[dict[str, Any]] = []
+    for c in matched[:_TOOL_ITEMS_CAP]:
+        item = {
+            "id": c["id"],
+            "title": c["title"],
+            "column": c.get("column"),
+            "state": c.get("state"),
+            "stuck_reason": c.get("stuck_reason"),
+            "waiting_on": c.get("waiting_on"),
+            "holder": c.get("holder"),
+            "age_seconds": c.get("age_seconds"),
+            "workflow": c.get("workflow"),
+            "workflow_id": c.get("workflow_id"),
+        }
+        if include_yours:
+            item["is_yours"] = bool(c.get("is_yours"))
+        out.append(item)
+    return out
+
+
+def _task_story(
+    loop_id: int,
+    account_id: int | None,
+    viewer_user_id: int | None,
+) -> dict[str, Any]:
+    loop = database.get_loop(loop_id, account_id, viewer_user_id=viewer_user_id)
+    if loop is None:
+        return {"error": "task not found"}
+    stream = database.get_loop_stream(loop_id, account_id) or []
+    narrated = loops.narrate_events(stream)
+    segments = loops.compute_loop_segments(stream)
+    now_ns = time.time_ns()
+    # Prefer the board row when the task is on today's board so holder /
+    # waiting_on / stuck_reason match WorkTab. Fall back to loop + segments.
+    board_cards = _fetch_work_cards(account_id, viewer_user_id)
+    card = next((c for c in board_cards if c["id"] == loop_id), None)
+    last_seg = segments[-1] if segments else None
+    column = (card or {}).get("column") or _STATE_TO_COLUMN.get(
+        loop.get("cached_state") or "", "working"
+    )
+    age_s = (card or {}).get("age_seconds")
+    if age_s is None:
+        last = loop.get("last_event_unix")
+        age_s = (
+            max(0, int((now_ns - int(last)) // 1_000_000_000)) if last else None
+        )
+    holder = (
+        (card or {}).get("holder")
+        or loop.get("awaiting_human_name")
+        or (last_seg or {}).get("holder")
+        or loop.get("service_name")
+        or "an agent"
+    )
+    waiting_on = (card or {}).get("waiting_on") or loop.get("awaiting_human_name")
+    out = {
+        "id": loop["id"],
+        "title": _work_title({**loop, "holder_name": holder}),
+        "state": loop.get("cached_state") or "",
+        "column": column,
+        "holder": holder,
+        "holder_type": (card or {}).get("holder_type") or (last_seg or {}).get("holder_type"),
+        "waiting_on": waiting_on,
+        "awaiting_human_name": loop.get("awaiting_human_name"),
+        "age_seconds": age_s,
+        "stuck_reason": (card or {}).get("stuck_reason"),
+        "workflow": loop.get("workflow_name"),
+        "workflow_id": loop.get("workflow_id"),
+        "handoff_event_id": loop.get("awaiting_handoff_event_id"),
+        "events": [_slim_event(e) for e in narrated[-_TOOL_EVENTS_CAP:]],
+        "event_count": len(narrated),
+        "segments": [_slim_segment(s) for s in segments[-_TOOL_SEGMENTS_CAP:]],
+    }
+    if viewer_user_id is not None:
+        out["is_yours"] = bool(loop.get("awaiting_is_you"))
+    return out
+
+
+def _run_tool(
+    name: str,
+    inp: dict[str, Any] | None,
+    account_id: int | None,
+    viewer_user_id: int | None = None,
+) -> str:
     """Execute one read-only Ask tool, scoped to `account_id`. Returns a JSON
     string for the model. Never raises — failures return a readable message so
-    the loop keeps going."""
+    the loop keeps going. `viewer_user_id` is required for is_yours / "me"."""
     try:
         inp = inp or {}
         svc = inp.get("service_name")
         aid = inp.get("agent_id")
+
+        if name == "get_waiting_on_me":
+            if viewer_user_id is None:
+                return json.dumps({
+                    "signed_in": False,
+                    "message": _SIGN_IN_FOR_ME,
+                    "tasks": [],
+                })
+            cards = _fetch_work_cards(account_id, viewer_user_id)
+            tasks = _yours_strip(cards)
+            return json.dumps({"signed_in": True, "count": len(tasks), "tasks": tasks})
+
+        if name == "get_work_overview":
+            cards = _fetch_work_cards(account_id, viewer_user_id)
+            declared, other = _kind_rollups(cards)
+            totals = {
+                "in_motion": 0, "waiting_person": 0, "stuck": 0,
+                "done_today": 0, "ongoing": 0,
+            }
+            for k in declared + ([other] if other else []):
+                for field in totals:
+                    totals[field] += k[field]
+            out: dict[str, Any] = {
+                "total": len(cards),
+                "kinds": declared,
+                "other": other,
+                **totals,
+            }
+            if viewer_user_id is None:
+                out["signed_in"] = False
+                out["note"] = (
+                    "Sign in to see which tasks are waiting on you. "
+                    "Rollups above are account-wide, not personal."
+                )
+            else:
+                yours = _yours_strip(cards)
+                out["signed_in"] = True
+                out["yours_count"] = len(yours)
+                out["yours"] = yours
+            return json.dumps(out)
+
+        if name == "find_tasks":
+            workflow_id = _as_int(inp.get("workflow_id"))
+            cards = _fetch_work_cards(
+                account_id, viewer_user_id, workflow_id=workflow_id,
+            )
+            query = inp.get("query")
+            if query is None:
+                query = inp.get("title") or ""
+            tasks = _find_tasks(
+                cards, str(query), include_yours=viewer_user_id is not None,
+            )
+            return json.dumps({"count": len(tasks), "tasks": tasks})
+
+        if name == "get_task_story":
+            loop_id = _as_int(inp.get("loop_id"))
+            if loop_id is None:
+                loop_id = _as_int(inp.get("id") or inp.get("task_id"))
+            if loop_id is None:
+                return json.dumps({"error": "loop_id is required"})
+            return json.dumps(
+                _task_story(loop_id, account_id, viewer_user_id), default=str,
+            )
 
         if name == "list_agents":
             groups = database.get_agents(account_id=account_id)
@@ -849,10 +1321,12 @@ def _agentic_answer(
     account_id: int | None,
     messages: list[dict[str, str]],
     seed_context: str,
+    viewer_user_id: int | None = None,
 ) -> str:
     """Run the tool-use loop: hand Claude the seed context + tools, execute any
     tool calls against the account's data, and repeat until it answers (or the
-    iteration cap forces a wrap-up). Returns the final text."""
+    iteration cap forces a wrap-up). Returns the final text.
+    `viewer_user_id` is threaded into every tool so is_yours is never guessed."""
     convo = list(_normalize_messages(messages))
     system = (
         system_prompt
@@ -884,7 +1358,10 @@ def _agentic_answer(
             {
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": _run_tool(block.name, block.input, account_id),
+                "content": _run_tool(
+                    block.name, block.input, account_id,
+                    viewer_user_id=viewer_user_id,
+                ),
             }
             for block in resp.content
             if getattr(block, "type", None) == "tool_use"
