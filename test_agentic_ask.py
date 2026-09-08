@@ -118,7 +118,8 @@ def main():
 
     tool_names = {t["name"] for t in asker._ASK_TOOLS}
     check("work-record tools are registered",
-          {"get_waiting_on_me", "get_work_overview", "find_tasks", "get_task_story"} <= tool_names)
+          {"get_waiting_on_me", "get_work_overview", "get_work_items",
+           "find_tasks", "get_task_story"} <= tool_names)
     schemas = json.dumps(asker._ASK_TOOLS)
     check("account_id is not in any tool schema (server-bound)",
           "account_id" not in schemas and "viewer_user_id" not in schemas)
