@@ -1110,6 +1110,7 @@ CREATE TABLE IF NOT EXISTS loops (
     service_name      TEXT    NOT NULL,
     agent_id          TEXT    NOT NULL DEFAULT 'main',
     title             TEXT,
+    title_source      TEXT,
     initiated_by_type TEXT    NOT NULL DEFAULT 'agent'
                       CHECK (initiated_by_type IN ('agent', 'human')),
     initiated_by      TEXT    NOT NULL DEFAULT '',
@@ -1128,6 +1129,7 @@ CREATE TABLE IF NOT EXISTS loops (
     service_name      TEXT    NOT NULL,
     agent_id          TEXT    NOT NULL DEFAULT 'main',
     title             TEXT,
+    title_source      TEXT,
     initiated_by_type TEXT    NOT NULL DEFAULT 'agent'
                       CHECK (initiated_by_type IN ('agent', 'human')),
     initiated_by      TEXT    NOT NULL DEFAULT '',
@@ -1498,6 +1500,11 @@ def init_db() -> None:
                 "participant_type IN",
                 _LOOP_PARTICIPANTS_DDL_SQLITE,
             )
+        # Named work vs generated labels. Plugin/operator titles
+        # (`trovis.loop.title` at ingest) are `provided`; LLM/template
+        # titles from ensure_loop_title are `generated`. Work home only
+        # counts provided titles — generated ones are the OTel flood.
+        _try_add_column(cur, "loops", "title_source", "TEXT DEFAULT NULL")
         # Workloops: link each span to the loop it belongs to. Nullable —
         # historical spans are never backfilled, and non-ingest writers
         # (MCP synthetic spans) stay loop-less. Set at INSERT time only;
@@ -1505,6 +1512,9 @@ def init_db() -> None:
         # FK: SQLite's ALTER ADD COLUMN can't enforce one, and the two
         # backends must stay schema-identical.
         _try_add_column(cur, "spans", "loop_id", "INTEGER DEFAULT NULL")
+        # After loop_id exists: classify leftover titles from before
+        # title_source. No-op on a fresh DB (no titled loops yet).
+        _backfill_loop_title_source(cur)
         for idx in _INDEXES:
             cur.execute(idx)
         # Bootstrap the pricing table with a handful of common models so
@@ -2492,19 +2502,24 @@ def _resolve_loop_for_span(
         cache[cache_key] = loop_id
         return loop_id
 
-    title = attr(attrs, "loop.title")
+    raw_title = attr(attrs, "loop.title")
+    title = str(raw_title).strip()[:120] if raw_title else None
+    if not title:
+        title = None
     actor = lp.agent_actor(service_name, agent_id)
     loop_id = _insert_returning_id(
         cur,
         "INSERT INTO loops (account_id, external_id, service_name, agent_id, "
-        "title, initiated_by_type, initiated_by, cached_state, last_event_unix) "
-        f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'agent', {PH}, 'open', {PH})",
+        "title, title_source, initiated_by_type, initiated_by, cached_state, "
+        "last_event_unix) "
+        f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, 'agent', {PH}, 'open', {PH})",
         (
             account_id,
             key,
             service_name,
             agent_id,
-            str(title) if title else None,
+            title,
+            _TITLE_SOURCE_PROVIDED if title else None,
             actor,
             ts_ns,
         ),
@@ -2908,6 +2923,40 @@ def abandon_loop(loop_id: int, account_id: int | None = None) -> bool:
 # Loop titles (server-side generation support)
 # ---------------------------------------------------------------------------
 
+_TITLE_SOURCE_PROVIDED = "provided"
+_TITLE_SOURCE_GENERATED = "generated"
+
+
+def _backfill_loop_title_source(cur) -> None:
+    """Classify existing loops.title as provided vs generated. Idempotent.
+
+    Plugin/operator titles arrive as `trovis.loop.title` (or oversee.*) on a
+    span at ingest and are stored on the loop at INSERT. Trovis-generated
+    titles (LLM / `{agent} · {tool} · N actions` template) are written later
+    by set_loop_title_if_missing and never stamped onto spans.
+
+    Work home (#120 lean endpoints) must only count provided titles; treating
+    any non-empty title as named work is what flooded overview with OTel
+    loops. Rows that already have title_source are left alone.
+    """
+    cur.execute(
+        f"UPDATE loops SET title_source = '{_TITLE_SOURCE_PROVIDED}' "
+        "WHERE title_source IS NULL "
+        "AND title IS NOT NULL AND TRIM(title) != '' "
+        "AND EXISTS ("
+        "  SELECT 1 FROM spans s "
+        "  WHERE s.loop_id = loops.id "
+        "    AND s.attributes LIKE '%' || loops.title || '%' "
+        "    AND (s.attributes LIKE '%\"trovis.loop.title\"%' "
+        "      OR s.attributes LIKE '%\"oversee.loop.title\"%')"
+        ")"
+    )
+    cur.execute(
+        f"UPDATE loops SET title_source = '{_TITLE_SOURCE_GENERATED}' "
+        "WHERE title_source IS NULL "
+        "AND title IS NOT NULL AND TRIM(title) != ''"
+    )
+
 
 def get_loop_title_shape(loop_id: int, account_id: int | None) -> dict[str, Any] | None:
     """The metadata-only 'shape' a title is generated from: agent identity,
@@ -2994,7 +3043,7 @@ def set_loop_title_if_missing(
     wins, forever. Returns True only when this call set it."""
     if not title:
         return False
-    sql = f"UPDATE loops SET title = {PH} WHERE id = {PH} AND title IS NULL"
+    sql = f"UPDATE loops SET title = {PH}, title_source = 'generated' WHERE id = {PH} AND title IS NULL"
     args: list[Any] = [str(title)[:120], loop_id]
     if account_id is not None:
         sql += f" AND account_id = {PH}"
@@ -3937,7 +3986,14 @@ def get_work_board(
 # open loop, join span aggregates, and fold the full event stream — 75–120s
 # on a busy tenant, which starves the single Uvicorn replica).
 #
-# Named work = loops.title present. Untitled rows are the raw OTel flood.
+# Named work = a REAL human title, provided at ingest (`trovis.loop.title`)
+# and stored as title_source='provided'. Untitled rows, Trovis-generated
+# labels (LLM / `{agent} · {tool} · N actions` template), and display
+# fallbacks ("Task from main") are the raw OTel / "Other work" flood and
+# do not belong on the Monday table or in overview counts.
+#
+# Architecture: loops without a named work item (or open Suggestion) do
+# not appear in the main table. Same for overview counts.
 #
 # Status (wire): waiting_on_you | waiting_on_other | stuck | moving | done
 #   waiting_on_other stays that enum; the UI label is "Waiting on someone".
@@ -3950,10 +4006,35 @@ def get_work_board(
 #   open             = named, still open
 #   completed_week   = named, closed in the last 7 days
 
-_NAMED_TITLE_SQL = "l.title IS NOT NULL AND TRIM(l.title) != ''"
+# Shell titles: stored fallbacks / templates that look like a name but
+# aren't a human-provided work item. Excluded even if title_source slipped.
+_SHELL_TITLE_SQL = (
+    "("
+    "LOWER(l.title) LIKE 'task from %' "
+    "OR l.title LIKE '% · % · % actions'"
+    ")"
+)
+_NAMED_TITLE_SQL = (
+    "l.title IS NOT NULL AND TRIM(l.title) != '' "
+    f"AND l.title_source = '{_TITLE_SOURCE_PROVIDED}' "
+    f"AND NOT {_SHELL_TITLE_SQL}"
+)
 _WORK_ITEMS_DEFAULT_LIMIT = 50
 _WORK_ITEMS_MAX_LIMIT = 100
 _WORK_COMPLETED_WEEK_DAYS = 7
+
+
+def _is_shell_work_title(title: str | None) -> bool:
+    """True for untitled / Task-from-X / template-title shells."""
+    t = (title or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if low.startswith("task from "):
+        return True
+    if " · " in t and t.endswith(" actions"):
+        return True
+    return False
 
 
 def _work_account_sql(account_id: int | None) -> tuple[str, list[Any]]:
@@ -4012,11 +4093,14 @@ def get_work_overview(
     viewer_user_id: int | None = None,
     now_ns: int | None = None,
 ) -> dict[str, int]:
-    """Counts only. Named work. No span aggregates, no full-board event fold.
+    """Counts only. Named work (plugin-provided human titles). No span
+    aggregates, no full-board event fold.
 
     needs_you uses the bounded assignee scan (attention-state loops, cap
     500) — not get_work_board. needs_attention is a SQL state/age count
     minus those same ids so waiting_on_you is never double-counted.
+
+    Generated titles (LLM / template / Task-from-X shells) are excluded.
     """
     now_ns = now_ns if now_ns is not None else time.time_ns()
     lp = _loops_mod()
@@ -4211,8 +4295,9 @@ def get_work_items(
     limit: int = _WORK_ITEMS_DEFAULT_LIMIT,
     now_ns: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Paginated named items for the Work home table. No untitled OTel flood,
-    no span-cost aggregates, no full-fleet event scan — events load for this
+    """Paginated named items for the Work home table. Plugin-provided human
+    titles only — no untitled OTel flood, no Trovis-generated labels, no
+    span-cost aggregates, no full-fleet event scan. Events load for this
     page only."""
     now_ns = now_ns if now_ns is not None else time.time_ns()
     limit = max(1, min(int(limit or _WORK_ITEMS_DEFAULT_LIMIT), _WORK_ITEMS_MAX_LIMIT))
@@ -4223,8 +4308,8 @@ def get_work_items(
     key = _decode_work_items_cursor(cursor)
 
     sql = (
-        "SELECT l.id, l.title, l.cached_state, l.last_event_unix, l.closed_at, "
-        "       l.created_at, l.service_name, l.agent_id "
+        "SELECT l.id, l.title, l.title_source, l.cached_state, l.last_event_unix, "
+        "       l.closed_at, l.created_at, l.service_name, l.agent_id "
         "FROM loops l "
         f"WHERE {_NAMED_TITLE_SQL}{acct_sql} "
         f"AND (l.closed_at IS NULL OR l.closed_at >= {PH}) "
@@ -4253,7 +4338,11 @@ def get_work_items(
     items: list[dict[str, Any]] = []
     for r in rows:
         title = (r.get("title") or "").strip()
-        if not title:
+        if (
+            not title
+            or r.get("title_source") != _TITLE_SOURCE_PROVIDED
+            or _is_shell_work_title(title)
+        ):
             continue
         items.append(
             {

@@ -94,12 +94,12 @@ check("database.py: exactly two INSERT INTO workflow_versions",
 # single NULL-guarded UPDATE in set_loop_title_if_missing: plugin titles are
 # never replaced, generated titles never overwritten.
 check("database.py: UPDATE loops SET title pinned at 1 (set_loop_title_if_missing)",
-      count("database.py", "UPDATE loops SET title") == 1)
+      count("database.py", "UPDATE loops SET title =") == 1)
 check("database.py: the title write is NULL-guarded (first title wins forever)",
-      "UPDATE loops SET title = {PH} WHERE id = {PH} AND title IS NULL"
+      "UPDATE loops SET title = {PH}, title_source = 'generated' WHERE id = {PH} AND title IS NULL"
       in text["database.py"])
 for path in [p for p in SOURCES if p != "database.py"]:
-    check(f"{path}: no UPDATE loops SET title", count(path, "UPDATE loops SET title") == 0)
+    check(f"{path}: no UPDATE loops SET title", count(path, "UPDATE loops SET title =") == 0)
 
 print()
 if failures:
