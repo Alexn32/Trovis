@@ -14,6 +14,13 @@
 // then validates the chosen key on mount and falls back to the login
 // screen on 401.
 
+import {
+  DEFAULT_TIMEOUT_MS,
+  LLM_TIMEOUT_MS,
+  RESTORE_TIMEOUT_MS,
+  fetchWithTimeout,
+} from './httpTimeout.js'
+
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 const LS_KEY = 'trovis_api_key'
 const LS_TOKEN = 'trovis_session_token'
@@ -89,7 +96,10 @@ export function clearSessionToken() {
 }
 
 async function request(path, options = {}) {
-  const headers = { ...(options.headers || {}) }
+  // `timeoutMs` is ours — native fetch would ignore (or in some runtimes
+  // reject) an unknown option. Strip it before the wire call.
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, headers: extraHeaders, ...fetchOpts } = options
+  const headers = { ...(extraHeaders || {}) }
   // Prefer the human session; the API key (agent/legacy) rides along too.
   if (SESSION_TOKEN && !headers['Authorization']) {
     headers['Authorization'] = `Bearer ${SESSION_TOKEN}`
@@ -98,10 +108,10 @@ async function request(path, options = {}) {
     headers['X-Trovis-Api-Key'] = API_KEY
   }
   // Default content-type for POSTs with a body
-  if (options.body && !headers['Content-Type']) {
+  if (fetchOpts.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json'
   }
-  const res = await fetch(`${BASE}${path}`, { ...options, headers })
+  const res = await fetchWithTimeout(`${BASE}${path}`, { ...fetchOpts, headers }, timeoutMs)
   if (!res.ok) {
     let body
     try {
@@ -154,6 +164,7 @@ export const api = {
         `/agents/${encodeURIComponent(name)}/drift${refresh ? '?refresh=true' : ''}`,
         agentId,
       ),
+      { timeoutMs: LLM_TIMEOUT_MS },
     ),
   getAgentSpans: (name, limit = 50, agentId) =>
     request(
@@ -165,7 +176,7 @@ export const api = {
   describeAgent: (name, agentId) =>
     request(
       _withAgent(`/agents/${encodeURIComponent(name)}/describe`, agentId),
-      { method: 'POST' },
+      { method: 'POST', timeoutMs: LLM_TIMEOUT_MS },
     ),
   // Registration is optional — 404 is a normal "no registration yet"
   // result, so callers should accept null gracefully.
@@ -195,6 +206,7 @@ export const api = {
   getWeeklySummary: (name, agentId) =>
     request(
       _withAgent(`/agents/${encodeURIComponent(name)}/weekly`, agentId),
+      { timeoutMs: LLM_TIMEOUT_MS },
     ),
   // Capability map. Three lists (reads_from / writes_to / can_do).
   // Cached for 24 hours.
@@ -204,6 +216,7 @@ export const api = {
         `/agents/${encodeURIComponent(name)}/capabilities`,
         agentId,
       ),
+      { timeoutMs: LLM_TIMEOUT_MS },
     ),
   // Token usage + estimated cost over the last `days` days, with
   // per-day and per-model breakdowns.
@@ -259,6 +272,7 @@ export const api = {
     request('/workflows/draft', {
       method: 'POST',
       body: JSON.stringify({ description }),
+      timeoutMs: LLM_TIMEOUT_MS,
     }),
 
   // --- team + ownership ---
@@ -296,6 +310,7 @@ export const api = {
     request('/ask', {
       method: 'POST',
       body: JSON.stringify({ messages }),
+      timeoutMs: LLM_TIMEOUT_MS,
     }),
   askAboutAgent: (name, messages, agentId) =>
     request(
@@ -303,6 +318,7 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify({ messages }),
+        timeoutMs: LLM_TIMEOUT_MS,
       },
     ),
 
@@ -333,7 +349,7 @@ export const api = {
   testAlert: () => request('/account/alerts/test', { method: 'POST' }),
 
   // --- dashboard (daily briefing) ---
-  getBriefing: () => request('/dashboard/briefing'),
+  getBriefing: () => request('/dashboard/briefing', { timeoutMs: LLM_TIMEOUT_MS }),
   getAttention: () => request('/dashboard/attention'),
   getCost: () => request('/dashboard/cost'),
   getWorkFeed: () => request('/dashboard/work-feed'),
@@ -402,6 +418,7 @@ export const api = {
     request('/dashboard/ask', {
       method: 'POST',
       body: JSON.stringify({ messages }),
+      timeoutMs: LLM_TIMEOUT_MS,
     }),
 
   // Guided add-agent chat ("Set up with AI"). Returns { answer, options, code }.
@@ -409,6 +426,7 @@ export const api = {
     request('/connect/ask', {
       method: 'POST',
       body: JSON.stringify({ messages }),
+      timeoutMs: LLM_TIMEOUT_MS,
     }),
 
   // --- auth (real users + orgs) ---
@@ -417,7 +435,7 @@ export const api = {
   login: (data) =>
     request('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
-  me: () => request('/auth/me'),
+  me: () => request('/auth/me', { timeoutMs: RESTORE_TIMEOUT_MS }),
   claim: (data) =>
     request('/auth/claim', { method: 'POST', body: JSON.stringify(data) }),
   setPassword: (data) =>
@@ -459,6 +477,7 @@ export const api = {
     request('/connections/from-description', {
       method: 'POST',
       body: JSON.stringify({ description }),
+      timeoutMs: LLM_TIMEOUT_MS,
     }),
   addConnection: (data) =>
     request('/connections', { method: 'POST', body: JSON.stringify(data) }),
@@ -471,9 +490,10 @@ export const api = {
 
   // Validate the current credential (session or API key) via /auth/me.
   // Returns the {user, org, auth} payload on success, null on 401.
+  // Hard-timeout: a hung Railway/API must abort, not pin `restoring`.
   async validateSession() {
     try {
-      return await request('/auth/me')
+      return await request('/auth/me', { timeoutMs: RESTORE_TIMEOUT_MS })
     } catch (e) {
       if (e.status === 401) return null
       throw e

@@ -24,6 +24,7 @@ import {
   clearSessionToken,
   getSessionToken,
 } from './api.js'
+import { restoreSession } from './sessionRestore.js'
 import {
   MonitorIcon,
   MoonIcon,
@@ -118,6 +119,9 @@ function AppInner() {
   const hadCredential = getSessionToken() || getApiKey()
   const [me, setMe] = useState(null)
   const [restoring, setRestoring] = useState(!!hadCredential && !inviteToken && !resetToken)
+  // True when /auth/me timed out or the network failed. Token is KEPT so Retry
+  // can reuse it; `restoring` is cleared so this cannot spin forever.
+  const [restoreFailed, setRestoreFailed] = useState(false)
   // Logged-out front door: show the marketing landing first, then the Login
   // flow when the visitor clicks a CTA. authMode picks which Login panel opens.
   const [authView, setAuthView] = useState('landing') // 'landing' | 'auth'
@@ -146,25 +150,38 @@ function AppInner() {
 
   // Validate the saved credential on first mount (skip when landing on an
   // invite link — the visitor should see the accept form first).
+  //
+  // Bug: `validateSession` → GET /auth/me used a bare fetch with no
+  // AbortSignal. `restoring` only cleared when that promise settled, so a
+  // hung Railway/API left the shell on "Restoring session..." forever.
+  // `validateSession` now aborts at RESTORE_TIMEOUT_MS (10s); timeout /
+  // network fail-softs (one retry with backoff) and never spins.
+  function applyRestore(decision) {
+    if (decision.clearCredentials) {
+      clearSessionToken()
+      clearApiKey()
+    }
+    setMe(decision.me)
+    setRestoring(false)
+    setRestoreFailed(decision.restoreFailed)
+    if (decision.signedOut) {
+      setAuthView('auth')
+      setAuthMode('login')
+    }
+  }
+
+  function runRestore() {
+    setRestoreFailed(false)
+    setRestoring(true)
+    return restoreSession({ validate: () => api.validateSession() }).then(applyRestore)
+  }
+
   useEffect(() => {
     if (!hadCredential || inviteToken) return
     let cancelled = false
-    api
-      .validateSession()
-      .then((payload) => {
-        if (cancelled) return
-        if (!payload) {
-          clearSessionToken()
-          clearApiKey()
-          setMe(null)
-        } else {
-          setMe(payload)
-        }
-        setRestoring(false)
-      })
-      .catch(() => {
-        if (!cancelled) setRestoring(false)
-      })
+    restoreSession({ validate: () => api.validateSession() }).then((decision) => {
+      if (!cancelled) applyRestore(decision)
+    })
     return () => {
       cancelled = true
     }
@@ -233,6 +250,38 @@ function AppInner() {
           </header>
           <div className="login-body">
             <p className="login-prompt">Restoring session…</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // API unreachable (timeout / network). Token is still in localStorage —
+  // Retry re-runs validateSession; Sign in opens the login form.
+  if (restoreFailed && !me) {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <header className="login-header">
+            <TrovisLogo />
+          </header>
+          <div className="login-body">
+            <p className="login-prompt">Can't reach Trovis</p>
+            <p className="login-note">
+              The API didn't respond. Your session is still saved — retry, or sign in again.
+            </p>
+            <div className="login-actions">
+              <button type="button" className="btn btn-primary btn-block" onClick={runRestore}>
+                Retry
+              </button>
+              <button
+                type="button"
+                className="btn btn-link"
+                onClick={() => setRestoreFailed(false)}
+              >
+                Sign in
+              </button>
+            </div>
           </div>
         </div>
       </div>
