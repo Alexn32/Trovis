@@ -3043,10 +3043,7 @@ def set_loop_title_if_missing(
     wins, forever. Returns True only when this call set it."""
     if not title:
         return False
-    sql = (
-        f"UPDATE loops SET title = {PH}, title_source = 'generated' "
-        f"WHERE id = {PH} AND title IS NULL"
-    )
+    sql = f"UPDATE loops SET title = {PH}, title_source = 'generated' WHERE id = {PH} AND title IS NULL"
     args: list[Any] = [str(title)[:120], loop_id]
     if account_id is not None:
         sql += f" AND account_id = {PH}"
