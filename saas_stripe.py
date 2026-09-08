@@ -4,10 +4,32 @@ Isolated from ``billing.py``. The Trovis *plan* webhook lives at
 ``POST /billing/webhook`` and uses ``STRIPE_WEBHOOK_SECRET``. This adapter
 never reads that secret and never writes a plan.
 
+Connect mapping contract (V1, folded here — surviving Stripe PR A):
+
+  Link metadata (require one, first present wins):
+    trovis_loop_external_id | trovis.loop.external_id |
+    trovis_run_id | trovis.run.id
+    → open loop on this Trovis account; else no-op. Never invent a loop.
+
+  Events:
+    payment_intent.processing      → wait
+    payment_intent.succeeded       → clear
+    payment_intent.payment_failed  → stuck
+    invoice.paid                   → clear
+    invoice.payment_failed         → stuck
+    charge.dispute.created         → stuck
+    charge.dispute.closed          → clear if won, else stuck
+
+  Locks:
+    explicit metadata only; never touch /billing/webhook;
+    separate Work webhook secret (STRIPE_SAAS_WEBHOOK_SECRET);
+    Stripe brand coming→live only after E2E;
+    no HubSpot / Slack / GitHub / Intercom in this PR.
+
 Env (read live, never cached):
   STRIPE_SAAS_CLIENT_ID        ca_...  — Connect OAuth client
   STRIPE_SAAS_CLIENT_SECRET    sk_... / client secret
-  STRIPE_SAAS_WEBHOOK_SECRET   whsec_...  — SaaS webhook only
+  STRIPE_SAAS_WEBHOOK_SECRET   whsec_...  — SaaS / Work webhook only
   STRIPE_SAAS_REDIRECT_URI     optional override of the OAuth callback
 """
 from __future__ import annotations
@@ -43,13 +65,8 @@ EVENT_MAP = {
     "invoice.paid": saas.EFFECT_CLEAR,
     "invoice.payment_failed": saas.EFFECT_STUCK,
     "charge.dispute.created": saas.EFFECT_STUCK,
-    "charge.dispute.closed": None,  # status-based; see _dispute_closed_effect
+    "charge.dispute.closed": None,  # status-based: clear iff won
 }
-
-# Dispute statuses that mean "closed cleanly" → clear the wait.
-_DISPUTE_CLEAR_STATUSES = frozenset({"won", "warning_closed"})
-# Lost (and cousins) stay stuck.
-_DISPUTE_STUCK_STATUSES = frozenset({"lost", "charge_refunded"})
 
 
 class StripeSaaSError(RuntimeError):
@@ -221,13 +238,11 @@ def _failure_reason(obj: dict[str, Any]) -> str | None:
 
 
 def _dispute_closed_effect(obj: dict[str, Any]) -> str | None:
+    """charge.dispute.closed → clear if won, else stuck."""
     status = str(obj.get("status") or "").strip().lower()
-    if status in _DISPUTE_CLEAR_STATUSES:
+    if status == "won":
         return saas.EFFECT_CLEAR
-    if status in _DISPUTE_STUCK_STATUSES:
-        return saas.EFFECT_STUCK
-    # Unknown closed status: keep stuck (don't clear a dispute we can't read).
-    logger.info("[saas.stripe] dispute.closed status=%r — keep stuck", status)
+    logger.info("[saas.stripe] dispute.closed status=%r — stuck", status)
     return saas.EFFECT_STUCK
 
 

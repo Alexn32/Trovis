@@ -1,11 +1,14 @@
 """SaaS Work-event spine + Stripe adapter.
 
-Hard locks this file guards:
-  - No metadata → no-op (no invented loop).
-  - No matching open loop → ignore.
-  - /billing/webhook is isolated (plan gate only).
-  - Mapped Stripe events update wait / clear / stuck on an existing loop.
-  - Brand flip is covered in frontend/test/brandMarks.test.mjs (after E2E).
+Connect mapping contract (folded into Stripe PR A):
+  Link (require one): trovis_loop_external_id | trovis.loop.external_id |
+    trovis_run_id | trovis.run.id → open loop this account; else no-op.
+  Events: payment_intent.processing→wait; .succeeded→clear;
+    .payment_failed→stuck; invoice.paid→clear; invoice.payment_failed→stuck;
+    charge.dispute.created→stuck; charge.dispute.closed→clear if won else stuck.
+  Locks: explicit metadata only; never touch /billing/webhook;
+    separate Work webhook secret; Stripe brand coming→live only after E2E;
+    no HubSpot/Slack/GitHub/Intercom.
 
 Run:
   TROVIS_DISABLE_PRICING_SYNC=1 python3 test_saas_stripe.py
@@ -207,6 +210,16 @@ m = saas_stripe.map_event(event("charge.dispute.closed", {
     "id": "dp_1", "metadata": {"trovis_loop_external_id": "n1"}, "status": "lost",
 }))
 check("dispute.closed lost → stuck", m and m["effect"] == "stuck")
+m = saas_stripe.map_event(event("charge.dispute.closed", {
+    "id": "dp_1", "metadata": {"trovis_loop_external_id": "n1"}, "status": "warning_closed",
+}))
+check("dispute.closed warning_closed → stuck (clear only if won)",
+      m and m["effect"] == "stuck")
+m = saas_stripe.map_event(event("charge.dispute.closed", {
+    "id": "dp_1", "metadata": {"trovis_loop_external_id": "n1"}, "status": "charge_refunded",
+}))
+check("dispute.closed charge_refunded → stuck",
+      m and m["effect"] == "stuck")
 check("checkout.session.completed is unmapped (billing-only)",
       saas_stripe.map_event(event("checkout.session.completed", {"id": "cs_1"})) is None)
 check("customer.subscription.updated is unmapped",

@@ -10,11 +10,10 @@ hand a structured event here. The spine then:
   3. Applies wait / clear / stuck via existing loop_events
      (to_system handoff toward the SaaS holder).
 
-V1 link keys (first present wins):
-  trovis_loop_external_id
-  trovis.loop.external_id
-  trovis_run_id
-  trovis.run.id
+V1 link keys (require one; first present wins):
+  trovis_loop_external_id | trovis.loop.external_id |
+  trovis_run_id | trovis.run.id
+  → open loop on this Trovis account; else no-op.
 
 Effects:
   wait  — unresolved to_system (lean holder kind tool) toward the SaaS.
