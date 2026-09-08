@@ -17,7 +17,8 @@ import { lifecycleSentence } from './loops.js'
 // thermometer to change the weather. You CAN act on a card — resolving a
 // handoff writes a real event — which is a different thing entirely.
 
-const REFRESH_MS = 20000
+const REFRESH_MS = 60000
+const POLL_MAX_MS = 120000
 
 // ---------------------------------------------------------------------------
 
@@ -241,11 +242,26 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
 
   useEffect(() => {
     load()
-    const t = setInterval(() => {
-      if (failSoftRef.current) return
-      load()
-    }, REFRESH_MS)
-    return () => clearInterval(t)
+    let delay = REFRESH_MS
+    let timer
+    function schedule() {
+      timer = setTimeout(() => {
+        if (failSoftRef.current || (typeof document !== 'undefined' && document.hidden)) {
+          schedule()
+          return
+        }
+        Promise.resolve(load())
+          .then(() => {
+            delay = REFRESH_MS
+          })
+          .catch(() => {
+            delay = Math.min(delay * 2, POLL_MAX_MS)
+          })
+          .finally(schedule)
+      }, delay)
+    }
+    schedule()
+    return () => clearTimeout(timer)
   }, [load])
 
   if (!board && err) {

@@ -383,14 +383,28 @@ export const api = {
     ),
   // The whole Work board in one request: open work + today's finished work,
   // already bucketed, sorted, and with holders resolved server-side.
+  // FAT — do not call from home / Work L1. Use getWorkOverview + getWorkItems.
   getWorkBoard: (workflowId = null) =>
     request(
       `/work/board${workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''}`,
       { timeoutMs: WORK_TIMEOUT_MS },
     ),
-  // Level 1 of the Work tab: one rollup card per kind of work + the cross-
-  // workflow strip of tasks waiting on you. One request; the server groups.
+  // Legacy Level-1 rollup. FAT (loop-scans get_work_board). Home must not
+  // call this — Frontend wires the Monday table against overview + items.
   getWorkSummary: () => request('/work/summary', { timeoutMs: WORK_TIMEOUT_MS }),
+  // Lean Work home. Counts only: needs_you, needs_attention, open, completed_week.
+  getWorkOverview: () => request('/work/overview', { timeoutMs: WORK_TIMEOUT_MS }),
+  // Paginated named items for the Monday table. cursor from the previous
+  // page's next_cursor. Untitled OTel loops are excluded.
+  getWorkItems: ({ cursor = null, limit = 50 } = {}) => {
+    const q = new URLSearchParams()
+    if (limit) q.set('limit', String(limit))
+    if (cursor) q.set('cursor', cursor)
+    const qs = q.toString()
+    return request(`/work/items${qs ? `?${qs}` : ''}`, { timeoutMs: WORK_TIMEOUT_MS })
+  },
+  // Stub. Empty until suggestions ship. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
+  getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
   getLoop: (loopId) => request(`/loops/${loopId}`, { timeoutMs: WORK_TIMEOUT_MS }),

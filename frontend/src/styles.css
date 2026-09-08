@@ -6117,6 +6117,41 @@ select.wf2-input { cursor: pointer; }
   .yc { min-width: 200px; }
 }
 
+/* Lean Work home — overview chips + named-items table (Monday adapter) */
+.work-chips {
+  display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 20px;
+}
+.work-chip {
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 120px; padding: 12px 14px;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  border-radius: 10px;
+}
+.work-chip.is-warn { box-shadow: inset 3px 0 0 var(--warning); }
+.work-chip.is-stuck { box-shadow: inset 3px 0 0 var(--error); }
+.work-chip-value {
+  font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums;
+  color: var(--text-primary); letter-spacing: -0.02em;
+}
+.work-chip-label { font-size: 11.5px; color: var(--text-muted); }
+.work-table-wrap { overflow-x: auto; }
+.work-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.work-table th {
+  text-align: left; font-size: 10.5px; font-weight: 650;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-muted); padding: 8px 10px; border-bottom: 1px solid var(--border-default);
+}
+.work-table td {
+  padding: 10px; border-bottom: 1px solid var(--border-default);
+  color: var(--text-secondary); vertical-align: top;
+}
+.work-td-title { color: var(--text-primary); font-weight: 550; }
+.work-td-updated { color: var(--text-muted); white-space: nowrap; }
+.work-table tr.is-yours td { background: var(--warning-faint); }
+.work-more { margin: 12px 0 0; }
+
 /* --- always-on (ongoing) work: quiet line above the board, expands to cards --- */
 .board-ongoing { margin: 0 0 12px; }
 .board-ongoing-line {

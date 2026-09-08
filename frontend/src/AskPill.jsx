@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { AskVisualRenderer } from './AskVisuals.jsx'
 import { TrovisMark, SendIcon } from './Icons.jsx'
-import { FALLBACK_CHIPS, askSuggestions } from './askChips.js'
+import { FALLBACK_CHIPS } from './askChips.js'
 
 // Floating Ask pill + ⌘K slide-up chat panel. Rendered once at the
 // app-shell level so the assistant is reachable from every page.
@@ -14,7 +14,7 @@ export default function AskPill() {
   const [messages, setMessages] = useState([])
   const [pending, setPending] = useState(false)
   const [input, setInput] = useState('')
-  const [suggestions, setSuggestions] = useState(FALLBACK_CHIPS)
+  const [suggestions] = useState(FALLBACK_CHIPS)
 
   // ⌘K / Ctrl+K toggles; Escape closes.
   useEffect(() => {
@@ -29,23 +29,6 @@ export default function AskPill() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
-
-  // Prefetch the board when Ask opens so the stuck chip can name a real
-  // task. Failures keep the last chips — no error theater.
-  useEffect(() => {
-    if (!open) return
-    let alive = true
-    api
-      .getWorkBoard()
-      .then((board) => {
-        if (!alive || !board) return
-        setSuggestions(askSuggestions(board))
-      })
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [open])
 
   async function send(text) {
     const q = (text ?? input).trim()

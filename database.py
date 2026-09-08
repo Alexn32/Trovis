@@ -1301,6 +1301,9 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_workflows_account ON workflows(account_id, archived_at)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_versions ON workflow_versions(workflow_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_loops_workflow ON loops(account_id, workflow_id)",
+    # Lean Work home (overview + items) pages named loops by recency without
+    # the fat board's span-aggregate join.
+    "CREATE INDEX IF NOT EXISTS idx_loops_account_updated ON loops(account_id, last_event_unix DESC, id DESC)",
 ]
 
 
@@ -3925,6 +3928,351 @@ def get_work_board(
         _attach_awaiting_human(cur, rows, account_id, viewer_user_id)
         _attach_holders(cur, rows, account_id, now_ns=now_ns)
         return rows
+
+
+# ---------------------------------------------------------------------------
+# Lean Work home — overview counts + paginated named items
+# ---------------------------------------------------------------------------
+# Home must NEVER call get_work_board / the Level-1 summary (those load every
+# open loop, join span aggregates, and fold the full event stream — 75–120s
+# on a busy tenant, which starves the single Uvicorn replica).
+#
+# Named work = loops.title present. Untitled rows are the raw OTel flood.
+#
+# Status (wire): waiting_on_you | waiting_on_other | stuck | moving | done
+#   waiting_on_other stays that enum; the UI label is "Waiting on someone".
+# Holder kind: human | agent | tool | unassigned
+#
+# Overview:
+#   needs_you        = waiting_on_you ONLY
+#   needs_attention  = stuck + aging waiting_on_other
+#                      (waiting_on_you is never double-counted here)
+#   open             = named, still open
+#   completed_week   = named, closed in the last 7 days
+
+_NAMED_TITLE_SQL = "l.title IS NOT NULL AND TRIM(l.title) != ''"
+_WORK_ITEMS_DEFAULT_LIMIT = 50
+_WORK_ITEMS_MAX_LIMIT = 100
+_WORK_COMPLETED_WEEK_DAYS = 7
+
+
+def _work_account_sql(account_id: int | None) -> tuple[str, list[Any]]:
+    if account_id is None:
+        return "", []
+    return f" AND l.account_id = {PH}", [account_id]
+
+
+def _work_item_status(
+    *,
+    closed: bool,
+    to_human: bool,
+    is_you: bool,
+    cached_state: str,
+) -> str:
+    """Wire status. Human waits stay waiting_on_* even when the engine
+    has flipped them to stalled — aging is a count dimension, not a rename."""
+    if closed:
+        return "done"
+    if to_human and is_you:
+        return "waiting_on_you"
+    if to_human:
+        return "waiting_on_other"
+    if cached_state in ("stalled", "awaiting_system"):
+        return "stuck"
+    return "moving"
+
+
+def _work_whats_next(status: str, holder_name: str, waiting_on: str | None) -> str:
+    if status == "waiting_on_you":
+        return "Waiting on you"
+    if status == "waiting_on_other":
+        # Wire status stays waiting_on_other; this line is what the table shows.
+        who = (holder_name or "").strip()
+        if who and who.lower() not in ("a person", "a human", "human"):
+            return f"Waiting on {who}"
+        return "Waiting on someone"
+    if status == "stuck":
+        if waiting_on:
+            return f"Waiting on {waiting_on}"
+        return "Needs attention"
+    if status == "done":
+        return "Done"
+    return "In progress"
+
+
+def _work_updated_at(row: dict[str, Any]) -> str | None:
+    iso = _ns_to_iso(row.get("last_event_unix"))
+    if iso:
+        return iso
+    return _ts_to_str(row.get("created_at"))
+
+
+def get_work_overview(
+    account_id: int | None,
+    viewer_user_id: int | None = None,
+    now_ns: int | None = None,
+) -> dict[str, int]:
+    """Counts only. Named work. No span aggregates, no full-board event fold.
+
+    needs_you uses the bounded assignee scan (attention-state loops, cap
+    500) — not get_work_board. needs_attention is a SQL state/age count
+    minus those same ids so waiting_on_you is never double-counted.
+    """
+    now_ns = now_ns if now_ns is not None else time.time_ns()
+    lp = _loops_mod()
+    stall_s = int(lp.STALL_THRESHOLD_S)
+    stall_ns_cutoff = now_ns - stall_s * 1_000_000_000
+    week_ago = (_utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    acct_sql, acct_args = _work_account_sql(account_id)
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM loops l "
+            f"WHERE l.closed_at IS NULL AND {_NAMED_TITLE_SQL}{acct_sql}",
+            tuple(acct_args),
+        )
+        open_n = int((cur.fetchone() or {"c": 0})["c"] or 0)
+
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM loops l "
+            f"WHERE l.closed_at IS NOT NULL AND l.closed_at >= {PH} "
+            f"AND {_NAMED_TITLE_SQL}{acct_sql}",
+            tuple([week_ago, *acct_args]),
+        )
+        completed_week = int((cur.fetchone() or {"c": 0})["c"] or 0)
+
+        # stuck (engine) + aging awaiting_human. waiting_on_you rows that
+        # sit in this set are subtracted below.
+        cur.execute(
+            "SELECT l.id FROM loops l "
+            f"WHERE l.closed_at IS NULL AND {_NAMED_TITLE_SQL}{acct_sql} "
+            "AND ("
+            "  l.cached_state IN ('stalled', 'awaiting_system') "
+            f"  OR (l.cached_state = 'awaiting_human' "
+            f"      AND COALESCE(l.last_event_unix, 0) <= {PH})"
+            ")",
+            tuple([*acct_args, stall_ns_cutoff]),
+        )
+        attention_ids = {int(r["id"]) for r in cur.fetchall()}
+
+        needs_you_ids: set[int] = set()
+        if viewer_user_id is not None:
+            assigned, _ = _loops_assigned_to(cur, account_id, viewer_user_id)
+            if assigned:
+                ph_list = ", ".join([PH] * len(assigned))
+                cur.execute(
+                    f"SELECT id FROM loops l WHERE l.id IN ({ph_list}) "
+                    f"AND {_NAMED_TITLE_SQL}",
+                    tuple(assigned),
+                )
+                needs_you_ids = {int(r["id"]) for r in cur.fetchall()}
+
+        return {
+            "needs_you": len(needs_you_ids),
+            "needs_attention": len(attention_ids - needs_you_ids),
+            "open": open_n,
+            "completed_week": completed_week,
+        }
+
+
+def _decode_work_items_cursor(cursor: str | None) -> tuple[int, int] | None:
+    if not cursor:
+        return None
+    raw = str(cursor).strip()
+    if ":" not in raw:
+        return None
+    ts_s, id_s = raw.rsplit(":", 1)
+    try:
+        return int(ts_s), int(id_s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _decorate_work_items(
+    cur,
+    rows: list[dict[str, Any]],
+    account_id: int | None,
+    viewer_user_id: int | None,
+    now_ns: int,
+) -> None:
+    """Page-local holder/status. One event IN-list, not the whole fleet."""
+    for row in rows:
+        row.setdefault("awaiting_is_you", False)
+        row.setdefault("holder_kind", "unassigned")
+        row.setdefault("holder_name", "Unassigned")
+        row.setdefault("waiting_on", None)
+        row.setdefault("status", "moving")
+        row.setdefault("whats_next", "In progress")
+        row["updated_at"] = _work_updated_at(row)
+    if not rows:
+        return
+
+    lp = _loops_mod()
+    ids = [r["id"] for r in rows]
+    ph_list = ", ".join([PH] * len(ids))
+
+    acct_sql = f"WHERE account_id = {PH}" if account_id is not None else ""
+    cur.execute(
+        f"SELECT service_name, agent_id, display_name FROM agent_display_names {acct_sql}",
+        (account_id,) if account_id is not None else (),
+    )
+    display = {
+        (r["service_name"], r["agent_id"]): r["display_name"] for r in cur.fetchall()
+    }
+
+    by_loop: dict[int, list[dict]] = {i: [] for i in ids}
+    cur.execute(
+        "SELECT id, loop_id, type, actor_type, actor, payload, event_time_unix "
+        f"FROM loop_events WHERE loop_id IN ({ph_list}) "
+        "ORDER BY event_time_unix, id",
+        tuple(ids),
+    )
+    for r in cur.fetchall():
+        ev = lp.normalize_loop_event(dict(r))
+        ev["_row_id"] = r["id"]
+        by_loop[r["loop_id"]].append(ev)
+
+    names: dict[str, str | None] = {}
+    is_you: dict[str, bool] = {}
+
+    def _name_for(tid: str) -> str | None:
+        if tid not in names:
+            names[tid] = _resolve_human_name(cur, tid, account_id)
+        return names[tid]
+
+    def _you(tid: str) -> bool:
+        if viewer_user_id is None:
+            return False
+        if tid not in is_you:
+            is_you[tid] = _target_is_user(cur, tid, account_id, viewer_user_id)
+        return is_you[tid]
+
+    for row in rows:
+        agent_label = (
+            display.get((row.get("service_name"), row.get("agent_id") or "main"))
+            or row.get("service_name")
+            or ""
+        )
+        closed = row.get("closed_at") is not None or row.get("cached_state") in (
+            "done",
+            "abandoned",
+        )
+        pending = lp._unresolved_handoffs(by_loop.get(row["id"], []))
+        to_human = False
+        is_yours = False
+        holder_kind = "agent" if agent_label else "unassigned"
+        holder_name = agent_label or "Unassigned"
+        waiting_on = None
+
+        if pending:
+            h = pending[-1]
+            p = h.get("payload") or {}
+            direction = p.get("direction")
+            if direction == "to_human":
+                to_human = True
+                tid = str(p.get("target_id") or "")
+                is_yours = bool(tid) and _you(tid)
+                holder_kind = "human"
+                holder_name = (
+                    _name_for(tid) if tid else None
+                ) or p.get("target_name") or "a person"
+            elif direction == "to_system":
+                holder_kind = "tool"
+                holder_name = str(p.get("target_id") or "a tool")
+                waiting_on = holder_name
+            elif direction == "to_agent":
+                target = str(p.get("target_id") or "")
+                waiting_on = target or "another agent"
+                if agent_label:
+                    holder_kind = "agent"
+                    holder_name = agent_label
+
+        status = _work_item_status(
+            closed=closed,
+            to_human=to_human,
+            is_you=is_yours,
+            cached_state=row.get("cached_state") or "",
+        )
+        row["status"] = status
+        row["holder_kind"] = holder_kind
+        row["holder_name"] = holder_name
+        row["waiting_on"] = waiting_on
+        row["awaiting_is_you"] = is_yours
+        row["whats_next"] = _work_whats_next(status, holder_name, waiting_on)
+        row["updated_at"] = _work_updated_at(row)
+
+
+def get_work_items(
+    account_id: int | None,
+    viewer_user_id: int | None = None,
+    cursor: str | None = None,
+    limit: int = _WORK_ITEMS_DEFAULT_LIMIT,
+    now_ns: int | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Paginated named items for the Work home table. No untitled OTel flood,
+    no span-cost aggregates, no full-fleet event scan — events load for this
+    page only."""
+    now_ns = now_ns if now_ns is not None else time.time_ns()
+    limit = max(1, min(int(limit or _WORK_ITEMS_DEFAULT_LIMIT), _WORK_ITEMS_MAX_LIMIT))
+    week_ago = (_utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    acct_sql, acct_args = _work_account_sql(account_id)
+    key = _decode_work_items_cursor(cursor)
+
+    sql = (
+        "SELECT l.id, l.title, l.cached_state, l.last_event_unix, l.closed_at, "
+        "       l.created_at, l.service_name, l.agent_id "
+        "FROM loops l "
+        f"WHERE {_NAMED_TITLE_SQL}{acct_sql} "
+        f"AND (l.closed_at IS NULL OR l.closed_at >= {PH}) "
+    )
+    args: list[Any] = [*acct_args, week_ago]
+    if key is not None:
+        cursor_ts, cursor_id = key
+        sql += (
+            f"AND (COALESCE(l.last_event_unix, 0) < {PH} "
+            f"     OR (COALESCE(l.last_event_unix, 0) = {PH} AND l.id < {PH})) "
+        )
+        args.extend([cursor_ts, cursor_ts, cursor_id])
+    sql += (
+        "ORDER BY COALESCE(l.last_event_unix, 0) DESC, l.id DESC "
+        f"LIMIT {PH}"
+    )
+    args.append(limit + 1)
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        fetched = [dict(r) for r in cur.fetchall()]
+        extra = fetched[limit:]
+        rows = fetched[:limit]
+        _decorate_work_items(cur, rows, account_id, viewer_user_id, now_ns)
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(
+            {
+                "id": r["id"],
+                "title": title,
+                "status": r.get("status") or "moving",
+                "holder": {
+                    "kind": r.get("holder_kind") or "unassigned",
+                    "name": r.get("holder_name") or "Unassigned",
+                },
+                "whats_next": r.get("whats_next") or "In progress",
+                "updated_at": r.get("updated_at"),
+            }
+        )
+    next_cursor = None
+    if extra:
+        last = rows[-1]
+        next_cursor = f"{int(last.get('last_event_unix') or 0)}:{last['id']}"
+    return items, next_cursor
 
 
 def get_loop_stream(

@@ -213,9 +213,27 @@ test('the ongoing line is human, and empty when there is none', () => {
   assert.equal(ongoingLine(), '')
 })
 
+test('work item status: waiting_on_other is labeled Waiting on someone', async () => {
+  const { workItemStatusLabel } = await import('../src/board.js')
+  assert.equal(workItemStatusLabel('waiting_on_other'), 'Waiting on someone')
+  assert.equal(workItemStatusLabel('waiting_on_you'), 'Waiting on you')
+  assert.equal(workItemStatusLabel('stuck'), 'Stuck')
+  assert.equal(workItemStatusLabel('moving'), 'Moving')
+  assert.equal(workItemStatusLabel('done'), 'Done')
+})
+
 test('no Trovis jargon in the standing-work copy', () => {
   const strings = [ongoingLine(3), 'ongoing']
   for (const s of strings) {
     assert.ok(!/\b(loops?|possession|segments?|stations?|handoffs?)\b/i.test(s), `jargon: ${s}`)
   }
+})
+
+test('Work home and Ask do not call fat /work/board or /work/summary', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  const ask = readFileSync(new URL('../src/AskPill.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(work, /getWorkSummary|getWorkBoard/, 'Work home uses overview + items')
+  assert.doesNotMatch(ask, /getWorkBoard/, 'Ask must not prefetch the fat board')
+  assert.match(work, /getWorkOverview/)
+  assert.match(work, /getWorkItems/)
 })
