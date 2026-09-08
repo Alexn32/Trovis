@@ -152,6 +152,11 @@ function AppInner() {
   // the moment the pane is next on screen, so an invalidated background pane
   // never refetches behind the user's back. `source` is the pane that made
   // the change; it already shows the result and is left alone.
+  // Filter a Home card navigated in with, e.g. the Work card's "Stuck" tile.
+  // Carries a nonce so re-clicking the same tile re-applies it — the Work pane
+  // is kept alive, so an unchanged value would be a no-op.
+  const [workFilter, setWorkFilter] = useState(null)
+
   const [rosterEpoch, setRosterEpoch] = useState({ dashboard: 0, fleet: 0 })
   const shownEpoch = useRef({ dashboard: 0, fleet: 0 })
   function rosterChanged(source) {
@@ -469,9 +474,14 @@ function AppInner() {
           // Off screen, Home stops re-syncing on focus (same rule as Work).
           active={dashboardVisible}
           onOpenAgent={openDetail}
-          // Home v2 has no Fleet strip; its links go to Work instead — the
-          // briefing footer, the look-at header, and "+N more".
-          onGoWork={() => {
+          onGoFleet={() => {
+            setTab('fleet')
+            setOverlay(null)
+          }}
+          // Home's cards preview real pages: a Work card or tile opens Work,
+          // optionally filtered to the bucket that was clicked.
+          onGoWork={(filter = null) => {
+            setWorkFilter({ value: filter, nonce: Date.now() })
             setTab('work')
             setOverlay(null)
           }}
@@ -503,6 +513,7 @@ function AppInner() {
           // pane nobody is looking at (same rule it already applies to
           // document.hidden). No new polling is introduced here.
           active={workVisible}
+          incomingFilter={workFilter}
           onConnectAgent={openAddAgent}
           onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
           onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}

@@ -1,21 +1,20 @@
-// Home v2 composition rules.
+// Home composition rules.
 //
 // These are the decisions a person actually feels on Home: what counts as
-// needing them, what earns a briefing bullet, when a section disappears, and
-// whether the copy reads like something a human wrote. All pure — no renderer.
+// needing them, how the Work card splits the buckets, when a card disappears,
+// and whether the copy reads like something a human wrote. All pure — no
+// renderer.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   ATTENTION_AGE_S,
   asOfLabel,
-  briefingBullets,
   briefingLead,
   isFirstRun,
   isShowable,
-  lookAtRows,
   partitionLookAt,
-  showCostPulse,
+  workSplit,
 } from '../src/home.js'
 
 const NOW = Date.parse('2026-03-10T12:00:00Z')
@@ -79,40 +78,44 @@ test('shell and id-shaped titles are gated out even if the API sends them', () =
   assert.equal(isShowable(item({ title: '' })), false)
 })
 
-test('look-at puts needs-you first, caps the list, and reports the remainder', () => {
+test('needs attention lists needs-you first, then the rest', () => {
   const items = []
-  for (let i = 1; i <= 6; i++) items.push(item({ id: i, status: 'stuck' }))
-  for (let i = 7; i <= 9; i++) items.push(item({ id: i, status: 'waiting_on_you' }))
-  const { rows, hidden, needsYouCount, needsAttentionCount } = lookAtRows(items, {
-    nowMs: NOW,
-    max: 7,
-  })
-  assert.equal(rows.length, 7)
-  assert.equal(hidden, 2)
-  assert.equal(needsYouCount, 3)
-  assert.equal(needsAttentionCount, 6)
-  // The first three rows are the ones waiting on the person.
-  assert.deepEqual(rows.slice(0, 3).map((r) => r.status), [
-    'waiting_on_you',
-    'waiting_on_you',
-    'waiting_on_you',
-  ])
+  for (let i = 1; i <= 3; i++) items.push(item({ id: i, status: 'stuck' }))
+  for (let i = 4; i <= 5; i++) items.push(item({ id: i, status: 'waiting_on_you' }))
+  const { needsYou, needsAttention } = partitionLookAt(items, NOW)
+  const rows = [...needsYou, ...needsAttention]
+  assert.equal(rows.length, 5)
+  assert.deepEqual(rows.slice(0, 2).map((r) => r.status), ['waiting_on_you', 'waiting_on_you'])
 })
 
-test('briefing bullets cap at 3 / 3 / 2 and omit moving when there is none', () => {
-  const items = []
-  for (let i = 1; i <= 5; i++) items.push(item({ id: i, status: 'waiting_on_you' }))
-  for (let i = 6; i <= 10; i++) items.push(item({ id: i, status: 'stuck' }))
-  const b = briefingBullets(items, NOW)
-  assert.equal(b.needsYou.length, 3)
-  assert.equal(b.stuck.length, 3)
-  assert.equal(b.moving.length, 0)
+test('the Work card splits the buckets the way the Work page does', () => {
+  const items = [
+    item({ id: 1, status: 'moving' }),
+    item({ id: 2, status: 'moving' }),
+    item({ id: 3, status: 'waiting_on_you' }),
+    item({ id: 4, status: 'waiting_on_other' }),
+    item({ id: 5, status: 'stuck' }),
+    item({ id: 6, status: 'done' }),
+  ]
+  const c = workSplit(items, { completed_week: 9 })
+  assert.equal(c.moving, 2)
+  // Waiting is every wait — on you AND on someone else. Deliberately a wider
+  // cut than needs-attention, which is only work that has stopped moving.
+  assert.equal(c.waiting, 2)
+  assert.equal(c.stuck, 1)
+  // Done comes from the authoritative weekly count, not from this page — so
+  // Home and the Work tab print the same number.
+  assert.equal(c.done, 9)
+})
 
-  const withMoving = briefingBullets(
-    [item({ id: 1, status: 'moving' }), item({ id: 2, status: 'moving' }), item({ id: 3, status: 'moving' })],
-    NOW,
+test('Work counts ignore shell titles and survive missing data', () => {
+  const c = workSplit(
+    [item({ id: 1, status: 'moving', title: 'loop_42' }), item({ id: 2, status: 'moving' })],
+    null,
   )
-  assert.equal(withMoving.moving.length, 2)
+  assert.equal(c.moving, 1, 'id-shaped titles are not counted')
+  assert.equal(c.done, 0, 'no overview yet -> zero, never NaN')
+  assert.deepEqual(workSplit(null, null), { moving: 0, waiting: 0, stuck: 0, done: 0 })
 })
 
 test('the lead sentence states today in plain words, and survives a missing briefing', () => {
@@ -147,13 +150,6 @@ test('as-of footer is omitted rather than printing a placeholder', () => {
   assert.equal(asOfLabel(null), '')
   assert.equal(asOfLabel('not a date'), '')
   assert.match(asOfLabel('2026-03-10T12:00:00Z'), /^As of /)
-})
-
-test('cost pulse hides at $0 and at sub-cent noise', () => {
-  assert.equal(showCostPulse(null), false)
-  assert.equal(showCostPulse({ today: 0 }), false)
-  assert.equal(showCostPulse({ today: 0.004 }), false)
-  assert.equal(showCostPulse({ today: 0.68 }), true)
 })
 
 test('first run needs every section to have LANDED empty, not merely be missing', () => {

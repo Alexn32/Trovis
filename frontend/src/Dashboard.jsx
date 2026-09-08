@@ -3,50 +3,46 @@ import { api } from './api.js'
 import { startAbortable } from './abortable.js'
 import { TaskPanel } from './Board.jsx'
 import { WorkLoadFailed } from './ui.jsx'
+import Sparkline from './Sparkline.jsx'
 import { itemToCard, workUpdatedLabel } from './board.js'
-// Costs always render in dollars (e.g. "$0.68"); shared with Fleet so they match.
+// Costs always render in dollars (e.g. "$0.68"); shared with Fleet and the
+// Cost page so every surface prints the same number the same way.
 import { formatCost as fmtMoney } from './utils.js'
-import { buildInsights } from './insights.js'
-import {
-  asOfLabel,
-  briefingBullets,
-  briefingLead,
-  isFirstRun,
-  lookAtRows,
-  showCostPulse,
-} from './home.js'
-import { TrovisMark } from './Icons.jsx'
+import { asOfLabel, briefingLead, isFirstRun, partitionLookAt, workSplit } from './home.js'
+import { TrovisMark, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
-// Home v2 — hybrid work, served judgment.
+// Home — snapshots of pages that already exist.
 //
-// Sections, top to bottom:
-//   1. Daily Briefing   — today's state in one card, readable in <30s
-//   1b. Judgment ribbon — what to do about it; silent unless it has something
-//   2. What to look at  — needs you + needs attention, hidden when empty
-//   3. Work feed        — the ambient chronological story
-//   4. Cost pulse       — a whisper; hidden at $0
+// Home is a hub, not a product of its own. Every card is a preview of a real
+// page and every click lands on it: a row opens that work item, a header or
+// tile opens Work (filtered), the cost figure opens the Cost page, the feed
+// opens the Work feed, an agent opens that agent. Nothing here is a Home-only
+// invention, and nothing here is a dead tap.
 //
-// The briefing sits in a hero cluster with the greeting so the first screen
-// answers "what matters today" rather than "hello, here is the date".
+// Cards, in the order the brief numbers them:
+//   1. Needs attention — omitted ENTIRELY when empty (no "all clear" prose)
+//   2. Cost            — one today figure, from /dashboard/cost, + a 7d spark
+//   3. Work feed       — a few ambient lines
+//   4. Work            — Moving / Waiting / Stuck / Done
+//   5. Fleet           — health dots, omitted when nothing needs attention
 //
-// NO Fleet on Home. Fleet is tab 2, and Home must not first-paint GET /agents:
-// that request is what made Home expensive, and the fleet grid was the only
-// thing needing it. Home must also never call /work/board or /work/summary —
-// both loop-scan the whole board and starve the single replica. Home reads the
-// lean pair (/work/overview + /work/items), the same truth the Work tab shows.
+// What Home deliberately does NOT do on first paint: no briefing essay (it is
+// behind a quiet disclosure that fetches only when opened), no judgment
+// ribbon, no suggestion strips, and exactly ONE dollar figure on the page.
 //
-// Every section fetches independently and fails independently: one dead
-// section renders its own Retry and the rest of Home still paints. Each
-// fetch carries an AbortSignal so unmount / tab switch / logout drops it
-// instead of waiting out the timeout (the briefing runs to 120s).
-//
-// Ask is NOT here — the global AskPill (⌘K, App.jsx) covers every page.
+// Data: the lean pair (/work/overview + /work/items) plus the existing feed,
+// cost and attention endpoints. Never /work/board, /work/summary or /agents —
+// those are what starve the single replica. Each card fetches independently,
+// carries an AbortSignal, and fails on its own.
 // ---------------------------------------------------------------------------
 
-// One page of named work is enough to fill a briefing (3+3+2) and a 7-row
-// queue. Home never paginates; "+N more" sends you to the Work tab.
+// One lean page of named work is enough for a snapshot; the real table lives
+// on Work, which every tile links to.
 const WORK_PAGE = 50
+
+// Rows shown in the Needs attention preview before it defers to Work.
+const ATTENTION_PREVIEW = 5
 
 function fmtRel(iso) {
   const ms = Date.now() - Date.parse(iso)
@@ -59,23 +55,19 @@ function fmtRel(iso) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-// `active` is false while the Home pane is off screen. App.jsx keeps every tab
-// pane mounted (#130 keep-alive), so a hidden Home is still listening for
-// focus — without this it would re-sync all six of its endpoints, the Claude
-// briefing among them, for a pane nobody is looking at. Same rule the Work
-// pane applies to its poll.
 export default function Dashboard({
   onOpenAgent,
   onOpenCost,
   onViewAllWorkFeed,
   onGoWork,
+  onGoFleet,
   userName,
   active = true,
 }) {
   // Silently re-sync when the tab regains focus (throttled to once per 30s).
-  // Cards keep their current data on screen while refetching — no skeleton
-  // flash. There is no interval poll: #127 removed the 15s briefing re-poll,
-  // and nothing here may bring it back.
+  // No interval poll — #127 removed the 15s briefing re-poll and nothing here
+  // may bring it back. Gated on `active` so a Home kept alive behind another
+  // tab (#130) does not refetch for a pane nobody is looking at.
   const [refreshKey, setRefreshKey] = useState(0)
   const activeRef = useRef(active)
   activeRef.current = active
@@ -96,15 +88,13 @@ export default function Dashboard({
     }
   }, [])
 
-  // The work pair powers BOTH the briefing bullets and "What to look at", so
-  // it is fetched once here rather than twice. Its failure is its own: the
-  // briefing still renders its narrative, the feed and cost are untouched.
+  // The lean work pair feeds both the Needs attention card and the Work card,
+  // so it is fetched once here rather than twice.
   const work = useWork(refreshKey)
-  const briefing = useBriefing(refreshKey)
-  const feed = useSection((signal) => api.getWorkFeed({ signal }), refreshKey)
   const cost = useSection((signal) => api.getCost({ signal }), refreshKey)
-  // Agent-health attention (an agent erroring or gone quiet) is not named
-  // work, so it never enters the work queue — but it belongs in a briefing.
+  const feed = useSection((signal) => api.getWorkFeed({ signal }), refreshKey)
+  // Agent health. Also the Fleet card's only source: it names the agents that
+  // need looking at, and links to Fleet for the full roster.
   const health = useSection((signal) => api.getAttention({ signal }), refreshKey)
 
   const [openItem, setOpenItem] = useState(null)
@@ -116,41 +106,19 @@ export default function Dashboard({
   })
 
   return (
-    <div className="dash">
+    <div className="dash home">
+      <Greeting userName={userName} />
+
       {firstRun ? (
-        <>
-          <Greeting userName={userName} />
-          <FirstRunCard onGoWork={onGoWork} />
-        </>
+        <FirstRunCard onGoWork={onGoWork} />
       ) : (
         <>
-          {/* Hero: greeting and briefing are one cluster, not two stacked
-              blocks. The first screen has to answer "what matters today",
-              so the date line does not get to occupy it alone. */}
-          <div className="home-hero">
-            <Greeting userName={userName} />
-            <DailyBriefing
-              briefing={briefing}
-              work={work}
-              health={health.data}
-              onOpenItem={setOpenItem}
-              onOpenAgent={onOpenAgent}
-              onGoWork={onGoWork}
-            />
-          </div>
-          <JudgmentRibbon
-            work={work}
-            health={health.data}
-            onOpenItem={setOpenItem}
-            onOpenAgent={onOpenAgent}
-          />
-          <WhatToLookAt work={work} onOpenItem={setOpenItem} onGoWork={onGoWork} />
-          <WorkFeedSection
-            feed={feed}
-            onViewAll={onViewAllWorkFeed}
-            onOpenAgent={onOpenAgent}
-          />
-          <CostPulse cost={cost.data} onOpenCost={onOpenCost} />
+          <NeedsAttentionCard work={work} onOpenItem={setOpenItem} onGoWork={onGoWork} />
+          <CostCard cost={cost} onOpenCost={onOpenCost} />
+          <WorkFeedCard feed={feed} onViewAll={onViewAllWorkFeed} onOpenAgent={onOpenAgent} />
+          <WorkCard work={work} onGoWork={onGoWork} />
+          <FleetCard health={health} onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
+          <BriefingDisclosure work={work} refreshKey={refreshKey} />
         </>
       )}
 
@@ -168,9 +136,9 @@ export default function Dashboard({
 // --- data hooks ------------------------------------------------------------
 
 /**
- * One independent section fetch. Keeps the last good value on a refetch
- * failure (a blip must not blank a section that was already showing) and
- * exposes `failed` only when we have nothing to show.
+ * One independent card fetch. Keeps the last good value on a refetch failure
+ * (a blip must not blank a card that was already showing) and reports
+ * `failed` only when there is nothing to show.
  */
 function useSection(fetcher, refreshKey) {
   const [data, setData] = useState(null)
@@ -217,6 +185,7 @@ function useSection(fetcher, refreshKey) {
 function useWork(refreshKey) {
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
+  const [truncated, setTruncated] = useState(false)
   const [err, setErr] = useState(null)
   const [nonce, setNonce] = useState(0)
 
@@ -228,9 +197,13 @@ function useWork(refreshKey) {
           .then((d) => isAlive() && setOverview(d || null))
         const it = api
           .getWorkItems({ limit: WORK_PAGE, signal })
-          .then(
-            (p) => isAlive() && setItems(Array.isArray(p?.items) ? p.items : []),
-          )
+          .then((p) => {
+            if (!isAlive()) return
+            setItems(Array.isArray(p?.items) ? p.items : [])
+            // More pages exist, so any count derived from this page is a
+            // floor, not a total. The Work card says so rather than lying.
+            setTruncated(Boolean(p?.next_cursor))
+          })
         Promise.allSettled([ov, it]).then((rs) => {
           if (!isAlive()) return
           const bad = rs.find((r) => r.status === 'rejected')
@@ -243,6 +216,7 @@ function useWork(refreshKey) {
   return {
     overview,
     items,
+    truncated,
     err,
     // Only a hard failure — one of the two landing is enough to render.
     failed: overview === null && items === null && !!err,
@@ -254,34 +228,35 @@ function useWork(refreshKey) {
   }
 }
 
-/** The Claude briefing. Cheap on the server (cached, 3s cap) but still the
- *  slowest call on the page, so it never gates anything else. */
-function useBriefing(refreshKey) {
+/**
+ * The briefing, fetched ONLY once someone opens the disclosure. It is the
+ * slowest call the dashboard can make (a Claude call behind a 3s server cap),
+ * and Home's first paint is now preview cards — so it must not be on it.
+ */
+function useLazyBriefing(open, refreshKey) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
   const [nonce, setNonce] = useState(0)
 
-  useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
-        api
-          .getBriefing({ signal })
-          .then((d) => {
-            if (!isAlive()) return
-            setData(d)
-            setErr(null)
-          })
-          .catch((e) => isAlive() && setErr(e))
-      }),
-    [refreshKey, nonce],
-  )
+  useEffect(() => {
+    if (!open) return undefined
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getBriefing({ signal })
+        .then((d) => {
+          if (!isAlive()) return
+          setData(d)
+          setErr(null)
+        })
+        .catch((e) => isAlive() && setErr(e))
+    })
+  }, [open, refreshKey, nonce])
 
   return {
     data,
     err,
-    // Last-known wins: a failed refetch keeps yesterday's line on screen.
     failed: data === null && !!err,
-    loading: data === null && !err,
+    loading: open && data === null && !err,
     retry: useCallback(() => {
       setErr(null)
       setNonce((n) => n + 1)
@@ -312,344 +287,308 @@ function Greeting({ userName }) {
   )
 }
 
-// --- 1. Daily Briefing -----------------------------------------------------
-
-// Calm primary narrative: large plain type, no alarm chrome. The only alarm
-// on this card is the text itself when the text is the alert.
-function DailyBriefing({ briefing, work, health, onOpenItem, onOpenAgent, onGoWork }) {
-  const data = briefing.data
-  const counts = work.overview
-  const lead = briefingLead(counts)
-  const bullets = briefingBullets(work.items || [])
-  const asOf = asOfLabel(data?.generated_at)
-
-  // Agent-health rows only fill the space work items left — a named, clickable
-  // work item always outranks an agent-level observation.
-  const healthLines = (health || [])
-    .filter((h) => h && h.severity !== 'info' && (h.title || h.detail))
-    .slice(0, Math.max(0, 3 - bullets.stuck.length))
-
-  const allClear =
-    !!counts &&
-    bullets.needsYou.length === 0 &&
-    bullets.stuck.length === 0 &&
-    healthLines.length === 0
-
+/** Card shell: title, an optional link to the page this previews, children. */
+function PreviewCard({ title, action, onAction, className = '', children }) {
   return (
-    <section className="dash-card home-brief" aria-label="Daily briefing">
-      <div className="dash-card-head">
-        <span className="dash-sq">
-          <TrovisMark size={10} />
-        </span>
-        <span className="dash-briefing-label">Daily Briefing</span>
-      </div>
-
-      {briefing.loading && !counts ? (
-        <div className="dash-skel">
-          <span style={{ width: '92%' }} />
-          <span style={{ width: '78%' }} />
-        </div>
-      ) : (
-        <>
-          {lead && <p className="home-brief-lead">{lead}</p>}
-
-          {/* Claude's narrative is colour, not the headline — and it is the
-              one part that can be missing without costing the reader the
-              state of today. */}
-          {data?.summary ? (
-            <p className="home-brief-narrative">{data.summary}</p>
-          ) : briefing.failed ? (
-            <p className="home-brief-narrative is-muted">
-              Today&apos;s summary didn&apos;t load.{' '}
-              <button type="button" className="dash-link" onClick={briefing.retry}>
-                Retry
-              </button>
-            </p>
-          ) : null}
-
-          {work.failed ? (
-            <p className="home-brief-narrative is-muted">
-              Couldn&apos;t load what&apos;s on your plate.{' '}
-              <button type="button" className="dash-link" onClick={work.retry}>
-                Retry
-              </button>
-            </p>
-          ) : (
-            <>
-              <BriefGroup
-                label="Needs you"
-                tone="warn"
-                items={bullets.needsYou}
-                emptyText={allClear ? null : 'None'}
-                onOpenItem={onOpenItem}
-              />
-              <BriefGroup
-                label="Needs attention"
-                tone="error"
-                items={bullets.stuck}
-                extra={healthLines}
-                onOpenAgent={onOpenAgent}
-                onOpenItem={onOpenItem}
-              />
-              <BriefGroup
-                label="Moving"
-                tone="quiet"
-                items={bullets.moving}
-                onOpenItem={onOpenItem}
-              />
-              {allClear && (
-                <p className="home-brief-clear">
-                  Nothing is waiting on a person right now.
-                </p>
-              )}
-            </>
-          )}
-        </>
-      )}
-
-      <div className="home-brief-foot">
-        <span>Today</span>
-        {asOf && (
-          <>
-            <span className="dash-dot-sep">·</span>
-            <span>{asOf}</span>
-          </>
-        )}
-        {onGoWork && (
-          <>
-            <span className="dash-dot-sep">·</span>
-            <button type="button" className="dash-link" onClick={onGoWork}>
-              Open Work
-            </button>
-          </>
+    <section className={`dash-card home-card ${className}`} aria-label={title}>
+      <div className="home-card-head">
+        <span className="dash-section-title">{title}</span>
+        {action && onAction && (
+          <button type="button" className="dash-link" onClick={onAction}>
+            {action}
+          </button>
         )}
       </div>
+      {children}
     </section>
   )
 }
 
-/**
- * One briefing group. Omitted entirely when it has nothing AND no explicit
- * "None" to print — an empty "Moving" heading is noise, an empty "Needs you"
- * is worth stating.
- */
-function BriefGroup({ label, tone, items, extra = [], emptyText, onOpenItem, onOpenAgent }) {
-  const has = items.length > 0 || extra.length > 0
-  if (!has && !emptyText) return null
-  return (
-    <div className={`home-brief-group tone-${tone}`}>
-      <span className="home-brief-group-label">{label}</span>
-      {!has ? (
-        <span className="home-brief-none">{emptyText}</span>
-      ) : (
-        <ul className="home-brief-list">
-          {items.map((it) => (
-            <li key={`i${it.id}`}>
-              <button
-                type="button"
-                className="home-brief-item"
-                onClick={() => onOpenItem && onOpenItem(it)}
-              >
-                <span className="home-brief-title">{it.title}</span>
-                {it.whats_next && (
-                  <span className="home-brief-why">{it.whats_next}</span>
-                )}
-              </button>
-            </li>
-          ))}
-          {extra.map((h, i) => (
-            <li key={`h${h.agent}-${i}`}>
-              <button
-                type="button"
-                className="home-brief-item"
-                onClick={() => onOpenAgent && onOpenAgent(h.agent, 'main')}
-              >
-                <span className="home-brief-title">{h.title || h.agent}</span>
-                {(h.detail || h.recommendation) && (
-                  <span className="home-brief-why">
-                    {h.detail || h.recommendation}
-                  </span>
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-}
+// --- 1. Needs attention ----------------------------------------------------
 
-// --- 1b. Judgment ribbon ---------------------------------------------------
+// Work that cannot move on its own: waiting on you, stuck, or sitting too
+// long with someone else. The whole card is absent on a healthy day — no
+// empty state, no "all clear" line.
+function NeedsAttentionCard({ work, onOpenItem, onGoWork }) {
+  if (work.failed) {
+    return (
+      <PreviewCard title="Needs attention">
+        <WorkLoadFailed lead="Can't load what needs you" onRetry={work.retry} />
+      </PreviewCard>
+    )
+  }
+  if (work.items === null) return null // loading: stay silent, reserve nothing
 
-// What Trovis makes of today, in at most three lines. Composed client-side
-// from the work and health data already on the page (see insights.js), so it
-// costs nothing on first paint and can never be the reason Home is slow.
-//
-// Silent by default: it renders only when it has something the rows below do
-// not already say. Loading and failure are both silent too — a ribbon that
-// announces its own absence is worse than no ribbon.
-function JudgmentRibbon({ work, health, onOpenItem, onOpenAgent }) {
-  if (work.items === null) return null
-  const insights = buildInsights({ items: work.items, health: health || [] })
-  if (insights.length === 0) return null
+  const { needsYou, needsAttention } = partitionLookAt(work.items)
+  const rows = [...needsYou, ...needsAttention]
+  if (rows.length === 0) return null
+
+  const shown = rows.slice(0, ATTENTION_PREVIEW)
+  const hidden = rows.length - shown.length
 
   return (
-    <section className="home-ribbon" aria-label="What Trovis makes of today">
-      {/* Labelled so these read as a considered take rather than three more
-          queue rows. Deliberately NOT phrased as "what to look at first" —
-          the section directly beneath is "What to look at", and two near
-          identical headings in a row is worse than none. */}
-      <span className="dash-caps home-ribbon-label">Trovis suggests</span>
-      <ul className="home-ribbon-list">
-        {insights.map((ins) => (
-          <li key={ins.id}>
+    <PreviewCard
+      title="Needs attention"
+      action="Open in Work →"
+      onAction={onGoWork ? () => onGoWork('attention') : undefined}
+      className="home-attention"
+    >
+      <ul className="home-att-list">
+        {shown.map((row) => (
+          <li key={row.id}>
             <button
               type="button"
-              className={`home-ribbon-row tone-${ins.tone}`}
-              onClick={() =>
-                ins.item ? onOpenItem(ins.item) : onOpenAgent && onOpenAgent(ins.agent, 'main')
-              }
+              className={`home-att-row ${
+                row.status === 'waiting_on_you' ? 'is-waiting-you' : 'is-stuck'
+              }`}
+              onClick={() => onOpenItem(row)}
             >
-              <span className="home-ribbon-dot" aria-hidden="true" />
-              <span className="home-ribbon-text">{ins.text}</span>
-              <span className="home-ribbon-go" aria-hidden="true">→</span>
+              <span className="home-att-title">{row.title}</span>
+              <span className="home-att-next">{row.whats_next || ''}</span>
+              <span className="home-att-age">{workUpdatedLabel(row.updated_at)}</span>
             </button>
           </li>
         ))}
       </ul>
-    </section>
-  )
-}
-
-// --- 2. What to look at ----------------------------------------------------
-
-// The loudest thing on Home when it has rows — and gone entirely when it
-// doesn't. Healthy silence: no "all clear" card, no empty alarm chrome.
-function WhatToLookAt({ work, onOpenItem, onGoWork }) {
-  if (work.failed) {
-    return (
-      <section className="dash-section" aria-label="What to look at">
-        <div className="dash-section-head">
-          <span className="dash-section-title">What to look at</span>
-        </div>
-        <WorkLoadFailed lead="Can't load what needs you" onRetry={work.retry} />
-      </section>
-    )
-  }
-  if (work.items === null) return null // loading: stay silent, don't reserve alarm space
-
-  const { rows, hidden } = lookAtRows(work.items)
-  if (rows.length === 0) return null
-
-  return (
-    <section className="dash-section home-lookat" aria-label="What to look at">
-      <div className="dash-section-head">
-        <span className="dash-section-title">What to look at</span>
-        {onGoWork && (
-          <button type="button" className="dash-link" onClick={onGoWork}>
-            Open Work →
-          </button>
-        )}
-      </div>
-      <div className="home-lookat-list">
-        {rows.map((row) => (
-          <button
-            key={row.id}
-            type="button"
-            className={`home-lookat-row ${
-              row.status === 'waiting_on_you' ? 'is-waiting-you' : 'is-stuck'
-            }`}
-            onClick={() => onOpenItem(row)}
-          >
-            <span className="home-lookat-title">{row.title}</span>
-            {/* whats_next already names the holder ("Waiting on Sarah Chen"),
-                so a holder column here would just say it twice. */}
-            <span className="home-lookat-next">{row.whats_next || ''}</span>
-            <span className="home-lookat-age">{workUpdatedLabel(row.updated_at)}</span>
-          </button>
-        ))}
-      </div>
       {hidden > 0 && onGoWork && (
-        <button type="button" className="dash-link home-lookat-more" onClick={onGoWork}>
+        <button type="button" className="dash-link home-card-more" onClick={() => onGoWork('attention')}>
           {hidden} more in Work →
         </button>
       )}
-    </section>
+    </PreviewCard>
+  )
+}
+
+// --- 2. Cost ---------------------------------------------------------------
+
+// The only dollar figure on Home, and the same one the Cost page shows — both
+// read /dashboard/cost. Two sources would eventually disagree in prose.
+function CostCard({ cost, onOpenCost }) {
+  const c = cost.data
+  // Last 7 points of the daily series the endpoint already returns.
+  const week = Array.isArray(c?.daily) ? c.daily.slice(-7) : []
+
+  return (
+    <PreviewCard
+      title="Cost"
+      action="Open Cost →"
+      onAction={onOpenCost}
+      className="home-cost"
+    >
+      {cost.loading ? (
+        <div className="dash-skel"><span style={{ width: '40%', height: 22 }} /></div>
+      ) : cost.failed ? (
+        <div className="dash-empty" role="alert">
+          Couldn&apos;t load cost.{' '}
+          <button type="button" className="dash-link" onClick={cost.retry}>Retry</button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="home-cost-body"
+          onClick={onOpenCost}
+          aria-label="Open the Cost page"
+        >
+          <span className="home-cost-figure">
+            <span className="home-cost-amount">{fmtMoney(c?.today || 0)}</span>
+            <span className="home-cost-label">today</span>
+          </span>
+          {week.length >= 2 && (
+            <Sparkline data={week} color="var(--brand-accent)" width={104} height={26} />
+          )}
+        </button>
+      )}
+    </PreviewCard>
   )
 }
 
 // --- 3. Work feed ----------------------------------------------------------
 
-// Ambient: hairline rows, muted type, no per-row alarm wash. This is the
-// story of what happened, not a queue of what to do.
-function WorkFeedSection({ feed, onViewAll, onOpenAgent }) {
-  const rows = feed.data || []
+function WorkFeedCard({ feed, onViewAll, onOpenAgent }) {
+  const rows = (feed.data || []).slice(0, 4)
   return (
-    <section className="dash-section" aria-label="Work feed">
-      <div className="dash-section-head">
-        <span className="dash-section-title">Work feed</span>
-        {onViewAll && (
-          <button type="button" className="dash-link" onClick={onViewAll}>
-            View all →
-          </button>
-        )}
-      </div>
-      <div className="dash-card dash-feed home-feed">
-        {feed.loading ? (
-          <div className="dash-skel pad">
-            <span style={{ width: '70%' }} />
-            <span style={{ width: '88%' }} />
-          </div>
-        ) : feed.failed ? (
-          <div className="dash-empty pad" role="alert">
-            Couldn&apos;t load recent activity.{' '}
-            <button type="button" className="dash-link" onClick={feed.retry}>
-              Retry
-            </button>
-          </div>
-        ) : rows.length === 0 ? (
-          <div className="dash-empty pad">Nothing has happened in the last day.</div>
-        ) : (
-          rows.map((f, i) => (
-            <button
-              key={`${f.agent}-${i}`}
-              type="button"
-              className="dash-feed-row home-feed-row"
-              onClick={() => onOpenAgent && onOpenAgent(f.agent, 'main')}
-            >
-              <span className="dash-feed-top">
-                <span className="dash-feed-agent">{f.agent}</span>
-                <span className="dash-dot-sep">·</span>
-                <span className="dash-feed-time">{fmtRel(f.time)}</span>
-              </span>
-              <span className="dash-feed-summary">{f.summary}</span>
-            </button>
-          ))
-        )}
-      </div>
-    </section>
+    <PreviewCard
+      title="Work feed"
+      action="Open feed →"
+      onAction={onViewAll}
+      className="home-feed"
+    >
+      {feed.loading ? (
+        <div className="dash-skel">
+          <span style={{ width: '70%' }} />
+          <span style={{ width: '88%' }} />
+        </div>
+      ) : feed.failed ? (
+        <div className="dash-empty" role="alert">
+          Couldn&apos;t load recent activity.{' '}
+          <button type="button" className="dash-link" onClick={feed.retry}>Retry</button>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="dash-empty">Nothing has happened in the last day.</div>
+      ) : (
+        <ul className="home-feed-list">
+          {rows.map((f, i) => (
+            <li key={`${f.agent}-${i}`}>
+              <button
+                type="button"
+                className="home-feed-row"
+                onClick={() => onOpenAgent && onOpenAgent(f.agent, 'main')}
+              >
+                <span className="home-feed-summary">{f.summary}</span>
+                <span className="home-feed-meta">
+                  {f.agent}
+                  <span className="dash-dot-sep">·</span>
+                  {fmtRel(f.time)}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </PreviewCard>
   )
 }
 
-// --- 4. Cost pulse ---------------------------------------------------------
+// --- 4. Work ---------------------------------------------------------------
 
-// The quietest thing on the page, and absent entirely at $0 — a demo account
-// should not be told it spent nothing.
-function CostPulse({ cost, onOpenCost }) {
-  if (!showCostPulse(cost)) return null
+const WORK_TILES = [
+  { key: 'moving', label: 'Moving' },
+  { key: 'waiting', label: 'Waiting' },
+  { key: 'stuck', label: 'Stuck' },
+  { key: 'done', label: 'Done' },
+]
+
+// A snapshot of the Work page's own buckets. "Waiting" is every wait, on you
+// or on someone else — deliberately a different cut from Needs attention,
+// which is only the work that has stopped moving.
+function WorkCard({ work, onGoWork }) {
+  if (work.failed) {
+    return (
+      <PreviewCard title="Work">
+        <WorkLoadFailed lead="Can't load this work" onRetry={work.retry} />
+      </PreviewCard>
+    )
+  }
+  const counts = workSplit(work.items, work.overview)
+  const pending = work.items === null
+
   return (
-    <button type="button" className="home-cost-pulse" onClick={onOpenCost}>
-      About {fmtMoney(cost.today)} today
-      <span className="home-cost-link">Cost →</span>
-    </button>
+    <PreviewCard
+      title="Work"
+      action="Open Work →"
+      onAction={onGoWork ? () => onGoWork(null) : undefined}
+      className="home-work"
+    >
+      <div className="home-work-tiles">
+        {WORK_TILES.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            className={`home-work-tile tone-${t.key}`}
+            onClick={() => onGoWork && onGoWork(t.key)}
+            disabled={pending}
+          >
+            <span className="home-work-num">
+              {pending ? '—' : counts[t.key]}
+              {/* A page-derived count on a truncated list is a floor. Say so
+                  rather than printing a total we do not have. */}
+              {!pending && work.truncated && t.key !== 'done' ? '+' : ''}
+            </span>
+            <span className="home-work-lbl">{t.label}</span>
+          </button>
+        ))}
+      </div>
+    </PreviewCard>
+  )
+}
+
+// --- 5. Fleet --------------------------------------------------------------
+
+// Health dots only. Home never loads the agent roster (that request is what
+// made Home expensive), so this card can only speak about agents already
+// flagged as needing attention — and it says exactly that. The Fleet page
+// owns the full picture, and the header goes there.
+//
+// Absent when no agent needs attention: with no roster we cannot honestly
+// claim "all healthy", so we say nothing at all.
+function FleetCard({ health, onOpenAgent, onGoFleet }) {
+  const rows = (health.data || []).filter((h) => h && h.agent)
+  if (health.loading || health.failed || rows.length === 0) return null
+
+  return (
+    <PreviewCard
+      title="Fleet"
+      action="Open Fleet →"
+      onAction={onGoFleet}
+      className="home-fleet"
+    >
+      <ul className="home-fleet-list">
+        {rows.slice(0, 6).map((h, i) => (
+          <li key={`${h.agent}-${i}`}>
+            <button
+              type="button"
+              className="home-fleet-row"
+              onClick={() => onOpenAgent && onOpenAgent(h.agent, 'main')}
+            >
+              <span className={`home-fleet-dot sev-${h.severity || 'info'}`} aria-hidden="true" />
+              <span className="home-fleet-name">{h.agent}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="home-fleet-note">Agents needing a look. Open Fleet for all of them.</p>
+    </PreviewCard>
+  )
+}
+
+// --- briefing, behind a quiet disclosure -----------------------------------
+
+// Kept, but off the first paint: closed by default and fetched only on the
+// first open. The lead line is composed from counts (always truthful, always
+// available); the Claude narrative is the part that can be missing.
+function BriefingDisclosure({ work, refreshKey }) {
+  const [open, setOpen] = useState(false)
+  const briefing = useLazyBriefing(open, refreshKey)
+  const lead = briefingLead(work.overview)
+  const asOf = asOfLabel(briefing.data?.generated_at)
+
+  return (
+    <div className="home-brief-disclosure">
+      <button
+        type="button"
+        className="home-brief-toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className="dash-sq"><TrovisMark size={10} /></span>
+        <span className="home-brief-toggle-label">Daily briefing</span>
+        {open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
+      </button>
+      {open && (
+        <div className="home-brief-body">
+          {lead && <p className="home-brief-lead">{lead}</p>}
+          {briefing.loading ? (
+            <div className="dash-skel">
+              <span style={{ width: '92%' }} />
+              <span style={{ width: '74%' }} />
+            </div>
+          ) : briefing.failed ? (
+            <p className="home-brief-narrative is-muted">
+              Today&apos;s summary didn&apos;t load.{' '}
+              <button type="button" className="dash-link" onClick={briefing.retry}>Retry</button>
+            </p>
+          ) : briefing.data?.summary ? (
+            <p className="home-brief-narrative">{briefing.data.summary}</p>
+          ) : null}
+          {asOf && <div className="home-brief-foot">{asOf}</div>}
+        </div>
+      )}
+    </div>
   )
 }
 
 // --- first run -------------------------------------------------------------
 
-// Minimal first-run gate: everything loaded and everything is empty. No org
-// chart, no wizard — an individual gets the same calm card and full access to
-// Work and Ask.
 function FirstRunCard({ onGoWork }) {
   return (
     <div className="dash-card dash-waiting">
@@ -664,7 +603,7 @@ function FirstRunCard({ onGoWork }) {
         here — what needs you, what&apos;s stuck, and what moved.
       </p>
       {onGoWork && (
-        <button type="button" className="btn btn-primary" onClick={onGoWork}>
+        <button type="button" className="btn btn-primary" onClick={() => onGoWork(null)}>
           Go to Work
         </button>
       )}

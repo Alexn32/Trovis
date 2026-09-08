@@ -9,6 +9,7 @@ import {
   workItemStatusLabel,
   workUpdatedLabel,
 } from './board.js'
+import { partitionLookAt } from './home.js'
 
 // Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
 // Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
@@ -31,6 +32,36 @@ const OVERVIEW_PILLS = [
   { key: 'open', label: 'Open', tone: null },
   { key: 'completed_week', label: 'Done this week', tone: 'quiet' },
 ]
+
+// Filters Home's cards navigate in with. Kept in the same vocabulary the Home
+// tiles use; 'attention' mirrors home.js's rule (stuck + aging waits) so the
+// two surfaces show the same rows.
+const WORK_FILTER_LABELS = {
+  attention: 'Needs attention',
+  moving: 'Moving',
+  waiting: 'Waiting',
+  stuck: 'Stuck',
+  done: 'Done',
+}
+
+function matchesWorkFilter(row, filter) {
+  switch (filter) {
+    case 'moving':
+      return row.status === 'moving'
+    case 'waiting':
+      return row.status === 'waiting_on_you' || row.status === 'waiting_on_other'
+    case 'stuck':
+      return row.status === 'stuck'
+    case 'done':
+      return row.status === 'done'
+    case 'attention': {
+      const { needsYou, needsAttention } = partitionLookAt([row])
+      return needsYou.length + needsAttention.length > 0
+    }
+    default:
+      return true
+  }
+}
 
 function rowClass(status) {
   if (status === 'waiting_on_you') return 'work-row is-waiting-you'
@@ -215,9 +246,12 @@ function WorkHome({
   onApproveSuggestion,
   onDeclineSuggestion,
   onEditSuggestion,
+  filter,
+  onClearFilter,
 }) {
   const [open, setOpen] = useState(null)
-  const rows = sortWorkItems(items || [])
+  const all = sortWorkItems(items || [])
+  const rows = filter ? all.filter((r) => matchesWorkFilter(r, filter)) : all
   const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
 
   function onRowKey(e, row) {
@@ -231,6 +265,19 @@ function WorkHome({
     <div className="view work-home">
       <header className="work-home-head">
         <h1>Work</h1>
+        {/* Arriving from a Home card. Always dismissible — a filter you cannot
+            see or clear is just a table that looks broken. */}
+        {filter && (
+          <button
+            type="button"
+            className="work-filter-chip"
+            onClick={onClearFilter}
+            aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
+          >
+            {WORK_FILTER_LABELS[filter] || filter}
+            <span aria-hidden="true">×</span>
+          </button>
+        )}
       </header>
 
       {overview && <OverviewStrip overview={overview} />}
@@ -322,8 +369,26 @@ function WorkHome({
 // not unmounted: the poll below skips its tick while hidden — exactly what it
 // already does for a backgrounded browser tab — instead of refetching for a
 // pane nobody can see. Defaults to true so other callers behave as before.
-export default function WorkTab({ onConnectAgent, onNewWorkflow, active = true }) {
+export default function WorkTab({
+  onConnectAgent,
+  onNewWorkflow,
+  active = true,
+  // { value, nonce } from a Home card. The nonce matters: keep-alive means
+  // this component is never remounted, so re-clicking the SAME tile after
+  // clearing the chip has to re-apply — an unchanged `value` alone would not.
+  incomingFilter = null,
+}) {
   const connectAgent = onConnectAgent || onNewWorkflow
+  const [filter, setFilter] = useState(null)
+
+  const filterNonce = incomingFilter?.nonce
+  useEffect(() => {
+    if (filterNonce === undefined) return
+    setFilter(incomingFilter?.value || null)
+    // Only the nonce drives this: a Home card sets it on every navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterNonce])
+
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
@@ -507,6 +572,8 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, active = true }
       onApproveSuggestion={approveSuggestion}
       onDeclineSuggestion={declineSuggestion}
       onEditSuggestion={editSuggestion}
+      filter={filter}
+      onClearFilter={() => setFilter(null)}
     />
   )
 }

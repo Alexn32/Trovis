@@ -25,9 +25,6 @@ import { isNamedWorkTitle } from './board.js'
  */
 export const ATTENTION_AGE_S = 14400
 
-/** Max rows in "What to look at" before we defer to the Work tab. */
-export const LOOK_AT_MAX = 7
-
 /** Age of an item in seconds, or null when it has no usable timestamp. */
 export function ageSeconds(iso, nowMs = Date.now()) {
   if (!iso) return null
@@ -75,39 +72,31 @@ export function partitionLookAt(items, nowMs = Date.now()) {
 }
 
 /**
- * The "What to look at" queue: needs-you first, then needs-attention, capped.
- * Returns `hidden` so the caller can say "+N more in Work" instead of
- * silently dropping rows.
+ * The Work card's four buckets, as the Work page itself splits them.
+ *
+ *   Moving  — in flight, nobody is blocked
+ *   Waiting — every wait, on you OR on someone else. Deliberately a DIFFERENT
+ *             cut from "needs attention": a fresh wait belongs here but is
+ *             not yet something to act on.
+ *   Stuck   — cannot move
+ *   Done    — finished this week
+ *
+ * Moving/Waiting/Stuck are counted from the loaded page of items, so on a
+ * truncated list they are a floor (the caller marks them "+"). Done comes
+ * from /work/overview.completed_week, which is authoritative and is the same
+ * number the Work tab prints — the two surfaces must not disagree.
  */
-export function lookAtRows(items, { nowMs = Date.now(), max = LOOK_AT_MAX } = {}) {
-  const { needsYou, needsAttention } = partitionLookAt(items, nowMs)
-  const all = [...needsYou, ...needsAttention]
-  return {
-    rows: all.slice(0, max),
-    hidden: Math.max(0, all.length - max),
-    needsYouCount: needsYou.length,
-    needsAttentionCount: needsAttention.length,
+export function workSplit(items, overview) {
+  const counts = { moving: 0, waiting: 0, stuck: 0, done: 0 }
+  for (const it of items || []) {
+    if (!isShowable(it)) continue
+    if (it.status === 'moving') counts.moving += 1
+    else if (it.status === 'waiting_on_you' || it.status === 'waiting_on_other') {
+      counts.waiting += 1
+    } else if (it.status === 'stuck') counts.stuck += 1
   }
-}
-
-/**
- * Briefing bullets: at most 3 needs-you, 3 stuck, 2 moving. Each is a real
- * named item so the reader can click straight through. "Moving" is the
- * optional noteworthy line and is omitted entirely when empty.
- */
-export function briefingBullets(items, nowMs = Date.now()) {
-  const { needsYou, needsAttention } = partitionLookAt(items, nowMs)
-  const moving = (items || [])
-    .filter((it) => isShowable(it) && it.status === 'moving')
-    .sort(
-      (a, b) =>
-        (Date.parse(b.updated_at || '') || 0) - (Date.parse(a.updated_at || '') || 0),
-    )
-  return {
-    needsYou: needsYou.slice(0, 3),
-    stuck: needsAttention.slice(0, 3),
-    moving: moving.slice(0, 2),
-  }
+  counts.done = Number(overview?.completed_week) || 0
+  return counts
 }
 
 /** English list: "A", "A and B", "A, B and C". */
@@ -171,15 +160,6 @@ export function asOfLabel(iso, locale = undefined) {
     hour: 'numeric',
     minute: '2-digit',
   })}`
-}
-
-/**
- * The cost pulse is a whisper, and only when there is something to whisper.
- * Hidden at $0 (and at sub-cent noise) so a quiet day shows no cost chrome.
- */
-export function showCostPulse(cost) {
-  if (!cost) return false
-  return (Number(cost.today) || 0) >= 0.01
 }
 
 /**
