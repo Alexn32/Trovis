@@ -136,6 +136,7 @@ with TestClient(main.app) as c:
     assert r.status_code == 201, r.text
     key = r.json()["api_key"]
     H = {"X-Trovis-Api-Key": key}
+    account_id = database.validate_api_key(key)["account_id"]
 
     print("\n[1] The door is closed without a key")
     r = c.post("/v1/traces", json=PAYLOAD)
@@ -201,6 +202,57 @@ with TestClient(main.app) as c:
     summary = c.get("/agents/raw-otlp-agent/summary", headers=H).json()
     check("span_count grew to 3", summary.get("span_count") == 3,
           f"span_count={summary.get('span_count')}")
+
+    print("\n[7] trovis.loop.title on the creating span → named Work")
+    # Lean contract: only title_source=provided counts. A raw OTLP span
+    # that carries trovis.loop.title at INSERT is the documented door.
+    # Untitled spans above must NOT appear in /work/items.
+    untitled_page = c.get("/work/items", headers=H).json()
+    check("untitled OTLP spans are not named work",
+          untitled_page.get("items") == [],
+          f"items={untitled_page.get('items')}")
+
+    titled = {
+        "resourceSpans": [{
+            "resource": {"attributes": kv({"service.name": "raw-otlp-agent"})},
+            "scopeSpans": [{"spans": [{
+                "traceId": "4" * 32, "spanId": "4" * 16, "name": "message_received",
+                "kind": 1, "startTimeUnixNano": str(T0 + 2 * NS),
+                "endTimeUnixNano": str(T0 + 2 * NS + 10_000_000),
+                "status": {"code": 1},
+                "attributes": kv({
+                    "trovis.event.type": "message_received",
+                    "trovis.loop.title": "Reconcile invoice 88",
+                    "trovis.run.id": "otlp-run-88",
+                }),
+            }]}],
+        }]
+    }
+    r = c.post("/v1/traces", json=titled, headers=H)
+    check("titled span accepted", r.json().get("accepted") == 1, f"body={r.json()}")
+
+    loops = [l for l in database.get_loops(account_id, limit=50)
+             if l.get("external_id") == "otlp-run-88"]
+    check("exactly one loop keyed to the run id",
+          len(loops) == 1, f"got {len(loops)}")
+    if loops:
+        check("title survived ingest",
+              loops[0].get("title") == "Reconcile invoice 88",
+              f"title={loops[0].get('title')!r}")
+        # get_loops() does not surface title_source; read the row directly.
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT title_source FROM loops WHERE id = ?",
+                        (loops[0]["id"],))
+            src = cur.fetchone()["title_source"]
+        check("title_source=provided (named work, not generated)",
+              src == "provided", f"title_source={src!r}")
+
+    page = c.get("/work/items", headers=H).json()
+    titles = [it.get("title") for it in page.get("items") or []]
+    check("named work appears in lean GET /work/items",
+          "Reconcile invoice 88" in titles, f"titles={titles}")
+    check("lean gate unchanged: only the provided-title loop is listed",
+          titles == ["Reconcile invoice 88"], f"titles={titles}")
 
 print()
 if failures:

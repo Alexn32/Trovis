@@ -203,6 +203,44 @@ try:
     check("span rows retrievable", len(rows) == 2, f"got {len(rows)}")
     check("spans carry a trace id", all(r.get("trace_id") for r in rows))
 
+    print("\n[7] set_loop_title / trovis.loop.title → named Work")
+    # The SDK helper (and a manual span that carries the same attr) is the
+    # documented way to get title_source=provided without an LLM title.
+    trovis.set_loop_title("Plan the Q3 rollout")
+    with tracer.start_as_current_span("message_received") as span:
+        from trovis.loop_attrs import apply_loop_attrs
+        span.set_attribute("trovis.event.type", "message_received")
+        apply_loop_attrs(span, run_id="sdk-run-q3", title="Plan the Q3 rollout")
+    flushed = provider.force_flush(timeout_millis=15_000)
+    check("titled span flushed", bool(flushed), f"returned {flushed!r}")
+
+    titled = None
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        loops = [l for l in database.get_loops(
+            database.validate_api_key(key)["account_id"], limit=50)
+                 if l.get("external_id") == "sdk-run-q3"]
+        if loops:
+            titled = loops[0]
+            break
+        time.sleep(0.25)
+    check("titled loop landed", titled is not None)
+    if titled:
+        check("title is the helper value",
+              titled.get("title") == "Plan the Q3 rollout",
+              f"title={titled.get('title')!r}")
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT title_source FROM loops WHERE id = ?",
+                        (titled["id"],))
+            src = cur.fetchone()["title_source"]
+        check("title_source=provided",
+              src == "provided", f"title_source={src!r}")
+
+    page = c.get("/work/items", headers=H).json()
+    titles = [it.get("title") for it in page.get("items") or []]
+    check("named work appears in lean GET /work/items",
+          "Plan the Q3 rollout" in titles, f"titles={titles}")
+
 finally:
     server.should_exit = True
     thread.join(timeout=10)

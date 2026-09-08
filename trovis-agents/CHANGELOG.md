@@ -1,5 +1,26 @@
 # Changelog — trovis-agents
 
+## 0.4.6
+
+Named Work titles on the creating span (`trovis.loop.title` → ingest
+`title_source=provided`). Platforms emit a short human title when one is
+available, plus `trovis.run.id` / `trovis.loop.external_id` and handoff
+attrs when the SDK surfaces them.
+
+- **OpenAI Agents SDK:** `CaptureProcessor` stamps `trovis.run.id` from the
+  SDK trace id. Title comes from `set_loop_title()`, a non-generic
+  workflow/trace name (`RunConfig.workflow_name` / `trace("…")`), or — when
+  `capture_outputs` is on — the first user task. `HandoffSpanData` emits
+  `trovis.handoff.direction=to_agent` + target.
+- **Anthropic Managed Agents / Claude Agent SDK:** first user message (or
+  `query(prompt=…)`) becomes the title when `capture_outputs` is on.
+  Session id is stamped as `trovis.run.id` and `trovis.loop.external_id`.
+- **Helpers:** `trovis.set_loop_title(title)` and `trovis.mark_handoff(...)`
+  queue attrs for the next span. Use `set_loop_title` to name Work without
+  turning on content capture.
+- Privacy unchanged: prompt-derived titles follow `capture_outputs`. Generic
+  SDK defaults (`"Agent workflow"`) are never emitted.
+
 ## 0.4.5
 
 Two silent-failure modes removed. **Both are breaking for installs that relied

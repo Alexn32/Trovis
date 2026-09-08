@@ -1,6 +1,6 @@
 {
   "name": "@trovis/openclaw-plugin",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Trovis Agent Management \u2014 automatic telemetry for OpenClaw agents",
   "author": "Trovis",
   "type": "module",

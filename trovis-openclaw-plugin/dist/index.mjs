@@ -66034,7 +66034,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
-var PLUGIN_VERSION = "0.6.2";
+var PLUGIN_VERSION = "0.6.3";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
 var ATTR_BYTE_LIMIT = 32 * 1024;
@@ -66287,6 +66287,7 @@ function pickAgentId(event, ctx) {
 }
 var pendingHandoff = null;
 var pendingClose = null;
+var pendingTitle = null;
 var handoffActiveRuns = /* @__PURE__ */ new Set();
 var closedRuns = /* @__PURE__ */ new Set();
 var RUN_TRACKING_MAX = 5e3;
@@ -66367,9 +66368,12 @@ function parseHandoffTools(raw) {
   }
   return map;
 }
-function applyLoopSignals(span, event, ctx) {
+function applyLoopSignals(span, event, ctx, extra) {
   setIfPresent(span, "trovis.run.id", pickRunId(event, ctx));
   setIfPresent(span, "trovis.loop.external_id", sessionKeyOf(event, ctx));
+  const title = pendingTitle || extra?.title;
+  pendingTitle = null;
+  setIfPresent(span, "trovis.loop.title", title);
   if (pendingHandoff) {
     const h = pendingHandoff;
     pendingHandoff = null;
@@ -66400,6 +66404,15 @@ function trovisHandoff(direction = "to_human", target, reason) {
 function trovisCloseLoop(reason = "done") {
   const r = typeof reason === "string" && reason.trim().length > 0 ? reason : "done";
   pendingClose = r;
+}
+function trovisSetLoopTitle(title) {
+  const t = typeof title === "string" ? title.replace(/\s+/g, " ").trim().slice(0, 80) : "";
+  if (!t) {
+    console.warn(`${LOG} trovisSetLoopTitle: empty title \u2014 ignored.`);
+    return null;
+  }
+  pendingTitle = t;
+  return t;
 }
 function normalizeUsageObject(container) {
   const c = container ?? {};
@@ -66804,7 +66817,15 @@ function wireEvents(api) {
     setIfPresent(span, "trovis.trace.span_id", ctx.spanId);
     setIfPresent(span, "trovis.trace.parent_span_id", ctx.parentSpanId);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
-    applyLoopSignals(span, event, ctx);
+    applyLoopSignals(span, event, ctx, {
+      // Workloop title: the inbound message is the best human-readable
+      // label for what this run is about. Content-derived, so it follows
+      // the same opt-in as content capture — with capture off, no title
+      // is sent unless the operator called trovisSetLoopTitle().
+      // Creation-only on the backend, so re-sending on a later message
+      // of the same run is harmless.
+      title: state.captureOutputs && typeof event?.content === "string" && event.content.length > 0 ? event.content.replace(/\s+/g, " ").trim().slice(0, 80) : void 0
+    });
     const skey = sessionKeyOf(event, ctx);
     if (skey) {
       const sender = pickStr(event?.senderId) ?? pickStr(ctx?.senderId);
@@ -66821,8 +66842,6 @@ function wireEvents(api) {
         "trovis.message.content",
         truncate(event.content, 1e4)
       );
-      const title = event.content.replace(/\s+/g, " ").trim().slice(0, 80);
-      setIfPresent(span, "trovis.loop.title", title);
     }
     span.end();
   });
@@ -67111,9 +67130,9 @@ The auth header is set on the exporter at gateway start, so **restart the gatewa
         return reply(
           `\u2705 Output capture **${enable ? "enabled" : "disabled"}**.
 
-` + (enable ? `Message content and tool results will now appear on spans as \`trovis.message.content\`, \`trovis.response.content\`, and \`trovis.tool.result\` (each truncated to 10 000 chars).
+` + (enable ? `Message content and tool results will now appear on spans as \`trovis.message.content\`, \`trovis.response.content\`, and \`trovis.tool.result\` (each truncated to 10 000 chars). The inbound message also becomes \`trovis.loop.title\` so the run lands as named Work.
 
-` : `Message content and tool results will no longer be captured. Existing spans aren't modified.
+` : `Message content and tool results will no longer be captured (and inbound messages will no longer name Work). Existing spans aren't modified. Use \`trovisSetLoopTitle()\` to name a run without capture.
 
 `) + persistHint("captureOutputs", enable)
         );
@@ -67238,7 +67257,7 @@ then restart the gateway.` : ``;
 \u2022 \`/trovis apikey <key>\` \u2014 set your API key
 
 **Capture toggles**
-\u2022 \`/trovis capture on\` / \`off\` \u2014 message + tool output capture (default off)
+\u2022 \`/trovis capture on\` / \`off\` \u2014 message + tool output capture; also names Work from the inbound message (default off)
 \u2022 \`/trovis userdata on\` / \`off\` \u2014 USER.md + MEMORY.md in registration (default off)
 
 **Inspect**
@@ -67278,6 +67297,7 @@ var __internal = {
     closedRuns.clear();
     pendingHandoff = null;
     pendingClose = null;
+    pendingTitle = null;
   }
 };
 var index_default = definePluginEntry({
@@ -67310,7 +67330,8 @@ export {
   __internal,
   index_default as default,
   trovisCloseLoop,
-  trovisHandoff
+  trovisHandoff,
+  trovisSetLoopTitle
 };
 /*! Bundled license information:
 

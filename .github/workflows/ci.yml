@@ -125,4 +125,8 @@ jobs:
       - run: pip install -e .
       # The exporter points at a dead port on purpose: the smoke test asserts
       # the SDK degrades quietly instead of taking the host agent down.
+      # test_loop_attrs.py / test_openai_usage.py are hermetic (fake tracers,
+      # no OTEL SDK required) and cover title + handoff emission.
       - run: python test_smoke.py
+      - run: python test_loop_attrs.py
+      - run: python test_openai_usage.py

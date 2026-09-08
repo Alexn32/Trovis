@@ -164,16 +164,45 @@ it so Agent B's spans share Agent A's trace and link back to the calling
 span. Trovis then surfaces "Agent A → Agent B" automatically. There's also
 `trovis.extract(headers)` if you need the raw OpenTelemetry context.
 
+## Named Work (`trovis.loop.title`)
+
+New runs land as **named Work** on Trovis (`GET /work/items`,
+`title_source=provided`) when the **creating span** carries
+`trovis.loop.title`. Ingest stamps the title only at loop INSERT — set it
+on the first span of the run.
+
+The SDK sets the title automatically when a sensible one is available:
+
+| Source | When |
+| ------ | ---- |
+| `trovis.set_loop_title("…")` | Always — explicit, no content capture required |
+| OpenAI workflow / `trace("…")` name | Always, unless it's a generic default (`"Agent workflow"`) |
+| First user task / `query(prompt=…)` | Only when `capture_outputs=True` (same privacy opt-in as message content) |
+
+```python
+from trovis import init, set_loop_title, mark_handoff
+
+init(api_key="ov_sk_your_key", agent_name="billing-triage")
+set_loop_title("Refund order 42")          # named Work, capture still off
+mark_handoff("to_human", "ops@acme.com")   # optional; also auto-emitted on SDK handoffs
+```
+
+Raw OTLP (no SDK): put `trovis.loop.title` on the first span of the loop,
+optionally with `trovis.run.id` or `trovis.loop.external_id` to group
+later spans. LLM-generated titles are **not** named Work — only
+`title_source=provided` counts.
+
 ## What gets captured
 
 - **Agent identity** (name, instructions/system prompt) — sent once when each unique agent is first constructed.
 - **Every LLM call** (model, duration, token usage).
 - **Every tool call** (name, duration, success/failure).
-- **Agent handoffs.**
+- **Agent handoffs** (`trovis.handoff.direction` / `target_id` when the SDK surfaces a handoff, or via `mark_handoff`).
 - **Guardrail checks.**
 - **Run completion.**
+- **Loop title** — see [Named Work](#named-work-trovislooptitle).
 
-By default, **message content is NOT captured** — only metadata. Enable with `init(capture_outputs=True)` for full visibility.
+By default, **message content is NOT captured** — only metadata. Enable with `init(capture_outputs=True)` for full visibility (this also names Work from the first user task).
 
 ## Environment variables
 
@@ -207,6 +236,11 @@ Setting `capture_outputs=True` enables the `CaptureProcessor`, which adds:
 - `trovis.tool.result` on tool-call spans.
 
 Each is truncated to 10 000 characters. Same attribute names and truncation budget as the Trovis OpenClaw plugin.
+
+When capture is on, the first user task is also collapsed into
+`trovis.loop.title` (80 chars) so the run appears as named Work. That is
+user content — it follows this same opt-in. Use `set_loop_title()` if you
+want a name without sending the prompt.
 
 ## License
 

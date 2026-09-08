@@ -13,6 +13,7 @@ import assert from "node:assert/strict"
 import plugin, {
   trovisHandoff,
   trovisCloseLoop,
+  trovisSetLoopTitle,
   __internal,
 } from "../dist/index.test.mjs"
 
@@ -143,6 +144,38 @@ test("loop title comes from the inbound message, collapsed and capped at 80 char
   const spans2 = prime({ captureOutputs: false })
   fire("message_received", { content: "secret task" }, { runId: "run-priv" })
   assert.ok(!("trovis.loop.title" in spans2[0].attributes))
+})
+
+test("trovisSetLoopTitle names Work without captureOutputs (Connect claim, privacy default intact)", () => {
+  const spans = prime({ captureOutputs: false })
+  const titled = trovisSetLoopTitle("  Refund   order 42  ")
+  assert.equal(titled, "Refund order 42")
+  fire("message_received", { content: "secret task" }, { runId: "run-named" })
+  assert.equal(spans[0].attributes["trovis.loop.title"], "Refund order 42")
+  assert.ok(
+    !("trovis.message.content" in spans[0].attributes),
+    "title helper must not enable content capture",
+  )
+
+  fire("llm_output", { runId: "run-named" }, {})
+  assert.ok(
+    !("trovis.loop.title" in spans[1].attributes),
+    "title is one-shot — consumed by the first span",
+  )
+})
+
+test("trovisSetLoopTitle wins over a captureOutputs-derived inbound title", () => {
+  const spans = prime({ captureOutputs: true })
+  trovisSetLoopTitle("Operator name")
+  fire("message_received", { content: "the raw user prompt" }, { runId: "run-win" })
+  assert.equal(spans[0].attributes["trovis.loop.title"], "Operator name")
+})
+
+test("trovisSetLoopTitle ignores empty / whitespace titles", () => {
+  const spans = prime()
+  assert.equal(trovisSetLoopTitle("   "), null)
+  fire("llm_output", { runId: "run-empty" }, {})
+  assert.ok(!("trovis.loop.title" in spans[0].attributes))
 })
 
 // ---------------------------------------------------------------------------

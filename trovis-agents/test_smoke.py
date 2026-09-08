@@ -51,6 +51,8 @@ try:
     import trovis
     check("import trovis", True, f"version={trovis.__version__}")
     check("init is callable", callable(trovis.init))
+    check("set_loop_title is exported", callable(trovis.set_loop_title))
+    check("mark_handoff is exported", callable(trovis.mark_handoff))
 
     step(2, "Calling init() with a dummy endpoint (won't actually export)…")
     # Point at a localhost port nothing is listening on so the BatchSpanProcessor

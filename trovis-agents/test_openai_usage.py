@@ -24,6 +24,14 @@ if "opentelemetry" not in sys.modules:
     sys.modules["opentelemetry"] = _ot
     sys.modules["opentelemetry.trace"] = _ot_trace
 
+# Namespace-package stub so registration.py can `from trovis.loop_attrs`
+# without running trovis/__init__.py (which pulls the full OTEL SDK).
+_pkg_dir = os.path.join(os.path.dirname(__file__), "trovis")
+if "trovis" not in sys.modules:
+    _pkg = types.ModuleType("trovis")
+    _pkg.__path__ = [_pkg_dir]
+    sys.modules["trovis"] = _pkg
+
 # Load registration.py standalone (its only top-level dependency is the stubbed
 # opentelemetry.trace) so we don't trigger trovis/__init__.py, which pulls in
 # the full OTEL SDK that isn't installed in this test env.

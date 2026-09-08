@@ -39,6 +39,7 @@ from typing import Any, Iterator, Optional
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
+from trovis.loop_attrs import apply_handoff_attrs, apply_loop_attrs, human_title
 from trovis.registration import is_capture_enabled
 
 logger = logging.getLogger("trovis.anthropic")
@@ -376,11 +377,19 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
 
     if event_type == "user.message":
         text = _extract_text(_get(event, "content"))
+        # Title from the inbound user task only when capture is on
+        # (prompt text is user content). set_loop_title() still applies
+        # via apply_loop_attrs regardless of the capture flag.
+        title = human_title(text) if (text and is_capture_enabled()) else None
         with tracer.start_as_current_span("message_received") as span:
             span.set_attribute("trovis.event.type", "message_received")
             span.set_attribute("trovis.agent.id", agent_name)
-            if run_id:
-                span.set_attribute("trovis.run.id", run_id)
+            apply_loop_attrs(
+                span,
+                run_id=run_id or None,
+                external_id=run_id or None,
+                title=title,
+            )
             if text:
                 span.set_attribute("trovis.message.content_length", len(text))
                 if is_capture_enabled():
@@ -394,8 +403,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
         with tracer.start_as_current_span("message_sent") as span:
             span.set_attribute("trovis.event.type", "message_sent")
             span.set_attribute("trovis.agent.id", agent_name)
-            if run_id:
-                span.set_attribute("trovis.run.id", run_id)
+            apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
             if text:
                 span.set_attribute(
                     "trovis.response.content_length", len(text)
@@ -434,8 +442,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
         with tracer.start_as_current_span("tool_call") as span:
             span.set_attribute("trovis.event.type", "tool_call")
             span.set_attribute("trovis.agent.id", agent_name)
-            if run_id:
-                span.set_attribute("trovis.run.id", run_id)
+            apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
             tool_name = _get(event, "name")
             if tool_name:
                 span.set_attribute("trovis.tool.name", str(tool_name))
@@ -447,16 +454,37 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
         with tracer.start_as_current_span("agent_run_complete") as span:
             span.set_attribute("trovis.event.type", "agent_run_complete")
             span.set_attribute("trovis.agent.id", agent_name)
-            if run_id:
-                span.set_attribute("trovis.run.id", run_id)
+            apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
             span.set_attribute("trovis.run.success", True)
+
+    elif event_type and event_type.endswith(".handoff"):
+        # Managed Agents may surface an explicit handoff event. Direction
+        # defaults to to_agent when the payload doesn't say; we never
+        # invent a target from tool parameter values.
+        direction = _get(event, "direction") or "to_agent"
+        target = (
+            _get(event, "target")
+            or _get(event, "to")
+            or _get(event, "agent")
+        )
+        with tracer.start_as_current_span("handoff") as span:
+            span.set_attribute("trovis.event.type", "handoff")
+            span.set_attribute("trovis.agent.id", agent_name)
+            apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
+            apply_handoff_attrs(
+                span,
+                direction=str(direction) if direction in (
+                    "to_human", "to_agent", "to_system"
+                ) else "to_agent",
+                target=str(target) if target else None,
+                reason=_get(event, "reason") or event_type,
+            )
 
     elif event_type and event_type.startswith("agent.error"):
         with tracer.start_as_current_span("agent_error") as span:
             span.set_attribute("trovis.event.type", "agent_error")
             span.set_attribute("trovis.agent.id", agent_name)
-            if run_id:
-                span.set_attribute("trovis.run.id", run_id)
+            apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
             span.set_status(StatusCode.ERROR)
 
 
@@ -613,3 +641,9 @@ def _reset_for_tests() -> None:
     _AGENT_ID_TO_MODEL.clear()
     _SESSION_TO_MODEL.clear()
     _PATCHED = False
+    try:
+        from trovis.loop_attrs import _reset_for_tests as _reset_loop
+
+        _reset_loop()
+    except Exception:  # noqa: BLE001
+        pass
