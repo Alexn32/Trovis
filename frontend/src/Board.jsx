@@ -5,7 +5,10 @@ import { WorkLoadFailed, StoryLoadFailed } from './ui.jsx'
 import { boardAge, boardCostLabel, boardEmpty, holderLine, ongoingLine } from './board.js'
 import { lifecycleSentence } from './loops.js'
 
-// The Work board — the Work tab's landing surface.
+// The Work board — a secondary view, not the Work home landing.
+// Home is overview + suggestions + the Monday table (WorkTab.jsx). This
+// four-column board stays for "Boards & other views"; it must not load
+// until the operator asks for it (fat GET /work/board).
 //
 // A board of TASKS. Every column, label and sentence here is written for
 // someone who has never heard of Trovis: work, waiting, stuck, done. The
@@ -139,7 +142,7 @@ function Column({ column, onOpen, onResolved }) {
 // ---------------------------------------------------------------------------
 // The task panel — the story, as steps. Slides over; never the entry point.
 
-function TaskPanel({ card, onClose, onResolved }) {
+export function TaskPanel({ card, onClose, onResolved }) {
   const [detail, setDetail] = useState(null)
   const [err, setErr] = useState(false)
   const [reload, setReload] = useState(0)

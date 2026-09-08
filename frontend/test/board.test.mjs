@@ -232,8 +232,84 @@ test('no Trovis jargon in the standing-work copy', () => {
 test('Work home and Ask do not call fat /work/board or /work/summary', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   const ask = readFileSync(new URL('../src/AskPill.jsx', import.meta.url), 'utf8')
-  assert.doesNotMatch(work, /getWorkSummary|getWorkBoard/, 'Work home uses overview + items')
+  // Home load path: overview + items + suggestions. getWorkBoard lives in
+  // Board.jsx and must not be invoked from WorkTab's load().
+  assert.doesNotMatch(work, /getWorkSummary/)
+  assert.doesNotMatch(work, /getWorkBoard/)
   assert.doesNotMatch(ask, /getWorkBoard/, 'Ask must not prefetch the fat board')
   assert.match(work, /getWorkOverview/)
   assert.match(work, /getWorkItems/)
+  assert.match(work, /getWorkSuggestions/)
+})
+
+test('Work home is the Monday table — Task column, no Priority, no KindCard landing', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  assert.match(work, />Task</)
+  assert.match(work, /Status/)
+  assert.match(work, /Holder/)
+  assert.match(work, /What&apos;s next/)
+  assert.match(work, /Updated/)
+  assert.doesNotMatch(work, /Priority/)
+  assert.doesNotMatch(work, /KindCard/)
+  assert.match(work, /work-suggestions/)
+  assert.match(work, /TaskPanel/)
+  assert.match(work, /Boards & other views/)
+})
+
+test('Work home never auto-creates from suggestion approve/edit/decline', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(work, /insert_spans|createWork|postWork|\/work\/items['"`].*POST/i)
+  assert.match(work, /never auto-create|Local dismiss only/)
+})
+
+test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving → Done', async () => {
+  const { sortWorkItems } = await import('../src/board.js')
+  const rows = [
+    { id: 1, status: 'done', updated_at: '2026-09-08T12:00:00Z' },
+    { id: 2, status: 'moving', updated_at: '2026-09-08T12:00:00Z' },
+    { id: 3, status: 'waiting_on_other', updated_at: '2026-09-08T12:00:00Z' },
+    { id: 4, status: 'stuck', updated_at: '2026-09-08T12:00:00Z' },
+    { id: 5, status: 'waiting_on_you', updated_at: '2026-09-08T12:00:00Z' },
+  ]
+  assert.deepEqual(sortWorkItems(rows).map((r) => r.status), [
+    'waiting_on_you',
+    'stuck',
+    'waiting_on_other',
+    'moving',
+    'done',
+  ])
+})
+
+test('named-work title gate hides ids, UUIDs, snake_case, and jargon', async () => {
+  const { isNamedWorkTitle } = await import('../src/board.js')
+  assert.equal(isNamedWorkTitle('Approve refund #4821'), true)
+  assert.equal(isNamedWorkTitle('loop_42'), false)
+  assert.equal(isNamedWorkTitle('550e8400-e29b-41d4-a716-446655440000'), false)
+  assert.equal(isNamedWorkTitle(''), false)
+})
+
+test('workUpdatedLabel is compact like boardAge, not "2h ago"', async () => {
+  const { workUpdatedLabel } = await import('../src/board.js')
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000).toISOString()
+  assert.equal(workUpdatedLabel(twoHoursAgo), '2h')
+  assert.equal(workUpdatedLabel(null), '')
+})
+
+test('Design locks: color + 3px rail only on waiting_on_you / stuck', () => {
+  const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8')
+  assert.match(css, /\.work-row\.is-waiting-you[\s\S]{0,180}inset 3px 0 0 var\(--warning\)/)
+  assert.match(css, /\.work-row\.is-stuck[\s\S]{0,180}inset 3px 0 0 var\(--error\)/)
+  assert.match(css, /\.work-row\.is-waiting-you[\s\S]{0,120}var\(--warm-fill\)/)
+  assert.match(css, /\.work-row\.is-stuck[\s\S]{0,120}var\(--error-faint\)/)
+  assert.match(css, /\.work-status-pill\.waiting_on_you[\s\S]{0,60}var\(--warning\)/)
+  assert.match(css, /\.work-status-pill\.stuck[\s\S]{0,60}var\(--error\)/)
+  assert.match(css, /\.work-status-pill\.moving[\s\S]{0,80}var\(--text-muted\)/)
+})
+
+test('no Trovis jargon on Work home', () => {
+  const src = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  for (const s of userFacingStrings(code)) {
+    assert.ok(!FORBIDDEN.test(s), `Work home ships jargon: ${JSON.stringify(s)}`)
+  }
 })

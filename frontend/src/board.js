@@ -1,3 +1,5 @@
+import { looksInternal } from './askChips.js'
+
 // Work board presentation logic — pure functions, no React, no DOM, so
 // node --test can cover the copy without a component framework.
 //
@@ -151,4 +153,45 @@ export function workItemStatusLabel(status) {
     default:
       return ''
   }
+}
+
+// Home table sort: Needs you → Stuck → waiting on someone → Moving → Done.
+// waiting_on_other sits between stuck and moving so it is not an alarm column.
+const WORK_STATUS_RANK = {
+  waiting_on_you: 0,
+  stuck: 1,
+  waiting_on_other: 2,
+  moving: 3,
+  done: 4,
+}
+
+/** Monday table default order. Stable for unknown statuses (they sink). */
+export function sortWorkItems(items) {
+  return [...(items || [])].sort((a, b) => {
+    const ra = WORK_STATUS_RANK[a?.status] ?? 50
+    const rb = WORK_STATUS_RANK[b?.status] ?? 50
+    if (ra !== rb) return ra - rb
+    const ta = Date.parse(a?.updated_at || '') || 0
+    const tb = Date.parse(b?.updated_at || '') || 0
+    if (ta !== tb) return tb - ta
+    return (b?.id || 0) - (a?.id || 0)
+  })
+}
+
+/** Compact "2h" / "15m" — same grain as boardAge, from an ISO timestamp. */
+export function workUpdatedLabel(iso) {
+  if (!iso) return ''
+  const ms = Date.now() - Date.parse(iso)
+  if (Number.isNaN(ms)) return ''
+  return boardAge(Math.max(0, Math.floor(ms / 1000)))
+}
+
+/**
+ * Named-work display gate. Raw ids, UUIDs, snake_case, and Trovis jargon
+ * stay off the table even if they slipped the API's title filter.
+ */
+export function isNamedWorkTitle(title) {
+  const t = String(title || '').trim()
+  if (!t) return false
+  return !looksInternal(t)
 }
