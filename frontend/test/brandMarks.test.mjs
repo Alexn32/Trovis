@@ -94,6 +94,17 @@ test('Add Agent live tiles stay the real doors; SaaS is not a picker door', () =
   }
 })
 
+test('Work holder mark uses holder name only — never whats_next', () => {
+  const src = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  const quiet = src.match(/QuietBrand texts=\{\[([^\]]+)\]\}/)
+  assert.ok(quiet, 'holder QuietBrand exists')
+  assert.match(quiet[1], /holder\?\.name/)
+  assert.doesNotMatch(quiet[1], /whats_next/)
+  assert.doesNotMatch(src, /work-td-next[^>]*>[\s\S]*QuietBrand/)
+  assert.match(src, /work-td-holder/)
+  assert.match(src, /holderLabel/)
+})
+
 test('Connect opening chips are live/recipe only — no SaaS doors', () => {
   const src = readFileSync(new URL('../src/ConnectGuide.jsx', import.meta.url), 'utf8')
   const opts = src.match(/options: \[([\s\S]*?)\]/)

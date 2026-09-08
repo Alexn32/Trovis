@@ -342,7 +342,7 @@ function WorkHome({
                 {workItemStatusLabel(row.status)}
               </span>
               <span className="work-td-holder">
-                <QuietBrand texts={[row.holder?.name, row.whats_next]} size={12} />
+                <QuietBrand texts={[row.holder?.name]} size={12} />
                 {holderLabel(row.holder, row.status)}
               </span>
               <span className="work-td-next">{row.whats_next || ''}</span>
