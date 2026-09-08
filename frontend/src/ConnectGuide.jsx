@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, getApiKey } from './api.js'
 import { CodeBlock, computeOverseeEndpoint } from './AddAgent.jsx'
 import { TrovisMark, SendIcon, CheckCircleIcon } from './Icons.jsx'
+import { QuietBrand } from './BrandMarks.jsx'
 
 // The conversational "Set up with AI" flow. Trovis asks one question at a
 // time (with quick-reply chips), emits copy-paste snippets carrying the
@@ -21,6 +22,7 @@ const OPENING_TURN = {
     'Claude Agent SDK / Claude Code',
     'OpenClaw',
     'ChatGPT (custom GPT)',
+    'Cursor (OpenTelemetry)',
     'Custom Python / other',
   ],
   code: [],
@@ -310,6 +312,7 @@ function GuideBubble({ m, orgKey, endpoint, chipsEnabled, onPick }) {
                 disabled={!chipsEnabled}
                 onClick={() => chipsEnabled && onPick(o)}
               >
+                <QuietBrand texts={[o]} size={14} />
                 {o}
               </button>
             ))}

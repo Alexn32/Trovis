@@ -23,6 +23,7 @@ import {
   LockIcon,
   TrashIcon,
 } from './Icons.jsx'
+import { QuietBrand } from './BrandMarks.jsx'
 
 // Fleet view. The /agents response is now nested:
 //   AgentGroup { service_name, agents: AgentInstance[], total_spans, ... }
@@ -386,7 +387,12 @@ function FleetCard({
         />
       </div>
 
-      {platform && <div className="agent-platform">{platform}</div>}
+      {platform && (
+        <div className="agent-platform">
+          <QuietBrand texts={[platform, name, serviceName]} size={13} />
+          {platform}
+        </div>
+      )}
       {ownerName && (
         <div className="owner-tag">
           Owner: <strong>{ownerName}</strong>
@@ -602,7 +608,10 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
             <span className="agent-name-secondary">{group.service_name}</span>
           )}
           {group.platform && (
-            <span className="instance-band-platform">{group.platform}</span>
+            <span className="instance-band-platform">
+              <QuietBrand texts={[group.platform, group.service_name, group.display_name]} size={12} />
+              {group.platform}
+            </span>
           )}
           <span className="agent-sub-count">· {group.agents.length} agents</span>
           {lockedCount > 0 && (

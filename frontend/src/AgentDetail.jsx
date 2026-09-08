@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { QuietBrand } from './BrandMarks.jsx'
 
 /* ─────────────────────────────────────────────
    TROVIS — Agent Detail Page
@@ -98,7 +99,10 @@ function Chip({ children }) {
 }
 function Tag({ children }) {
   return (
-    <span style={{ fontFamily: F.mono, fontSize: 11.5, background: C.subtle, padding: '2px 8px', borderRadius: 6 }}>
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      fontFamily: F.mono, fontSize: 11.5, background: C.subtle, padding: '2px 8px', borderRadius: 6,
+    }}>
       {children}
     </span>
   )
@@ -143,7 +147,12 @@ function Header({ summary, registration, account, onBack }) {
         margin: '10px 0 12px', fontSize: 13, color: C.muted, fontFamily: F.body,
       }}>
         {owner && <span>Owner: <span style={{ color: C.body, fontWeight: 500 }}>{owner}</span></span>}
-        {summary.platform && <Tag>{summary.platform}</Tag>}
+        {summary.platform && (
+          <Tag>
+            <QuietBrand texts={[summary.platform, serviceName, name]} size={12} />
+            {summary.platform}
+          </Tag>
+        )}
         {model && <Tag>{model}</Tag>}
         {summary.agent_id && summary.agent_id !== 'main' && <Tag>{summary.agent_id}</Tag>}
         <span>First seen {fmtDate(summary.first_seen)}</span>

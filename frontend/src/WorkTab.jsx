@@ -10,6 +10,7 @@ import {
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
+import { QuietBrand } from './BrandMarks.jsx'
 
 // Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
 // Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
@@ -340,7 +341,10 @@ function WorkHome({
               <span className={`work-status-pill ${row.status || ''}`}>
                 {workItemStatusLabel(row.status)}
               </span>
-              <span className="work-td-holder">{holderLabel(row.holder, row.status)}</span>
+              <span className="work-td-holder">
+                <QuietBrand texts={[row.holder?.name]} size={12} />
+                {holderLabel(row.holder, row.status)}
+              </span>
               <span className="work-td-next">{row.whats_next || ''}</span>
               <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
             </div>
