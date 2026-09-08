@@ -196,6 +196,25 @@ export function isNamedWorkTitle(title) {
   return !looksInternal(t)
 }
 
+/**
+ * Adapt a lean /work/items row into the card shape TaskPanel expects, so the
+ * Work table and Home's "What to look at" open the SAME detail pane from the
+ * same row data. Shared here rather than duplicated per surface.
+ */
+export function itemToCard(row) {
+  const ms = row?.updated_at ? Date.now() - Date.parse(row.updated_at) : NaN
+  return {
+    id: row?.id,
+    title: row?.title,
+    holder_name: row?.holder?.name || '',
+    holder_type: row?.holder?.kind === 'human' ? 'human' : 'agent',
+    is_yours: row?.status === 'waiting_on_you',
+    age_seconds: Number.isNaN(ms) ? null : Math.max(0, Math.floor(ms / 1000)),
+    standing: false,
+    standing_reason: null,
+  }
+}
+
 const HOLDER_KIND_PREFIX = {
   human: 'Person',
   agent: 'Agent',

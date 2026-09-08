@@ -67,6 +67,16 @@ test('an agent added or deleted elsewhere invalidates the panes that list agents
   assert.match(app, /if \(fleetVisible\) shownEpoch\.current\.fleet = rosterEpoch\.fleet/)
 })
 
+test('Home stops re-syncing on focus while its pane is hidden', () => {
+  // Home v2 keeps six endpoints (briefing / attention / cost / work-feed /
+  // work overview + items) and re-syncs them when the window regains focus.
+  // Keep-alive leaves it mounted behind Work, so without the active gate that
+  // re-sync fires for a pane nobody is looking at.
+  const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
+  assert.match(dash, /if \(document\.hidden \|\| !activeRef\.current\) return/)
+  assert.match(app, /active=\{dashboardVisible\}/)
+})
+
 test('the Work poll skips its tick while the pane is hidden', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.match(work, /failSoftRef\.current \|\| document\.hidden \|\| !activeRef\.current/)

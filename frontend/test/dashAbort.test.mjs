@@ -133,7 +133,7 @@ test('App.jsx logout does not await api.logout (uses performLogout)', () => {
   assert.match(app, /legacyTab \|\| 'work'/)
 })
 
-test('Dashboard unmount aborts briefing/attention/work-feed/cost; no 15s waiting poll', () => {
+test('Dashboard unmount aborts every Home GET; no 15s waiting poll', () => {
   const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
   const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   assert.match(code, /startAbortable/)
@@ -141,11 +141,30 @@ test('Dashboard unmount aborts briefing/attention/work-feed/cost; no 15s waiting
   assert.match(code, /getAttention\(\{\s*signal\s*\}\)/)
   assert.match(code, /getCost\(\{\s*signal\s*\}\)/)
   assert.match(code, /getWorkFeed\(\{\s*signal\s*\}\)/)
+  // Home v2's work pair carries the signal too.
+  assert.match(code, /getWorkOverview\(\{\s*signal\s*\}\)/)
+  assert.match(code, /getWorkItems\(\{[^}]*signal[^}]*\}\)/)
   assert.doesNotMatch(code, /setInterval/)
   assert.doesNotMatch(code, /15000/)
   assert.doesNotMatch(code, /15_000/)
-  // Timeout/abort on listAgents must not paint an empty fleet.
-  assert.doesNotMatch(code, /setAgents\(\[\]\)/)
+})
+
+test('Home never first-paints the fleet or the fat work endpoints', () => {
+  const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
+  const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  // Fleet is tab 2. GET /agents is what made Home expensive.
+  assert.doesNotMatch(code, /listAgents/)
+  // Both loop-scan the whole board and starve the single replica.
+  assert.doesNotMatch(code, /getWorkBoard/)
+  assert.doesNotMatch(code, /getWorkSummary/)
+  // Suggestions + the Monday table stay on the Work tab.
+  assert.doesNotMatch(code, /getWorkSuggestions/)
+})
+
+test('work pair forwards an AbortSignal from api.js', () => {
+  const api = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
+  assert.match(api, /getWorkOverview:\s*\(opts = \{\}\) =>/)
+  assert.match(api, /getWorkItems:\s*\(\{[^}]*signal[^}]*\}/s)
 })
 
 test('dashboard API methods forward an AbortSignal', () => {

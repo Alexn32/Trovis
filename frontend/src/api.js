@@ -402,15 +402,21 @@ export const api = {
   // call this — Frontend wires the Monday table against overview + items.
   getWorkSummary: () => request('/work/summary', { timeoutMs: WORK_TIMEOUT_MS }),
   // Lean Work home. Counts only: needs_you, needs_attention, open, completed_week.
-  getWorkOverview: () => request('/work/overview', { timeoutMs: WORK_TIMEOUT_MS }),
+  // Optional `{ signal }` so Home can abort on unmount / tab switch.
+  getWorkOverview: (opts = {}) =>
+    request('/work/overview', { timeoutMs: WORK_TIMEOUT_MS, ...opts }),
   // Paginated named items for the Monday table. cursor from the previous
   // page's next_cursor. Untitled OTel loops are excluded.
-  getWorkItems: ({ cursor = null, limit = 50 } = {}) => {
+  // `signal` is ours (Home aborts it); the rest of the object is query state.
+  getWorkItems: ({ cursor = null, limit = 50, signal = undefined } = {}) => {
     const q = new URLSearchParams()
     if (limit) q.set('limit', String(limit))
     if (cursor) q.set('cursor', cursor)
     const qs = q.toString()
-    return request(`/work/items${qs ? `?${qs}` : ''}`, { timeoutMs: WORK_TIMEOUT_MS })
+    return request(`/work/items${qs ? `?${qs}` : ''}`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+    })
   },
   // Pending suggestions for the home strip. Empty until a generator inserts
   // rows — never invent titles. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }

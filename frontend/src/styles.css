@@ -4374,86 +4374,108 @@ a:hover {
 
 /* ---------- 2. daily briefing ---------- */
 .dash-briefing-label { font-size: 11.5px; font-weight: 700; color: var(--text-primary); }
-.dash-briefing-body { font-size: 13.5px; font-weight: 440; color: var(--text-secondary); line-height: 1.65; margin: 0; }
-.dash-briefing-foot {
-  display: flex; gap: 32px; align-items: flex-end;
-  border-top: 1px solid var(--border-default);
-  padding-top: 12px; margin-top: 14px;
-}
-.dash-foot-stat { display: flex; flex-direction: column; gap: 1px; }
-.dash-foot-num { font-size: 20px; font-weight: 800; color: var(--text-primary); letter-spacing: -0.02em; }
-.dash-foot-delta { font-size: 14px; font-weight: 700; color: var(--success); }
-.dash-foot-lbl { font-size: 11.5px; font-weight: 500; color: var(--text-muted); }
 
-/* ---------- 3. attention + cost grid ---------- */
-.dash-grid-2 { display: grid; grid-template-columns: 1fr 300px; gap: 14px; align-items: start; }
+/* ---------- Home v2 ----------------------------------------------------------
+   Visual hierarchy, loud → quiet:
+     1. What to look at  — warm/error rails, the only alarm colour on Home
+     2. Daily Briefing   — calm primary narrative, large plain type
+     3. Work feed        — ambient hairline rows, no per-row wash
+     4. Cost pulse       — a whisper
+   Section ORDER on the page is still Briefing → look-at → feed → cost; only
+   the WEIGHT differs. Reuses the existing tokens and the work-row rails
+   (--warm-fill / --error-faint) so Home and the Work tab read as one product.
+   -------------------------------------------------------------------------- */
 
-.dash-count-badge {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
-  background: var(--dash-crit); color: #fff; font-size: 10px; font-weight: 700;
+/* Briefing: the lead is the headline, Claude's narrative is colour beneath. */
+.home-brief-lead {
+  font-size: 17px; font-weight: 650; line-height: 1.45; letter-spacing: -0.01em;
+  color: var(--text-primary); margin: 0 0 6px;
+}
+.home-brief-narrative {
+  font-size: 13.5px; font-weight: 440; line-height: 1.65;
+  color: var(--text-secondary); margin: 0 0 12px;
+}
+.home-brief-narrative.is-muted { color: var(--text-muted); }
+.home-brief-clear { font-size: 13px; color: var(--text-muted); margin: 2px 0 0; }
+
+.home-brief-group { display: flex; gap: 10px; padding: 7px 0; align-items: baseline; }
+.home-brief-group + .home-brief-group { border-top: 1px solid var(--border-default); }
+.home-brief-group-label {
+  /* Wide enough that "Needs attention" stays on one line. */
+  flex: 0 0 116px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+/* The briefing is calm: the label carries the tone, never a filled row. */
+.home-brief-group.tone-warn .home-brief-group-label { color: var(--warning); }
+.home-brief-group.tone-error .home-brief-group-label { color: var(--error); }
+.home-brief-none { font-size: 13px; color: var(--text-muted); }
+.home-brief-list { list-style: none; margin: 0; padding: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.home-brief-item {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  background: none; border: none; padding: 0; text-align: left; width: 100%;
+}
+.home-brief-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.home-brief-item:hover .home-brief-title { color: var(--brand-accent); }
+.home-brief-why { font-size: 12.5px; color: var(--text-muted); }
+.home-brief-foot {
+  display: flex; align-items: center; gap: 7px; margin-top: 12px;
+  padding-top: 10px; border-top: 1px solid var(--border-default);
+  font-size: 11.5px; color: var(--text-muted);
 }
 
-.dash-att-list { display: flex; flex-direction: column; }
-.dash-att-row { border-bottom: 1px solid var(--border-default); }
-.dash-att-row:last-child { border-bottom: none; }
-.dash-att-head {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  background: none; border: none; padding: 9px 0; text-align: left;
+/* What to look at: the loudest thing on Home — and absent when empty. */
+.home-lookat-list { display: flex; flex-direction: column; gap: 6px; }
+.home-lookat-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 14px; align-items: center; text-align: left; width: 100%;
+  padding: 11px 14px; border-radius: 9px;
+  border: 1px solid var(--border-default); background: var(--bg-elevated);
+  transition: background 0.15s ease;
 }
-.dash-sev-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.dash-sev-dot.sev-critical { background: var(--dash-crit); box-shadow: 0 0 0 3px var(--error-faint); }
-.dash-sev-dot.sev-warning { background: var(--dash-warn); }
-.dash-sev-dot.sev-info { background: var(--dash-info); }
-.dash-att-agent { font-size: 13px; font-weight: 650; color: var(--text-primary); flex-shrink: 0; }
-.dash-sev-badge {
-  font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
-  padding: 2px 6px; border-radius: 100px; border: 1px solid; flex-shrink: 0;
+/* Same 3px rail vocabulary as the Work table, so a row means the same thing
+   on both surfaces. */
+.home-lookat-row.is-waiting-you {
+  background: var(--warm-fill); border-color: transparent;
+  box-shadow: inset 3px 0 0 var(--warning);
 }
-.dash-sev-badge.sev-critical { color: var(--dash-crit); border-color: var(--dash-crit); background: var(--error-faint); }
-.dash-sev-badge.sev-warning { color: var(--dash-warn); border-color: var(--dash-warn); background: var(--warning-faint); }
-.dash-sev-badge.sev-info { color: var(--dash-info); border-color: var(--dash-info); background: var(--idle-faint); }
-.dash-att-title {
-  font-size: 12.5px; color: var(--text-secondary); flex: 1;
+.home-lookat-row.is-waiting-you:hover { background: var(--warm-fill-hover); }
+.home-lookat-row.is-stuck {
+  background: var(--error-faint); border-color: transparent;
+  box-shadow: inset 3px 0 0 var(--error);
+}
+.home-lookat-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-lookat-title {
+  font-size: 13.5px; font-weight: 650; color: var(--text-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.dash-att-chev { color: var(--text-muted); display: inline-flex; flex-shrink: 0; }
-.dash-att-detail { padding: 2px 0 12px 15px; display: flex; flex-direction: column; gap: 8px; }
-.dash-att-detail-text { font-size: 12.5px; color: var(--text-secondary); line-height: 1.6; margin: 0; }
-.dash-rec {
-  background: var(--dash-rec-bg); border: 1px solid var(--dash-rec-border);
-  border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px;
-}
-.dash-rec-label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dash-rec-label); }
-.dash-rec-text { font-size: 12.5px; color: var(--dash-rec-text); line-height: 1.5; }
-.dash-att-meta { font-size: 11.5px; color: var(--text-muted); }
+.home-lookat-meta,
+.home-lookat-next { font-size: 12px; color: var(--text-secondary); }
+.home-lookat-age { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.home-lookat-more { align-self: flex-start; }
 
-/* ---------- cost intelligence ---------- */
-.dash-cost-today { display: flex; align-items: baseline; gap: 6px; margin-bottom: 12px; }
-.dash-bignum { font-size: 28px; font-weight: 800; color: var(--text-primary); letter-spacing: -0.03em; }
-.dash-cost-today-lbl { font-size: 11.5px; font-weight: 500; color: var(--text-muted); }
-.dash-budget { margin-bottom: 12px; }
-.dash-budget-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
-.dash-budget-text { font-size: 11.5px; color: var(--text-muted); }
-.dash-budget-pct { font-size: 11px; font-weight: 700; }
-.dash-budget-pct.ok { color: var(--success); }
-.dash-budget-pct.over { color: var(--dash-warn); }
-.dash-budget-bar { height: 4px; border-radius: 100px; background: var(--bg-surface); overflow: hidden; }
-.dash-budget-fill { height: 100%; border-radius: 100px; background: var(--text-primary); transition: width 0.3s ease; }
-.dash-budget-fill.over { background: var(--dash-warn); }
-.dash-spark { display: block; margin: 4px 0 12px; }
-.dash-cost-agents { display: flex; flex-direction: column; }
-.dash-cost-agent-row {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 6px 0; border-top: 1px solid var(--border-default);
+/* Work feed: ambient. Rows are buttons, so strip the button chrome — the
+   hairline divider comes from .dash-feed-row below. */
+.home-feed-row {
+  display: flex; flex-direction: column; align-items: flex-start;
+  width: 100%; text-align: left; background: none; border: none;
 }
-.dash-cost-agent-row:first-of-type { border-top: none; }
-.dash-cost-agent-name { font-size: 12.5px; font-weight: 550; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dash-cost-agent-val { font-size: 12.5px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 5px; }
-.dash-trend.up { fill: var(--dash-warn); }
-.dash-trend.down { fill: var(--success); }
 
-/* ---------- 4. work feed + 5. fleet grid ---------- */
+/* Cost pulse: the quietest line on the page. */
+.home-cost-pulse {
+  display: flex; align-items: center; gap: 8px; align-self: flex-start;
+  background: none; border: none; padding: 2px 0;
+  font-size: 12px; color: var(--text-muted);
+}
+.home-cost-pulse:hover { color: var(--text-secondary); }
+.home-cost-link { font-weight: 600; }
+
+@media (max-width: 720px) {
+  .home-lookat-row { grid-template-columns: 1fr; gap: 3px; }
+  .home-brief-group { flex-direction: column; gap: 4px; }
+  .home-brief-group-label { flex-basis: auto; }
+}
+
+/* ---------- 4. work feed ---------- */
 .dash-section { display: flex; flex-direction: column; gap: 10px; }
 .dash-section-head { display: flex; justify-content: space-between; align-items: center; }
 .dash-link { background: none; border: none; font-size: 11.5px; font-weight: 600; color: var(--text-muted); padding: 0; }
@@ -4473,21 +4495,10 @@ a:hover {
 }
 .dash-feed-summary { font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; }
 
-.dash-fleet-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.dash-fleet-cell {
-  display: flex; align-items: center; gap: 8px; text-align: left;
-  background: var(--bg-elevated); border: 1px solid var(--border-default);
-  border-radius: 8px; padding: 10px 12px; transition: border-color 0.15s ease;
-}
 .dash-status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .dash-status-dot.status-healthy { background: var(--success); }
 .dash-status-dot.status-degraded { background: var(--dash-warn); }
 .dash-status-dot.status-offline { background: var(--dash-offline); }
-.dash-fleet-cell.status-healthy:hover { border-color: var(--success); }
-.dash-fleet-cell.status-degraded:hover { border-color: var(--dash-warn); }
-.dash-fleet-cell.status-offline:hover { border-color: var(--border-hover); }
-.dash-fleet-name { font-size: 12px; font-weight: 650; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.dash-fleet-count { font-size: 10.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
 /* ---------- skeleton loading ---------- */
 .dash-skel { display: flex; flex-direction: column; gap: 8px; }
@@ -5099,13 +5110,9 @@ select.wf2-input { cursor: pointer; }
 .ask-vis-wf-stat { display: flex; flex-direction: column; gap: 1px; }
 
 /* =============================================================================
-   Dedicated cost page (overlay) + clickable dashboard cost card
+   Dedicated cost page (overlay)
+   Reached from the Home cost pulse (.home-cost-pulse) and the nav.
    ============================================================================= */
-.dash-cost.is-clickable { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
-.dash-cost.is-clickable:hover { border-color: var(--border-hover); box-shadow: var(--shadow-sm); }
-.dash-cost-link { font-size: 11px; font-weight: 600; color: var(--text-muted); }
-.dash-cost.is-clickable:hover .dash-cost-link { color: var(--text-primary); }
-
 .costp .wf2-back { margin-bottom: 2px; }
 .costp-titlerow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .costp-refresh { display: flex; align-items: center; gap: 10px; }
@@ -5384,28 +5391,7 @@ select.wf2-input { cursor: pointer; }
   font-size: 14px; line-height: 1.55; color: var(--text-secondary);
   margin: 0 0 24px; max-width: 46ch;
 }
-.dash-waiting-checklist {
-  list-style: none; margin: 0; padding: 0; text-align: left;
-  display: flex; flex-direction: column; gap: 11px;
-}
-.dash-waiting-checklist li {
-  display: flex; align-items: center; gap: 11px;
-  font-size: 13.5px; color: var(--text-muted);
-}
-.dash-waiting-checklist li.is-done { color: var(--text-secondary); }
-.dash-wait-mark {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0;
-  font-size: 11px; font-weight: 700;
-}
-.dash-waiting-checklist li.is-done .dash-wait-mark {
-  background: var(--success-faint); color: var(--success);
-}
-.dash-wait-mark.dot { border: 1.5px solid var(--border-hover); background: transparent; }
-.dash-waiting-checklist li.is-active .dash-wait-mark.dot {
-  border-color: var(--text-muted);
-  animation: dashWaitDot 1.4s ease-in-out infinite;
-}
+
 @keyframes dashWaitDot {
   0%, 100% { opacity: 0.35; }
   50%      { opacity: 1; }

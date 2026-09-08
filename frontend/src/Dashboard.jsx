@@ -1,32 +1,47 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
-import { isTimeoutError, isUnreachableError } from './httpTimeout.js'
 import { startAbortable } from './abortable.js'
+import { TaskPanel } from './Board.jsx'
+import { WorkLoadFailed } from './ui.jsx'
+import { itemToCard, workUpdatedLabel } from './board.js'
 // Costs always render in dollars (e.g. "$0.68"); shared with Fleet so they match.
 import { formatCost as fmtMoney } from './utils.js'
 import {
-  TrovisMark,
-  ChevronDownIcon,
-  ChevronRightIcon,
-} from './Icons.jsx'
+  asOfLabel,
+  briefingBullets,
+  briefingLead,
+  isFirstRun,
+  lookAtRows,
+  showCostPulse,
+} from './home.js'
+import { TrovisMark } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
-// Dashboard — the insight-driven daily briefing.
+// Home v2 — hybrid work, served judgment.
 //
-// Six sections, each fetching independently so a slow/failed Claude call on
-// one card never blocks the page: greeting, AI briefing, attention + cost,
-// work feed, fleet grid, and a floating ⌘K Ask pill.
-// Unmount / tab switch aborts in-flight Claude calls (briefing up to 120s).
-// All visuals key off CSS variables so the page works in light and dark.
+// Sections, top to bottom:
+//   1. Daily Briefing   — today's state in one card, readable in <30s
+//   2. What to look at  — needs you + needs attention, hidden when empty
+//   3. Work feed        — the ambient chronological story
+//   4. Cost pulse       — a whisper; hidden at $0
+//
+// NO Fleet on Home. Fleet is tab 2, and Home must not first-paint GET /agents:
+// that request is what made Home expensive, and the fleet grid was the only
+// thing needing it. Home must also never call /work/board or /work/summary —
+// both loop-scan the whole board and starve the single replica. Home reads the
+// lean pair (/work/overview + /work/items), the same truth the Work tab shows.
+//
+// Every section fetches independently and fails independently: one dead
+// section renders its own Retry and the rest of Home still paints. Each
+// fetch carries an AbortSignal so unmount / tab switch / logout drops it
+// instead of waiting out the timeout (the briefing runs to 120s).
+//
+// Ask is NOT here — the global AskPill (⌘K, App.jsx) covers every page.
 // ---------------------------------------------------------------------------
 
-// The server sends `status` on every agent ('healthy' | 'degraded' | 'idle').
-// This used to re-derive it here from last_seen + error rate, kept in sync
-// with the backend by a comment — one of three classifiers that disagreed
-// about the same agent. Render the server's verdict; never recompute it.
-function deriveStatus(a) {
-  return a?.status || 'idle'
-}
+// One page of named work is enough to fill a briefing (3+3+2) and a 7-row
+// queue. Home never paginates; "+N more" sends you to the Work tab.
+const WORK_PAGE = 50
 
 function fmtRel(iso) {
   const ms = Date.now() - Date.parse(iso)
@@ -39,17 +54,30 @@ function fmtRel(iso) {
   return `${Math.floor(h / 24)}d ago`
 }
 
-
-export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, onViewAllWorkFeed, userName }) {
-  // Silently re-sync every data card when the tab regains focus (throttled to
-  // once per 30s). Cards keep their current data on screen while refetching —
-  // no skeleton flash — so this is invisible until fresh numbers arrive. The
-  // The global AskPill (App.jsx) is excluded so a conversation survives.
+// `active` is false while the Home pane is off screen. App.jsx keeps every tab
+// pane mounted (#130 keep-alive), so a hidden Home is still listening for
+// focus — without this it would re-sync all six of its endpoints, the Claude
+// briefing among them, for a pane nobody is looking at. Same rule the Work
+// pane applies to its poll.
+export default function Dashboard({
+  onOpenAgent,
+  onOpenCost,
+  onViewAllWorkFeed,
+  onGoWork,
+  userName,
+  active = true,
+}) {
+  // Silently re-sync when the tab regains focus (throttled to once per 30s).
+  // Cards keep their current data on screen while refetching — no skeleton
+  // flash. There is no interval poll: #127 removed the 15s briefing re-poll,
+  // and nothing here may bring it back.
   const [refreshKey, setRefreshKey] = useState(0)
+  const activeRef = useRef(active)
+  activeRef.current = active
   useEffect(() => {
     let last = Date.now()
     function maybeRefresh() {
-      if (document.hidden) return
+      if (document.hidden || !activeRef.current) return
       if (Date.now() - last > 30000) {
         last = Date.now()
         setRefreshKey((k) => k + 1)
@@ -63,106 +91,187 @@ export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, onViewAl
     }
   }, [])
 
-  // "Waiting for telemetry": right after onboarding the account has an agent
-  // but no real activity yet (its only span is the registration). The briefing
-  // counts are activity-only, so tasks_last_week === 0 + ≥1 agent means we
-  // should show a warm placeholder instead of empty briefing/attention/cost/
-  // work-feed cards. We fetch the briefing once here (the expensive Claude
-  // call) and pass it down so BriefingCard doesn't refetch.
-  const [briefing, setBriefing] = useState(null)
-  const [briefingLoading, setBriefingLoading] = useState(true)
-  const [hasAgents, setHasAgents] = useState(null)
+  // The work pair powers BOTH the briefing bullets and "What to look at", so
+  // it is fetched once here rather than twice. Its failure is its own: the
+  // briefing still renders its narrative, the feed and cost are untouched.
+  const work = useWork(refreshKey)
+  const briefing = useBriefing(refreshKey)
+  const feed = useSection((signal) => api.getWorkFeed({ signal }), refreshKey)
+  const cost = useSection((signal) => api.getCost({ signal }), refreshKey)
+  // Agent-health attention (an agent erroring or gone quiet) is not named
+  // work, so it never enters the work queue — but it belongs in a briefing.
+  const health = useSection((signal) => api.getAttention({ signal }), refreshKey)
 
-  useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
-        setBriefingLoading(true)
-        api
-          .getBriefing({ signal })
-          .then((d) => isAlive() && setBriefing(d))
-          .catch(
-            () =>
-              isAlive() &&
-              setBriefing({
-                summary: '',
-                tasks_yesterday: 0,
-                tasks_last_week: 0,
-                tasks_delta: '—',
-              }),
-          )
-          .finally(() => isAlive() && setBriefingLoading(false))
-        api
-          .listAgents({ signal })
-          .then((d) => isAlive() && setHasAgents(Array.isArray(d) && d.length > 0))
-          .catch((e) => {
-            if (!isAlive()) return
-            // Timeout / abort is not "zero agents" — leaving hasAgents null
-            // avoids the empty-onboarding flash on a hung GET /agents.
-            if (isTimeoutError(e) || isUnreachableError(e)) return
-            setHasAgents(false)
-          })
-      }),
-    [refreshKey],
-  )
+  const [openItem, setOpenItem] = useState(null)
 
-  const waiting =
-    hasAgents === true &&
-    briefing !== null &&
-    (briefing.tasks_last_week || 0) === 0
+  const firstRun = isFirstRun({
+    overview: work.overview,
+    items: work.items,
+    feed: feed.data,
+  })
 
   return (
     <div className="dash">
       <Greeting userName={userName} />
-      {waiting ? (
-        <WaitingCard />
+
+      {firstRun ? (
+        <FirstRunCard onGoWork={onGoWork} />
       ) : (
         <>
-          <BriefingCard data={briefing} loading={briefingLoading} />
-          <div className="dash-grid-2">
-            <AttentionCard refreshKey={refreshKey} />
-            <CostCard refreshKey={refreshKey} onOpenCost={onOpenCost} />
-          </div>
-          <WorkFeedCard refreshKey={refreshKey} onViewAll={onViewAllWorkFeed || onGoFleet} />
+          <DailyBriefing
+            briefing={briefing}
+            work={work}
+            health={health.data}
+            onOpenItem={setOpenItem}
+            onOpenAgent={onOpenAgent}
+            onGoWork={onGoWork}
+          />
+          <WhatToLookAt work={work} onOpenItem={setOpenItem} onGoWork={onGoWork} />
+          <WorkFeedSection
+            feed={feed}
+            onViewAll={onViewAllWorkFeed}
+            onOpenAgent={onOpenAgent}
+          />
+          <CostPulse cost={cost.data} onOpenCost={onOpenCost} />
         </>
       )}
-      <FleetGrid refreshKey={refreshKey} onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
+
+      {openItem && (
+        <TaskPanel
+          card={itemToCard(openItem)}
+          onClose={() => setOpenItem(null)}
+          onResolved={() => setOpenItem(null)}
+        />
+      )}
     </div>
   )
 }
 
-// Shown after onboarding while the first agent's telemetry hasn't arrived.
-// Replaces the briefing/attention/cost/work-feed cards; the Fleet grid (which
-// shows the connected agent) and the Ask pill stay. Refresh or revisit after
-// the first spans land — we do not re-poll the 120s briefing while waiting.
-function WaitingCard() {
-  return (
-    <div className="dash-card dash-waiting">
-      <div className="dash-waiting-pulse" aria-hidden="true">
-        <span className="dash-sq">
-          <TrovisMark size={11} />
-        </span>
-      </div>
-      <h2 className="dash-waiting-title">Your first agent is connected</h2>
-      <p className="dash-waiting-sub">
-        Waiting for telemetry. Refresh this page after your agent sends its
-        first activity.
-      </p>
-      <ul className="dash-waiting-checklist">
-        <li className="is-done">
-          <span className="dash-wait-mark">✓</span> Agent connected
-        </li>
-        <li className="is-active">
-          <span className="dash-wait-mark dot" /> First spans received
-        </li>
-        <li>
-          <span className="dash-wait-mark dot" /> Dashboard populates
-        </li>
-      </ul>
-    </div>
+// --- data hooks ------------------------------------------------------------
+
+/**
+ * One independent section fetch. Keeps the last good value on a refetch
+ * failure (a blip must not blank a section that was already showing) and
+ * exposes `failed` only when we have nothing to show.
+ */
+function useSection(fetcher, refreshKey) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState(null)
+  const [nonce, setNonce] = useState(0)
+
+  // Call sites pass an inline arrow, so `fetcher` is a new function every
+  // render. Hold it in a ref and keep it OUT of the effect deps — in the deps
+  // it would re-fire (and re-abort) the request on every render.
+  const fetchRef = useRef(fetcher)
+  fetchRef.current = fetcher
+
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        fetchRef
+          .current(signal)
+          .then((d) => {
+            if (!isAlive()) return
+            setData(Array.isArray(d) || d ? d : null)
+            setErr(null)
+          })
+          .catch((e) => {
+            if (!isAlive()) return
+            setErr(e)
+          })
+      }),
+    [refreshKey, nonce],
   )
+
+  return {
+    data,
+    err,
+    failed: data === null && !!err,
+    loading: data === null && !err,
+    retry: useCallback(() => {
+      setErr(null)
+      setNonce((n) => n + 1)
+    }, []),
+  }
 }
 
-// --- 1. Greeting -----------------------------------------------------------
+/** Counts + named items, settled independently so one can fail alone. */
+function useWork(refreshKey) {
+  const [overview, setOverview] = useState(null)
+  const [items, setItems] = useState(null)
+  const [err, setErr] = useState(null)
+  const [nonce, setNonce] = useState(0)
+
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        const ov = api
+          .getWorkOverview({ signal })
+          .then((d) => isAlive() && setOverview(d || null))
+        const it = api
+          .getWorkItems({ limit: WORK_PAGE, signal })
+          .then(
+            (p) => isAlive() && setItems(Array.isArray(p?.items) ? p.items : []),
+          )
+        Promise.allSettled([ov, it]).then((rs) => {
+          if (!isAlive()) return
+          const bad = rs.find((r) => r.status === 'rejected')
+          setErr(bad ? bad.reason : null)
+        })
+      }),
+    [refreshKey, nonce],
+  )
+
+  return {
+    overview,
+    items,
+    err,
+    // Only a hard failure — one of the two landing is enough to render.
+    failed: overview === null && items === null && !!err,
+    loading: overview === null && items === null && !err,
+    retry: useCallback(() => {
+      setErr(null)
+      setNonce((n) => n + 1)
+    }, []),
+  }
+}
+
+/** The Claude briefing. Cheap on the server (cached, 3s cap) but still the
+ *  slowest call on the page, so it never gates anything else. */
+function useBriefing(refreshKey) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState(null)
+  const [nonce, setNonce] = useState(0)
+
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        api
+          .getBriefing({ signal })
+          .then((d) => {
+            if (!isAlive()) return
+            setData(d)
+            setErr(null)
+          })
+          .catch((e) => isAlive() && setErr(e))
+      }),
+    [refreshKey, nonce],
+  )
+
+  return {
+    data,
+    err,
+    // Last-known wins: a failed refetch keeps yesterday's line on screen.
+    failed: data === null && !!err,
+    loading: data === null && !err,
+    retry: useCallback(() => {
+      setErr(null)
+      setNonce((n) => n + 1)
+    }, []),
+  }
+}
+
+// --- greeting --------------------------------------------------------------
 
 function Greeting({ userName }) {
   const now = new Date()
@@ -185,312 +294,276 @@ function Greeting({ userName }) {
   )
 }
 
-// --- 2. Daily Briefing -----------------------------------------------------
+// --- 1. Daily Briefing -----------------------------------------------------
 
-function BriefingCard({ data, loading }) {
+// Calm primary narrative: large plain type, no alarm chrome. The only alarm
+// on this card is the text itself when the text is the alert.
+function DailyBriefing({ briefing, work, health, onOpenItem, onOpenAgent, onGoWork }) {
+  const data = briefing.data
+  const counts = work.overview
+  const lead = briefingLead(counts)
+  const bullets = briefingBullets(work.items || [])
+  const asOf = asOfLabel(data?.generated_at)
+
+  // Agent-health rows only fill the space work items left — a named, clickable
+  // work item always outranks an agent-level observation.
+  const healthLines = (health || [])
+    .filter((h) => h && h.severity !== 'info' && (h.title || h.detail))
+    .slice(0, Math.max(0, 3 - bullets.stuck.length))
+
+  const allClear =
+    !!counts &&
+    bullets.needsYou.length === 0 &&
+    bullets.stuck.length === 0 &&
+    healthLines.length === 0
+
   return (
-    <div className="dash-card dash-briefing">
+    <section className="dash-card home-brief" aria-label="Daily briefing">
       <div className="dash-card-head">
         <span className="dash-sq">
           <TrovisMark size={10} />
         </span>
         <span className="dash-briefing-label">Daily Briefing</span>
       </div>
-      {loading ? (
+
+      {briefing.loading && !counts ? (
         <div className="dash-skel">
           <span style={{ width: '92%' }} />
           <span style={{ width: '78%' }} />
         </div>
       ) : (
-        <p className="dash-briefing-body">
-          {data.summary || 'No activity to summarize yet.'}
-        </p>
-      )}
-      {!loading && (
-        <div className="dash-briefing-foot">
-          <div className="dash-foot-stat">
-            <span className="dash-foot-num">{data.tasks_yesterday}</span>
-            <span className="dash-foot-lbl">tasks yesterday</span>
-          </div>
-          <div className="dash-foot-stat">
-            <span className="dash-foot-num">{data.tasks_last_week}</span>
-            <span className="dash-foot-lbl">this week</span>
-          </div>
-          <div className="dash-foot-stat">
-            <span className="dash-foot-delta">{data.tasks_delta}</span>
-            <span className="dash-foot-lbl">vs last week</span>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// --- 3a. Needs Attention ---------------------------------------------------
-
-function AttentionCard({ refreshKey }) {
-  const [items, setItems] = useState(null)
-  const [openIdx, setOpenIdx] = useState(0)
-
-  useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
-        api
-          .getAttention({ signal })
-          .then((d) => isAlive() && setItems(Array.isArray(d) ? d : []))
-          .catch(() => isAlive() && setItems([]))
-      }),
-    [refreshKey],
-  )
-
-  const count = items?.length || 0
-  return (
-    <div className="dash-card dash-attention">
-      <div className="dash-card-head spread">
-        <span className="dash-section-title">Needs Attention</span>
-        {count > 0 && <span className="dash-count-badge">{count}</span>}
-      </div>
-      {items === null ? (
-        <div className="dash-skel">
-          <span style={{ width: '100%' }} />
-          <span style={{ width: '85%' }} />
-        </div>
-      ) : count === 0 ? (
-        <div className="dash-empty">All clear — no agents need attention.</div>
-      ) : (
-        <div className="dash-att-list">
-          {items.map((it, i) => (
-            <AttentionRow
-              key={`${it.agent}-${i}`}
-              item={it}
-              open={openIdx === i}
-              onToggle={() => setOpenIdx(openIdx === i ? -1 : i)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function AttentionRow({ item, open, onToggle }) {
-  return (
-    <div className={`dash-att-row sev-${item.severity}`}>
-      <button type="button" className="dash-att-head" onClick={onToggle}>
-        <span className={`dash-sev-dot sev-${item.severity}`} />
-        <span className="dash-att-agent">{item.agent}</span>
-        <span className={`dash-sev-badge sev-${item.severity}`}>
-          {item.severity}
-        </span>
-        <span className="dash-att-title">{item.title}</span>
-        <span className="dash-att-chev">
-          {open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
-        </span>
-      </button>
-      {open && (
-        <div className="dash-att-detail">
-          {item.detail && <p className="dash-att-detail-text">{item.detail}</p>}
-          {item.recommendation && (
-            <div className="dash-rec">
-              <span className="dash-rec-label">Recommendation</span>
-              <span className="dash-rec-text">{item.recommendation}</span>
-            </div>
-          )}
-          {(item.impact || item.last_seen) && (
-            <div className="dash-att-meta">
-              {item.impact}
-              {item.impact && item.last_seen ? ' · ' : ''}
-              {item.last_seen ? `last seen ${fmtRel(item.last_seen)}` : ''}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// --- 3b. Cost Intelligence -------------------------------------------------
-
-function CostCard({ onOpenCost, refreshKey }) {
-  const [c, setC] = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
-        api
-          .getCost({ signal })
-          .then((d) => isAlive() && setC(d))
-          .catch(() => isAlive() && setC(null))
-          .finally(() => isAlive() && setLoading(false))
-      }),
-    [refreshKey],
-  )
-
-  const over = (c?.budget_pct || 0) > 85
-  return (
-    <div
-      className={`dash-card dash-cost ${onOpenCost ? 'is-clickable' : ''}`}
-      onClick={onOpenCost ? () => onOpenCost() : undefined}
-      role={onOpenCost ? 'button' : undefined}
-      tabIndex={onOpenCost ? 0 : undefined}
-      onKeyDown={onOpenCost ? (e) => (e.key === 'Enter' || e.key === ' ') && onOpenCost() : undefined}
-    >
-      <div className="dash-card-head spread">
-        <span className="dash-section-title">Cost</span>
-        {onOpenCost && <span className="dash-cost-link">Details →</span>}
-      </div>
-      {loading ? (
-        <div className="dash-skel">
-          <span style={{ width: '60%', height: 24 }} />
-          <span style={{ width: '90%' }} />
-        </div>
-      ) : !c ? (
-        <div className="dash-empty">Cost data unavailable.</div>
-      ) : (
         <>
-          <div className="dash-cost-today">
-            <span className="dash-bignum">{fmtMoney(c.today)}</span>
-            <span className="dash-cost-today-lbl">today</span>
-          </div>
+          {lead && <p className="home-brief-lead">{lead}</p>}
 
-          {c.month_budget > 0 && (
-            <div className="dash-budget">
-              <div className="dash-budget-row">
-                <span className="dash-budget-text">
-                  {fmtMoney(c.month_total)} / {fmtMoney(c.month_budget)} this month
-                </span>
-                <span
-                  className={`dash-budget-pct ${over ? 'over' : 'ok'}`}
-                >
-                  {Math.round(c.budget_pct)}%
-                </span>
-              </div>
-              <div className="dash-budget-bar">
-                <div
-                  className={`dash-budget-fill ${over ? 'over' : ''}`}
-                  style={{ width: `${Math.min(100, c.budget_pct)}%` }}
-                />
-              </div>
-            </div>
-          )}
+          {/* Claude's narrative is colour, not the headline — and it is the
+              one part that can be missing without costing the reader the
+              state of today. */}
+          {data?.summary ? (
+            <p className="home-brief-narrative">{data.summary}</p>
+          ) : briefing.failed ? (
+            <p className="home-brief-narrative is-muted">
+              Today&apos;s summary didn&apos;t load.{' '}
+              <button type="button" className="dash-link" onClick={briefing.retry}>
+                Retry
+              </button>
+            </p>
+          ) : null}
 
-          <Sparkline data={c.daily} />
-
-          {c.agents && c.agents.length > 0 && (
-            <div className="dash-cost-agents">
-              <div className="dash-caps">By Agent</div>
-              {c.agents.map((a) => (
-                <div key={a.name} className="dash-cost-agent-row">
-                  <span className="dash-cost-agent-name">{a.name}</span>
-                  <span className="dash-cost-agent-val">
-                    {fmtMoney(a.cost)}
-                    <TrendArrow trend={a.trend} />
-                  </span>
-                </div>
-              ))}
-            </div>
+          {work.failed ? (
+            <p className="home-brief-narrative is-muted">
+              Couldn&apos;t load what&apos;s on your plate.{' '}
+              <button type="button" className="dash-link" onClick={work.retry}>
+                Retry
+              </button>
+            </p>
+          ) : (
+            <>
+              <BriefGroup
+                label="Needs you"
+                tone="warn"
+                items={bullets.needsYou}
+                emptyText={allClear ? null : 'None'}
+                onOpenItem={onOpenItem}
+              />
+              <BriefGroup
+                label="Needs attention"
+                tone="error"
+                items={bullets.stuck}
+                extra={healthLines}
+                onOpenAgent={onOpenAgent}
+                onOpenItem={onOpenItem}
+              />
+              <BriefGroup
+                label="Moving"
+                tone="quiet"
+                items={bullets.moving}
+                onOpenItem={onOpenItem}
+              />
+              {allClear && (
+                <p className="home-brief-clear">
+                  Nothing is waiting on a person right now.
+                </p>
+              )}
+            </>
           )}
         </>
       )}
+
+      <div className="home-brief-foot">
+        <span>Today</span>
+        {asOf && (
+          <>
+            <span className="dash-dot-sep">·</span>
+            <span>{asOf}</span>
+          </>
+        )}
+        {onGoWork && (
+          <>
+            <span className="dash-dot-sep">·</span>
+            <button type="button" className="dash-link" onClick={onGoWork}>
+              Open Work
+            </button>
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * One briefing group. Omitted entirely when it has nothing AND no explicit
+ * "None" to print — an empty "Moving" heading is noise, an empty "Needs you"
+ * is worth stating.
+ */
+function BriefGroup({ label, tone, items, extra = [], emptyText, onOpenItem, onOpenAgent }) {
+  const has = items.length > 0 || extra.length > 0
+  if (!has && !emptyText) return null
+  return (
+    <div className={`home-brief-group tone-${tone}`}>
+      <span className="home-brief-group-label">{label}</span>
+      {!has ? (
+        <span className="home-brief-none">{emptyText}</span>
+      ) : (
+        <ul className="home-brief-list">
+          {items.map((it) => (
+            <li key={`i${it.id}`}>
+              <button
+                type="button"
+                className="home-brief-item"
+                onClick={() => onOpenItem && onOpenItem(it)}
+              >
+                <span className="home-brief-title">{it.title}</span>
+                {it.whats_next && (
+                  <span className="home-brief-why">{it.whats_next}</span>
+                )}
+              </button>
+            </li>
+          ))}
+          {extra.map((h, i) => (
+            <li key={`h${h.agent}-${i}`}>
+              <button
+                type="button"
+                className="home-brief-item"
+                onClick={() => onOpenAgent && onOpenAgent(h.agent, 'main')}
+              >
+                <span className="home-brief-title">{h.title || h.agent}</span>
+                {(h.detail || h.recommendation) && (
+                  <span className="home-brief-why">
+                    {h.detail || h.recommendation}
+                  </span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
 
-function Sparkline({ data }) {
-  const w = 180
-  const h = 32
-  if (!data || data.length < 2) return <svg width={w} height={h} className="dash-spark" />
-  const max = Math.max(...data, 0.0001)
-  const pts = data.map((v, i) => [
-    (i / (data.length - 1)) * w,
-    h - (v / max) * (h - 3) - 1.5,
-  ])
-  const line = pts
-    .map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`)
-    .join(' ')
-  const area = `${line} L${w},${h} L0,${h} Z`
-  return (
-    <svg width={w} height={h} className="dash-spark" aria-hidden="true">
-      <defs>
-        <linearGradient id="dashSparkFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--dash-spark)" stopOpacity="0.18" />
-          <stop offset="100%" stopColor="var(--dash-spark)" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={area} fill="url(#dashSparkFill)" />
-      <path
-        d={line}
-        fill="none"
-        stroke="var(--dash-spark)"
-        strokeWidth="1"
-        strokeOpacity="0.5"
-      />
-    </svg>
-  )
-}
+// --- 2. What to look at ----------------------------------------------------
 
-function TrendArrow({ trend }) {
-  if (trend === 'up')
+// The loudest thing on Home when it has rows — and gone entirely when it
+// doesn't. Healthy silence: no "all clear" card, no empty alarm chrome.
+function WhatToLookAt({ work, onOpenItem, onGoWork }) {
+  if (work.failed) {
     return (
-      <svg className="dash-trend up" width="8" height="8" viewBox="0 0 8 8">
-        <polygon points="4,0 8,8 0,8" />
-      </svg>
+      <section className="dash-section" aria-label="What to look at">
+        <div className="dash-section-head">
+          <span className="dash-section-title">What to look at</span>
+        </div>
+        <WorkLoadFailed lead="Can't load what needs you" onRetry={work.retry} />
+      </section>
     )
-  if (trend === 'down')
-    return (
-      <svg className="dash-trend down" width="8" height="8" viewBox="0 0 8 8">
-        <polygon points="0,0 8,0 4,8" />
-      </svg>
-    )
-  return null
-}
+  }
+  if (work.items === null) return null // loading: stay silent, don't reserve alarm space
 
-// --- 4. Work Feed ----------------------------------------------------------
-
-function WorkFeedCard({ onViewAll, refreshKey }) {
-  const [feed, setFeed] = useState(null)
-
-  useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
-        api
-          .getWorkFeed({ signal })
-          .then((d) => isAlive() && setFeed(Array.isArray(d) ? d : []))
-          .catch(() => isAlive() && setFeed([]))
-      }),
-    [refreshKey],
-  )
+  const { rows, hidden } = lookAtRows(work.items)
+  if (rows.length === 0) return null
 
   return (
-    <section className="dash-section">
+    <section className="dash-section home-lookat" aria-label="What to look at">
       <div className="dash-section-head">
-        <span className="dash-section-title">Work Feed</span>
-        <button type="button" className="dash-link" onClick={onViewAll}>
-          View all →
-        </button>
+        <span className="dash-section-title">What to look at</span>
+        {onGoWork && (
+          <button type="button" className="dash-link" onClick={onGoWork}>
+            Open Work →
+          </button>
+        )}
       </div>
-      <div className="dash-card dash-feed">
-        {feed === null ? (
+      <div className="home-lookat-list">
+        {rows.map((row) => (
+          <button
+            key={row.id}
+            type="button"
+            className={`home-lookat-row ${
+              row.status === 'waiting_on_you' ? 'is-waiting-you' : 'is-stuck'
+            }`}
+            onClick={() => onOpenItem(row)}
+          >
+            <span className="home-lookat-title">{row.title}</span>
+            {/* whats_next already names the holder ("Waiting on Sarah Chen"),
+                so a holder column here would just say it twice. */}
+            <span className="home-lookat-next">{row.whats_next || ''}</span>
+            <span className="home-lookat-age">{workUpdatedLabel(row.updated_at)}</span>
+          </button>
+        ))}
+      </div>
+      {hidden > 0 && onGoWork && (
+        <button type="button" className="dash-link home-lookat-more" onClick={onGoWork}>
+          {hidden} more in Work →
+        </button>
+      )}
+    </section>
+  )
+}
+
+// --- 3. Work feed ----------------------------------------------------------
+
+// Ambient: hairline rows, muted type, no per-row alarm wash. This is the
+// story of what happened, not a queue of what to do.
+function WorkFeedSection({ feed, onViewAll, onOpenAgent }) {
+  const rows = feed.data || []
+  return (
+    <section className="dash-section" aria-label="Work feed">
+      <div className="dash-section-head">
+        <span className="dash-section-title">Work feed</span>
+        {onViewAll && (
+          <button type="button" className="dash-link" onClick={onViewAll}>
+            View all →
+          </button>
+        )}
+      </div>
+      <div className="dash-card dash-feed home-feed">
+        {feed.loading ? (
           <div className="dash-skel pad">
             <span style={{ width: '70%' }} />
             <span style={{ width: '88%' }} />
           </div>
-        ) : feed.length === 0 ? (
-          <div className="dash-empty pad">
-            No agent activity in the last 24 hours.
+        ) : feed.failed ? (
+          <div className="dash-empty pad" role="alert">
+            Couldn&apos;t load recent activity.{' '}
+            <button type="button" className="dash-link" onClick={feed.retry}>
+              Retry
+            </button>
           </div>
+        ) : rows.length === 0 ? (
+          <div className="dash-empty pad">Nothing has happened in the last day.</div>
         ) : (
-          feed.map((f, i) => (
-            <div key={`${f.agent}-${i}`} className="dash-feed-row">
-              <div className="dash-feed-top">
+          rows.map((f, i) => (
+            <button
+              key={`${f.agent}-${i}`}
+              type="button"
+              className="dash-feed-row home-feed-row"
+              onClick={() => onOpenAgent && onOpenAgent(f.agent, 'main')}
+            >
+              <span className="dash-feed-top">
                 <span className="dash-feed-agent">{f.agent}</span>
                 <span className="dash-dot-sep">·</span>
                 <span className="dash-feed-time">{fmtRel(f.time)}</span>
-                <span className="dash-feed-tasks">{f.tasks} tasks</span>
-              </div>
-              <div className="dash-feed-summary">{f.summary}</div>
-            </div>
+              </span>
+              <span className="dash-feed-summary">{f.summary}</span>
+            </button>
           ))
         )}
       </div>
@@ -498,73 +571,43 @@ function WorkFeedCard({ onViewAll, refreshKey }) {
   )
 }
 
-// --- 5. Fleet Status grid --------------------------------------------------
+// --- 4. Cost pulse ---------------------------------------------------------
 
-function FleetGrid({ onOpenAgent, onGoFleet, refreshKey }) {
-  const [agents, setAgents] = useState(null)
-  const [loadError, setLoadError] = useState(null)
-
-  useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
-        api
-          .listAgents({ signal })
-          .then((d) => {
-            if (!isAlive()) return
-            setLoadError(null)
-            setAgents(Array.isArray(d) ? d : [])
-          })
-          .catch((e) => {
-            if (!isAlive()) return
-            setLoadError(e)
-            // Keep prior agents; timeout/abort is not an empty fleet.
-          })
-      }),
-    [refreshKey],
-  )
-
+// The quietest thing on the page, and absent entirely at $0 — a demo account
+// should not be told it spent nothing.
+function CostPulse({ cost, onOpenCost }) {
+  if (!showCostPulse(cost)) return null
   return (
-    <section className="dash-section">
-      <div className="dash-section-head">
-        <span className="dash-section-title">Fleet</span>
-        <button type="button" className="dash-link" onClick={onGoFleet}>
-          Open Fleet →
-        </button>
+    <button type="button" className="home-cost-pulse" onClick={onOpenCost}>
+      About {fmtMoney(cost.today)} today
+      <span className="home-cost-link">Cost →</span>
+    </button>
+  )
+}
+
+// --- first run -------------------------------------------------------------
+
+// Minimal first-run gate: everything loaded and everything is empty. No org
+// chart, no wizard — an individual gets the same calm card and full access to
+// Work and Ask.
+function FirstRunCard({ onGoWork }) {
+  return (
+    <div className="dash-card dash-waiting">
+      <div className="dash-waiting-pulse" aria-hidden="true">
+        <span className="dash-sq">
+          <TrovisMark size={11} />
+        </span>
       </div>
-      {agents === null && !loadError ? (
-        <div className="dash-skel pad">
-          <span style={{ width: '100%' }} />
-        </div>
-      ) : loadError ? (
-        <div className="dash-card dash-empty pad" role="alert">
-          Couldn't load agents. Trovis didn't respond — open Fleet to retry.
-        </div>
-      ) : agents.length === 0 ? (
-        <div className="dash-card dash-empty pad">
-          No agents reporting telemetry yet.
-        </div>
-      ) : (
-        <div className="dash-fleet-grid">
-          {agents.map((a) => {
-            const status = deriveStatus(a)
-            return (
-              <button
-                key={a.service_name}
-                type="button"
-                className={`dash-fleet-cell status-${status}`}
-                onClick={() => onOpenAgent(a.service_name, 'main')}
-                title={a.display_name || a.service_name}
-              >
-                <span className={`dash-status-dot status-${status}`} />
-                <span className="dash-fleet-name">
-                  {a.display_name || a.service_name}
-                </span>
-                <span className="dash-fleet-count">{a.total_spans || 0}</span>
-              </button>
-            )
-          })}
-        </div>
+      <h2 className="dash-waiting-title">Nothing to show yet</h2>
+      <p className="dash-waiting-sub">
+        Once your agents and teammates start working, today&apos;s state shows up
+        here — what needs you, what&apos;s stuck, and what moved.
+      </p>
+      {onGoWork && (
+        <button type="button" className="btn btn-primary" onClick={onGoWork}>
+          Go to Work
+        </button>
       )}
-    </section>
+    </div>
   )
 }

@@ -30,15 +30,37 @@ test('Fleet shows timeout copy + Retry before the true-empty "No agents yet"', (
   assert.doesNotMatch(fleet, /setGroups\(\[\]\)/)
 })
 
-test('Dashboard Fleet grid does not treat abort/timeout as zero agents', () => {
+// Home v2 removed the Dashboard fleet grid — Fleet is tab 2, and Home must
+// not first-paint GET /agents. The old "abort is not an empty fleet" rule for
+// that grid is therefore gone; what replaces it is the rule below, which is
+// the same idea applied to every Home section: a failed or aborted fetch
+// renders Retry, never an empty state that reads as "you have nothing".
+test('Home has no fleet grid to mis-empty', () => {
   const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
   const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  assert.doesNotMatch(code, /setAgents\(\[\]\)/)
-  assert.match(code, /setLoadError\(e\)/)
-  assert.match(code, /Couldn't load agents/)
-  assert.match(code, /No agents reporting telemetry yet/)
-  const errIdx = code.indexOf("Couldn't load agents")
-  const emptyIdx = code.indexOf('No agents reporting telemetry yet')
-  assert.ok(errIdx > 0 && emptyIdx > errIdx)
-  assert.match(code, /isTimeoutError\(e\) \|\| isUnreachableError\(e\)/)
+  assert.doesNotMatch(code, /listAgents/)
+  assert.doesNotMatch(code, /dash-fleet-grid/)
+})
+
+test('a failed Home section shows Retry, never an empty state', () => {
+  const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
+  const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  // `failed` is only true with nothing to show, so a refetch blip keeps the
+  // last good data on screen instead of blanking the section.
+  assert.match(code, /failed:\s*data === null && !!err/)
+  assert.match(code, /loading:\s*data === null && !err/)
+  // The work pair survives one of its two calls failing.
+  assert.match(code, /failed:\s*overview === null && items === null && !!err/)
+  // Every section that can fail offers a way back.
+  for (const retry of [/onRetry=\{work\.retry\}/, /onClick=\{feed\.retry\}/, /onClick=\{briefing\.retry\}/]) {
+    assert.match(code, retry)
+  }
+})
+
+test('an empty look-at section disappears rather than announcing itself', () => {
+  const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
+  const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert.match(code, /if \(rows\.length === 0\) return null/)
+  // Loading must not reserve alarm-coloured space either.
+  assert.match(code, /if \(work\.items === null\) return null/)
 })
