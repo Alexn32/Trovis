@@ -403,8 +403,32 @@ export const api = {
     const qs = q.toString()
     return request(`/work/items${qs ? `?${qs}` : ''}`, { timeoutMs: WORK_TIMEOUT_MS })
   },
-  // Stub. Empty until suggestions ship. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
+  // Pending suggestions for the home strip. Empty until a generator inserts
+  // rows — never invent titles. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
+  getWorkItem: (id) =>
+    request(`/work/items/${encodeURIComponent(id)}`, { timeoutMs: WORK_TIMEOUT_MS }),
+  // Approve → named work item `{ item }` in /work/items. Optional body is
+  // edit-then-approve: { title?, why?, draft_holder? }. Garbage titles 400.
+  approveWorkSuggestion: (id, patch = null) =>
+    request(`/work/suggestions/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(patch || {}),
+      timeoutMs: WORK_TIMEOUT_MS,
+    }),
+  // Edit a pending suggestion in place (still in the strip).
+  editWorkSuggestion: (id, patch) =>
+    request(`/work/suggestions/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch || {}),
+      timeoutMs: WORK_TIMEOUT_MS,
+    }),
+  // Remove from the strip. 204. Does not create a work item.
+  declineWorkSuggestion: (id) =>
+    request(`/work/suggestions/${encodeURIComponent(id)}/decline`, {
+      method: 'POST',
+      timeoutMs: WORK_TIMEOUT_MS,
+    }),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
   getLoop: (loopId) => request(`/loops/${loopId}`, { timeoutMs: WORK_TIMEOUT_MS }),

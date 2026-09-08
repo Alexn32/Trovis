@@ -256,10 +256,13 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.match(work, /Boards & other views/)
 })
 
-test('Work home never auto-creates from suggestion approve/edit/decline', () => {
+test('Work home never invents a named item from suggestion actions', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /insert_spans|createWork|postWork|\/work\/items['"`].*POST/i)
-  assert.match(work, /never auto-create|Local dismiss only/)
+  assert.match(work, /approveWorkSuggestion/)
+  assert.match(work, /editWorkSuggestion/)
+  assert.match(work, /declineWorkSuggestion/)
+  assert.match(work, /never invent a named item/)
 })
 
 test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving → Done', async () => {

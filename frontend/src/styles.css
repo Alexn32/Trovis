@@ -6186,6 +6186,16 @@ select.wf2-input { cursor: pointer; }
   color: var(--error); background: none; border: none; padding: 8px 10px;
 }
 .work-sug-decline:hover { color: var(--error); opacity: 0.85; }
+.work-sug-decline:disabled { opacity: 0.5; cursor: not-allowed; }
+.work-sug-input {
+  font: inherit; font-size: 14px; font-weight: 650; width: 100%;
+  color: var(--text-primary); background: var(--bg-surface);
+  border: 1px solid var(--border-default); border-radius: 8px;
+  padding: 6px 8px;
+}
+.work-sug-note {
+  font-size: 12.5px; color: var(--text-muted); margin: 4px 0 6px;
+}
 
 .work-table { overflow-x: auto; }
 .work-table-head,
