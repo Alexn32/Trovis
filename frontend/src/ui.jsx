@@ -21,10 +21,10 @@ export function Stat({ label, value, tone, sub }) {
 // Fail-soft empty state when Work home (`/work/overview` + `/work/items`)
 // or legacy L2 (`/work/board`) times out or the network dies. Copy lives
 // here so Board.jsx doesn't grow new user-facing strings.
-export function WorkLoadFailed({ onRetry }) {
+export function WorkLoadFailed({ onRetry, lead = "Can't load this work" }) {
   return (
     <div className="board-empty" role="alert">
-      <p className="board-empty-lead">Can't load this work</p>
+      <p className="board-empty-lead">{lead}</p>
       <p className="board-empty-sub">
         Trovis didn't respond. Retry, or come back in a moment.
       </p>

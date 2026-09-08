@@ -405,7 +405,8 @@ export const api = {
     const qs = q.toString()
     return request(`/work/items${qs ? `?${qs}` : ''}`, { timeoutMs: WORK_TIMEOUT_MS })
   },
-  // Stub. Empty until suggestions ship. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
+  // Pending suggestions for the home strip. Empty until a generator inserts
+  // rows — never invent titles. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
   getWorkItem: (id) =>
     request(`/work/items/${encodeURIComponent(id)}`, { timeoutMs: WORK_TIMEOUT_MS }),

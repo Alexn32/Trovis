@@ -3,7 +3,7 @@ import { api } from './api.js'
 import Board, { TaskPanel } from './Board.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
-  isNamedWorkTitle,
+  holderLabel,
   sortWorkItems,
   workItemStatusLabel,
   workUpdatedLabel,
@@ -12,13 +12,14 @@ import {
 // Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
 // Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
 // Must NOT call /work/summary or /work/board on this path (those starve
-// the replica). Board.jsx is a secondary view behind "Boards & other views".
+// the replica). Board.jsx is a secondary view behind "Other views".
 //
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
 // auto-poll back into Loading.
-// Suggest approve/edit/decline are explicit clicks against /work/suggestions.
-// Never auto-create a named item on load or poll.
+// Suggest approve/edit/decline never invent a named item. Approve only
+// creates via POST /work/suggestions/{id}/approve. Never auto-create a
+// named item on load or poll.
 
 const POLL_START_MS = 30000
 const POLL_MAX_MS = 120000
@@ -50,11 +51,11 @@ function itemToCard(row) {
   }
 }
 
-function namedRows(items) {
-  return sortWorkItems((items || []).filter((row) => isNamedWorkTitle(row.title)))
-}
+// Render the contract as the API sent it. Do not re-filter rows to "fix"
+// overview totals if /work/items still includes flood until a hotfix.
 
 function OverviewStrip({ overview }) {
+  // Counts are the server contract. Do not recompute or clamp them here.
   return (
     <div className="work-overview" aria-label="Work overview">
       {OVERVIEW_PILLS.map((p) => {
@@ -74,73 +75,139 @@ function OverviewStrip({ overview }) {
   )
 }
 
-function SuggestionsStrip({ suggestions, busyId, onApprove, onEdit, onDecline }) {
-  const rows = (suggestions || []).filter((s) => isNamedWorkTitle(s.title))
+function suggestionWhy(s) {
+  const who = s.draft_holder?.name
+  return [s.why, who ? `with ${who}` : ''].filter(Boolean).join(' · ')
+}
+
+function SuggestionRow({ row, busy, onApprove, onDecline, onEdit }) {
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState(row.title)
+  const why = suggestionWhy(row)
+  const blocked = !!busy
+
+  async function saveEdit() {
+    const next = title.trim()
+    if (!next || next === row.title) {
+      setEditing(false)
+      setTitle(row.title)
+      return
+    }
+    await onEdit(row.id, { title: next })
+    setEditing(false)
+  }
+
+  return (
+    <li className="work-sug-row">
+      <div className="work-sug-copy">
+        {editing ? (
+          <input
+            className="work-sug-input"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            aria-label="Suggestion name"
+            disabled={blocked}
+          />
+        ) : (
+          <p className="work-sug-title">{row.title}</p>
+        )}
+        {why ? <p className="work-sug-why">{why}</p> : null}
+      </div>
+      <div className="work-sug-actions">
+        {editing ? (
+          <>
+            <button type="button" className="btn btn-primary" disabled={blocked} onClick={saveEdit}>
+              Save
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={blocked}
+              onClick={() => {
+                setTitle(row.title)
+                setEditing(false)
+              }}
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={blocked}
+              onClick={() => onApprove(row.id)}
+            >
+              Approve
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={blocked}
+              onClick={() => {
+                setTitle(row.title)
+                setEditing(true)
+              }}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              className="work-sug-decline"
+              disabled={blocked}
+              onClick={() => onDecline(row.id)}
+            >
+              Decline
+            </button>
+          </>
+        )}
+      </div>
+    </li>
+  )
+}
+
+function SuggestionsStrip({ suggestions, busyId, note, onApprove, onDecline, onEdit }) {
+  const rows = suggestions || []
   if (!rows.length) return null
   return (
     <section className="work-suggestions" aria-label="Suggestions">
       <h2 className="work-suggestions-title">Suggestions</h2>
       <ul className="work-suggestions-list">
-        {rows.map((s) => {
-          const who = s.draft_holder?.name
-          const why = [s.why, who ? `with ${who}` : ''].filter(Boolean).join(' · ')
-          const busy = busyId === s.id
-          return (
-            <li key={s.id} className="work-sug-row">
-              <div className="work-sug-copy">
-                <p className="work-sug-title">{s.title}</p>
-                {why ? <p className="work-sug-why">{why}</p> : null}
-              </div>
-              <div className="work-sug-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={busy}
-                  onClick={() => onApprove(s)}
-                >
-                  Approve
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={busy}
-                  onClick={() => onEdit(s)}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="work-sug-decline"
-                  disabled={busy}
-                  onClick={() => onDecline(s)}
-                >
-                  Decline
-                </button>
-              </div>
-            </li>
-          )
-        })}
+        {rows.map((s) => (
+          <SuggestionRow
+            key={s.id}
+            row={s}
+            busy={busyId === s.id}
+            onApprove={onApprove}
+            onDecline={onDecline}
+            onEdit={onEdit}
+          />
+        ))}
       </ul>
+      {note ? <p className="work-sug-note">{note}</p> : null}
     </section>
   )
 }
 
-function WorkSkeleton() {
+function OverviewSkeleton() {
   return (
-    <div className="view work-home" aria-busy="true" aria-label="Loading work">
-      <h1>Work</h1>
-      <div className="work-overview">
-        <span className="work-skel-pill" />
-        <span className="work-skel-pill" />
-        <span className="work-skel-pill" />
-        <span className="work-skel-pill" />
-      </div>
-      <div className="work-skel-table">
-        <span />
-        <span />
-        <span />
-        <span />
-      </div>
+    <div className="work-overview" aria-busy="true" aria-label="Loading overview">
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+    </div>
+  )
+}
+
+function TableSkeleton() {
+  return (
+    <div className="work-skel-table" aria-busy="true" aria-label="Loading work">
+      <span />
+      <span />
+      <span />
+      <span />
     </div>
   )
 }
@@ -149,18 +216,23 @@ function WorkHome({
   onConnectAgent,
   onOpenBoards,
   overview,
+  overviewErr,
+  onRetryOverview,
   items,
+  itemsErr,
+  onRetryItems,
   suggestions,
   nextCursor,
   onLoadMore,
-  sugBusyId,
+  busyId,
+  suggestionNote,
   onApproveSuggestion,
-  onEditSuggestion,
   onDeclineSuggestion,
+  onEditSuggestion,
 }) {
   const [open, setOpen] = useState(null)
-  const rows = namedRows(items)
-  const empty = (overview.open || 0) === 0 && rows.length === 0
+  const rows = sortWorkItems(items || [])
+  const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
 
   function onRowKey(e, row) {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -175,14 +247,28 @@ function WorkHome({
         <h1>Work</h1>
       </header>
 
-      <OverviewStrip overview={overview} />
+      {overview && <OverviewStrip overview={overview} />}
+      {!overview && overviewErr && (
+        <div className="work-section-failed">
+          <WorkLoadFailed lead="Can't load these counts" onRetry={onRetryOverview} />
+        </div>
+      )}
+      {!overview && !overviewErr && <OverviewSkeleton />}
       <SuggestionsStrip
         suggestions={suggestions}
-        busyId={sugBusyId}
+        busyId={busyId}
+        note={suggestionNote}
         onApprove={onApproveSuggestion}
-        onEdit={onEditSuggestion}
         onDecline={onDeclineSuggestion}
+        onEdit={onEditSuggestion}
       />
+
+      {itemsErr && !items && (
+        <div className="work-section-failed">
+          <WorkLoadFailed lead="Can't load this work" onRetry={onRetryItems} />
+        </div>
+      )}
+      {!items && !itemsErr && <TableSkeleton />}
 
       {empty && (
         <div className="board-empty">
@@ -198,7 +284,7 @@ function WorkHome({
         </div>
       )}
 
-      {!empty && (
+      {items && !empty && (
         <div className="work-table" role="table" aria-label="Work">
           <div className="work-table-head" role="row">
             <span role="columnheader">Task</span>
@@ -221,7 +307,7 @@ function WorkHome({
               <span className={`work-status-pill ${row.status || ''}`}>
                 {workItemStatusLabel(row.status)}
               </span>
-              <span className="work-td-holder">{row.holder?.name || ''}</span>
+              <span className="work-td-holder">{holderLabel(row.holder, row.status)}</span>
               <span className="work-td-next">{row.whats_next || ''}</span>
               <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
             </div>
@@ -236,7 +322,7 @@ function WorkHome({
 
       {onOpenBoards && (
         <button type="button" className="work-other-views" onClick={onOpenBoards}>
-          Boards & other views →
+          Other views →
         </button>
       )}
 
@@ -251,90 +337,133 @@ function WorkHome({
   )
 }
 
-export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
+export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow }) {
+  const connectAgent = onConnectAgent || onNewWorkflow
   const [surface, setSurface] = useState('home')
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
-  const [sugBusyId, setSugBusyId] = useState(null)
   const [nextCursor, setNextCursor] = useState(null)
-  const [err, setErr] = useState(null)
+  const [overviewErr, setOverviewErr] = useState(null)
+  const [itemsErr, setItemsErr] = useState(null)
+  const [busyId, setBusyId] = useState(null)
+  const [suggestionNote, setSuggestionNote] = useState(null)
 
+  const overviewFailSoftRef = useRef(false)
+  const itemsFailSoftRef = useRef(false)
   const failSoftRef = useRef(false)
-  failSoftRef.current = !overview && !items && !!err
+  overviewFailSoftRef.current = !overview && !!overviewErr
+  itemsFailSoftRef.current = !items && !!itemsErr
+  failSoftRef.current = overviewFailSoftRef.current && itemsFailSoftRef.current
 
-  const load = useCallback(async () => {
+  const loadOverview = useCallback(async () => {
     try {
-      const [ov, page] = await Promise.all([
-        api.getWorkOverview(),
-        api.getWorkItems({ limit: 50 }),
-      ])
+      const ov = await api.getWorkOverview()
       setOverview(ov)
-      setItems(Array.isArray(page?.items) ? page.items : [])
-      setNextCursor(page?.next_cursor || null)
-      setErr(null)
+      setOverviewErr(null)
     } catch (e) {
-      setErr(e?.message || 'Could not load your work')
+      setOverviewErr(e?.message || "Can't load these counts")
       throw e
     }
-    // Suggestions never block home, never invent rows.
+  }, [])
+
+  const loadItems = useCallback(async () => {
+    try {
+      const page = await api.getWorkItems({ limit: 50 })
+      setItems(Array.isArray(page?.items) ? page.items : [])
+      setNextCursor(page?.next_cursor || null)
+      setItemsErr(null)
+    } catch (e) {
+      setItemsErr(e?.message || "Can't load this work")
+      throw e
+    }
+  }, [])
+
+  const loadSuggestions = useCallback(() => {
     api
       .getWorkSuggestions()
       .then((s) => setSuggestions(Array.isArray(s?.suggestions) ? s.suggestions : []))
       .catch(() => {})
   }, [])
 
-  function retry() {
-    setErr(null)
-    load().catch(() => {})
+  const load = useCallback(async () => {
+    const tasks = []
+    if (!overviewFailSoftRef.current) tasks.push(loadOverview())
+    if (!itemsFailSoftRef.current) tasks.push(loadItems())
+    loadSuggestions()
+    const results = await Promise.allSettled(tasks)
+    if (results.some((r) => r.status === 'rejected')) {
+      throw new Error('section failed')
+    }
+  }, [loadOverview, loadItems, loadSuggestions])
+
+  function retryOverview() {
+    setOverviewErr(null)
+    loadOverview().catch(() => {})
   }
 
-  function dropSuggestion(id) {
-    setSuggestions((prev) => prev.filter((s) => s.id !== id))
+  function retryItems() {
+    setItemsErr(null)
+    loadItems().catch(() => {})
   }
 
-  async function approveSuggestion(s) {
-    setSugBusyId(s.id)
+  async function refreshNamedWork() {
+    await Promise.allSettled([loadOverview(), loadItems()])
+  }
+
+  async function approveSuggestion(id) {
+    // Official approve endpoint creates the named item. Never invent one here.
+    setBusyId(id)
+    setSuggestionNote(null)
     try {
-      const res = await api.approveWorkSuggestion(s.id)
-      dropSuggestion(s.id)
-      if (res?.item) {
-        setItems((prev) => [res.item, ...(prev || []).filter((it) => it.id !== res.item.id)])
+      await api.approveWorkSuggestion(id)
+      setSuggestions((prev) => prev.filter((s) => s.id !== id))
+      await refreshNamedWork()
+    } catch (e) {
+      // 404 = mutations not shipped yet (GET stub only). Do not create a row.
+      setSuggestionNote(e?.message || "Can't update this suggestion")
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function declineSuggestion(id) {
+    setBusyId(id)
+    setSuggestionNote(null)
+    try {
+      await api.declineWorkSuggestion(id)
+      setSuggestions((prev) => prev.filter((s) => s.id !== id))
+    } catch (e) {
+      if (e?.status === 404) {
+        // Stub or already gone — drop from the strip. No work item.
+        setSuggestions((prev) => prev.filter((s) => s.id !== id))
+      } else {
+        setSuggestionNote(e?.message || "Can't update this suggestion")
       }
-    } catch {
-      /* keep the strip row so the operator can retry or edit */
     } finally {
-      setSugBusyId(null)
+      setBusyId(null)
     }
   }
 
-  async function declineSuggestion(s) {
-    setSugBusyId(s.id)
+  async function editSuggestion(id, patch) {
+    setBusyId(id)
+    setSuggestionNote(null)
     try {
-      await api.declineWorkSuggestion(s.id)
-      dropSuggestion(s.id)
-    } catch {
-      /* keep the row */
-    } finally {
-      setSugBusyId(null)
-    }
-  }
-
-  async function editSuggestion(s) {
-    const next = window.prompt('Name this work', s.title || '')
-    if (next == null) return
-    const title = String(next).trim()
-    if (!title) return
-    setSugBusyId(s.id)
-    try {
-      const updated = await api.editWorkSuggestion(s.id, { title })
+      const updated = await api.editWorkSuggestion(id, patch)
       setSuggestions((prev) =>
-        prev.map((row) => (row.id === s.id ? { ...row, ...updated } : row)),
+        prev.map((s) => (s.id === id ? { ...s, ...(updated || patch) } : s)),
       )
-    } catch {
-      /* keep the previous title */
+    } catch (e) {
+      if (e?.status === 404) {
+        // Mutations not shipped — keep the edit in the strip only. No create.
+        setSuggestions((prev) =>
+          prev.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+        )
+      } else {
+        setSuggestionNote(e?.message || "Can't update this suggestion")
+      }
     } finally {
-      setSugBusyId(null)
+      setBusyId(null)
     }
   }
 
@@ -376,40 +505,31 @@ export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
   if (surface === 'board') {
     return (
       <Board
-        onConnectAgent={onConnectAgent}
+        onConnectAgent={connectAgent}
         onOpenWorkflow={onOpenWorkflow}
         onBack={() => setSurface('home')}
       />
     )
   }
 
-  if (!overview && !items && err) {
-    return (
-      <div className="view work-home">
-        <header className="work-home-head">
-          <h1>Work</h1>
-        </header>
-        <WorkLoadFailed onRetry={retry} />
-      </div>
-    )
-  }
-  if (!overview || !items) {
-    return <WorkSkeleton />
-  }
-
   return (
     <WorkHome
-      onConnectAgent={onConnectAgent}
+      onConnectAgent={connectAgent}
       onOpenBoards={() => setSurface('board')}
       overview={overview}
+      overviewErr={overviewErr}
+      onRetryOverview={retryOverview}
       items={items}
+      itemsErr={itemsErr}
+      onRetryItems={retryItems}
       suggestions={suggestions}
       nextCursor={nextCursor}
       onLoadMore={loadMore}
-      sugBusyId={sugBusyId}
+      busyId={busyId}
+      suggestionNote={suggestionNote}
       onApproveSuggestion={approveSuggestion}
-      onEditSuggestion={editSuggestion}
       onDeclineSuggestion={declineSuggestion}
+      onEditSuggestion={editSuggestion}
     />
   )
 }

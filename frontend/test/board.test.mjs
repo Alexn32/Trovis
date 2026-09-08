@@ -253,17 +253,20 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /KindCard/)
   assert.match(work, /work-suggestions/)
   assert.match(work, /TaskPanel/)
-  assert.match(work, /Boards & other views/)
+  assert.match(work, /holderLabel/)
+  assert.match(work, /Other views →/)
+  assert.doesNotMatch(work, /Boards & other views/)
 })
 
-test('Work home never auto-creates from suggestion approve/edit/decline', () => {
+test('Work home never invents a named item from suggestion actions', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /insert_spans|createWork|postWork|\/work\/items['"`].*POST/i)
   assert.match(work, /Never auto-create/)
   assert.match(work, /approveWorkSuggestion/)
-  assert.match(work, /declineWorkSuggestion/)
   assert.match(work, /editWorkSuggestion/)
-  const load = work.match(/const load = useCallback\(async \(\) => \{[\s\S]*?\}, \[\]\)/)
+  assert.match(work, /declineWorkSuggestion/)
+  assert.match(work, /never invent a named item/)
+  const load = work.match(/const load = useCallback\(async \(\) => \{[\s\S]*?\}, \[loadOverview/)
   assert.ok(load, 'home load() is a useCallback')
   assert.doesNotMatch(load[0], /approveWorkSuggestion|declineWorkSuggestion|editWorkSuggestion/)
 })
@@ -284,6 +287,35 @@ test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving →
     'moving',
     'done',
   ])
+})
+
+test('Work home does not client-filter items to fix overview totals', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(work, /isNamedWorkTitle/)
+  assert.doesNotMatch(work, /looksInternal/)
+  assert.match(work, /sortWorkItems/)
+  assert.match(work, /Do not recompute or clamp/)
+})
+
+test('Work home loads overview and items independently', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  assert.match(work, /loadOverview/)
+  assert.match(work, /loadItems/)
+  assert.match(work, /Promise\.allSettled/)
+  assert.match(work, /Can't load these counts/)
+  assert.match(work, /onConnectAgent \|\| onNewWorkflow/)
+})
+
+test('holderLabel prefixes kind when lean fields have it, else name-only', async () => {
+  const { holderLabel } = await import('../src/board.js')
+  assert.equal(holderLabel({ kind: 'human', name: 'Alex' }, 'waiting_on_you'), 'You Alex')
+  assert.equal(holderLabel({ kind: 'human', name: 'You' }, 'waiting_on_you'), 'You')
+  assert.equal(holderLabel({ kind: 'human', name: 'Sarah Chen' }, 'waiting_on_other'), 'Person Sarah Chen')
+  assert.equal(holderLabel({ kind: 'agent', name: 'Support Bot' }, 'moving'), 'Agent Support Bot')
+  assert.equal(holderLabel({ kind: 'tool', name: 'Stripe' }, 'stuck'), 'Tool Stripe')
+  assert.equal(holderLabel({ kind: 'unassigned', name: 'Unassigned' }, 'moving'), 'Unassigned')
+  assert.equal(holderLabel({ name: 'Alex' }, 'waiting_on_you'), 'Alex')
+  assert.equal(holderLabel(null, 'moving'), '')
 })
 
 test('named-work title gate hides ids, UUIDs, snake_case, and jargon', async () => {
