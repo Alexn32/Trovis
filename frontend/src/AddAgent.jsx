@@ -1,21 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api, getApiKey } from './api.js'
-import {
-  OpenAIIcon,
-  AnthropicIcon,
-  OpenClawIcon,
-  SparkleIcon,
-  TrovisMark,
-} from './Icons.jsx'
+import { SparkleIcon, TrovisMark } from './Icons.jsx'
+import { BrandMark, WorksWithStrip } from './BrandMarks.jsx'
 import ConnectGuide from './ConnectGuide.jsx'
 
-// Per-platform logo + brand color for the picker tiles. OpenClaw uses its own
-// full-color lobster mark; OpenAI / Claude use their logomarks tinted to brand.
-const PLATFORM_LOGOS = {
-  openclaw:        { Icon: OpenClawIcon }, // self-colored
-  'openai-agents': { Icon: OpenAIIcon,    color: '#10a37f' },
-  claude:          { Icon: AnthropicIcon, color: '#d97757' },
-  chatgpt:         { Icon: OpenAIIcon,    color: 'var(--text-primary)' },
+// Tile → V1 brand id. ChatGPT and the OpenAI Agents SDK share the OpenAI mark;
+// that is recognition, not "one connector per logo".
+const TILE_BRAND = {
+  openclaw: 'openclaw',
+  'openai-agents': 'chatgpt',
+  claude: 'claude',
+  chatgpt: 'chatgpt',
+  cursor: 'cursor',
 }
 
 // The two Claude variants shown on the sub-step after picking "Claude Agents".
@@ -49,11 +45,11 @@ const CLAUDE_VARIANTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Only the three platforms with first-party Trovis integrations
-// are surfaced for now. Generic Python / Node / framework /
-// no-code-product instruction pages still exist in this file — they
-// just aren't reachable from the picker. Re-adding any tile to this
-// array is enough to bring its page back.
+// Live Connect doors — only the ones that already work today. Generic
+// Python / Node / framework pages still exist below; they are not
+// reachable from this picker. Slack / GitHub / HubSpot / Stripe /
+// Intercom are recognition-only (see WorksWithStrip) and must not
+// appear here as clickable doors.
 const PLATFORMS = [
   { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
   { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
@@ -62,6 +58,16 @@ const PLATFORMS = [
   // A custom GPT built in ChatGPT: via GPT Actions (OAuth) it both reports its
   // own activity to Trovis AND can ask about the fleet (askFleet). No code.
   { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor + query a GPT via Actions — no code',    needsProvider: false },
+]
+
+// Recipe path — real OTEL ingest, not a first-party Cursor integration.
+const RECIPE_PLATFORMS = [
+  {
+    id: 'cursor',
+    label: 'Cursor',
+    subtitle: 'Send traces over OpenTelemetry — no plugin',
+    needsProvider: false,
+  },
 ]
 
 const PROVIDERS = [
@@ -311,36 +317,52 @@ function WizardHeader({ step, total, onBack, onClose }) {
 // Step 1 + 2 — selection grids
 // ---------------------------------------------------------------------------
 
+function PlatformTile({ platform, onSelect, recipe = false }) {
+  const brandId = TILE_BRAND[platform.id]
+  return (
+    <button
+      type="button"
+      className={`platform-card${recipe ? ' is-recipe' : ''}`}
+      onClick={() => onSelect(platform)}
+    >
+      {brandId && (
+        <span className="platform-card-logo">
+          <BrandMark id={brandId} size={20} />
+        </span>
+      )}
+      <span className="platform-card-text">
+        <span className="platform-card-label">
+          {platform.label}
+          {recipe && <span className="platform-card-badge">via OpenTelemetry</span>}
+        </span>
+        <span className="platform-card-subtitle">{platform.subtitle}</span>
+      </span>
+    </button>
+  )
+}
+
 function PlatformStep({ onSelect }) {
   return (
     <div>
-      <h2 className="wizard-title">Choose your platform</h2>
+      <h2 className="wizard-title">Choose how you connect</h2>
       <p className="wizard-subtitle">
-        Pick the closest match — we'll show you exactly what to do next.
+        These doors work today. Pick the closest match — we’ll show you exactly
+        what to do next.
       </p>
       <div className="platform-grid">
-        {PLATFORMS.map((p) => {
-          const logo = PLATFORM_LOGOS[p.id]
-          const Logo = logo?.Icon
-          return (
-            <button
-              key={p.id}
-              type="button"
-              className="platform-card"
-              onClick={() => onSelect(p)}
-            >
-              {Logo && (
-                <span className="platform-card-logo" style={{ color: logo.color }}>
-                  <Logo size={20} />
-                </span>
-              )}
-              <span className="platform-card-text">
-                <span className="platform-card-label">{p.label}</span>
-                <span className="platform-card-subtitle">{p.subtitle}</span>
-              </span>
-            </button>
-          )
-        })}
+        {PLATFORMS.map((p) => (
+          <PlatformTile key={p.id} platform={p} onSelect={onSelect} />
+        ))}
+      </div>
+      <h3 className="wizard-recipe-title">Or send traces yourself</h3>
+      <p className="wizard-recipe-sub">
+        Cursor can report to Trovis the same way any OpenTelemetry app does.
+        There is no plugin.
+      </p>
+      <div className="platform-grid">
+        {RECIPE_PLATFORMS.map((p) => (
+          <PlatformTile key={p.id} platform={p} onSelect={onSelect} recipe />
+        ))}
       </div>
     </div>
   )
@@ -595,9 +617,8 @@ OpenAIInstrumentor().instrument()`
   )
 }
 
-function PythonGenericInstructions({ agentName, endpoint }) {
-  const apiKey = getApiKey() || ''
-  const setup = fill(
+function otelSetupBlock(agentName, endpoint, apiKey) {
+  return fill(
 `from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -621,7 +642,10 @@ with tracer.start_as_current_span("my-operation") as span:
     # your agent logic here`,
     agentName, endpoint,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
+}
 
+function PythonGenericInstructions({ agentName, endpoint }) {
+  const apiKey = getApiKey() || ''
   return (
     <>
       <h2 className="instructions-title">Generic OpenTelemetry setup</h2>
@@ -629,8 +653,40 @@ with tracer.start_as_current_span("my-operation") as span:
         <CodeBlock code="pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http" />
       </NumberedStep>
       <NumberedStep n={2} title="Add this setup block and instrument your operations">
-        <CodeBlock code={setup} />
+        <CodeBlock code={otelSetupBlock(agentName, endpoint, apiKey)} />
       </NumberedStep>
+      <SuccessCallout />
+    </>
+  )
+}
+
+// Cursor recipe — same OTEL ingest as anything else. Honest: not a plugin.
+function CursorOtelInstructions({ agentName, endpoint }) {
+  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  return (
+    <>
+      <h2 className="instructions-title">Send Cursor traces over OpenTelemetry</h2>
+      <p className="instructions-subtitle">
+        There is no plugin. If your agent (or anything you run from Cursor)
+        emits OpenTelemetry traces, point the exporter at Trovis.
+      </p>
+      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+      <NumberedStep n={1} title="Install the OpenTelemetry exporter">
+        <CodeBlock code="pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http" />
+      </NumberedStep>
+      <NumberedStep n={2} title="Point traces at Trovis">
+        <CodeBlock code={otelSetupBlock(agentName, resolvedEndpoint, apiKey)} />
+      </NumberedStep>
+      <Callout variant="info">
+        Same door as any other OTEL app — Trovis does not install anything
+        inside Cursor.
+      </Callout>
       <SuccessCallout />
     </>
   )
@@ -1498,9 +1554,11 @@ function InstructionsView({ platform, agentName, endpoint }) {
   if (platform === 'chatgpt') {
     return <ChatGPTInstructions />
   }
-  // Unreachable from the picker — the platform list above only
-  // contains the live integrations. Returning null is safer than
-  // rendering a stale OtherInstructions page.
+  if (platform === 'cursor') {
+    return <CursorOtelInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  // Unreachable from the picker — live + recipe tiles only.
+  // Returning null is safer than rendering a stale OtherInstructions page.
   return null
 }
 
@@ -1556,6 +1614,7 @@ export default function AddAgent({ onClose, embedded = false, onUpgrade }) {
           }}
           onManual={() => setView('manual')}
           onClose={embedded ? null : onClose}
+          hideWorksWith={embedded}
         />
       )}
       {guideVisited && (
@@ -1582,7 +1641,7 @@ export default function AddAgent({ onClose, embedded = false, onUpgrade }) {
 
 // The hero shown when the Add Agent overlay opens: one primary path (the AI
 // guide) and one secondary (the classic platform-picker wizard).
-function AddAgentLanding({ onStartGuide, onManual, onClose }) {
+function AddAgentLanding({ onStartGuide, onManual, onClose, hideWorksWith = false }) {
   return (
     <div className="aa-landing">
       {onClose && (
@@ -1609,19 +1668,7 @@ function AddAgentLanding({ onStartGuide, onManual, onClose }) {
       <button type="button" className="aa-landing-manual" onClick={onManual}>
         Add manually instead
       </button>
-      <div className="aa-landing-logos">
-        <span className="aa-landing-logos-label">Works with</span>
-        {PLATFORMS.map((p) => {
-          const logo = PLATFORM_LOGOS[p.id]
-          const Logo = logo?.Icon
-          return Logo ? (
-            <span key={p.id} className="aa-landing-logo" title={p.label}>
-              <Logo size={16} />
-            </span>
-          ) : null
-        })}
-        <span className="aa-landing-logos-label">+ anything OTEL</span>
-      </div>
+      {!hideWorksWith && <WorksWithStrip className="aa-landing-logos" />}
     </div>
   )
 }
@@ -1639,7 +1686,9 @@ function ManualWizard({ onClose, embedded = false, onBackToLanding = null }) {
   // connect and are renamable on the dashboard, so there's no name input.
   const [endpoint] = useState(computeOverseeEndpoint())
 
-  const selectedPlatform = PLATFORMS.find((p) => p.id === platform)
+  const selectedPlatform =
+    PLATFORMS.find((p) => p.id === platform) ||
+    RECIPE_PLATFORMS.find((p) => p.id === platform)
   const needsProvider = selectedPlatform?.needsProvider ?? false
   const needsClaudeVariant = platform === 'claude'
   // Either kind of sub-selection sits at step 2 before the instructions.
@@ -1720,8 +1769,8 @@ function ClaudeVariantStep({ onSelect }) {
             className="platform-card"
             onClick={() => onSelect(v)}
           >
-            <span className="platform-card-logo" style={{ color: '#d97757' }}>
-              <AnthropicIcon size={20} />
+            <span className="platform-card-logo">
+              <BrandMark id="claude" size={20} />
             </span>
             <span className="platform-card-text">
               <span className="platform-card-label">{v.label}</span>

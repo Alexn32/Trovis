@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import AddAgent from './AddAgent.jsx'
 import { TrovisMark, CheckCircleIcon, TrovisLogo } from './Icons.jsx'
+import { WorksWithStrip } from './BrandMarks.jsx'
 
 // Post-signup onboarding wizard. Shown once to the org owner (gated in App.jsx
 // on `!me.org.onboarded_at`). Linear steps: name → connect first agent →
@@ -145,9 +146,11 @@ export default function Onboarding({ me, onDone }) {
           <div className="onboard-step">
             <h1 className="onboard-title">Connect your first agent</h1>
             <p className="onboard-sub">
-              Pick your platform and follow the steps. Telemetry starts flowing once your
-              agent runs — you can keep setting up in the meantime.
+              Pick a door that works today, or send traces over OpenTelemetry.
+              Tools you already use are recognized when they show up in work —
+              a direct connect for those is coming.
             </p>
+            <WorksWithStrip className="onboard-works-with" />
             {agentConnected && (
               <div className="onboard-connected">
                 <CheckCircleIcon size={16} /> First agent connected — nice.

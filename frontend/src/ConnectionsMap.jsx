@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
 import { statusFor, statusColor } from './utils.js'
+import { QuietBrand } from './BrandMarks.jsx'
 
 // Multi-agent connections map. A directional system diagram: agent nodes +
 // directed edges (who feeds whom), derived from telemetry (shared traces)
@@ -428,6 +429,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
                 : 'gray'
               const name = g?.display_name || id
               const plat = platformLabel(g?.platform)
+              const brandTexts = [g?.platform, g?.display_name, id]
               const x = p.x - NODE_W / 2
               const y = p.y - NODE_H / 2
               return (
@@ -440,7 +442,14 @@ export default function ConnectionsMap({ onSelectAgent }) {
                   <rect x={x} y={y} width={NODE_W} height={NODE_H} rx="11" className="map-node-box" />
                   <circle cx={x + 15} cy={p.y - 7} r="5" style={{ fill: statusColor(status) }} />
                   <text x={x + 28} y={p.y - 3} className="map-node-name">{trunc(name, 18)}</text>
-                  {plat && <text x={x + 28} y={p.y + 13} className="map-node-plat">{trunc(plat, 22)}</text>}
+                  {plat && (
+                    <foreignObject x={x + 28} y={p.y + 2} width={NODE_W - 36} height={16}>
+                      <div className="map-node-plat-row">
+                        <QuietBrand texts={brandTexts} size={11} />
+                        <span className="map-node-plat-txt">{trunc(plat, 20)}</span>
+                      </div>
+                    </foreignObject>
+                  )}
                 </g>
               )
             })}

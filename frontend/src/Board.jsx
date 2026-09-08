@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { ChevronRightIcon, UserIcon } from './Icons.jsx'
+import { QuietBrand } from './BrandMarks.jsx'
 import { WorkLoadFailed, StoryLoadFailed } from './ui.jsx'
 import { boardAge, boardCostLabel, boardEmpty, holderLine, ongoingLine } from './board.js'
 import { lifecycleSentence } from './loops.js'
@@ -70,6 +71,7 @@ function Card({ card, onOpen, onResolved }) {
       <span className="bc-meta">
         <span className={`bc-holder ${card.holder_type}`}>
           {card.holder_type === 'human' && <UserIcon size={11} />}
+          <QuietBrand texts={[card.holder_name, card.waiting_on]} size={11} />
           {card.holder_name}
         </span>
         {age && (
