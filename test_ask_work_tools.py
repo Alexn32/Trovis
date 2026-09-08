@@ -11,6 +11,8 @@ Covers:
     lean named helpers — never get_work_board
   - untitled OTel / 'Task from main' flood is not Work truth
   - stuck items carry service_name so 'what agent is stuck?' is not empty
+  - 'What's stuck?' cites fresh waiting_on_other (promis?) even when
+    overview stuck/needs_attention is 0 — not a fleet telemetry pivot
 """
 import json
 import os
@@ -142,6 +144,17 @@ with TestClient(main.app) as c:
     post("orders-agent", [
         sp("message_received", 200000, {**t("Retry shipment"), "trovis.loop.external_id": "o3"}),
         sp("tool_call", 190000, {"trovis.loop.external_id": "o3", "trovis.tool.name": "ship"}),
+    ])
+    # Fresh wait on someone (not aged → NOT needs_attention). Same shape as
+    # QA Hammocks "promis?" — open named work that status=stuck misses.
+    post("main", [
+        sp("message_received", 400, {**t("promis?"), "trovis.loop.external_id": "p1"}),
+        sp("agent_run_complete", 300, {
+            "trovis.loop.external_id": "p1",
+            "trovis.handoff.direction": "to_human",
+            "trovis.handoff.target_id": "sarah@t.com",
+            "trovis.handoff.id": "H8",
+        }),
     ])
     # Untitled OTel flood + stored "Task from main" shells — must not be Work.
     flood_ids = []
@@ -298,6 +311,20 @@ with TestClient(main.app) as c:
           and "Reply to customer" in _titles(empty_q))
     check("empty find_tasks never returns Task from main",
           all("task from " not in t.lower() for t in _titles(empty_q)))
+    check("empty find_tasks defaults to open (includes fresh waiting promis?)",
+          "promis?" in _titles(empty_q))
+    check("empty find_tasks defaults to open (excludes done this week)",
+          "Answered a question" not in _titles(empty_q))
+
+    listed = tool("get_work_items", {}, aid, viewer=uid)
+    check("get_work_items with no status lists open named work including promis?",
+          "promis?" in _titles(listed)
+          and all(t.get("status") != "done" for t in listed.get("tasks") or []))
+    blocking = tool("get_work_items", {"status": "blocking"}, aid, viewer=uid)
+    check("status=blocking includes waiting_on_other promis? + stuck Retry",
+          "promis?" in _titles(blocking) and "Retry shipment" in _titles(blocking))
+    check("status=blocking excludes moving Draft reply",
+          "Draft reply" not in _titles(blocking))
 
     if flood_ids:
         flood_story = tool("get_task_story", {"loop_id": flood_ids[0]}, aid, viewer=uid)
@@ -327,6 +354,49 @@ with TestClient(main.app) as c:
     finally:
         database.get_work_board = orig
 
+    print("\n--- What's stuck? cites fresh waiting_on_other (QA promis?) ---")
+    r3 = c.post("/auth/signup", json={
+        "email": "qa@t.com", "password": "supersecret123",
+        "name": "QA", "account_type": "business", "org_name": "QA Hammocks",
+    }).json()
+    qa_k, qa_t = r3["api_key"], r3["token"]
+    qa_h = {"Authorization": f"Bearer {qa_t}"}
+    qa_aid, qa_uid = r3["org"]["id"], r3["user"]["id"]
+    c.post("/team", headers=qa_h, json={
+        "name": "Sam", "email": "sam@t.com", "role": "Lead",
+    })
+    c.post("/v1/traces", json={"resourceSpans": [{
+        "resource": {"attributes": kv({"service.name": "main"})},
+        "scopeSpans": [{"spans": [
+            sp("message_received", 400, {**t("promis?"), "trovis.loop.external_id": "qa1"}),
+            sp("agent_run_complete", 300, {
+                "trovis.loop.external_id": "qa1",
+                "trovis.handoff.direction": "to_human",
+                "trovis.handoff.target_id": "sam@t.com",
+                "trovis.handoff.id": "HQA",
+            }),
+        ]}],
+    }]}, headers={"X-Trovis-Api-Key": qa_k})
+    qa_ov = tool("get_work_overview", {}, qa_aid, viewer=qa_uid)
+    check("QA overview is 0 needs_attention / 1 open (fresh waiting_on_other)",
+          qa_ov.get("needs_attention") == 0 and qa_ov.get("open") == 1
+          and qa_ov.get("needs_you") == 0)
+    check("QA overview next tells the model to cite get_work_items titles",
+          "get_work_items" in (qa_ov.get("next") or "")
+          and "waiting_on_other" in (qa_ov.get("next") or ""))
+    qa_stuck = tool("get_work_items", {"status": "stuck"}, qa_aid, viewer=qa_uid)
+    check("QA status=stuck is empty (promis? is waiting_on_other, not stuck)",
+          qa_stuck.get("count") == 0)
+    check("QA stuck-empty payload still names promis? as open_or_waiting",
+          any(t.get("title") == "promis?" for t in qa_stuck.get("open_or_waiting") or []))
+    check("QA stuck-empty hint forbids a fleet telemetry pivot",
+          "telemetry" in (qa_stuck.get("hint") or "").lower())
+    qa_open = tool("get_work_items", {}, qa_aid, viewer=qa_uid)
+    check("QA unfiltered get_work_items names promis?",
+          qa_open.get("count") == 1 and qa_open["tasks"][0]["title"] == "promis?"
+          and qa_open["tasks"][0]["status"] == "waiting_on_other"
+          and qa_open["tasks"][0].get("service_name") == "main")
+
     print("\n--- prompt prefers lean named Work ---")
     instr = asker._AGENTIC_INSTRUCTIONS
     check("instructions name get_work_overview + get_work_items",
@@ -335,6 +405,15 @@ with TestClient(main.app) as c:
           "/work/board" in instr and "Task from main" in instr)
     check("instructions tell the model not to blank on which agent is stuck",
           "do NOT" in instr and "list_agents" in instr and "service_name" in instr)
+    check("instructions treat waiting_on_other as stuck/blocking/attention",
+          "waiting_on_other" in instr and "what's blocking" in instr)
+    check("instructions require citing get_work_items titles, not stuck-only",
+          "cite" in instr.lower() and "do NOT filter status=stuck" in instr)
+    check("instructions prefer named work over fleet error-rate pivots",
+          "error-rate" in instr and "named open or waiting" in instr)
+    check("fleet concise prompt prefers named titles over error-rate pivots",
+          "waiting_on_other" in asker.SYSTEM_FLEET_CONCISE
+          and "error-rate" in asker.SYSTEM_FLEET_CONCISE)
 
 print()
 if failures:

@@ -69,8 +69,9 @@ SYSTEM_FLEET = (
     "OTel loops.\n"
     "- Be direct and specific. Refer to agents by their service_name and "
     "tasks by their title.\n"
-    "- Prefer concrete numbers (\"85% error rate on lead-scorer\") over "
-    "vague qualifications.\n"
+    "- Prefer concrete numbers and named work titles over vague "
+    "qualifications. Do not lead with fleet error rates when named "
+    "open or waiting work exists.\n"
     "- If the data doesn't support a confident answer, say so plainly.\n"
     "- Keep responses concise — a paragraph or short list, not an essay."
 )
@@ -194,7 +195,10 @@ SYSTEM_FLEET_CONCISE = (
     "Ground every claim about tasks, what's waiting, or why something is "
     "stuck in the named work-record tools (get_work_overview / "
     "get_work_items) — never guess from agent summaries or dump untitled "
-    "OTel. Use specific numbers and refer to agents and tasks by name. "
+    "OTel. waiting_on_other / waiting_on_you named items count as "
+    "stuck/blocking even when needs_attention is 0. Prefer those titles "
+    "over fleet error-rate pivots whenever any named open work exists. "
+    "Use specific numbers and refer to agents and tasks by name. "
     "Never invent data.\n"
     "- Default to 2-4 sentences. For how-do-I/setup questions, give complete "
     "step-by-step instructions instead — exact commands and code on their own "
@@ -678,7 +682,17 @@ _WORK_ITEM_STATUSES = (
 _NAMED_ONLY_NOTE = (
     "Named Work only (plugin-provided human titles). Untitled OTel loops, "
     "generated titles, and 'Task from …' shells are telemetry — not Work. "
-    "Do not list them as tasks."
+    "Do not list them as tasks. Counts are not titles: if open > 0, call "
+    "get_work_items (no status=stuck filter) and cite those titles. "
+    "waiting_on_other / waiting_on_you / stuck / stalled answer "
+    "'what's stuck', 'what needs attention', and 'what's blocking' even "
+    "when needs_attention is 0. Do not pivot to fleet error rates while "
+    "named open or waiting work exists."
+)
+_STUCK_WIDEN_HINT = (
+    "No items match this narrow status. Named open/waiting work still "
+    "answers 'what's stuck' / 'what's blocking' / 'what needs attention'. "
+    "Cite the open_or_waiting titles; do not pivot to fleet telemetry."
 )
 
 _SIGN_IN_FOR_ME = (
@@ -784,10 +798,13 @@ _ASK_TOOLS = [
         "name": "get_work_overview",
         "description": (
             "Lean named-Work counts: needs_you, needs_attention, open, "
-            "completed_week. Human-provided titles only. Use for 'how much "
-            "is stuck', 'what's waiting', fleet-of-work shape. Does NOT "
-            "dump the Other-work / OTel catch-all. Untitled telemetry is "
-            "excluded; mention that only if the user asks about raw traces."
+            "completed_week. Human-provided titles only. Counts are not "
+            "the answer to 'what's stuck' / 'what's blocking' / 'what "
+            "needs attention' — there is no stuck count, and 0 "
+            "needs_attention with open > 0 still means named work is "
+            "waiting. ALWAYS follow with get_work_items (open, not "
+            "status=stuck) and cite titles. Does NOT dump the Other-work "
+            "/ OTel catch-all."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -796,11 +813,15 @@ _ASK_TOOLS = [
         "description": (
             "Paginated named Work items (human titles only). Optional "
             "status filter: waiting_on_you | waiting_on_other | stuck | "
-            "moving | done | needs_attention (stuck + waiting_on_other). "
-            "Each row has id, title, status, holder, service_name, "
-            "agent_id, whats_next. Use for 'what's stuck', 'what's "
-            "waiting', listing the desk. NEVER treat untitled / "
-            "'Task from …' / generated titles as Work."
+            "moving | done | needs_attention (stuck + aging "
+            "waiting_on_other) | open (default when omitted: not done) | "
+            "blocking (waiting_on_you + waiting_on_other + stuck). Each "
+            "row has id, title, status, holder, service_name, agent_id, "
+            "whats_next. For 'what's stuck' / 'what's blocking' / 'what "
+            "needs attention' omit status or use open/blocking — do NOT "
+            "filter status=stuck only. Fresh waiting_on_other is "
+            "answerable even when overview needs_attention is 0. NEVER "
+            "treat untitled / 'Task from …' / generated titles as Work."
         ),
         "input_schema": {
             "type": "object",
@@ -809,7 +830,8 @@ _ASK_TOOLS = [
                     "type": "string",
                     "description": (
                         "waiting_on_you | waiting_on_other | stuck | "
-                        "moving | done | needs_attention"
+                        "moving | done | needs_attention | open | blocking. "
+                        "Omit for open named work."
                     ),
                 },
             },
@@ -819,10 +841,14 @@ _ASK_TOOLS = [
         "name": "find_tasks",
         "description": (
             "Search named Work items by title or id substring. Optional "
-            "status filter (same enum as get_work_items). Returns up to 25 "
-            "named tasks with status, holder, service_name, agent_id. Use "
-            "to locate a named task before get_task_story. Empty query + "
-            "status=stuck lists named stuck work — never the OTel flood."
+            "status filter (same enum as get_work_items, including open "
+            "and blocking). Returns up to 25 named tasks with status, "
+            "holder, service_name, agent_id. Use to locate a named task "
+            "before get_task_story. Empty query with no status lists "
+            "open named work (not done). Empty query + status=stuck is "
+            "stuck-only — for 'what's stuck/blocking' prefer no status "
+            "or status=blocking so waiting_on_other is included. Never "
+            "the OTel flood."
         ),
         "input_schema": {
             "type": "object",
@@ -831,7 +857,7 @@ _ASK_TOOLS = [
                     "type": "string",
                     "description": (
                         "Title or id substring (case-insensitive). "
-                        "Empty = named items only, capped."
+                        "Empty = open named items only, capped."
                     ),
                 },
                 "status": {
@@ -839,7 +865,7 @@ _ASK_TOOLS = [
                     "description": (
                         "Optional status filter: waiting_on_you | "
                         "waiting_on_other | stuck | moving | done | "
-                        "needs_attention"
+                        "needs_attention | open | blocking"
                     ),
                 },
             },
@@ -883,17 +909,24 @@ _AGENTIC_INSTRUCTIONS = (
     "- Asked what's waiting on me / my desk / assigned to me → call "
     "get_waiting_on_me. If it says to sign in, tell the user to sign in. "
     "NEVER invent is_yours from agent summaries.\n"
-    "- Asked \"what's stuck\" / what's waiting / needs attention / "
-    "judgment on the desk → get_work_overview THEN get_work_items "
-    "(status=stuck or needs_attention). Answer from named titles + "
-    "holders + service_name. NEVER dump /work/board, the Other-work "
-    "catch-all, untitled loops, or 'Task from main' / generated titles. "
-    "Those are raw telemetry, not Work truth. You may say untitled OTel "
-    "exists separately if asked — do not list it as the work record.\n"
+    "- Asked \"what's stuck\" / \"what needs attention\" / \"what's "
+    "blocking\" / what's waiting / judgment on the desk → "
+    "get_work_overview AND ALWAYS get_work_items (open named work — do "
+    "NOT filter status=stuck only). Overview has no stuck count; 0 "
+    "needs_attention with open > 0 is NOT empty. waiting_on_other, "
+    "waiting_on_you, needs_attention, stuck, and stalled named items "
+    "are all answerable — cite their titles from get_work_items. Prefer "
+    "those names over fleet error-rate / telemetry pivots whenever any "
+    "named open or waiting item exists. NEVER dump /work/board, the "
+    "Other-work catch-all, untitled loops, or 'Task from main' / "
+    "generated titles. Those are raw telemetry, not Work truth. You "
+    "may say untitled OTel exists separately if asked — do not list it "
+    "as the work record.\n"
     "- Asked \"which agent is stuck\" / \"what agent is stuck\" → do NOT "
-    "return empty. Call get_work_items (status=stuck) and cite each "
-    "item's service_name / holder, AND call list_agents for fleet "
-    "status. Use both. Follow-ups stay grounded in those holders.\n"
+    "return empty. Call get_work_items (open or status=blocking, not "
+    "stuck-only) and cite each item's title + service_name / holder. "
+    "Use list_agents only if there is truly no named open/waiting "
+    "work. Follow-ups stay grounded in those holders.\n"
     "- Asked why a named task is stuck / what's blocking it → find_tasks "
     "then get_task_story. Cite holder, service_name, whats_next, and "
     "recent events. Do not guess from fleet summaries.\n"
@@ -915,7 +948,7 @@ def _as_int(v: Any) -> int | None:
 
 
 def _normalize_work_status(raw: Any) -> str | None:
-    """Map tool input onto the lean Work status enum (plus needs_attention)."""
+    """Map tool input onto the lean Work status enum (plus rollups)."""
     s = (str(raw) if raw is not None else "").strip().lower()
     if not s:
         return None
@@ -926,9 +959,15 @@ def _normalize_work_status(raw: Any) -> str | None:
         "in_motion": "moving",
         "attention": "needs_attention",
         "needs_attention": "needs_attention",
+        "stalled": "stuck",
+        "open": "open",
+        "blocking": "blocking",
+        "blocked": "blocking",
     }
     s = aliases.get(s, s)
-    if s in _WORK_ITEM_STATUSES or s in ("needs_attention", "waiting"):
+    if s in _WORK_ITEM_STATUSES or s in (
+        "needs_attention", "waiting", "open", "blocking",
+    ):
         return s
     return None
 
@@ -941,6 +980,10 @@ def _status_matches(item_status: str | None, want: str | None) -> bool:
         return st in ("stuck", "waiting_on_other")
     if want == "waiting":
         return st in ("waiting_on_you", "waiting_on_other")
+    if want == "open":
+        return st != "done"
+    if want == "blocking":
+        return st in ("stuck", "waiting_on_other", "waiting_on_you")
     return st == want
 
 
@@ -980,6 +1023,9 @@ def _list_named_work_items(
     """Page lean get_work_items and filter. Never touches get_work_board."""
     q = (query or "").strip().lower()
     want = _normalize_work_status(status)
+    if want is None and not q:
+        # Listing the desk: open named work, not this week's dones.
+        want = "open"
     out: list[dict[str, Any]] = []
     cursor: str | None = None
     for _ in range(5):
@@ -1130,23 +1176,38 @@ def _run_tool(
             else:
                 out["signed_in"] = True
                 out["yours_count"] = out["needs_you"]
+            if out["open"] > 0:
+                out["next"] = (
+                    "Call get_work_items with no status=stuck filter and "
+                    "cite titles. waiting_on_other / waiting_on_you count "
+                    "as stuck/blocking/needs attention."
+                )
             return json.dumps(out)
 
         if name in ("find_tasks", "get_work_items"):
             query = inp.get("query")
             if query is None:
                 query = inp.get("title") or ""
+            want = _normalize_work_status(inp.get("status"))
             tasks = _list_named_work_items(
                 account_id,
                 viewer_user_id,
                 status=inp.get("status"),
                 query=str(query),
             )
-            return json.dumps({
+            payload: dict[str, Any] = {
                 "count": len(tasks),
                 "tasks": tasks,
                 "named_only": True,
-            })
+            }
+            if want in ("stuck", "needs_attention") and not tasks:
+                waiting = _list_named_work_items(
+                    account_id, viewer_user_id, status="blocking",
+                )
+                if waiting:
+                    payload["hint"] = _STUCK_WIDEN_HINT
+                    payload["open_or_waiting"] = waiting
+            return json.dumps(payload)
 
         if name == "get_task_story":
             loop_id = _as_int(inp.get("loop_id"))
