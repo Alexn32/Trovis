@@ -105,6 +105,16 @@ test('Work holder mark uses holder name only — never whats_next', () => {
   assert.match(src, /holderLabel/)
 })
 
+test('Work table brand marks are muted; Connect tiles stay loud', () => {
+  const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8')
+  const block = css.match(/\.work-td-holder \.brand-quiet\s*\{([^}]+)\}/)
+  assert.ok(block, 'Work-table mute rule exists')
+  const opacity = Number((block[1].match(/opacity:\s*([\d.]+)/) || [])[1])
+  assert.ok(opacity >= 0.55 && opacity <= 0.65, `Work mute opacity ${opacity}`)
+  assert.match(block[1], /--text-muted/)
+  assert.doesNotMatch(css, /\.platform-card-logo[^{]*\{[^}]*opacity:\s*0\.[0-6]/)
+})
+
 test('Connect opening chips are live/recipe only — no SaaS doors', () => {
   const src = readFileSync(new URL('../src/ConnectGuide.jsx', import.meta.url), 'utf8')
   const opts = src.match(/options: \[([\s\S]*?)\]/)

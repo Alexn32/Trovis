@@ -6403,6 +6403,11 @@ select.wf2-input { cursor: pointer; }
   align-items: center;
   gap: 6px;
 }
+/* Work table marks stay quieter than Connect picker / live tiles. */
+.work-td-holder .brand-quiet {
+  opacity: 0.6;
+  color: var(--text-muted);
+}
 .work-td-updated {
   color: var(--text-muted); white-space: nowrap;
   font-variant-numeric: tabular-nums; text-align: right;
