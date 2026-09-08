@@ -6196,6 +6196,8 @@ select.wf2-input { cursor: pointer; }
 .work-sug-note {
   font-size: 12.5px; color: var(--text-muted); margin: 4px 0 6px;
 }
+.work-section-failed { margin: 0 0 22px; }
+.work-section-failed .board-empty { margin: 0; padding: 18px 16px; }
 
 .work-table { overflow-x: auto; }
 .work-table-head,

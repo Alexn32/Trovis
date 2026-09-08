@@ -3,6 +3,7 @@ import { api } from './api.js'
 import Board, { TaskPanel } from './Board.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
+  holderLabel,
   sortWorkItems,
   workItemStatusLabel,
   workUpdatedLabel,
@@ -11,7 +12,7 @@ import {
 // Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
 // Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
 // Must NOT call /work/summary or /work/board on this path (those starve
-// the replica). Board.jsx is a secondary view behind "Boards & other views".
+// the replica). Board.jsx is a secondary view behind "Other views".
 //
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
@@ -188,22 +189,24 @@ function SuggestionsStrip({ suggestions, busyId, note, onApprove, onDecline, onE
   )
 }
 
-function WorkSkeleton() {
+function OverviewSkeleton() {
   return (
-    <div className="view work-home" aria-busy="true" aria-label="Loading work">
-      <h1>Work</h1>
-      <div className="work-overview">
-        <span className="work-skel-pill" />
-        <span className="work-skel-pill" />
-        <span className="work-skel-pill" />
-        <span className="work-skel-pill" />
-      </div>
-      <div className="work-skel-table">
-        <span />
-        <span />
-        <span />
-        <span />
-      </div>
+    <div className="work-overview" aria-busy="true" aria-label="Loading overview">
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+    </div>
+  )
+}
+
+function TableSkeleton() {
+  return (
+    <div className="work-skel-table" aria-busy="true" aria-label="Loading work">
+      <span />
+      <span />
+      <span />
+      <span />
     </div>
   )
 }
@@ -212,7 +215,11 @@ function WorkHome({
   onConnectAgent,
   onOpenBoards,
   overview,
+  overviewErr,
+  onRetryOverview,
   items,
+  itemsErr,
+  onRetryItems,
   suggestions,
   nextCursor,
   onLoadMore,
@@ -223,8 +230,8 @@ function WorkHome({
   onEditSuggestion,
 }) {
   const [open, setOpen] = useState(null)
-  const rows = sortWorkItems(items)
-  const empty = (overview.open || 0) === 0 && rows.length === 0
+  const rows = sortWorkItems(items || [])
+  const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
 
   function onRowKey(e, row) {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -239,7 +246,13 @@ function WorkHome({
         <h1>Work</h1>
       </header>
 
-      <OverviewStrip overview={overview} />
+      {overview && <OverviewStrip overview={overview} />}
+      {!overview && overviewErr && (
+        <div className="work-section-failed">
+          <WorkLoadFailed lead="Can't load these counts" onRetry={onRetryOverview} />
+        </div>
+      )}
+      {!overview && !overviewErr && <OverviewSkeleton />}
       <SuggestionsStrip
         suggestions={suggestions}
         busyId={busyId}
@@ -248,6 +261,13 @@ function WorkHome({
         onDecline={onDeclineSuggestion}
         onEdit={onEditSuggestion}
       />
+
+      {itemsErr && !items && (
+        <div className="work-section-failed">
+          <WorkLoadFailed lead="Can't load this work" onRetry={onRetryItems} />
+        </div>
+      )}
+      {!items && !itemsErr && <TableSkeleton />}
 
       {empty && (
         <div className="board-empty">
@@ -263,7 +283,7 @@ function WorkHome({
         </div>
       )}
 
-      {!empty && (
+      {items && !empty && (
         <div className="work-table" role="table" aria-label="Work">
           <div className="work-table-head" role="row">
             <span role="columnheader">Task</span>
@@ -286,7 +306,7 @@ function WorkHome({
               <span className={`work-status-pill ${row.status || ''}`}>
                 {workItemStatusLabel(row.status)}
               </span>
-              <span className="work-td-holder">{row.holder?.name || ''}</span>
+              <span className="work-td-holder">{holderLabel(row.holder, row.status)}</span>
               <span className="work-td-next">{row.whats_next || ''}</span>
               <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
             </div>
@@ -301,7 +321,7 @@ function WorkHome({
 
       {onOpenBoards && (
         <button type="button" className="work-other-views" onClick={onOpenBoards}>
-          Boards & other views →
+          Other views →
         </button>
       )}
 
@@ -316,57 +336,78 @@ function WorkHome({
   )
 }
 
-export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
+export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow }) {
+  const connectAgent = onConnectAgent || onNewWorkflow
   const [surface, setSurface] = useState('home')
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
   const [nextCursor, setNextCursor] = useState(null)
-  const [err, setErr] = useState(null)
+  const [overviewErr, setOverviewErr] = useState(null)
+  const [itemsErr, setItemsErr] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [suggestionNote, setSuggestionNote] = useState(null)
 
+  const overviewFailSoftRef = useRef(false)
+  const itemsFailSoftRef = useRef(false)
   const failSoftRef = useRef(false)
-  failSoftRef.current = !overview && !items && !!err
+  overviewFailSoftRef.current = !overview && !!overviewErr
+  itemsFailSoftRef.current = !items && !!itemsErr
+  failSoftRef.current = overviewFailSoftRef.current && itemsFailSoftRef.current
 
-  const load = useCallback(async () => {
+  const loadOverview = useCallback(async () => {
     try {
-      const [ov, page] = await Promise.all([
-        api.getWorkOverview(),
-        api.getWorkItems({ limit: 50 }),
-      ])
+      const ov = await api.getWorkOverview()
       setOverview(ov)
-      setItems(Array.isArray(page?.items) ? page.items : [])
-      setNextCursor(page?.next_cursor || null)
-      setErr(null)
+      setOverviewErr(null)
     } catch (e) {
-      setErr(e?.message || 'Could not load your work')
+      setOverviewErr(e?.message || "Can't load these counts")
       throw e
     }
-    // Suggestions are a stub; never block home, never invent rows.
+  }, [])
+
+  const loadItems = useCallback(async () => {
+    try {
+      const page = await api.getWorkItems({ limit: 50 })
+      setItems(Array.isArray(page?.items) ? page.items : [])
+      setNextCursor(page?.next_cursor || null)
+      setItemsErr(null)
+    } catch (e) {
+      setItemsErr(e?.message || "Can't load this work")
+      throw e
+    }
+  }, [])
+
+  const loadSuggestions = useCallback(() => {
     api
       .getWorkSuggestions()
       .then((s) => setSuggestions(Array.isArray(s?.suggestions) ? s.suggestions : []))
       .catch(() => {})
   }, [])
 
-  function retry() {
-    setErr(null)
-    load().catch(() => {})
+  const load = useCallback(async () => {
+    const tasks = []
+    if (!overviewFailSoftRef.current) tasks.push(loadOverview())
+    if (!itemsFailSoftRef.current) tasks.push(loadItems())
+    loadSuggestions()
+    const results = await Promise.allSettled(tasks)
+    if (results.some((r) => r.status === 'rejected')) {
+      throw new Error('section failed')
+    }
+  }, [loadOverview, loadItems, loadSuggestions])
+
+  function retryOverview() {
+    setOverviewErr(null)
+    loadOverview().catch(() => {})
+  }
+
+  function retryItems() {
+    setItemsErr(null)
+    loadItems().catch(() => {})
   }
 
   async function refreshNamedWork() {
-    try {
-      const [ov, page] = await Promise.all([
-        api.getWorkOverview(),
-        api.getWorkItems({ limit: 50 }),
-      ])
-      setOverview(ov)
-      setItems(Array.isArray(page?.items) ? page.items : [])
-      setNextCursor(page?.next_cursor || null)
-    } catch {
-      /* keep last-good table — mutations must not take home down */
-    }
+    await Promise.allSettled([loadOverview(), loadItems()])
   }
 
   async function approveSuggestion(id) {
@@ -463,33 +504,23 @@ export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
   if (surface === 'board') {
     return (
       <Board
-        onConnectAgent={onConnectAgent}
+        onConnectAgent={connectAgent}
         onOpenWorkflow={onOpenWorkflow}
         onBack={() => setSurface('home')}
       />
     )
   }
 
-  if (!overview && !items && err) {
-    return (
-      <div className="view work-home">
-        <header className="work-home-head">
-          <h1>Work</h1>
-        </header>
-        <WorkLoadFailed onRetry={retry} />
-      </div>
-    )
-  }
-  if (!overview || !items) {
-    return <WorkSkeleton />
-  }
-
   return (
     <WorkHome
-      onConnectAgent={onConnectAgent}
+      onConnectAgent={connectAgent}
       onOpenBoards={() => setSurface('board')}
       overview={overview}
+      overviewErr={overviewErr}
+      onRetryOverview={retryOverview}
       items={items}
+      itemsErr={itemsErr}
+      onRetryItems={retryItems}
       suggestions={suggestions}
       nextCursor={nextCursor}
       onLoadMore={loadMore}
