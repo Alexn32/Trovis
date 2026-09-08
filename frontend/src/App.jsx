@@ -25,6 +25,7 @@ import {
   getSessionToken,
 } from './api.js'
 import { restoreSession } from './sessionRestore.js'
+import { performLogout } from './sessionLogout.js'
 import {
   MonitorIcon,
   MoonIcon,
@@ -76,7 +77,7 @@ function readLegalPath() {
 }
 
 // The current view (tab + overlay) lives in React state, not the URL — so a
-// browser reload would otherwise reset to the Dashboard. Persist it to
+// browser reload would otherwise reset to Work. Persist it to
 // sessionStorage and restore on mount so reload keeps you on the page you were
 // on. sessionStorage (not local) so it's scoped to the tab and cleared on
 // logout; the URL is intentionally left unchanged (no router).
@@ -133,7 +134,7 @@ function AppInner() {
   // stale persisted view from before the change (Stuck keeps its sub-view).
   const legacyTab = persistedView.tab
   const initialTab =
-    legacyTab === 'workflows' || legacyTab === 'stuck' ? 'work' : legacyTab || 'dashboard'
+    legacyTab === 'workflows' || legacyTab === 'stuck' ? 'work' : legacyTab || 'work'
   const [tab, setTab] = useState(initialTab) // 'dashboard' | 'fleet' | 'team' | 'work'
   // Work tab sub-view: 'loops' | 'workflow' | 'stuck'
   const [workView, setWorkView] = useState(
@@ -198,19 +199,19 @@ function AppInner() {
     setMe(payload)
   }
 
-  async function logout() {
-    try {
-      await api.logout()
-    } catch {
-      /* best-effort */
-    }
-    clearSessionToken()
-    clearApiKey()
-    clearPersistedView()
-    // Hard navigate to a clean root: this drops any stale ?reset=/invite token
-    // held in the mount-time refs, so logging out after a password reset lands
-    // on the landing/login instead of re-showing the consumed reset form.
-    window.location.assign('/')
+  function logout() {
+    // Abort in-flight Dashboard GETs (briefing up to 120s) and do not await
+    // the logout POST — otherwise Log out waits on a hung briefing.
+    performLogout({
+      logoutRequest: () => api.logout(),
+      clearSessionToken,
+      clearApiKey,
+      clearPersistedView,
+      // Hard navigate to a clean root: this drops any stale ?reset=/invite token
+      // held in the mount-time refs, so logging out after a password reset lands
+      // on the landing/login instead of re-showing the consumed reset form.
+      navigate: () => window.location.assign('/'),
+    })
   }
 
   function openDetail(serviceName, agentId) {

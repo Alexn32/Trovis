@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { startAbortable } from './abortable.js'
 // Costs always render in dollars (e.g. "$0.68"); shared with Fleet so they match.
 import { formatCost as fmtMoney } from './utils.js'
 import {
@@ -9,11 +10,12 @@ import {
 } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
-// Dashboard — the insight-driven daily briefing. Default landing page.
+// Dashboard — the insight-driven daily briefing.
 //
 // Six sections, each fetching independently so a slow/failed Claude call on
 // one card never blocks the page: greeting, AI briefing, attention + cost,
 // work feed, fleet grid, and a floating ⌘K Ask pill.
+// Unmount / tab switch aborts in-flight Claude calls (briefing up to 120s).
 // All visuals key off CSS variables so the page works in light and dark.
 // ---------------------------------------------------------------------------
 
@@ -70,44 +72,36 @@ export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, onViewAl
   const [briefingLoading, setBriefingLoading] = useState(true)
   const [hasAgents, setHasAgents] = useState(null)
 
-  useEffect(() => {
-    let alive = true
-    setBriefingLoading(true)
-    api
-      .getBriefing()
-      .then((d) => alive && setBriefing(d))
-      .catch(
-        () =>
-          alive &&
-          setBriefing({
-            summary: '',
-            tasks_yesterday: 0,
-            tasks_last_week: 0,
-            tasks_delta: '—',
-          }),
-      )
-      .finally(() => alive && setBriefingLoading(false))
-    api
-      .listAgents()
-      .then((d) => alive && setHasAgents(Array.isArray(d) && d.length > 0))
-      .catch(() => alive && setHasAgents(false))
-    return () => {
-      alive = false
-    }
-  }, [refreshKey])
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        setBriefingLoading(true)
+        api
+          .getBriefing({ signal })
+          .then((d) => isAlive() && setBriefing(d))
+          .catch(
+            () =>
+              isAlive() &&
+              setBriefing({
+                summary: '',
+                tasks_yesterday: 0,
+                tasks_last_week: 0,
+                tasks_delta: '—',
+              }),
+          )
+          .finally(() => isAlive() && setBriefingLoading(false))
+        api
+          .listAgents({ signal })
+          .then((d) => isAlive() && setHasAgents(Array.isArray(d) && d.length > 0))
+          .catch(() => isAlive() && setHasAgents(false))
+      }),
+    [refreshKey],
+  )
 
   const waiting =
     hasAgents === true &&
     briefing !== null &&
     (briefing.tasks_last_week || 0) === 0
-
-  // While waiting, poll a little faster so the page resolves itself the moment
-  // the first real spans land (reuses the shared refreshKey plumbing).
-  useEffect(() => {
-    if (!waiting) return
-    const t = setInterval(() => setRefreshKey((k) => k + 1), 15000)
-    return () => clearInterval(t)
-  }, [waiting])
 
   return (
     <div className="dash">
@@ -131,8 +125,8 @@ export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, onViewAl
 
 // Shown after onboarding while the first agent's telemetry hasn't arrived.
 // Replaces the briefing/attention/cost/work-feed cards; the Fleet grid (which
-// shows the connected agent) and the Ask pill stay. Auto-disappears once the
-// briefing reports activity (the parent polls every 15s).
+// shows the connected agent) and the Ask pill stay. Refresh or revisit after
+// the first spans land — we do not re-poll the 120s briefing while waiting.
 function WaitingCard() {
   return (
     <div className="dash-card dash-waiting">
@@ -143,8 +137,8 @@ function WaitingCard() {
       </div>
       <h2 className="dash-waiting-title">Your first agent is connected</h2>
       <p className="dash-waiting-sub">
-        Waiting for telemetry. This page fills in automatically the moment your
-        agent sends its first activity — no refresh needed.
+        Waiting for telemetry. Refresh this page after your agent sends its
+        first activity.
       </p>
       <ul className="dash-waiting-checklist">
         <li className="is-done">
@@ -231,16 +225,16 @@ function AttentionCard({ refreshKey }) {
   const [items, setItems] = useState(null)
   const [openIdx, setOpenIdx] = useState(0)
 
-  useEffect(() => {
-    let alive = true
-    api
-      .getAttention()
-      .then((d) => alive && setItems(Array.isArray(d) ? d : []))
-      .catch(() => alive && setItems([]))
-    return () => {
-      alive = false
-    }
-  }, [refreshKey])
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        api
+          .getAttention({ signal })
+          .then((d) => isAlive() && setItems(Array.isArray(d) ? d : []))
+          .catch(() => isAlive() && setItems([]))
+      }),
+    [refreshKey],
+  )
 
   const count = items?.length || 0
   return (
@@ -314,17 +308,17 @@ function CostCard({ onOpenCost, refreshKey }) {
   const [c, setC] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    let alive = true
-    api
-      .getCost()
-      .then((d) => alive && setC(d))
-      .catch(() => alive && setC(null))
-      .finally(() => alive && setLoading(false))
-    return () => {
-      alive = false
-    }
-  }, [refreshKey])
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        api
+          .getCost({ signal })
+          .then((d) => isAlive() && setC(d))
+          .catch(() => isAlive() && setC(null))
+          .finally(() => isAlive() && setLoading(false))
+      }),
+    [refreshKey],
+  )
 
   const over = (c?.budget_pct || 0) > 85
   return (
@@ -450,16 +444,16 @@ function TrendArrow({ trend }) {
 function WorkFeedCard({ onViewAll, refreshKey }) {
   const [feed, setFeed] = useState(null)
 
-  useEffect(() => {
-    let alive = true
-    api
-      .getWorkFeed()
-      .then((d) => alive && setFeed(Array.isArray(d) ? d : []))
-      .catch(() => alive && setFeed([]))
-    return () => {
-      alive = false
-    }
-  }, [refreshKey])
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        api
+          .getWorkFeed({ signal })
+          .then((d) => isAlive() && setFeed(Array.isArray(d) ? d : []))
+          .catch(() => isAlive() && setFeed([]))
+      }),
+    [refreshKey],
+  )
 
   return (
     <section className="dash-section">
@@ -502,16 +496,16 @@ function WorkFeedCard({ onViewAll, refreshKey }) {
 function FleetGrid({ onOpenAgent, onGoFleet, refreshKey }) {
   const [agents, setAgents] = useState(null)
 
-  useEffect(() => {
-    let alive = true
-    api
-      .listAgents()
-      .then((d) => alive && setAgents(Array.isArray(d) ? d : []))
-      .catch(() => alive && setAgents([]))
-    return () => {
-      alive = false
-    }
-  }, [refreshKey])
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        api
+          .listAgents({ signal })
+          .then((d) => isAlive() && setAgents(Array.isArray(d) ? d : []))
+          .catch(() => isAlive() && setAgents([]))
+      }),
+    [refreshKey],
+  )
 
   return (
     <section className="dash-section">
