@@ -18,6 +18,7 @@ export const BRAND_ORDER = [
   'hubspot',
   'stripe',
   'intercom',
+  'shopify',
 ]
 
 export const BRANDS = {
@@ -83,6 +84,13 @@ export const BRANDS = {
     role: 'coming',
     color: '#1f8ded',
     aliases: ['intercom'],
+  },
+  shopify: {
+    id: 'shopify',
+    label: 'Shopify',
+    role: 'coming',
+    color: '#96bf48',
+    aliases: ['shopify'],
   },
 }
 

@@ -81,6 +81,15 @@ export function IntercomIcon({ size = 18 }) {
   )
 }
 
+export function ShopifyIcon({ size = 18 }) {
+  // Shopping bag — recognizable Shopify-adjacent mark, kept simple.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="#96bf48" aria-hidden="true">
+      <path d="M16.2 6.1a4.2 4.2 0 0 0-8.4 0H5.85L4.7 21.15A1.85 1.85 0 0 0 6.54 23.1h10.92a1.85 1.85 0 0 0 1.84-1.95L18.15 6.1H16.2zm-6.5 0a2.3 2.3 0 0 1 4.6 0h-4.6zM12 10.7a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9z" />
+    </svg>
+  )
+}
+
 const ICONS = {
   openclaw: OpenClawIcon,
   claude: AnthropicIcon,
@@ -91,6 +100,7 @@ const ICONS = {
   hubspot: HubSpotIcon,
   stripe: StripeIcon,
   intercom: IntercomIcon,
+  shopify: ShopifyIcon,
 }
 
 export function BrandMark({ id, size = 16, className = '' }) {

@@ -22,6 +22,7 @@ const V1 = [
   'hubspot',
   'stripe',
   'intercom',
+  'shopify',
 ]
 
 test('V1 catalog is locked — Zendesk is out', () => {
@@ -34,7 +35,7 @@ test('V1 catalog is locked — Zendesk is out', () => {
 test('live doors are only the ones that work today', () => {
   assert.deepEqual(LIVE_BRAND_IDS, ['openclaw', 'claude', 'chatgpt'])
   assert.deepEqual(RECIPE_BRAND_IDS, ['cursor'])
-  assert.deepEqual(COMING_BRAND_IDS, ['slack', 'github', 'hubspot', 'stripe', 'intercom'])
+  assert.deepEqual(COMING_BRAND_IDS, ['slack', 'github', 'hubspot', 'stripe', 'intercom', 'shopify'])
 })
 
 test('resolveBrand maps platform / holder / tool text; unknown is silent', () => {
@@ -48,6 +49,8 @@ test('resolveBrand maps platform / holder / tool text; unknown is silent', () =>
   assert.equal(resolveBrand('slack-alerts'), 'slack')
   assert.equal(resolveBrand('GitHub'), 'github')
   assert.equal(resolveBrand('Intercom'), 'intercom')
+  assert.equal(resolveBrand('Shopify'), 'shopify')
+  assert.equal(resolveBrand('waiting on shopify'), 'shopify')
   assert.equal(resolveBrand('Python Agent'), null)
   assert.equal(resolveBrand('Trovis-instrumented Agent'), null)
   assert.equal(resolveBrand('billing-agent'), null)
@@ -79,7 +82,7 @@ test('Add Agent live tiles stay the real doors; SaaS is not a picker door', () =
   for (const id of ['openclaw', 'openai-agents', 'claude', 'chatgpt']) {
     assert.match(live, new RegExp(`id: '${id}'`))
   }
-  for (const id of ['slack', 'github', 'hubspot', 'stripe', 'intercom', 'zendesk']) {
+  for (const id of ['slack', 'github', 'hubspot', 'stripe', 'intercom', 'shopify', 'zendesk']) {
     assert.doesNotMatch(live, new RegExp(`id: '${id}'`))
   }
   // Cursor may be a recipe tile, never a fake plugin.
@@ -125,7 +128,7 @@ test('Connect opening chips are live/recipe only — no SaaS doors', () => {
   assert.match(block, /Claude/)
   assert.match(block, /ChatGPT/)
   assert.match(block, /Cursor/)
-  for (const name of ['Slack', 'GitHub', 'HubSpot', 'Stripe', 'Intercom', 'Zendesk']) {
+  for (const name of ['Slack', 'GitHub', 'HubSpot', 'Stripe', 'Intercom', 'Shopify', 'Zendesk']) {
     assert.doesNotMatch(block, new RegExp(name))
   }
 })
