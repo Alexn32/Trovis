@@ -283,6 +283,14 @@ test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving →
   ])
 })
 
+test('Work home does not client-filter items to fix overview totals', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(work, /isNamedWorkTitle/)
+  assert.doesNotMatch(work, /looksInternal/)
+  assert.match(work, /sortWorkItems/)
+  assert.match(work, /Do not recompute or clamp/)
+})
+
 test('named-work title gate hides ids, UUIDs, snake_case, and jargon', async () => {
   const { isNamedWorkTitle } = await import('../src/board.js')
   assert.equal(isNamedWorkTitle('Approve refund #4821'), true)

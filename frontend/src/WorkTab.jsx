@@ -3,7 +3,6 @@ import { api } from './api.js'
 import Board, { TaskPanel } from './Board.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
-  isNamedWorkTitle,
   sortWorkItems,
   workItemStatusLabel,
   workUpdatedLabel,
@@ -50,11 +49,11 @@ function itemToCard(row) {
   }
 }
 
-function namedRows(items) {
-  return sortWorkItems((items || []).filter((row) => isNamedWorkTitle(row.title)))
-}
+// Render the contract as the API sent it. Do not re-filter rows to "fix"
+// overview totals if /work/items still includes flood until a hotfix.
 
 function OverviewStrip({ overview }) {
+  // Counts are the server contract. Do not recompute or clamp them here.
   return (
     <div className="work-overview" aria-label="Work overview">
       {OVERVIEW_PILLS.map((p) => {
@@ -167,7 +166,7 @@ function SuggestionRow({ row, busy, onApprove, onDecline, onEdit }) {
 }
 
 function SuggestionsStrip({ suggestions, busyId, note, onApprove, onDecline, onEdit }) {
-  const rows = (suggestions || []).filter((s) => isNamedWorkTitle(s.title))
+  const rows = suggestions || []
   if (!rows.length) return null
   return (
     <section className="work-suggestions" aria-label="Suggestions">
@@ -224,7 +223,7 @@ function WorkHome({
   onEditSuggestion,
 }) {
   const [open, setOpen] = useState(null)
-  const rows = namedRows(items)
+  const rows = sortWorkItems(items)
   const empty = (overview.open || 0) === 0 && rows.length === 0
 
   function onRowKey(e, row) {
