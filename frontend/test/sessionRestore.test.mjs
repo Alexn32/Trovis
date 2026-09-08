@@ -6,6 +6,7 @@ import {
   timeoutError,
   isTimeoutError,
   RESTORE_TIMEOUT_MS,
+  WORK_TIMEOUT_MS,
 } from '../src/httpTimeout.js'
 import {
   sessionRestoreDecision,
@@ -167,4 +168,30 @@ test('a TCP hang (server accepts, never responds) aborts — the Railway-dead ca
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
+})
+
+// --- Work L1 / L2: same hang, fail-soft with Retry --------------------------
+
+test('WORK_TIMEOUT_MS is a 10–15s hard cap for /work/summary and /work/board', () => {
+  assert.ok(WORK_TIMEOUT_MS >= 10_000)
+  assert.ok(WORK_TIMEOUT_MS <= 15_000)
+})
+
+test('getWorkBoard and getWorkSummary pass the work timeout (not a bare fetch)', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
+  assert.match(src, /getWorkBoard[\s\S]{0,280}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /getWorkSummary[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
+})
+
+test('Work L1 and L2 render a Retry empty state, not a stuck Loading', async () => {
+  const { readFileSync } = await import('node:fs')
+  const tab = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  const board = readFileSync(new URL('../src/Board.jsx', import.meta.url), 'utf8')
+  const ui = readFileSync(new URL('../src/ui.jsx', import.meta.url), 'utf8')
+  assert.match(tab, /WorkLoadFailed/)
+  assert.match(board, /WorkLoadFailed/)
+  assert.match(ui, /Can't load this work/)
+  assert.match(ui, />\s*Retry\s*</)
+  assert.doesNotMatch(ui, /\b(loops?|possession|segments?|stations?|handoffs?)\b/i)
 })

@@ -7,6 +7,9 @@ export const DEFAULT_TIMEOUT_MS = 15_000
 // /auth/me must be fast. Don't make a returning user stare at the restore
 // shell for the full default just because the API is dead.
 export const RESTORE_TIMEOUT_MS = 10_000
+// Work L1 (summary) and L2 (board/kind) — same hang as restore: a bare
+// fetch left "Loading…" forever. 15s abort; UI fail-softs with Retry.
+export const WORK_TIMEOUT_MS = 15_000
 // Claude-backed endpoints (Ask, briefing, describe, drafts) routinely take
 // longer than a fleet GET. A 15s cap would abort real answers.
 export const LLM_TIMEOUT_MS = 120_000

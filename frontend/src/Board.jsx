@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { ChevronRightIcon, UserIcon } from './Icons.jsx'
+import { WorkLoadFailed } from './ui.jsx'
 import { boardAge, boardCostLabel, boardEmpty, holderLine, ongoingLine } from './board.js'
 import { lifecycleSentence } from './loops.js'
 
@@ -219,11 +220,11 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
   const [open, setOpen] = useState(null)
 
   const load = useCallback(async () => {
+    setErr(null)
     try {
       setBoard(await api.getWorkBoard(workflowId || null))
-      setErr(null)
     } catch (e) {
-      setErr(e?.message || 'Could not load the board')
+      setErr(e?.message || 'Could not load this work')
     }
   }, [workflowId])
 
@@ -233,7 +234,22 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
     return () => clearInterval(t)
   }, [load])
 
-  if (err) return <div className="view board-view"><div className="dash-empty pad">{err}</div></div>
+  if (!board && err) {
+    return (
+      <div className="view board-view">
+        <div className="board-head">
+          {onBack ? (
+            <button type="button" className="board-back" onClick={onBack}>
+              ← All work
+            </button>
+          ) : (
+            <h1>Work</h1>
+          )}
+        </div>
+        <WorkLoadFailed onRetry={load} />
+      </div>
+    )
+  }
   if (!board) return <div className="view board-view"><div className="dash-empty pad">Loading…</div></div>
 
   const empty = boardEmpty(board)

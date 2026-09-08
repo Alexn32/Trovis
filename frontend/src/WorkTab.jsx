@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { UserIcon, ChevronRightIcon } from './Icons.jsx'
+import { WorkLoadFailed } from './ui.jsx'
 import Board from './Board.jsx'
 import {
   boardAge,
@@ -146,9 +147,9 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
   const [selected, setSelected] = useState(null) // { id, name } | null (Level 2)
 
   const load = useCallback(async () => {
+    setErr(null)
     try {
       setSummary(await api.getWorkSummary())
-      setErr(null)
     } catch (e) {
       setErr(e?.message || 'Could not load your work')
     }
@@ -166,8 +167,16 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
   const openTask = (card) =>
     setSelected({ id: card.workflow_id || null, name: card.workflow_name || 'Other work' })
 
-  if (err) {
-    return <div className="view board-view"><div className="dash-empty pad">{err}</div></div>
+  // First paint only: keep a last-good summary if a later refresh fails.
+  if (!summary && err) {
+    return (
+      <div className="view board-view">
+        <div className="board-head">
+          <h1>Work</h1>
+        </div>
+        <WorkLoadFailed onRetry={load} />
+      </div>
+    )
   }
   if (!summary) {
     return <div className="view board-view"><div className="dash-empty pad">Loading…</div></div>

@@ -18,6 +18,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   LLM_TIMEOUT_MS,
   RESTORE_TIMEOUT_MS,
+  WORK_TIMEOUT_MS,
   fetchWithTimeout,
 } from './httpTimeout.js'
 
@@ -368,10 +369,13 @@ export const api = {
   // The whole Work board in one request: open work + today's finished work,
   // already bucketed, sorted, and with holders resolved server-side.
   getWorkBoard: (workflowId = null) =>
-    request(`/work/board${workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''}`),
+    request(
+      `/work/board${workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''}`,
+      { timeoutMs: WORK_TIMEOUT_MS },
+    ),
   // Level 1 of the Work tab: one rollup card per kind of work + the cross-
   // workflow strip of tasks waiting on you. One request; the server groups.
-  getWorkSummary: () => request('/work/summary'),
+  getWorkSummary: () => request('/work/summary', { timeoutMs: WORK_TIMEOUT_MS }),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
   getLoop: (loopId) => request(`/loops/${loopId}`),
