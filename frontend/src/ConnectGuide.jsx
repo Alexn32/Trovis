@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, getApiKey } from './api.js'
 import { CodeBlock, computeOverseeEndpoint } from './AddAgent.jsx'
 import { TrovisMark, SendIcon, CheckCircleIcon } from './Icons.jsx'
-import { QuietBrand } from './BrandMarks.jsx'
+import { QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
 
 // The conversational "Set up with AI" flow. Trovis asks one question at a
 // time (with quick-reply chips), emits copy-paste snippets carrying the
@@ -213,6 +213,12 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
           </button>
         )}
       </div>
+
+      {/* The guided door is where someone arrives with no idea what Trovis
+          connects to. Show the same honest split the landing and onboarding
+          show — doors that work today vs logos we merely recognise — so the
+          assistant is never the only thing setting expectations. */}
+      <WorksWithStrip className="connect-works-with" />
 
       <div className="connect-thread" ref={threadRef}>
         {messages.map((m, i) =>
