@@ -171,7 +171,7 @@ function _withAgent(path, agentId) {
 
 export const api = {
   // --- data ---
-  listAgents: () => request('/agents'),
+  listAgents: (opts = {}) => request('/agents', opts),
   getAgentSummary: (name, agentId) =>
     request(_withAgent(`/agents/${encodeURIComponent(name)}/summary`, agentId)),
   // Drift verdict (declared identity vs. observed behavior). Cached server-side;
@@ -367,10 +367,13 @@ export const api = {
   testAlert: () => request('/account/alerts/test', { method: 'POST' }),
 
   // --- dashboard (daily briefing) ---
-  getBriefing: () => request('/dashboard/briefing', { timeoutMs: LLM_TIMEOUT_MS }),
-  getAttention: () => request('/dashboard/attention'),
-  getCost: () => request('/dashboard/cost'),
-  getWorkFeed: () => request('/dashboard/work-feed'),
+  // Optional `{ signal }` so Dashboard unmount / tab switch can abort
+  // in-flight Claude calls instead of waiting out LLM_TIMEOUT (120s).
+  getBriefing: (opts = {}) =>
+    request('/dashboard/briefing', { timeoutMs: LLM_TIMEOUT_MS, ...opts }),
+  getAttention: (opts = {}) => request('/dashboard/attention', opts),
+  getCost: (opts = {}) => request('/dashboard/cost', opts),
+  getWorkFeed: (opts = {}) => request('/dashboard/work-feed', opts),
   // Chronological, fleet-wide activity stream for the Work Feed page.
   getActivity: (hours = 24, limit = 200) =>
     request(`/dashboard/activity?hours=${hours}&limit=${limit}`),
@@ -493,7 +496,10 @@ export const api = {
     request('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) =>
     request('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
-  logout: () => request('/auth/logout', { method: 'POST' }),
+  // keepalive: the POST can finish after we navigate away. Logout itself
+  // must never await hung Dashboard GETs — see performLogout.
+  logout: () =>
+    request('/auth/logout', { method: 'POST', keepalive: true }),
   me: () => request('/auth/me', { timeoutMs: RESTORE_TIMEOUT_MS }),
   claim: (data) =>
     request('/auth/claim', { method: 'POST', body: JSON.stringify(data) }),

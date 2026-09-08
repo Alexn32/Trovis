@@ -64,10 +64,44 @@ export function authErrorMessage(err) {
   return msg
 }
 
+export function abortError() {
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  err.code = 'aborted'
+  return err
+}
+
+export function isAbortError(err) {
+  return err?.name === 'AbortError' || err?.code === 'aborted' || err?.code === 'ABORT_ERR'
+}
+
+// Every in-flight fetchWithTimeout registers here so logout / leaving a page
+// can abort them instead of waiting out LLM_TIMEOUT (120s) on a hung briefing.
+const inflightControllers = new Set()
+
+export function inFlightCount() {
+  return inflightControllers.size
+}
+
+/** Abort every tracked request. Settles hangers even if fetchImpl ignores signal. */
+export function abortInFlightRequests() {
+  for (const controller of [...inflightControllers]) {
+    try {
+      controller.abort()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /**
  * Fetch with a hard deadline. Aborts the underlying request when `timeoutMs`
  * elapses and rejects with a TimeoutError — even if `fetchImpl` ignores
  * AbortSignal (so a hung mock or a stuck TCP can't spin forever).
+ *
+ * A caller AbortSignal (Dashboard unmount) or `abortInFlightRequests()`
+ * (logout) likewise settles the promise immediately, instead of waiting
+ * for the timeout.
  */
 export async function fetchWithTimeout(
   url,
@@ -81,12 +115,13 @@ export async function fetchWithTimeout(
   }
 
   const controller = new AbortController()
+  inflightControllers.add(controller)
+  let timedOut = false
   const onUserAbort = () => controller.abort()
   if (userSignal) {
     if (userSignal.aborted) {
-      const err = new Error('Aborted')
-      err.name = 'AbortError'
-      throw err
+      inflightControllers.delete(controller)
+      throw abortError()
     }
     userSignal.addEventListener('abort', onUserAbort, { once: true })
   }
@@ -94,17 +129,32 @@ export async function fetchWithTimeout(
   let timeoutId
   try {
     const fetchPromise = fetchImpl(url, { ...rest, signal: controller.signal })
-    // If we time out first, a late AbortError from fetch must not become an
-    // unhandled rejection.
+    // If we time out / abort first, a late AbortError from fetch must not
+    // become an unhandled rejection.
     void fetchPromise.catch(() => {})
+
+    const abortPromise = new Promise((_, reject) => {
+      const onAbort = () => {
+        if (!timedOut) reject(abortError())
+      }
+      if (controller.signal.aborted) {
+        onAbort()
+        return
+      }
+      controller.signal.addEventListener('abort', onAbort, { once: true })
+    })
+    void abortPromise.catch(() => {})
+
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
+        timedOut = true
         controller.abort()
         reject(timeoutError(timeoutMs))
       }, timeoutMs)
     })
-    return await Promise.race([fetchPromise, timeoutPromise])
+    return await Promise.race([fetchPromise, timeoutPromise, abortPromise])
   } finally {
+    inflightControllers.delete(controller)
     clearTimeout(timeoutId)
     if (userSignal) userSignal.removeEventListener('abort', onUserAbort)
   }
