@@ -18,7 +18,8 @@ import {
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
 // auto-poll back into Loading.
 // Suggest approve/edit/decline never invent a named item. Approve only
-// creates via POST /work/suggestions/{id}/approve when that ships.
+// creates via POST /work/suggestions/{id}/approve. Never auto-create a
+// named item on load or poll.
 
 const POLL_START_MS = 30000
 const POLL_MAX_MS = 120000

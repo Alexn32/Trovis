@@ -22,6 +22,7 @@ import {
   fetchWithTimeout,
   isTimeoutError,
   isUnreachableError,
+  unreachableMessage,
 } from './httpTimeout.js'
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
@@ -120,8 +121,9 @@ async function request(path, options = {}) {
   } catch (e) {
     // Never leak "Failed to fetch" / AbortError to the UI. Timeout and a
     // dead Railway look the same to the operator: Trovis didn't respond.
+    // Login/auth uses "Can't reach Trovis — retry".
     if (isTimeoutError(e) || isUnreachableError(e)) {
-      const err = new Error("Trovis didn't respond")
+      const err = new Error(unreachableMessage(path))
       err.code = isTimeoutError(e) ? 'timeout' : 'network'
       err.status = 0
       throw err

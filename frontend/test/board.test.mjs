@@ -261,10 +261,14 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
 test('Work home never invents a named item from suggestion actions', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /insert_spans|createWork|postWork|\/work\/items['"`].*POST/i)
+  assert.match(work, /Never auto-create/)
   assert.match(work, /approveWorkSuggestion/)
   assert.match(work, /editWorkSuggestion/)
   assert.match(work, /declineWorkSuggestion/)
   assert.match(work, /never invent a named item/)
+  const load = work.match(/const load = useCallback\(async \(\) => \{[\s\S]*?\}, \[loadOverview/)
+  assert.ok(load, 'home load() is a useCallback')
+  assert.doesNotMatch(load[0], /approveWorkSuggestion|declineWorkSuggestion|editWorkSuggestion/)
 })
 
 test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving → Done', async () => {

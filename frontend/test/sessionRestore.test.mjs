@@ -178,15 +178,16 @@ test('WORK_TIMEOUT_MS is a 10–15s hard cap for /work/summary and /work/board',
   assert.ok(WORK_TIMEOUT_MS <= 15_000)
 })
 
-test('getWorkOverview, getWorkItems, getWorkBoard, getWorkSummary, and getLoop pass the work timeout', async () => {
+test('getWorkOverview, getWorkItems, getWorkItem, getWorkSuggestions, getWorkBoard, getWorkSummary, and getLoop pass the work timeout', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
   assert.match(src, /getWorkOverview[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkItems[\s\S]{0,400}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /getWorkItem[\s\S]{0,200}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkSuggestions[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
-  assert.match(src, /approveWorkSuggestion[\s\S]{0,220}timeoutMs:\s*WORK_TIMEOUT_MS/)
-  assert.match(src, /editWorkSuggestion[\s\S]{0,220}timeoutMs:\s*WORK_TIMEOUT_MS/)
-  assert.match(src, /declineWorkSuggestion[\s\S]{0,220}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /approveWorkSuggestion[\s\S]{0,280}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /editWorkSuggestion[\s\S]{0,240}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /declineWorkSuggestion[\s\S]{0,240}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkBoard[\s\S]{0,280}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkSummary[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getLoop[\s\S]{0,80}timeoutMs:\s*WORK_TIMEOUT_MS/)
@@ -208,10 +209,39 @@ test('Work L1, L2, and TaskPanel render a Retry empty state, not stuck Loading',
   assert.doesNotMatch(code, /\b(loops?|possession|segments?|stations?|handoffs?)\b/i)
 })
 
-test('isUnreachableError catches Failed to fetch and timeouts, not 401s', () => {
+test('isUnreachableError catches Failed to fetch, AbortError, and timeouts, not 401s', () => {
   assert.equal(isUnreachableError(new TypeError('Failed to fetch')), true)
   assert.equal(isUnreachableError(timeoutError(15_000)), true)
+  const abort = new Error('The user aborted a request')
+  abort.name = 'AbortError'
+  assert.equal(isUnreachableError(abort), true)
   const auth = new Error('unauthorized')
   auth.status = 401
   assert.equal(isUnreachableError(auth), false)
+})
+
+test('login/auth timeouts and AbortError become human copy, not raw errors', async () => {
+  const {
+    authErrorMessage,
+    AUTH_UNREACHABLE_MESSAGE,
+    unreachableMessage,
+  } = await import('../src/httpTimeout.js')
+  const abort = new Error('AbortError')
+  abort.name = 'AbortError'
+  assert.equal(authErrorMessage(abort), AUTH_UNREACHABLE_MESSAGE)
+  assert.equal(authErrorMessage(timeoutError(15_000)), AUTH_UNREACHABLE_MESSAGE)
+  assert.equal(authErrorMessage(new TypeError('Failed to fetch')), AUTH_UNREACHABLE_MESSAGE)
+  assert.equal(authErrorMessage(new Error('Invalid email or password')), 'Invalid email or password')
+  assert.equal(unreachableMessage('/auth/login'), AUTH_UNREACHABLE_MESSAGE)
+  assert.equal(unreachableMessage('/auth/me'), AUTH_UNREACHABLE_MESSAGE)
+  assert.equal(unreachableMessage('/work/items'), "Trovis didn't respond")
+
+  const { readFileSync } = await import('node:fs')
+  const login = readFileSync(new URL('../src/Login.jsx', import.meta.url), 'utf8')
+  const api = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
+  const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+  assert.match(login, /authErrorMessage/)
+  assert.doesNotMatch(login.replace(/authErrorMessage\(err\)/g, ''), /setError\(err\.message\)/)
+  assert.match(api, /unreachableMessage\(path\)/)
+  assert.match(app, /Can't reach Trovis — retry/)
 })

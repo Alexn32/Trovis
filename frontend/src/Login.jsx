@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, setApiKey, setSessionToken } from './api.js'
+import { authErrorMessage } from './httpTimeout.js'
 import { Spinner } from './ui.jsx'
 import { TrovisLogo } from './Icons.jsx'
 
@@ -118,7 +119,7 @@ function LoginPanel({ onSuccess, onBack, onForgot }) {
     try {
       onSuccess(await api.login({ email: email.trim(), password }))
     } catch (err) {
-      setError(err.message)
+      setError(authErrorMessage(err))
       setSubmitting(false)
     }
   }
@@ -243,7 +244,7 @@ function ResetPanel({ token, onSuccess }) {
     try {
       onSuccess(await api.resetPassword(token, password))
     } catch (err) {
-      setError(err.message)
+      setError(authErrorMessage(err))
       setSubmitting(false)
     }
   }
@@ -306,7 +307,7 @@ function SignupPanel({ onSuccess, onBack }) {
         }),
       )
     } catch (err) {
-      setError(err.message)
+      setError(authErrorMessage(err))
       setSubmitting(false)
     }
   }
@@ -390,7 +391,7 @@ function ClaimPanel({ onSuccess, onBack }) {
         }),
       )
     } catch (err) {
-      setError(err.message)
+      setError(authErrorMessage(err))
       setSubmitting(false)
     }
   }
@@ -439,7 +440,7 @@ function AcceptInvitePanel({ token, onSuccess }) {
     try {
       onSuccess(await api.acceptInvite({ token, name: name.trim() || null, password }))
     } catch (err) {
-      setError(err.message)
+      setError(authErrorMessage(err))
       setSubmitting(false)
     }
   }
