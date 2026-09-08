@@ -6117,40 +6117,161 @@ select.wf2-input { cursor: pointer; }
   .yc { min-width: 200px; }
 }
 
-/* Lean Work home — overview chips + named-items table (Monday adapter) */
-.work-chips {
-  display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 20px;
+/* ==========================================================================
+   Work Home v1.1 — Design visual-pass-v1.1 (Monday main table)
+   Color ONLY on waiting_on_you / stuck (and suggestion actions).
+   moving never alarms. Suggestions hide when empty.
+   ========================================================================== */
+
+.work-home {
+  max-width: 1040px;
+  margin: 0 auto;
+  width: 100%;
 }
-.work-chip {
-  display: flex; flex-direction: column; gap: 2px;
-  min-width: 120px; padding: 12px 14px;
+.work-home-head { margin: 0 0 22px; }
+.work-home h1 {
+  font-size: 32px; font-weight: 700; letter-spacing: -0.03em;
+  color: var(--text-primary); margin: 0;
+}
+
+.work-overview {
+  display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 22px;
+}
+.work-pill {
+  display: inline-flex; align-items: baseline; gap: 10px;
+  padding: 10px 14px; min-height: 40px;
   background: var(--bg-surface); border: 1px solid var(--border-default);
-  border-radius: 10px;
+  border-radius: 999px;
 }
-.work-chip.is-warn { box-shadow: inset 3px 0 0 var(--warning); }
-.work-chip.is-stuck { box-shadow: inset 3px 0 0 var(--error); }
-.work-chip-value {
-  font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums;
+.work-pill.is-waiting { background: var(--warm-fill); border-color: transparent; }
+.work-pill.is-stuck { background: var(--error-faint); border-color: transparent; }
+.work-pill.is-quiet { background: var(--bg-primary); }
+.work-pill-label { font-size: 13px; color: var(--text-secondary); }
+.work-pill.is-waiting .work-pill-label,
+.work-pill.is-stuck .work-pill-label { color: var(--text-primary); }
+.work-pill-value {
+  font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums;
   color: var(--text-primary); letter-spacing: -0.02em;
 }
-.work-chip-label { font-size: 11.5px; color: var(--text-muted); }
-.work-table-wrap { overflow-x: auto; }
-.work-table {
-  width: 100%; border-collapse: collapse; font-size: 13px;
+
+.work-suggestions {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 14px;
+  padding: 14px 16px 10px;
+  box-shadow: var(--shadow-sm);
+  margin: 0 0 22px;
 }
-.work-table th {
-  text-align: left; font-size: 10.5px; font-weight: 650;
-  letter-spacing: 0.04em; text-transform: uppercase;
-  color: var(--text-muted); padding: 8px 10px; border-bottom: 1px solid var(--border-default);
+.work-suggestions-title {
+  font-size: 12px; font-weight: 650; letter-spacing: 0.02em;
+  color: var(--text-muted); margin: 0 0 10px;
 }
-.work-table td {
-  padding: 10px; border-bottom: 1px solid var(--border-default);
-  color: var(--text-secondary); vertical-align: top;
+.work-suggestions-list { list-style: none; margin: 0; padding: 0; }
+.work-sug-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 8px 0 10px;
 }
-.work-td-title { color: var(--text-primary); font-weight: 550; }
-.work-td-updated { color: var(--text-muted); white-space: nowrap; }
-.work-table tr.is-yours td { background: var(--warning-faint); }
-.work-more { margin: 12px 0 0; }
+.work-sug-row + .work-sug-row { border-top: 1px solid var(--border-default); }
+.work-sug-copy { min-width: 0; }
+.work-sug-title {
+  font-size: 14px; font-weight: 650; color: var(--text-primary);
+  margin: 0 0 2px;
+}
+.work-sug-why { font-size: 12.5px; color: var(--text-muted); margin: 0; }
+.work-sug-actions {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+}
+.work-sug-decline {
+  font: inherit; font-size: 13px; cursor: pointer;
+  color: var(--error); background: none; border: none; padding: 8px 10px;
+}
+.work-sug-decline:hover { color: var(--error); opacity: 0.85; }
+
+.work-table { overflow-x: auto; }
+.work-table-head,
+.work-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) 148px 132px minmax(160px, 1.6fr) 72px;
+  gap: 12px; align-items: center;
+}
+.work-table-head {
+  padding: 0 16px 8px;
+  font-size: 11px; font-weight: 650; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.work-row {
+  width: 100%; text-align: left;
+  min-height: 50px; height: auto; padding: 0 16px;
+  margin: 0 0 6px; border: none; border-radius: 12px;
+  background: var(--bg-surface); color: var(--text-muted);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.work-row:hover { background: var(--bg-surface-hover); }
+.work-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.work-row.is-waiting-you {
+  background: var(--warm-fill);
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+.work-row.is-waiting-you:hover { background: var(--warm-fill-hover); }
+.work-row.is-stuck {
+  background: var(--error-faint);
+  box-shadow: inset 3px 0 0 var(--error);
+}
+.work-td-title {
+  color: var(--text-primary); font-weight: 600; font-size: 13.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.work-status-pill { font-weight: 550; }
+.work-status-pill.waiting_on_you { color: var(--warning); }
+.work-status-pill.stuck { color: var(--error); }
+.work-status-pill.waiting_on_other,
+.work-status-pill.moving,
+.work-status-pill.done { color: var(--text-muted); }
+.work-td-holder, .work-td-next {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.work-td-updated {
+  color: var(--text-muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+.work-more { margin: 8px 0 0; }
+
+.work-other-views {
+  display: inline-block; margin: 18px 0 0; padding: 0;
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  color: var(--text-muted); background: none; border: none;
+}
+.work-other-views:hover { color: var(--text-primary); }
+
+.work-skel-pill {
+  display: block; height: 40px; width: 148px; border-radius: 999px;
+  background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-surface-hover) 50%, var(--bg-surface) 75%);
+  background-size: 200% 100%; animation: dash-shimmer 1.3s ease-in-out infinite;
+}
+.work-skel-table { display: flex; flex-direction: column; gap: 6px; }
+.work-skel-table span {
+  display: block; height: 50px; border-radius: 12px;
+  background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-surface-hover) 50%, var(--bg-surface) 75%);
+  background-size: 200% 100%; animation: dash-shimmer 1.3s ease-in-out infinite;
+}
+
+@media (max-width: 800px) {
+  .work-table-head { display: none; }
+  .work-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "title updated"
+      "status holder"
+      "next next";
+    height: auto; min-height: 0; padding: 12px 16px; gap: 4px 12px;
+  }
+  .work-td-title { grid-area: title; }
+  .work-status-pill { grid-area: status; }
+  .work-td-holder { grid-area: holder; justify-self: end; }
+  .work-td-next { grid-area: next; }
+  .work-td-updated { grid-area: updated; }
+  .work-sug-row { flex-direction: column; align-items: flex-start; }
+}
 
 /* --- always-on (ongoing) work: quiet line above the board, expands to cards --- */
 .board-ongoing { margin: 0 0 12px; }
