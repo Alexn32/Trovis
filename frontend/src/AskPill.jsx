@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { ASK_EVENT } from './askOpen.js'
 import { AskVisualRenderer } from './AskVisuals.jsx'
 import { TrovisMark, SendIcon } from './Icons.jsx'
 import { FALLBACK_CHIPS } from './askChips.js'
@@ -15,6 +16,9 @@ export default function AskPill() {
   const [pending, setPending] = useState(false)
   const [input, setInput] = useState('')
   const [suggestions] = useState(FALLBACK_CHIPS)
+  // Always points at the current `send` (defined below), so the open-from-
+  // elsewhere listener can fire a question without re-subscribing each render.
+  const sendRef = useRef(null)
 
   // ⌘K / Ctrl+K toggles; Escape closes.
   useEffect(() => {
@@ -28,6 +32,18 @@ export default function AskPill() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Opened from elsewhere in the app (e.g. a job's Ask button), optionally
+  // with the question already asked. See askOpen.js for why this is an event.
+  useEffect(() => {
+    function onAsk(e) {
+      const q = String(e?.detail?.question || '').trim()
+      setOpen(true)
+      if (q) sendRef.current(q)
+    }
+    window.addEventListener(ASK_EVENT, onAsk)
+    return () => window.removeEventListener(ASK_EVENT, onAsk)
   }, [])
 
   async function send(text) {
@@ -55,6 +71,8 @@ export default function AskPill() {
       setPending(false)
     }
   }
+
+  sendRef.current = send
 
   if (!open) {
     return (

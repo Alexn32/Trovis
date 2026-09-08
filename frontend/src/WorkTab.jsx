@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
-import { TaskPanel } from './Board.jsx'
+import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
   holderLabel,
-  itemToCard,
   sortWorkItems,
   workItemStatusLabel,
   workUpdatedLabel,
@@ -248,6 +247,7 @@ function WorkHome({
   onEditSuggestion,
   filter,
   onClearFilter,
+  onItemResolved,
 }) {
   const [open, setOpen] = useState(null)
   const all = sortWorkItems(items || [])
@@ -354,10 +354,14 @@ function WorkHome({
       )}
 
       {open && (
-        <TaskPanel
-          card={itemToCard(open)}
+        <JobDetail
+          item={open}
           onClose={() => setOpen(null)}
-          onResolved={() => setOpen(null)}
+          onResolved={() => {
+            setOpen(null)
+            // A resolved handoff changes the table underneath it.
+            if (onItemResolved) onItemResolved()
+          }}
         />
       )}
     </div>
@@ -574,6 +578,7 @@ export default function WorkTab({
       onEditSuggestion={editSuggestion}
       filter={filter}
       onClearFilter={() => setFilter(null)}
+      onItemResolved={refreshNamedWork}
     />
   )
 }
