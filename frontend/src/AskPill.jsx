@@ -2,26 +2,19 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { AskVisualRenderer } from './AskVisuals.jsx'
 import { TrovisMark, SendIcon } from './Icons.jsx'
+import { FALLBACK_CHIPS, askSuggestions } from './askChips.js'
 
-// Floating "Ask about your fleet" pill + ⌘K slide-up chat panel. Rendered
-// once at the app-shell level so the assistant is reachable from every page.
-// Powered by POST /dashboard/ask — the Trovis assistant answers fleet
-// questions from live telemetry AND walks users through connecting agents.
-
-const BASE_SUGGESTIONS = [
-  "What's waiting on me?",
-  'Which agent is costing me the most per task?',
-  'Show me error rates across all agents',
-  'How do I connect a new agent?',
-  'Which agents are idle?',
-]
+// Floating Ask pill + ⌘K slide-up chat panel. Rendered once at the
+// app-shell level so the assistant is reachable from every page.
+// POST /dashboard/ask answers from the live work record (waiting / stuck /
+// overview) and from fleet telemetry.
 
 export default function AskPill() {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState([])
   const [pending, setPending] = useState(false)
   const [input, setInput] = useState('')
-  const [suggestions, setSuggestions] = useState(BASE_SUGGESTIONS)
+  const [suggestions, setSuggestions] = useState(FALLBACK_CHIPS)
 
   // ⌘K / Ctrl+K toggles; Escape closes.
   useEffect(() => {
@@ -37,35 +30,22 @@ export default function AskPill() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // Derive a couple of suggestions from current fleet + work state.
+  // Prefetch the board when Ask opens so the stuck chip can name a real
+  // task. Failures keep the last chips — no error theater.
   useEffect(() => {
+    if (!open) return
     let alive = true
-    Promise.all([
-      api.listAgents().catch(() => []),
-      api.getWorkBoard().catch(() => null),
-    ]).then(([agents, board]) => {
-      if (!alive) return
-      const extra = []
-      const stuckCol = board?.columns?.find((c) => c.key === 'stuck')
-      const stuck = stuckCol?.cards?.[0]
-      if (stuck?.title) extra.push(`Why is ${stuck.title} stuck?`)
-      if (Array.isArray(agents) && agents.length > 0) {
-        const worst = [...agents]
-          .map((a) => ({
-            name: a.display_name || a.service_name,
-            rate: a.total_spans
-              ? (a.total_errors || 0) / a.total_spans
-              : 0,
-          }))
-          .sort((x, y) => y.rate - x.rate)[0]
-        if (worst && worst.rate > 0.02) extra.push(`Why is ${worst.name} failing?`)
-      }
-      setSuggestions([...extra, ...BASE_SUGGESTIONS].slice(0, 5))
-    })
+    api
+      .getWorkBoard()
+      .then((board) => {
+        if (!alive || !board) return
+        setSuggestions(askSuggestions(board))
+      })
+      .catch(() => {})
     return () => {
       alive = false
     }
-  }, [])
+  }, [open])
 
   async function send(text) {
     const q = (text ?? input).trim()
@@ -99,7 +79,7 @@ export default function AskPill() {
         <span className="dash-sq">
           <TrovisMark size={10} />
         </span>
-        <span className="dash-ask-pill-text">Ask about your fleet</span>
+        <span className="dash-ask-pill-text">Ask</span>
         <kbd className="dash-kbd">⌘K</kbd>
       </button>
     )
@@ -109,12 +89,15 @@ export default function AskPill() {
     <div className="dash-ask-overlay" onClick={() => setOpen(false)}>
       <div className="dash-ask-panel" onClick={(e) => e.stopPropagation()}>
         <div className="dash-ask-head">
-          <span className="dash-ask-title">
-            <span className="dash-sq">
-              <TrovisMark size={10} />
+          <div className="dash-ask-head-copy">
+            <span className="dash-ask-title">
+              <span className="dash-sq">
+                <TrovisMark size={10} />
+              </span>
+              Ask
             </span>
-            Ask about your fleet
-          </span>
+            <span className="dash-ask-sub">Answers from your work record</span>
+          </div>
           <button
             type="button"
             className="dash-ask-close"
@@ -128,19 +111,16 @@ export default function AskPill() {
         <div className="dash-ask-body">
           {messages.length === 0 ? (
             <div className="dash-ask-empty">
-              <p className="dash-ask-help">
-                Ask anything about work waiting on you, stuck tasks, agents,
-                costs, or how to set something up.
-              </p>
               <div className="dash-ask-suggest">
                 {suggestions.map((s) => (
                   <button
-                    key={s}
+                    key={s.query}
                     type="button"
                     className="dash-suggest-pill"
-                    onClick={() => send(s)}
+                    title={s.title || undefined}
+                    onClick={() => send(s.query)}
                   >
-                    {s}
+                    {s.label}
                   </button>
                 ))}
               </div>
@@ -169,7 +149,7 @@ export default function AskPill() {
               className="dash-ask-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask about your agents..."
+              placeholder="Ask what's waiting or why something's stuck…"
               autoFocus
             />
             <button

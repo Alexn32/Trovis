@@ -13,7 +13,7 @@ import {
 //
 // Six sections, each fetching independently so a slow/failed Claude call on
 // one card never blocks the page: greeting, AI briefing, attention + cost,
-// work feed, fleet grid, and a floating ⌘K "Ask about your fleet" pill.
+// work feed, fleet grid, and a floating ⌘K Ask pill.
 // All visuals key off CSS variables so the page works in light and dark.
 // ---------------------------------------------------------------------------
 
