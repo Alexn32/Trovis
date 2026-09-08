@@ -20,7 +20,6 @@ _tmp.close()
 os.environ["TROVIS_DB_PATH"] = _tmp.name
 
 import database
-from psycopg2.extensions import adapt
 
 failures = []
 
@@ -31,15 +30,19 @@ def check(label, cond):
         failures.append(label)
 
 
+def _pg_quote(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "NULL"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _pg_mogrify(query: str, args: tuple) -> str:
     """Bind `%s` the way psycopg2 does. Bare LIKE `%` → IndexError."""
-    quoted: list[str] = []
-    for a in args:
-        q = adapt(a)
-        if hasattr(q, "encoding"):
-            q.encoding = "utf-8"
-        raw = q.getquoted()
-        quoted.append(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+    quoted = [_pg_quote(a) for a in args]
 
     tmp = query.replace("%%", "\x00")
     out: list[str] = []
