@@ -26,6 +26,7 @@ import {
 } from './api.js'
 import { restoreSession } from './sessionRestore.js'
 import { performLogout } from './sessionLogout.js'
+import { isPaneVisible, nextRosterEpoch } from './tabs.js'
 import {
   MonitorIcon,
   MoonIcon,
@@ -142,6 +143,20 @@ function AppInner() {
   )
   // Overlays: {kind:'detail', serviceName, agentId?} | {kind:'add'} | {kind:'settings'} | {kind:'cost'} | {kind:'workfeed'}
   const [overlay, setOverlay] = useState(persistedView.overlay || null)
+
+  // Roster invalidation for the keep-alive panes (see the pane block below).
+  // Dashboard and Fleet both list agents and both used to refetch simply
+  // because a tab switch remounted them. They no longer unmount, so an agent
+  // added or deleted elsewhere in the shell has to be announced: bumping a
+  // pane's epoch remounts it once — and `shownEpoch` defers that remount to
+  // the moment the pane is next on screen, so an invalidated background pane
+  // never refetches behind the user's back. `source` is the pane that made
+  // the change; it already shows the result and is left alone.
+  const [rosterEpoch, setRosterEpoch] = useState({ dashboard: 0, fleet: 0 })
+  const shownEpoch = useRef({ dashboard: 0, fleet: 0 })
+  function rosterChanged(source) {
+    setRosterEpoch((prev) => nextRosterEpoch(prev, source))
+  }
 
   // Persist the current view (tab + overlay + Work sub-view) on every change
   // so a reload returns here instead of the Dashboard.
@@ -352,25 +367,48 @@ function AppInner() {
     userName: me?.user?.name || me?.user?.email || null,
   }
 
-  let mainContent
+  // ---- Overlays -----------------------------------------------------------
+  // Built first, and rendered in place of the tab panes: agent detail, add
+  // agent, settings, cost, work feed and the workflow views cover the main
+  // content exactly as they did before keep-alive. An overlay object with an
+  // unrecognised kind leaves overlayContent null and falls through to the
+  // panes, same as the old if/else chain.
+  let overlayContent = null
   if (overlay?.kind === 'detail') {
-    mainContent = (
+    overlayContent = (
       <AgentDetail
         serviceName={overlay.serviceName}
         agentId={overlay.agentId}
         account={account}
         onBack={closeOverlay}
+        // Deleting the agent closes the overlay and invalidates the panes
+        // that list agents, so neither keeps rendering the deleted row.
+        onDeleted={() => {
+          rosterChanged('overlay')
+          closeOverlay()
+        }}
         onUpgrade={openUpgrade}
       />
     )
   } else if (overlay?.kind === 'add') {
-    mainContent = <AddAgent onClose={closeOverlay} onUpgrade={openUpgrade} />
+    // The wizard has no success callback, so closing it counts as a possible
+    // roster change — cheap, since it's a deliberate one-off action, and it
+    // keeps the first agent from landing behind a stale "no agents yet".
+    overlayContent = (
+      <AddAgent
+        onClose={() => {
+          rosterChanged('overlay')
+          closeOverlay()
+        }}
+        onUpgrade={openUpgrade}
+      />
+    )
   } else if (overlay?.kind === 'settings') {
-    mainContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} onUpgrade={openUpgrade} />
+    overlayContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} onUpgrade={openUpgrade} />
   } else if (overlay?.kind === 'cost') {
-    mainContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
+    overlayContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
   } else if (overlay?.kind === 'workfeed') {
-    mainContent = (
+    overlayContent = (
       <WorkFeedPage
         onBack={closeOverlay}
         onOpenAgent={openDetail}
@@ -378,7 +416,7 @@ function AppInner() {
       />
     )
   } else if (overlay?.kind === 'workflow') {
-    mainContent = (
+    overlayContent = (
       <WorkflowPage
         workflowId={overlay.id}
         onBack={closeOverlay}
@@ -388,38 +426,83 @@ function AppInner() {
       />
     )
   } else if (overlay?.kind === 'workflow-new' || overlay?.kind === 'workflow-edit') {
-    mainContent = (
+    overlayContent = (
       <WorkflowEditorLoader
         workflowId={overlay.kind === 'workflow-edit' ? overlay.id : null}
         onBack={closeOverlay}
         onSaved={(id) => setOverlay({ kind: 'workflow', id })}
       />
     )
-  } else if (tab === 'work') {
-    mainContent = (
-      <WorkTab
-        onConnectAgent={openAddAgent}
-        onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
-        onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
-      />
-    )
-  } else if (tab === 'dashboard') {
-    mainContent = (
-      <Dashboard
-        onOpenAgent={openDetail}
-        onGoFleet={() => setTab('fleet')}
-        onOpenCost={() => setOverlay({ kind: 'cost' })}
-        onViewAllWorkFeed={() => setOverlay({ kind: 'workfeed' })}
-        userName={account.userName}
-      />
-    )
-  } else if (tab === 'team' && isBusiness) {
-    mainContent = <Team onSelectAgent={openDetail} />
-  } else {
-    mainContent = (
-      <Fleet onSelectAgent={openDetail} onAddAgent={openAddAgent} onUpgrade={openUpgrade} />
-    )
   }
+  const overlayOpen = Boolean(overlayContent)
+
+  // ---- Keep-alive tab panes ----------------------------------------------
+  // Dashboard / Fleet / Work (+ Team on business orgs) are all rendered here,
+  // unconditionally, and mounted for as long as the user is signed in. Tab
+  // switching only flips which pane is visible (`hidden` + aria-hidden +
+  // inert, see TabPane) — it never unmounts a page.
+  //
+  // Why: these pages fetch in useEffect on mount (Dashboard's briefing is a
+  // Claude call up to 120s). Rendering one at a time meant every tab switch
+  // unmounted the old page, aborted its requests, and re-ran the new page's
+  // effects from scratch — so Dashboard ↔ Fleet ↔ Work felt like a full
+  // reload and re-fetched the same data over and over. Staying mounted keeps
+  // each page's state, scroll and last-good data. Each pane's mount fetches
+  // now happen once, at sign-in, instead of on every visit; nothing polls
+  // more often than before.
+  //
+  // If you add a tab, render its pane here too — never behind `tab === …`.
+  const paneState = { tab, isBusiness, overlayOpen }
+  const dashboardVisible = isPaneVisible('dashboard', paneState)
+  const fleetVisible = isPaneVisible('fleet', paneState)
+  const workVisible = isPaneVisible('work', paneState)
+  // Take up a pending roster invalidation only while the pane is on screen,
+  // so the refetch happens when the user arrives — not in the background.
+  // (`key` remounts that one pane; the other panes are untouched.)
+  if (dashboardVisible) shownEpoch.current.dashboard = rosterEpoch.dashboard
+  if (fleetVisible) shownEpoch.current.fleet = rosterEpoch.fleet
+  const panes = (
+    <>
+      <TabPane id="dashboard" visible={dashboardVisible}>
+        <Dashboard
+          key={`dashboard-${shownEpoch.current.dashboard}`}
+          onOpenAgent={openDetail}
+          onGoFleet={() => setTab('fleet')}
+          onOpenCost={() => setOverlay({ kind: 'cost' })}
+          onViewAllWorkFeed={() => setOverlay({ kind: 'workfeed' })}
+          userName={account.userName}
+        />
+      </TabPane>
+      <TabPane id="fleet" visible={fleetVisible}>
+        <Fleet
+          key={`fleet-${shownEpoch.current.fleet}`}
+          onSelectAgent={openDetail}
+          onAddAgent={openAddAgent}
+          // Fleet deletes agents in place (optimistic). It doesn't need to
+          // reload itself, but Dashboard's copy of the roster is now stale.
+          onAgentsChanged={() => rosterChanged('fleet')}
+          onUpgrade={openUpgrade}
+        />
+      </TabPane>
+      {isBusiness && (
+        <TabPane id="team" visible={isPaneVisible('team', paneState)}>
+          <Team onSelectAgent={openDetail} />
+        </TabPane>
+      )}
+      <TabPane id="work" visible={workVisible}>
+        <WorkTab
+          // Hidden panes stay mounted, so tell Work when it is off screen:
+          // its background poll skips a tick instead of refetching for a
+          // pane nobody is looking at (same rule it already applies to
+          // document.hidden). No new polling is introduced here.
+          active={workVisible}
+          onConnectAgent={openAddAgent}
+          onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
+          onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
+        />
+      </TabPane>
+    </>
+  )
 
   return (
     <div className="app">
@@ -435,7 +518,10 @@ function AppInner() {
         onLogout={logout}
         onOpenSettings={openSettings}
       />
-      <main className="app-main">{mainContent}</main>
+      <main className="app-main">
+        {overlayContent}
+        {panes}
+      </main>
       {/* Global Trovis assistant — floating ⌘K pill, reachable on every page. */}
       <AskPill />
       <UpgradeModal
@@ -444,6 +530,33 @@ function AppInner() {
         onClose={() => setUpgradeOpen(false)}
         onApplied={refreshMe}
       />
+    </div>
+  )
+}
+
+// One keep-alive tab pane. Its children mount once and stay mounted; only
+// visibility changes. `hidden` takes the pane out of layout (the UA rule plus
+// an explicit `.tab-pane[hidden]` rule in styles.css), aria-hidden takes it
+// out of the accessibility tree, and `inert` keeps its buttons and inputs out
+// of the tab order — a hidden pane must not be focusable. `inert` isn't a
+// supported JSX attribute on React 18, so it's set on the node directly.
+function TabPane({ id, visible, children }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const el = ref.current
+    if (el && 'inert' in el) el.inert = !visible
+  }, [visible])
+  return (
+    <div
+      ref={ref}
+      id={`pane-${id}`}
+      className="tab-pane"
+      role="tabpanel"
+      aria-labelledby={`tab-${id}`}
+      hidden={!visible}
+      aria-hidden={!visible}
+    >
+      {children}
     </div>
   )
 }
@@ -504,9 +617,11 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
           {tabs.map(([id, label]) => (
             <button
               key={id}
+              id={`tab-${id}`}
               type="button"
               role="tab"
               aria-selected={tab === id}
+              aria-controls={`pane-${id}`}
               className={`tab ${tab === id ? 'tab-active' : ''}`}
               onClick={() => onTabChange(id)}
             >

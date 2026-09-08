@@ -337,7 +337,12 @@ function WorkHome({
   )
 }
 
-export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow }) {
+// `active` is false while the Work pane is off screen. App.jsx keeps every tab
+// pane mounted (see its keep-alive note), so an inactive Work tab is hidden,
+// not unmounted: the poll below skips its tick while hidden — exactly what it
+// already does for a backgrounded browser tab — instead of refetching for a
+// pane nobody can see. Defaults to true so other callers behave as before.
+export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow, active = true }) {
   const connectAgent = onConnectAgent || onNewWorkflow
   const [surface, setSurface] = useState('home')
   const [overview, setOverview] = useState(null)
@@ -352,6 +357,10 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
   const overviewFailSoftRef = useRef(false)
   const itemsFailSoftRef = useRef(false)
   const failSoftRef = useRef(false)
+  // Read by the poll timer, which is scheduled once — a ref so a tab switch
+  // doesn't tear down and restart the interval.
+  const activeRef = useRef(active)
+  activeRef.current = active
   overviewFailSoftRef.current = !overview && !!overviewErr
   itemsFailSoftRef.current = !items && !!itemsErr
   failSoftRef.current = overviewFailSoftRef.current && itemsFailSoftRef.current
@@ -473,7 +482,7 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
     let timer
     function schedule() {
       timer = setTimeout(() => {
-        if (failSoftRef.current || document.hidden) {
+        if (failSoftRef.current || document.hidden || !activeRef.current) {
           schedule()
           return
         }

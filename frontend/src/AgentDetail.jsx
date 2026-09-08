@@ -742,7 +742,10 @@ function LockedPanel({ summary, onUpgrade }) {
   )
 }
 
-export default function AgentDetail({ serviceName, agentId, account, onBack, onUpgrade }) {
+// `onDeleted` fires after the agent is deleted (falls back to onBack). The
+// shell uses it to invalidate the Dashboard/Fleet panes, which stay mounted
+// behind this overlay and would otherwise keep listing the deleted agent.
+export default function AgentDetail({ serviceName, agentId, account, onBack, onDeleted, onUpgrade }) {
   const [summary, setSummary] = useState(null)
   const [registration, setRegistration] = useState(null)
   const [weekly, setWeekly] = useState(null)
@@ -812,7 +815,11 @@ export default function AgentDetail({ serviceName, agentId, account, onBack, onU
           <WeekStrip weekly={weekly} costDays={costDays} />
           <WorkFeed serviceName={summary.service_name} agentId={agentId} />
           <IdentityCard summary={summary} capabilities={capabilities} registration={registration} />
-          <DangerZone serviceName={summary.service_name} agentId={agentId} onDeleted={onBack} />
+          <DangerZone
+            serviceName={summary.service_name}
+            agentId={agentId}
+            onDeleted={onDeleted || onBack}
+          />
         </>
       )}
     </Shell>
