@@ -17,3 +17,41 @@ export function Stat({ label, value, tone, sub }) {
     </div>
   )
 }
+
+// Fail-soft empty state when Work L1 (`/work/summary`) or L2 (`/work/board`)
+// times out or the network dies. Copy lives here so Board.jsx doesn't grow
+// new user-facing strings (its jargon sweep reads that file).
+export function WorkLoadFailed({ onRetry }) {
+  return (
+    <div className="board-empty" role="alert">
+      <p className="board-empty-lead">Can't load this work</p>
+      <p className="board-empty-sub">
+        Trovis didn't respond. Retry, or come back in a moment.
+      </p>
+      {onRetry && (
+        <button type="button" className="btn btn-primary" onClick={onRetry}>
+          Retry
+        </button>
+      )}
+    </div>
+  )
+}
+
+// Task panel / story (the per-task detail fetch). Same hang as the board:
+// no deadline left "Loading…" or the browser's raw "Failed to fetch".
+// Compact so it fits the slide-over; copy stays out of Board.jsx (jargon sweep).
+export function StoryLoadFailed({ onRetry }) {
+  return (
+    <div className="bpanel-err" role="alert">
+      <p className="board-empty-lead">Can't load this task</p>
+      <p className="board-empty-sub">
+        Trovis didn't respond. Retry, or close this panel.
+      </p>
+      {onRetry && (
+        <button type="button" className="btn btn-primary" onClick={onRetry}>
+          Retry
+        </button>
+      )}
+    </div>
+  )
+}

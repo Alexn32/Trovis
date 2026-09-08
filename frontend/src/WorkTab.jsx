@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { UserIcon, ChevronRightIcon } from './Icons.jsx'
+import { WorkLoadFailed } from './ui.jsx'
 import Board from './Board.jsx'
 import {
   boardAge,
@@ -145,6 +146,9 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
   const [err, setErr] = useState(null)
   const [selected, setSelected] = useState(null) // { id, name } | null (Level 2)
 
+  const failSoftRef = useRef(false)
+  failSoftRef.current = !summary && !!err
+
   const load = useCallback(async () => {
     try {
       setSummary(await api.getWorkSummary())
@@ -154,9 +158,17 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
     }
   }, [])
 
+  function retry() {
+    setErr(null)
+    load()
+  }
+
   useEffect(() => {
     load()
-    const t = setInterval(load, REFRESH_MS)
+    const t = setInterval(() => {
+      if (failSoftRef.current) return
+      load()
+    }, REFRESH_MS)
     return () => clearInterval(t)
   }, [load])
 
@@ -166,8 +178,16 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
   const openTask = (card) =>
     setSelected({ id: card.workflow_id || null, name: card.workflow_name || 'Other work' })
 
-  if (err) {
-    return <div className="view board-view"><div className="dash-empty pad">{err}</div></div>
+  // First paint only: keep a last-good summary if a later refresh fails.
+  if (!summary && err) {
+    return (
+      <div className="view board-view">
+        <div className="board-head">
+          <h1>Work</h1>
+        </div>
+        <WorkLoadFailed onRetry={retry} />
+      </div>
+    )
   }
   if (!summary) {
     return <div className="view board-view"><div className="dash-empty pad">Loading…</div></div>

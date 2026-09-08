@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { ChevronRightIcon, UserIcon } from './Icons.jsx'
+import { WorkLoadFailed, StoryLoadFailed } from './ui.jsx'
 import { boardAge, boardCostLabel, boardEmpty, holderLine, ongoingLine } from './board.js'
 import { lifecycleSentence } from './loops.js'
 
@@ -139,18 +140,21 @@ function Column({ column, onOpen, onResolved }) {
 
 function TaskPanel({ card, onClose, onResolved }) {
   const [detail, setDetail] = useState(null)
-  const [err, setErr] = useState(null)
+  const [err, setErr] = useState(false)
+  const [reload, setReload] = useState(0)
 
   useEffect(() => {
     let live = true
+    setErr(false)
+    setDetail(null)
     api
       .getLoop(card.id)
       .then((d) => live && setDetail(d))
-      .catch((e) => live && setErr(e?.message || 'Could not load this task'))
+      .catch(() => live && setErr(true))
     return () => {
       live = false
     }
-  }, [card.id])
+  }, [card.id, reload])
 
   const steps = (detail?.events || []).filter((e) => e.sentence)
 
@@ -168,7 +172,7 @@ function TaskPanel({ card, onClose, onResolved }) {
             <p className="bpanel-standing">{card.standing_reason}</p>
           )}
         </header>
-        {err && <div className="bpanel-err">{err}</div>}
+        {err && <StoryLoadFailed onRetry={() => setReload((n) => n + 1)} />}
         {!detail && !err && <div className="bpanel-loading">Loading…</div>}
         {detail && (
           <ol className="bpanel-steps">
@@ -218,22 +222,48 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
   const [workflowId, setWorkflowId] = useState(initialWorkflowId ? String(initialWorkflowId) : '')
   const [open, setOpen] = useState(null)
 
+  const failSoftRef = useRef(false)
+  failSoftRef.current = !board && !!err
+
   const load = useCallback(async () => {
     try {
       setBoard(await api.getWorkBoard(workflowId || null))
       setErr(null)
     } catch (e) {
-      setErr(e?.message || 'Could not load the board')
+      setErr(e?.message || 'Could not load this work')
     }
   }, [workflowId])
 
+  function retry() {
+    setErr(null)
+    load()
+  }
+
   useEffect(() => {
     load()
-    const t = setInterval(load, REFRESH_MS)
+    const t = setInterval(() => {
+      if (failSoftRef.current) return
+      load()
+    }, REFRESH_MS)
     return () => clearInterval(t)
   }, [load])
 
-  if (err) return <div className="view board-view"><div className="dash-empty pad">{err}</div></div>
+  if (!board && err) {
+    return (
+      <div className="view board-view">
+        <div className="board-head">
+          {onBack ? (
+            <button type="button" className="board-back" onClick={onBack}>
+              ← All work
+            </button>
+          ) : (
+            <h1>Work</h1>
+          )}
+        </div>
+        <WorkLoadFailed onRetry={retry} />
+      </div>
+    )
+  }
   if (!board) return <div className="view board-view"><div className="dash-empty pad">Loading…</div></div>
 
   const empty = boardEmpty(board)

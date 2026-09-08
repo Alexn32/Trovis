@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { StoryLoadFailed } from './ui.jsx'
 import {
   agentLabel,
   fmtAgeLong,
@@ -134,19 +135,22 @@ function PossessionBlock({ seg, events, live, canClose, closing, onMarkDone }) {
 
 export default function StoryView({ loop, sessionUser, onChanged }) {
   const [detail, setDetail] = useState(null)
-  const [err, setErr] = useState(null)
+  const [err, setErr] = useState(false)
   const [closing, setClosing] = useState(false)
+  const [reload, setReload] = useState(0)
 
   useEffect(() => {
     let alive = true
+    setErr(false)
+    setDetail(null)
     api
       .getLoop(loop.id)
       .then((d) => alive && setDetail(d))
-      .catch((e) => alive && setErr(e?.message || 'Could not load this task'))
+      .catch(() => alive && setErr(true))
     return () => {
       alive = false
     }
-  }, [loop.id])
+  }, [loop.id, reload])
 
   async function markDone(e) {
     e.stopPropagation()
@@ -155,14 +159,20 @@ export default function StoryView({ loop, sessionUser, onChanged }) {
     try {
       setDetail(await api.closeLoop(loop.id))
       onChanged && onChanged()
-    } catch (error) {
-      setErr(error?.message || 'Could not mark this task done')
+    } catch {
+      setErr(true)
     } finally {
       setClosing(false)
     }
   }
 
-  if (err) return <div className="story is-err">{err}</div>
+  if (err) {
+    return (
+      <div className="story is-err">
+        <StoryLoadFailed onRetry={() => setReload((n) => n + 1)} />
+      </div>
+    )
+  }
   if (!detail) return <div className="story is-loading">Loading the story…</div>
 
   const meta = loopStateMeta(detail)
