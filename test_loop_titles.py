@@ -182,6 +182,37 @@ with TestClient(main.app) as c:
     finally:
         describer.loop_title = _orig
 
+    # --- 7. Ingest adopt-title: later plugin title wins on untitled open loop;
+    #        shells rejected; existing provided never overwritten.
+    assert post(c, key, "svc-adopt", [span("w", NOW - 3 * NS, {
+        "trovis.run.id": "t8",
+    })]).status_code == 200
+    check("adopt candidate starts untitled",
+          loop_for("svc-adopt")["title"] is None)
+    assert post(c, key, "svc-adopt", [span("w", NOW - 2 * NS, {
+        "trovis.run.id": "t8", "trovis.loop.title": "Plugin arrived late",
+    })]).status_code == 200
+    check("untitled open loop adopts the later plugin title",
+          loop_for("svc-adopt")["title"] == "Plugin arrived late")
+    lid = loop_for("svc-adopt")["id"]
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("SELECT title_source FROM loops WHERE id = ?", (lid,))
+        src = cur.fetchone()["title_source"]
+    check("adopted title_source=provided", src == "provided")
+    check("ensure_loop_title no-ops after adopt (plugin title wins)",
+          loops.ensure_loop_title(lid, account_id) is False
+          and loop_for("svc-adopt")["title"] == "Plugin arrived late")
+    assert post(c, key, "svc-adopt", [span("w", NOW - NS, {
+        "trovis.run.id": "t8", "trovis.loop.title": "Task from svc-adopt",
+    })]).status_code == 200
+    check("shell title does not overwrite adopted provided",
+          loop_for("svc-adopt")["title"] == "Plugin arrived late")
+    assert post(c, key, "svc-adopt", [span("w", NOW, {
+        "trovis.run.id": "t8", "trovis.loop.title": "Different plugin title",
+    })]).status_code == 200
+    check("later provided title does not overwrite existing provided",
+          loop_for("svc-adopt")["title"] == "Plugin arrived late")
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")

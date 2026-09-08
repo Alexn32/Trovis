@@ -90,14 +90,19 @@ check("database.py: exactly two INSERT INTO workflow_versions",
       count("database.py", "INSERT INTO workflow_versions") == 2)
 
 # --- Loop titles ---------------------------------------------------------------
-# Titles are the ONE stored derivation, written exactly once per loop via the
-# single NULL-guarded UPDATE in set_loop_title_if_missing: plugin titles are
-# never replaced, generated titles never overwritten.
-check("database.py: UPDATE loops SET title pinned at 1 (set_loop_title_if_missing)",
-      count("database.py", "UPDATE loops SET title =") == 1)
-check("database.py: the title write is NULL-guarded (first title wins forever)",
+# Two NULL/empty-guarded writers, both first-title-wins:
+#   1. ingest adopt (`title_source=provided`) onto an untitled *open* loop
+#   2. set_loop_title_if_missing (`title_source=generated`)
+# Neither overwrites an existing title. Named-work still requires provided.
+check("database.py: UPDATE loops SET title pinned at 2 (adopt + generated)",
+      count("database.py", "UPDATE loops SET title =") == 2)
+check("database.py: generated title write is NULL-guarded",
       "UPDATE loops SET title = {PH}, title_source = 'generated' WHERE id = {PH} AND title IS NULL"
       in text["database.py"])
+check("database.py: ingest adopt is NULL/empty-guarded and open-only",
+      "AND (title IS NULL OR TRIM(title) = '')" in text["database.py"]
+      and "AND closed_at IS NULL" in text["database.py"]
+      and "title_source = {PH}" in text["database.py"])
 for path in [p for p in SOURCES if p != "database.py"]:
     check(f"{path}: no UPDATE loops SET title", count(path, "UPDATE loops SET title =") == 0)
 

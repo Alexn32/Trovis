@@ -254,6 +254,161 @@ with TestClient(main.app) as c:
     check("lean gate unchanged: only the provided-title loop is listed",
           titles == ["Reconcile invoice 88"], f"titles={titles}")
 
+    print("\n[8] untitled open loop adopts a later trovis.loop.title")
+    # Creating span has the grouping key only; a later span on the same
+    # run.id carries the human title. Ingest must adopt NULL→provided.
+    untitled_then_title = {
+        "resourceSpans": [{
+            "resource": {"attributes": kv({"service.name": "raw-otlp-agent"})},
+            "scopeSpans": [{"spans": [{
+                "traceId": "5" * 32, "spanId": "5" * 16, "name": "start",
+                "kind": 1, "startTimeUnixNano": str(T0 + 3 * NS),
+                "endTimeUnixNano": str(T0 + 3 * NS + 10_000_000),
+                "status": {"code": 1},
+                "attributes": kv({"trovis.run.id": "otlp-adopt-1"}),
+            }]}],
+        }]
+    }
+    r = c.post("/v1/traces", json=untitled_then_title, headers=H)
+    check("untitled creating span accepted",
+          r.json().get("accepted") == 1, f"body={r.json()}")
+    loops = [l for l in database.get_loops(account_id, limit=50)
+             if l.get("external_id") == "otlp-adopt-1"]
+    check("untitled loop created with no title",
+          len(loops) == 1 and not (loops[0].get("title") or "").strip(),
+          f"loops={loops}")
+
+    later_title = {
+        "resourceSpans": [{
+            "resource": {"attributes": kv({"service.name": "raw-otlp-agent"})},
+            "scopeSpans": [{"spans": [{
+                "traceId": "6" * 32, "spanId": "6" * 16, "name": "named",
+                "kind": 1, "startTimeUnixNano": str(T0 + 4 * NS),
+                "endTimeUnixNano": str(T0 + 4 * NS + 10_000_000),
+                "status": {"code": 1},
+                "attributes": kv({
+                    "trovis.run.id": "otlp-adopt-1",
+                    "trovis.loop.title": "Close the books",
+                }),
+            }]}],
+        }]
+    }
+    r = c.post("/v1/traces", json=later_title, headers=H)
+    check("later titled span accepted",
+          r.json().get("accepted") == 1, f"body={r.json()}")
+    loops = [l for l in database.get_loops(account_id, limit=50)
+             if l.get("external_id") == "otlp-adopt-1"]
+    check("exactly one loop after adopt",
+          len(loops) == 1, f"got {len(loops)}")
+    if loops:
+        check("NULL→provided adopt",
+              loops[0].get("title") == "Close the books",
+              f"title={loops[0].get('title')!r}")
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT title_source FROM loops WHERE id = ?",
+                        (loops[0]["id"],))
+            src = cur.fetchone()["title_source"]
+        check("adopted title_source=provided",
+              src == "provided", f"title_source={src!r}")
+
+    print("\n[9] shell titles are rejected; existing provided is not overwritten")
+    shell_then_human = {
+        "resourceSpans": [{
+            "resource": {"attributes": kv({"service.name": "raw-otlp-agent"})},
+            "scopeSpans": [{"spans": [{
+                "traceId": "7" * 32, "spanId": "7" * 16, "name": "shell",
+                "kind": 1, "startTimeUnixNano": str(T0 + 5 * NS),
+                "endTimeUnixNano": str(T0 + 5 * NS + 10_000_000),
+                "status": {"code": 1},
+                "attributes": kv({
+                    "trovis.loop.external_id": "otlp-shell-1",
+                    "trovis.loop.title": "Task from raw-otlp-agent",
+                }),
+            }]}],
+        }]
+    }
+    r = c.post("/v1/traces", json=shell_then_human, headers=H)
+    check("shell creating span accepted",
+          r.json().get("accepted") == 1, f"body={r.json()}")
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            "SELECT title, title_source FROM loops WHERE external_id = ?",
+            ("otlp-shell-1",),
+        )
+        shell_row = dict(cur.fetchone())
+    check("shell title rejected at INSERT (not provided)",
+          shell_row.get("title_source") != "provided"
+          and not (shell_row.get("title") or "").strip(),
+          f"row={shell_row}")
+
+    # Template-style shell on a later span of the untitled loop: still reject.
+    template_shell = {
+        "resourceSpans": [{
+            "resource": {"attributes": kv({"service.name": "raw-otlp-agent"})},
+            "scopeSpans": [{"spans": [{
+                "traceId": "8" * 32, "spanId": "8" * 16, "name": "tmpl",
+                "kind": 1, "startTimeUnixNano": str(T0 + 6 * NS),
+                "endTimeUnixNano": str(T0 + 6 * NS + 10_000_000),
+                "status": {"code": 1},
+                "attributes": kv({
+                    "trovis.loop.external_id": "otlp-shell-1",
+                    "trovis.loop.title": "raw-otlp-agent · exec · 3 actions",
+                }),
+            }]}],
+        }]
+    }
+    r = c.post("/v1/traces", json=template_shell, headers=H)
+    check("template-shell span accepted",
+          r.json().get("accepted") == 1, f"body={r.json()}")
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            "SELECT title, title_source FROM loops WHERE external_id = ?",
+            ("otlp-shell-1",),
+        )
+        shell_row = dict(cur.fetchone())
+    check("template shell rejected at adopt (still untitled)",
+          shell_row.get("title_source") != "provided"
+          and not (shell_row.get("title") or "").strip(),
+          f"row={shell_row}")
+
+    # Existing provided title must not be overwritten by a later title.
+    clobber = {
+        "resourceSpans": [{
+            "resource": {"attributes": kv({"service.name": "raw-otlp-agent"})},
+            "scopeSpans": [{"spans": [{
+                "traceId": "9" * 32, "spanId": "9" * 16, "name": "clobber",
+                "kind": 1, "startTimeUnixNano": str(T0 + 7 * NS),
+                "endTimeUnixNano": str(T0 + 7 * NS + 10_000_000),
+                "status": {"code": 1},
+                "attributes": kv({
+                    "trovis.run.id": "otlp-run-88",
+                    "trovis.loop.title": "Nope, a different name",
+                }),
+            }]}],
+        }]
+    }
+    r = c.post("/v1/traces", json=clobber, headers=H)
+    check("clobber span accepted",
+          r.json().get("accepted") == 1, f"body={r.json()}")
+    loops = [l for l in database.get_loops(account_id, limit=50)
+             if l.get("external_id") == "otlp-run-88"]
+    check("existing provided title is not overwritten",
+          len(loops) == 1 and loops[0].get("title") == "Reconcile invoice 88",
+          f"title={loops[0].get('title')!r}" if loops else "no loop")
+
+    page = c.get("/work/items", headers=H).json()
+    titles = [it.get("title") for it in page.get("items") or []]
+    check("lean items include adopted provided title",
+          "Close the books" in titles, f"titles={titles}")
+    check("lean items still exclude shells and do not list the clobber",
+          "Task from raw-otlp-agent" not in titles
+          and "raw-otlp-agent · exec · 3 actions" not in titles
+          and "Nope, a different name" not in titles,
+          f"titles={titles}")
+    check("lean overview still only counts provided titles",
+          set(titles) == {"Reconcile invoice 88", "Close the books"},
+          f"titles={titles}")
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + "; ".join(failures))

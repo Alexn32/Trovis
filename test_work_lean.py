@@ -89,7 +89,8 @@ with TestClient(main.app) as c:
         sp("agent_run_complete", 370, {"trovis.loop.external_id": "shell1",
             "trovis.handoff.direction": "to_system", "trovis.handoff.target_id": "Pager",
             "trovis.handoff.id": "HS"})])
-    # Display-fallback shell stored as if it were a title.
+    # Display-fallback shell — ingest must reject (not title_source=provided).
+    # Lean SQL still excludes this pattern if a row ever slips through.
     post("main", [sp("message_received", 360, {"trovis.loop.title": "Task from main",
         "trovis.loop.external_id": "tfm"})])
     # Closed untitled OTel — sweep-style generated title must not inflate
@@ -146,8 +147,9 @@ with TestClient(main.app) as c:
     check("handoff untitled loop got a generated template title",
           bool((shell1.get("title") or "").strip())
           and shell1.get("title_source") == "generated")
-    check("Task-from-main shell stored as provided (ingest) but is a shell",
-          tfm.get("title") == "Task from main" and tfm.get("title_source") == "provided")
+    check("Task-from-main shell rejected at ingest (not title_source=provided)",
+          tfm.get("title_source") != "provided"
+          and not (tfm.get("title") or "").strip())
     check("closed untitled flood starts untitled",
           not (df1.get("title") or "").strip())
     database.set_loop_title_if_missing(
@@ -295,6 +297,44 @@ with TestClient(main.app) as c:
     check("health returns in well under a second (not waiting on summary)",
           health_dt < 0.5)
     print(f"    health_dt={health_dt:.3f}s summary_status={summary_status['code']}")
+
+    print("\n--- ingest adopt-title (NULL→provided; lean gate unchanged) ---")
+    # Untitled open loop, then a later span on the same key carries a title.
+    post("adopt-agent", [sp("message_received", 80, {"trovis.loop.external_id": "adopt1"})])
+    ov_before = overview()
+    page_before = items()
+    before_titles = {it["title"] for it in page_before["items"]}
+    check("untitled adopt candidate is not named work yet",
+          "File the Q3 report" not in before_titles)
+    post("adopt-agent", [sp("tool_call", 70, {
+        "trovis.loop.external_id": "adopt1",
+        "trovis.loop.title": "File the Q3 report",
+        "trovis.tool.name": "docs"})])
+    # Same key, shell title must not overwrite the adopted provided title.
+    post("adopt-agent", [sp("tool_call", 60, {
+        "trovis.loop.external_id": "adopt1",
+        "trovis.loop.title": "Task from adopt-agent"})])
+    # A later human title must not overwrite either.
+    post("adopt-agent", [sp("tool_call", 50, {
+        "trovis.loop.external_id": "adopt1",
+        "trovis.loop.title": "Some other name"})])
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("SELECT title, title_source FROM loops WHERE external_id = ?",
+                    ("adopt1",))
+        adopted = dict(cur.fetchone())
+    check("NULL→provided adopt stamps the later title",
+          adopted.get("title") == "File the Q3 report"
+          and adopted.get("title_source") == "provided")
+    ov_after = overview()
+    page_after = items()
+    after_titles = {it["title"] for it in page_after["items"]}
+    check("adopted provided title is named work on lean items",
+          "File the Q3 report" in after_titles)
+    check("lean overview open counts the adopted provided title only (+1)",
+          ov_after["open"] == ov_before["open"] + 1)
+    check("shell / later titles did not overwrite the adopted provided title",
+          "Task from adopt-agent" not in after_titles
+          and "Some other name" not in after_titles)
 
     print("\n--- engine states untouched ---")
     check("engine states unchanged",
