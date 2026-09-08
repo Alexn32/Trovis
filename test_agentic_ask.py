@@ -7,6 +7,11 @@ Verifies (isolated temp DB, mocked Anthropic client — no network):
   4. The loop executes a tool call, feeds the result back, and returns the
      final answer — and the tool_result it fed the model carried the real
      captured content (so Ask can now quote what an agent actually said).
+  5. Work-record tools are registered; account_id / viewer_user_id stay
+     server-bound (not in the tool schema).
+  6. get_waiting_on_me without a viewer asks to sign in and never fakes
+     is_yours; viewer_user_id is threaded through ask_about_fleet into
+     _run_tool.
 """
 
 import json
@@ -110,6 +115,71 @@ def main():
     check("loop actually passed tools to the model", bool(captured["tools_sent"]))
     check("tool_result fed back to the model carried the captured content",
           captured["tool_result_seen"] and AGENT_MSG in captured["tool_result_seen"])
+
+    tool_names = {t["name"] for t in asker._ASK_TOOLS}
+    check("work-record tools are registered",
+          {"get_waiting_on_me", "get_work_overview", "find_tasks", "get_task_story"} <= tool_names)
+    schemas = json.dumps(asker._ASK_TOOLS)
+    check("account_id is not in any tool schema (server-bound)",
+          "account_id" not in schemas and "viewer_user_id" not in schemas)
+
+    no_viewer = json.loads(asker._run_tool("get_waiting_on_me", {}, aid))
+    check("get_waiting_on_me without viewer asks to sign in",
+          no_viewer.get("signed_in") is False and "sign in" in (no_viewer.get("message") or "").lower())
+    check("get_waiting_on_me without viewer returns no tasks (does not fake is_yours)",
+          no_viewer.get("tasks") == [])
+
+    overview_anon = json.loads(asker._run_tool("get_work_overview", {}, aid))
+    check("get_work_overview without viewer does not claim yours",
+          "yours" not in overview_anon and overview_anon.get("signed_in") is False)
+
+    # 5. viewer_user_id is threaded through the loop into _run_tool.
+    captured_viewer = {"tool_result": None, "tools": None}
+
+    class FakeWaiting:
+        def __init__(self):
+            self.calls = 0
+        def create(self, **kwargs):
+            self.calls += 1
+            captured_viewer["tools"] = kwargs.get("tools")
+            if self.calls == 1:
+                return types.SimpleNamespace(
+                    stop_reason="tool_use",
+                    content=[blk(type="tool_use", name="get_waiting_on_me",
+                                 input={}, id="tu_me")],
+                )
+            for m in kwargs.get("messages", []):
+                if m.get("role") == "user" and isinstance(m.get("content"), list):
+                    for c in m["content"]:
+                        if isinstance(c, dict) and c.get("type") == "tool_result":
+                            captured_viewer["tool_result"] = c.get("content")
+            return types.SimpleNamespace(
+                stop_reason="end_turn",
+                content=[blk(type="text", text="Nothing is waiting on you.")],
+            )
+
+    class FakeWaitingClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeWaiting()
+
+    asker.anthropic.Anthropic = FakeWaitingClient
+    # No user id → the tool_result must carry the sign-in message, not a fake yours list.
+    asker.ask_about_fleet(aid, [{"role": "user", "content": "what's waiting on me?"}], concise=True)
+    check("fleet loop without viewer fed the sign-in tool_result",
+          captured_viewer["tool_result"] and "sign in" in captured_viewer["tool_result"].lower())
+
+    captured_viewer["tool_result"] = None
+    asker.anthropic.Anthropic = FakeWaitingClient
+    asker.ask_about_fleet(
+        aid, [{"role": "user", "content": "what's waiting on me?"}],
+        concise=True, viewer_user_id=1,
+    )
+    fed = json.loads(captured_viewer["tool_result"] or "{}")
+    check("fleet loop with viewer_user_id marks signed_in true (no fake is_yours)",
+          fed.get("signed_in") is True and fed.get("tasks") == [])
+    check("waiting-on-me tool was in the catalog the model saw",
+          any(t.get("name") == "get_waiting_on_me" for t in (captured_viewer["tools"] or [])))
+
 
     print("\n" + ("ALL CHECKS PASSED" if not _fail else f"{len(_fail)} FAILED"))
     try:

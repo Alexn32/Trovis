@@ -9,6 +9,7 @@ import { TrovisMark, SendIcon } from './Icons.jsx'
 // questions from live telemetry AND walks users through connecting agents.
 
 const BASE_SUGGESTIONS = [
+  "What's waiting on me?",
   'Which agent is costing me the most per task?',
   'Show me error rates across all agents',
   'How do I connect a new agent?',
@@ -36,13 +37,19 @@ export default function AskPill() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // Derive a couple of suggestions from current fleet state.
+  // Derive a couple of suggestions from current fleet + work state.
   useEffect(() => {
     let alive = true
-    api
-      .listAgents()
-      .then((agents) => {
-        if (!alive || !Array.isArray(agents) || agents.length === 0) return
+    Promise.all([
+      api.listAgents().catch(() => []),
+      api.getWorkBoard().catch(() => null),
+    ]).then(([agents, board]) => {
+      if (!alive) return
+      const extra = []
+      const stuckCol = board?.columns?.find((c) => c.key === 'stuck')
+      const stuck = stuckCol?.cards?.[0]
+      if (stuck?.title) extra.push(`Why is ${stuck.title} stuck?`)
+      if (Array.isArray(agents) && agents.length > 0) {
         const worst = [...agents]
           .map((a) => ({
             name: a.display_name || a.service_name,
@@ -51,11 +58,10 @@ export default function AskPill() {
               : 0,
           }))
           .sort((x, y) => y.rate - x.rate)[0]
-        const extra = []
         if (worst && worst.rate > 0.02) extra.push(`Why is ${worst.name} failing?`)
-        setSuggestions([...extra, ...BASE_SUGGESTIONS].slice(0, 5))
-      })
-      .catch(() => {})
+      }
+      setSuggestions([...extra, ...BASE_SUGGESTIONS].slice(0, 5))
+    })
     return () => {
       alive = false
     }
@@ -123,8 +129,8 @@ export default function AskPill() {
           {messages.length === 0 ? (
             <div className="dash-ask-empty">
               <p className="dash-ask-help">
-                Ask anything about your agents, costs, errors, or performance —
-                or how to set something up.
+                Ask anything about work waiting on you, stuck tasks, agents,
+                costs, or how to set something up.
               </p>
               <div className="dash-ask-suggest">
                 {suggestions.map((s) => (
