@@ -1,14 +1,16 @@
-"""Ask work-record tools: read-only board/loop access for ⌘K.
+"""Ask work-record tools: lean named Work only (never the fat board).
 
-Hermetic (temp SQLite, no Claude). Seeds work the same way as
-test_work_summary.py — ingest via /v1/traces — then calls asker._run_tool
-directly so we assert the tool payloads, not the model.
+Hermetic (temp SQLite, no Claude). Seeds work via /v1/traces, then calls
+asker._run_tool so we assert tool payloads, not the model.
 
 Covers:
-  - account scoping (another org sees nothing)
-  - is_yours / yours strip with a signed-in viewer (matches /work/summary)
-  - API key / no viewer → explicit sign-in, never a fake yours list
-  - find_tasks + get_task_story cite live stuck state and loop events
+  - account scoping
+  - waiting_on_you with a signed-in viewer
+  - API key / no viewer → explicit sign-in
+  - get_work_overview / get_work_items / find_tasks / get_task_story use
+    lean named helpers — never get_work_board
+  - untitled OTel / 'Task from main' flood is not Work truth
+  - stuck items carry service_name so 'what agent is stuck?' is not empty
 """
 import json
 import os
@@ -62,6 +64,17 @@ def tool(name, inp, account_id, viewer=None):
     return json.loads(asker._run_tool(name, inp, account_id, viewer_user_id=viewer))
 
 
+def _is_flood_title(title):
+    t = (title or "").strip()
+    if not t:
+        return True
+    return database._is_shell_work_title(t)
+
+
+def _titles(payload):
+    return [t.get("title") or "" for t in (payload.get("tasks") or [])]
+
+
 with TestClient(main.app) as c:
     r = c.post("/auth/signup", json={
         "email": "s@t.com", "password": "supersecret123",
@@ -111,7 +124,7 @@ with TestClient(main.app) as c:
             "trovis.run.cost_usd": "0.04",
         }),
     ])
-    # orders-agent: 1 stuck (Sarah, >4h), 1 in motion
+    # orders-agent: aging wait on Sarah (needs_attention, waiting_on_other)
     post("orders-agent", [
         sp("message_received", 200000, {**t("Confirm address"), "trovis.loop.external_id": "o1"}),
         sp("agent_run_complete", 190000, {
@@ -125,25 +138,45 @@ with TestClient(main.app) as c:
         sp("message_received", 500, {**t("Reconcile orders"), "trovis.loop.external_id": "o2"}),
         sp("tool_call", 200, {"trovis.loop.external_id": "o2", "trovis.tool.name": "exec"}),
     ])
+    # Named agent-stuck item (stalled, no human handoff) — holder is the agent.
+    post("orders-agent", [
+        sp("message_received", 200000, {**t("Retry shipment"), "trovis.loop.external_id": "o3"}),
+        sp("tool_call", 190000, {"trovis.loop.external_id": "o3", "trovis.tool.name": "ship"}),
+    ])
+    # Untitled OTel flood + stored "Task from main" shells — must not be Work.
+    flood_ids = []
+    for i in range(12):
+        post("main", [sp("message_received", 80 + i, {"trovis.loop.external_id": f"raw{i}"})])
+        post("main", [sp("message_received", 40 + i, {
+            **t("Task from main"), "trovis.loop.external_id": f"tfm{i}",
+        })])
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            "UPDATE loops SET cached_state = 'stalled' "
+            "WHERE external_id = ? AND account_id = ?",
+            ("o3", aid),
+        )
+        cur.execute(
+            "SELECT id FROM loops WHERE account_id = ? "
+            "AND (title IS NULL OR title = '' OR title LIKE 'Task from %')",
+            (aid,),
+        )
+        flood_ids = [int(row["id"]) for row in cur.fetchall()]
+        conn.commit()
 
-    summary = c.get("/work/summary", headers=H).json()
-
-    print("\n--- get_waiting_on_me mirrors /work/summary yours ---")
+    print("\n--- get_waiting_on_me is named waiting_on_you ---")
     mine = tool("get_waiting_on_me", {}, aid, viewer=uid)
     check("signed in", mine.get("signed_in") is True)
-    check("exactly one task waiting on the viewer",
+    check("exactly one named task waiting on the viewer",
           mine.get("count") == 1 and len(mine.get("tasks") or []) == 1)
-    yours = summary.get("yours") or []
-    check("matches the summary yours strip title",
-          yours and mine["tasks"][0]["title"] == yours[0]["title"] == "Reply to customer")
-    check("carries id + handoff_event_id to act on",
-          mine["tasks"][0]["id"] == yours[0]["id"]
-          and mine["tasks"][0]["handoff_event_id"] == yours[0]["handoff_event_id"]
-          and mine["tasks"][0]["handoff_event_id"] is not None)
-    check("holder and workflow are present",
-          mine["tasks"][0].get("holder") and mine["tasks"][0].get("workflow") == "Customer service")
-    check("Sarah's stuck task is NOT in yours",
+    check("matches Reply to customer",
+          mine["tasks"][0]["title"] == "Reply to customer")
+    check("yours row has holder + service_name",
+          mine["tasks"][0].get("holder") and mine["tasks"][0].get("service_name") == "cs-agent")
+    check("Sarah's task is NOT in yours",
           all(t["title"] != "Confirm address" for t in mine["tasks"]))
+    check("yours is not a Task-from-main flood",
+          all(not _is_flood_title(t.get("title")) for t in mine["tasks"]))
 
     print("\n--- no viewer: sign in, never fake is_yours ---")
     anon = tool("get_waiting_on_me", {}, aid, viewer=None)
@@ -154,19 +187,29 @@ with TestClient(main.app) as c:
     overview_anon = tool("get_work_overview", {}, aid, viewer=None)
     check("overview without viewer has no yours list",
           "yours" not in overview_anon and overview_anon.get("yours_count") is None)
-    check("overview without viewer still has kind/stuck rollups",
-          overview_anon.get("stuck") == 1 and overview_anon.get("waiting_person") == 1)
+    check("overview without viewer is lean named counts",
+          overview_anon.get("needs_attention") >= 1
+          and overview_anon.get("open") >= 1
+          and overview_anon.get("named_only") is True)
+    check("anonymous overview does not claim a fat board total",
+          "kinds" not in overview_anon and "other" not in overview_anon)
 
-    print("\n--- get_work_overview with viewer ---")
+    print("\n--- get_work_overview is lean named-only ---")
     overview = tool("get_work_overview", {}, aid, viewer=uid)
-    kinds = {k["name"]: k for k in overview.get("kinds") or []}
-    check("cs kind rollup matches summary",
-          kinds["Customer service"]["waiting_person"] == 1
-          and kinds["Customer service"]["in_motion"] == 1
-          and kinds["Customer service"]["stuck"] == 0)
-    check("orders kind has the stuck task",
-          kinds["Order ops"]["stuck"] == 1)
-    check("yours_count is 1 when signed in", overview.get("yours_count") == 1)
+    check("overview keys are the lean contract",
+          overview.get("needs_you") == 1
+          and overview.get("needs_attention") >= 1
+          and overview.get("open") >= 4
+          and overview.get("named_only") is True)
+    check("yours_count is needs_you when signed in", overview.get("yours_count") == 1)
+    check("overview does not dump Other-work / kinds",
+          "kinds" not in overview and "other" not in overview and "yours" not in overview)
+    check("overview note bans treating OTel as Work",
+          "telemetry" in (overview.get("note") or "").lower()
+          or "named" in (overview.get("note") or "").lower())
+    # Flood is 12 untitled + 12 Task-from-main. Named open is far smaller.
+    check("overview open is not the OTel flood",
+          overview["open"] < 20)
 
     print("\n--- account scoping ---")
     r2 = c.post("/auth/signup", json={
@@ -178,35 +221,31 @@ with TestClient(main.app) as c:
     other_over = tool("get_work_overview", {}, other_aid, viewer=other_uid)
     other_find = tool("find_tasks", {"query": "Reply"}, other_aid, viewer=other_uid)
     check("other account: nothing waiting", other_mine.get("count") == 0)
-    check("other account: empty overview", other_over.get("total") == 0)
+    check("other account: empty overview", other_over.get("open") == 0)
     check("other account: find_tasks misses this org's tasks", other_find.get("count") == 0)
     stolen = tool("get_task_story", {"loop_id": mine["tasks"][0]["id"]}, other_aid, viewer=other_uid)
     check("other account cannot read this org's task story",
           stolen.get("error") == "task not found")
 
-    print("\n--- find_tasks + get_task_story for a stuck task ---")
+    print("\n--- find_tasks + get_work_items are named-only ---")
     found = tool("find_tasks", {"query": "Confirm address"}, aid, viewer=uid)
-    check("find_tasks locates the stuck task by title",
+    check("find_tasks locates the named waiting task by title",
           found.get("count") == 1 and found["tasks"][0]["title"] == "Confirm address")
-    stuck = found["tasks"][0]
-    check("find_tasks includes column/state/waiting_on",
-          stuck["column"] == "stuck"
-          and stuck["state"] in ("stalled", "awaiting_human")
-          and (stuck.get("waiting_on") or stuck.get("holder")))
+    waiting = found["tasks"][0]
+    check("Confirm address is waiting_on_other (Sarah), not a board 'stuck' dump",
+          waiting["status"] == "waiting_on_other"
+          and "sarah" in (waiting.get("holder") or "").lower())
     check("Confirm address is not is_yours for Alex",
-          stuck.get("is_yours") is False)
+          waiting.get("is_yours") is False)
+    check("named item carries service_name for agent follow-ups",
+          waiting.get("service_name") == "orders-agent")
 
-    story = tool("get_task_story", {"loop_id": stuck["id"]}, aid, viewer=uid)
+    story = tool("get_task_story", {"loop_id": waiting["id"]}, aid, viewer=uid)
     check("story is the Confirm address loop",
-          story.get("title") == "Confirm address" and story.get("id") == stuck["id"])
-    check("story cites live stuck/waiting state",
-          story.get("column") == "stuck"
-          and story.get("state") in ("stalled", "awaiting_human"))
-    holder_blob = " ".join(str(story.get(k) or "") for k in (
-        "holder", "waiting_on", "awaiting_human_name",
-    )).lower()
-    check("story names Sarah as the holder/waiting_on",
-          "sarah" in holder_blob)
+          story.get("title") == "Confirm address" and story.get("id") == waiting["id"])
+    check("story cites lean waiting state + Sarah",
+          story.get("status") == "waiting_on_other"
+          and "sarah" in (story.get("holder") or "").lower())
     check("story is_yours is false for Alex (it's Sarah's)",
           story.get("is_yours") is False)
     events = story.get("events") or []
@@ -216,21 +255,86 @@ with TestClient(main.app) as c:
           or "handoff" in event_blob)
     check("story does not invent from spans/fleet — events are loop events",
           all(e.get("type") != "span" for e in events))
+    check("story title is not a Task-from shell",
+          not _is_flood_title(story.get("title")))
 
-    by_id = tool("find_tasks", {"query": str(stuck["id"])}, aid, viewer=uid)
+    by_id = tool("find_tasks", {"query": str(waiting["id"])}, aid, viewer=uid)
     check("find_tasks matches id substring",
-          by_id.get("count") >= 1 and any(t["id"] == stuck["id"] for t in by_id["tasks"]))
+          by_id.get("count") >= 1 and any(t["id"] == waiting["id"] for t in by_id["tasks"]))
 
-    wf_id = kinds["Order ops"]["workflow_id"]
-    scoped = tool("find_tasks", {"query": "", "workflow_id": wf_id}, aid, viewer=uid)
-    check("find_tasks workflow_id filter stays inside Order ops",
-          scoped["count"] >= 1
-          and all(t.get("workflow") == "Order ops" for t in scoped["tasks"]))
+    print("\n--- stuck Ask path is named-only (no Task-from-main flood) ---")
+    stuck = tool("get_work_items", {"status": "stuck"}, aid, viewer=uid)
+    stuck_find = tool("find_tasks", {"query": "", "status": "stuck"}, aid, viewer=uid)
+    check("stuck tools return the named Retry shipment",
+          any(t["title"] == "Retry shipment" for t in stuck.get("tasks") or [])
+          and any(t["title"] == "Retry shipment" for t in stuck_find.get("tasks") or []))
+    check("stuck items are named-only",
+          stuck.get("named_only") is True
+          and all(not _is_flood_title(t.get("title")) for t in stuck.get("tasks") or []))
+    check("stuck find_tasks is named-only",
+          all(not _is_flood_title(t.get("title")) for t in stuck_find.get("tasks") or []))
+    check("stuck list is not a 25-item Task-from-main dump",
+          stuck.get("count") < 10 and stuck_find.get("count") < 10)
+    retry = next(t for t in stuck["tasks"] if t["title"] == "Retry shipment")
+    check("stuck item has service_name so 'what agent is stuck?' is not empty",
+          retry.get("service_name") == "orders-agent" and retry.get("holder"))
 
-    print("\n--- find_tasks cap ---")
-    all_found = tool("find_tasks", {"query": ""}, aid, viewer=uid)
-    check("find_tasks without query is capped at 25",
-          all_found["count"] <= 25)
+    agents = tool("list_agents", {}, aid, viewer=uid)
+    check("list_agents still returns the fleet for the agent follow-up",
+          agents.get("count") >= 1
+          and any(a.get("service_name") == "orders-agent" for a in agents.get("agents") or []))
+
+    attention = tool("get_work_items", {"status": "needs_attention"}, aid, viewer=uid)
+    att_titles = set(_titles(attention))
+    check("needs_attention includes named stuck + aging waiting (Sarah)",
+          "Retry shipment" in att_titles and "Confirm address" in att_titles)
+    check("needs_attention excludes the OTel flood",
+          all(not _is_flood_title(t) for t in att_titles))
+
+    empty_q = tool("find_tasks", {"query": ""}, aid, viewer=uid)
+    check("empty find_tasks is capped and named-only",
+          empty_q["count"] <= 25
+          and all(not _is_flood_title(t) for t in _titles(empty_q))
+          and "Reply to customer" in _titles(empty_q))
+    check("empty find_tasks never returns Task from main",
+          all("task from " not in t.lower() for t in _titles(empty_q)))
+
+    if flood_ids:
+        flood_story = tool("get_task_story", {"loop_id": flood_ids[0]}, aid, viewer=uid)
+        check("story on untitled / Task-from-main is not-found (not a fake title)",
+              flood_story.get("error") == "task not found")
+
+    print("\n--- Ask work tools never call get_work_board ---")
+    orig = database.get_work_board
+    def boom(*a, **k):
+        raise AssertionError("get_work_board must not run on the Ask work path")
+    database.get_work_board = boom
+    try:
+        ov2 = tool("get_work_overview", {}, aid, viewer=uid)
+        it2 = tool("get_work_items", {"status": "stuck"}, aid, viewer=uid)
+        ft2 = tool("find_tasks", {"query": ""}, aid, viewer=uid)
+        me2 = tool("get_waiting_on_me", {}, aid, viewer=uid)
+        st2 = tool("get_task_story", {"loop_id": waiting["id"]}, aid, viewer=uid)
+        check("overview survives with get_work_board broken", ov2.get("named_only") is True)
+        check("items survive with get_work_board broken",
+              any(t["title"] == "Retry shipment" for t in it2.get("tasks") or []))
+        check("find_tasks survives with get_work_board broken",
+              all(not _is_flood_title(t) for t in _titles(ft2)))
+        check("waiting-on-me survives with get_work_board broken",
+              me2.get("count") == 1)
+        check("task story survives with get_work_board broken",
+              st2.get("title") == "Confirm address")
+    finally:
+        database.get_work_board = orig
+
+    print("\n--- prompt prefers lean named Work ---")
+    instr = asker._AGENTIC_INSTRUCTIONS
+    check("instructions name get_work_overview + get_work_items",
+          "get_work_overview" in instr and "get_work_items" in instr)
+    check("instructions ban /work/board and Task from main flood",
+          "/work/board" in instr and "Task from main" in instr)
+    check("instructions tell the model not to blank on which agent is stuck",
+          "do NOT" in instr and "list_agents" in instr and "service_name" in instr)
 
 print()
 if failures:

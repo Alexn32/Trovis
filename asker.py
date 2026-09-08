@@ -3,7 +3,7 @@
 Two entry points:
   - ask_about_fleet(account_id, messages, viewer_user_id=...) — context =
     every agent's summary, plus read-only tools over telemetry AND the
-    work board / loops
+    named Work record (lean overview / items — never the fat board)
   - ask_about_agent(service_name, account_id, messages, viewer_user_id=...)
     — context = one agent's full payload (summary + description +
     registration files + last ~30 spans)
@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 from typing import Any
 
 import anthropic
@@ -64,9 +63,10 @@ class AgentNotFoundError(LookupError):
 SYSTEM_FLEET = (
     "You are an analyst for Trovis, an agent management system. You have "
     "read access to summaries for every AI agent the user is running, and "
-    "(via tools) the live work record — tasks, who holds them, and what is "
-    "waiting on the signed-in user. Answer using that data; never invent "
-    "work-record claims from agent summaries.\n"
+    "(via tools) the live named Work record — human-titled tasks, who holds "
+    "them, and what is waiting on the signed-in user. Answer using that "
+    "data; never invent work-record claims from agent summaries or untitled "
+    "OTel loops.\n"
     "- Be direct and specific. Refer to agents by their service_name and "
     "tasks by their title.\n"
     "- Prefer concrete numbers (\"85% error rate on lead-scorer\") over "
@@ -186,14 +186,16 @@ _SETUP_KNOWLEDGE = (
 
 SYSTEM_FLEET_CONCISE = (
     "You are the Trovis assistant — an expert analyst for the user's AI agent "
-    "fleet, their live work record (tasks on the Work board), and their guide "
+    "fleet, their live named Work record (human-titled tasks), and their guide "
     "to the product. You have read access to telemetry summaries for every "
     "agent the user runs (provided below), and tools for the work record. "
     "You know how Trovis works end to end.\n"
     "- Ground every claim about the user's agents in the telemetry data. "
     "Ground every claim about tasks, what's waiting, or why something is "
-    "stuck in the work-record tools — never guess from agent summaries. Use "
-    "specific numbers and refer to agents and tasks by name. Never invent data.\n"
+    "stuck in the named work-record tools (get_work_overview / "
+    "get_work_items) — never guess from agent summaries or dump untitled "
+    "OTel. Use specific numbers and refer to agents and tasks by name. "
+    "Never invent data.\n"
     "- Default to 2-4 sentences. For how-do-I/setup questions, give complete "
     "step-by-step instructions instead — exact commands and code on their own "
     "lines (use \\n line breaks; the UI renders plain text, so no markdown "
@@ -647,12 +649,16 @@ def _format_agent_context(
 # ---------------------------------------------------------------------------
 # Agentic Ask — read-only tools + a bounded retrieval loop
 # ---------------------------------------------------------------------------
-# The assistant gets tools to pull live telemetry AND the live work record
-# on demand — captured message/response/tool content, spans, costs, the
-# fleet list, and board/loop state — and loops until it has what it needs
-# to answer. `account_id` and `viewer_user_id` are bound server-side per
-# call and NEVER exposed to the model, so a tool can only ever read the
+# The assistant gets tools to pull live telemetry AND the live named Work
+# record on demand — captured message/response/tool content, spans, costs,
+# the fleet list, and lean overview/items — and loops until it has what it
+# needs to answer. `account_id` and `viewer_user_id` are bound server-side
+# per call and NEVER exposed to the model, so a tool can only ever read the
 # caller's own data. is_yours is only true when viewer_user_id is set.
+#
+# Work tools MUST use database.get_work_overview / get_work_items /
+# get_work_item (named-only, title_source=provided). NEVER
+# database.get_work_board — that is the fat Other-work OTel flood.
 
 _ASK_MAX_ITERS = 6
 _ASK_TOOL_TOKENS = 8000      # per-turn cap while looping (incl. thinking)
@@ -660,19 +666,20 @@ _TOOL_CONTENT_CAP = 1600     # max chars of captured content per item
 _TOOL_ITEMS_CAP = 25         # max items any single tool returns
 _TOOL_EVENTS_CAP = 12        # last N narrated loop events in get_task_story
 _TOOL_SEGMENTS_CAP = 8
+_NAMED_WORK_PAGE = 100       # lean page size while filtering named items
 
-# Same engine-state → board-column map as main._STATE_TO_COLUMN. Display
-# only — is_yours still comes from get_work_board's awaiting_is_you.
-_STATE_TO_COLUMN = {
-    "open": "working",
-    "working": "working",
-    "awaiting_agent": "working",
-    "awaiting_system": "working",
-    "awaiting_human": "waiting_person",
-    "stalled": "stuck",
-    "done": "done",
-    "abandoned": "done",
-}
+_WORK_ITEM_STATUSES = (
+    "waiting_on_you",
+    "waiting_on_other",
+    "stuck",
+    "moving",
+    "done",
+)
+_NAMED_ONLY_NOTE = (
+    "Named Work only (plugin-provided human titles). Untitled OTel loops, "
+    "generated titles, and 'Task from …' shells are telemetry — not Work. "
+    "Do not list them as tasks."
+)
 
 _SIGN_IN_FOR_ME = (
     "Sign in to see what's waiting on you. An API key cannot identify a person, "
@@ -763,44 +770,77 @@ _ASK_TOOLS = [
     {
         "name": "get_waiting_on_me",
         "description": (
-            "Tasks currently waiting on the signed-in user (the Work tab "
-            "'yours' strip: is_yours). Returns id, title, age_seconds, holder, "
-            "workflow, handoff_event_id. Use for 'what's waiting on me', 'my "
+            "Named Work items currently waiting on the signed-in user "
+            "(status=waiting_on_you). Returns id, title, holder, "
+            "service_name, whats_next. Use for 'what's waiting on me', 'my "
             "desk', 'assigned to me'. If the caller is not signed in, this "
             "returns a sign-in message — tell them to sign in; never invent "
-            "is_yours from agent summaries."
+            "is_yours from agent summaries. Named titles only — never "
+            "untitled OTel / 'Task from …'."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "get_work_overview",
         "description": (
-            "Work-record rollups like the Work tab summary: counts by kind "
-            "(workflow) for in_motion / waiting_person / stuck / done_today / "
-            "ongoing, plus the Other work catch-all. Does not claim any task "
-            "is 'yours' unless a signed-in viewer is present. Use for 'how "
-            "much is stuck', 'what's in flight', fleet-of-work shape."
+            "Lean named-Work counts: needs_you, needs_attention, open, "
+            "completed_week. Human-provided titles only. Use for 'how much "
+            "is stuck', 'what's waiting', fleet-of-work shape. Does NOT "
+            "dump the Other-work / OTel catch-all. Untitled telemetry is "
+            "excluded; mention that only if the user asks about raw traces."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "get_work_items",
+        "description": (
+            "Paginated named Work items (human titles only). Optional "
+            "status filter: waiting_on_you | waiting_on_other | stuck | "
+            "moving | done | needs_attention (stuck + waiting_on_other). "
+            "Each row has id, title, status, holder, service_name, "
+            "agent_id, whats_next. Use for 'what's stuck', 'what's "
+            "waiting', listing the desk. NEVER treat untitled / "
+            "'Task from …' / generated titles as Work."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "waiting_on_you | waiting_on_other | stuck | "
+                        "moving | done | needs_attention"
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "find_tasks",
         "description": (
-            "Search the live work board by title or id substring. Optional "
-            "workflow_id filter. Returns up to 25 tasks with column, state, "
-            "stuck_reason, waiting_on, holder. Use to locate a task before "
-            "calling get_task_story."
+            "Search named Work items by title or id substring. Optional "
+            "status filter (same enum as get_work_items). Returns up to 25 "
+            "named tasks with status, holder, service_name, agent_id. Use "
+            "to locate a named task before get_task_story. Empty query + "
+            "status=stuck lists named stuck work — never the OTel flood."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Title or id substring (case-insensitive). Empty = all board tasks, capped.",
+                    "description": (
+                        "Title or id substring (case-insensitive). "
+                        "Empty = named items only, capped."
+                    ),
                 },
-                "workflow_id": {
-                    "type": "integer",
-                    "description": "Optional workflow filter.",
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "Optional status filter: waiting_on_you | "
+                        "waiting_on_other | stuck | moving | done | "
+                        "needs_attention"
+                    ),
                 },
             },
         },
@@ -808,18 +848,17 @@ _ASK_TOOLS = [
     {
         "name": "get_task_story",
         "description": (
-            "Live story for one task (loop): current state, holder, "
-            "waiting_on / awaiting_human_name, age, stuck_reason, recent "
-            "events and possession segments. Cite this for 'why is X stuck' "
-            "/ 'what's blocking this' — never guess from spans or agent "
-            "summaries."
+            "Live story for one NAMED work item: status, holder, "
+            "service_name, agent_id, whats_next, recent events. Cite this "
+            "for 'why is X stuck' / 'what's blocking this'. Untitled OTel "
+            "loops return not-found — do not invent a 'Task from …' title."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "loop_id": {
                     "type": "integer",
-                    "description": "Task id (the board card / loop id).",
+                    "description": "Named work item id.",
                 },
             },
             "required": ["loop_id"],
@@ -828,13 +867,13 @@ _ASK_TOOLS = [
 ]
 
 _AGENTIC_INSTRUCTIONS = (
-    "\n\n---\n\nTOOLS — you can fetch live telemetry AND the live work "
-    "record on demand:\n"
+    "\n\n---\n\nTOOLS — you can fetch live telemetry AND the live NAMED "
+    "work record on demand:\n"
     "Telemetry: list_agents, get_agent_details, get_recent_exchanges (the "
     "ACTUAL message/response/tool text), get_recent_spans (incl. errors + "
     "status messages), get_costs.\n"
-    "Work record: get_waiting_on_me, get_work_overview, find_tasks, "
-    "get_task_story.\n"
+    "Named Work (human titles only): get_waiting_on_me, get_work_overview, "
+    "get_work_items, find_tasks, get_task_story.\n"
     "Ground every answer in real data:\n"
     "- Asked what an agent said/did/produced/received → call "
     "get_recent_exchanges and quote it.\n"
@@ -844,12 +883,20 @@ _AGENTIC_INSTRUCTIONS = (
     "- Asked what's waiting on me / my desk / assigned to me → call "
     "get_waiting_on_me. If it says to sign in, tell the user to sign in. "
     "NEVER invent is_yours from agent summaries.\n"
-    "- Asked about work shape / how much is stuck or waiting → "
-    "get_work_overview.\n"
-    "- Asked why a task is stuck / what's blocking it / the story of a "
-    "task → find_tasks then get_task_story. Cite holder, waiting_on, "
-    "stuck_reason, and recent events from the story. Do not guess from "
-    "fleet or agent summaries.\n"
+    "- Asked \"what's stuck\" / what's waiting / needs attention / "
+    "judgment on the desk → get_work_overview THEN get_work_items "
+    "(status=stuck or needs_attention). Answer from named titles + "
+    "holders + service_name. NEVER dump /work/board, the Other-work "
+    "catch-all, untitled loops, or 'Task from main' / generated titles. "
+    "Those are raw telemetry, not Work truth. You may say untitled OTel "
+    "exists separately if asked — do not list it as the work record.\n"
+    "- Asked \"which agent is stuck\" / \"what agent is stuck\" → do NOT "
+    "return empty. Call get_work_items (status=stuck) and cite each "
+    "item's service_name / holder, AND call list_agents for fleet "
+    "status. Use both. Follow-ups stay grounded in those holders.\n"
+    "- Asked why a named task is stuck / what's blocking it → find_tasks "
+    "then get_task_story. Cite holder, service_name, whats_next, and "
+    "recent events. Do not guess from fleet summaries.\n"
     "Prefer fetching over guessing; make a few targeted calls, not many. Be "
     "decisive and specific — cite exact numbers and quote real content. If the "
     "data genuinely isn't there (capture off, no runs, every call errored, "
@@ -867,139 +914,97 @@ def _as_int(v: Any) -> int | None:
         return None
 
 
-def _humanize_age(s: int | None) -> str | None:
-    if s is None:
+def _normalize_work_status(raw: Any) -> str | None:
+    """Map tool input onto the lean Work status enum (plus needs_attention)."""
+    s = (str(raw) if raw is not None else "").strip().lower()
+    if not s:
         return None
-    s = max(0, int(s))
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m"
-    if s < 86400:
-        return f"{s // 3600}h"
-    return f"{s // 86400}d"
-
-
-def _work_title(row: dict[str, Any]) -> str:
-    title = (row.get("title") or "").strip()
-    if title:
-        return title
-    who = row.get("holder_name") or row.get("service_name") or "An agent"
-    return f"Task from {who}"
-
-
-def _work_age_seconds(row: dict[str, Any], now_ns: int) -> int | None:
-    since = row.get("state_since_unix") or row.get("last_event_unix")
-    if not since:
-        return None
-    return max(0, int((now_ns - int(since)) // 1_000_000_000))
-
-
-def _work_stuck_reason(row: dict[str, Any], column: str, age_s: int | None) -> str | None:
-    """Same posture as main._board_stuck_reason — display only."""
-    if column != "stuck":
-        return None
-    if row.get("holder_type") == "human":
-        return None
-    age_bit = f", {_humanize_age(age_s)}" if age_s else ""
-    if row.get("waiting_on"):
-        return f"waiting on {row['waiting_on']}{age_bit}"
-    if age_s:
-        return f"no activity for {_humanize_age(age_s)}"
+    aliases = {
+        "waiting_person": "waiting_on_other",
+        "waiting": "waiting",
+        "working": "moving",
+        "in_motion": "moving",
+        "attention": "needs_attention",
+        "needs_attention": "needs_attention",
+    }
+    s = aliases.get(s, s)
+    if s in _WORK_ITEM_STATUSES or s in ("needs_attention", "waiting"):
+        return s
     return None
 
 
-def _work_card(row: dict[str, Any], now_ns: int) -> dict[str, Any]:
-    """Project a get_work_board row the same way /work/summary cards do.
+def _status_matches(item_status: str | None, want: str | None) -> bool:
+    if not want:
+        return True
+    st = item_status or ""
+    if want == "needs_attention":
+        return st in ("stuck", "waiting_on_other")
+    if want == "waiting":
+        return st in ("waiting_on_you", "waiting_on_other")
+    return st == want
 
-    is_yours is awaiting_is_you from the board helper — we do not classify
-    'yours' here. Without a viewer, get_work_board leaves awaiting_is_you False.
-    """
-    column = _STATE_TO_COLUMN.get(row.get("cached_state") or "", "working")
-    age_s = _work_age_seconds(row, now_ns)
+
+def _ask_work_item(it: dict[str, Any]) -> dict[str, Any]:
+    """Project a lean named item for the model. Never invent a title."""
+    holder = it.get("holder") or {}
+    if not isinstance(holder, dict):
+        holder = {"kind": "unassigned", "name": str(holder)}
+    title = (it.get("title") or "").strip()
     return {
-        "id": row["id"],
-        "title": _work_title(row),
-        "column": column,
-        "state": row.get("cached_state") or "",
-        "holder": row.get("holder_name") or row.get("service_name") or "an agent",
-        "holder_type": row.get("holder_type") or "agent",
-        "waiting_on": row.get("waiting_on"),
-        "age_seconds": age_s,
-        "is_yours": bool(row.get("awaiting_is_you")),
-        "handoff_event_id": row.get("awaiting_handoff_event_id"),
-        "workflow_id": row.get("workflow_id"),
-        "workflow": row.get("workflow_name"),
-        "stuck_reason": _work_stuck_reason(row, column, age_s),
-        "standing": bool(row.get("standing")),
-        "awaiting_human_name": row.get("awaiting_human_name"),
+        "id": it["id"],
+        "title": title,
+        "status": it.get("status") or "moving",
+        "holder": holder.get("name") or "Unassigned",
+        "holder_kind": holder.get("kind") or "unassigned",
+        "whats_next": it.get("whats_next") or "In progress",
+        "service_name": it.get("service_name"),
+        "agent_id": it.get("agent_id") or "main",
+        "updated_at": it.get("updated_at"),
+        "is_yours": (it.get("status") == "waiting_on_you"),
     }
 
 
-def _fetch_work_cards(
+def _is_named_ask_title(title: str | None) -> bool:
+    t = (title or "").strip()
+    return bool(t) and not database._is_shell_work_title(t)
+
+
+def _list_named_work_items(
     account_id: int | None,
     viewer_user_id: int | None,
-    workflow_id: int | None = None,
+    *,
+    status: str | None = None,
+    query: str | None = None,
+    limit: int = _TOOL_ITEMS_CAP,
 ) -> list[dict[str, Any]]:
-    """Same fetch as GET /work/summary / GET /work/board — one unfiltered
-    (or workflow-filtered) get_work_board, then the card projection."""
-    now_ns = time.time_ns()
-    rows = database.get_work_board(
-        account_id,
-        viewer_user_id=viewer_user_id,
-        workflow_id=workflow_id,
-        now_ns=now_ns,
-    )
-    return [_work_card(r, now_ns) for r in rows]
-
-
-def _kind_rollups(cards: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Kind/stuck/waiting rollups matching GET /work/summary grouping."""
-    kinds: dict[int | None, dict[str, Any]] = {}
-    for c in cards:
-        key = c.get("workflow_id")
-        k = kinds.setdefault(
-            key,
-            {
-                "workflow_id": key,
-                "name": c.get("workflow") or "Other work",
-                "in_motion": 0, "waiting_person": 0, "stuck": 0,
-                "done_today": 0, "ongoing": 0,
-            },
+    """Page lean get_work_items and filter. Never touches get_work_board."""
+    q = (query or "").strip().lower()
+    want = _normalize_work_status(status)
+    out: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(5):
+        items, cursor = database.get_work_items(
+            account_id,
+            viewer_user_id=viewer_user_id,
+            cursor=cursor,
+            limit=_NAMED_WORK_PAGE,
+            include_agent=True,
         )
-        if c.get("standing"):
-            field = "ongoing"
-        else:
-            field = {
-                "working": "in_motion",
-                "waiting_person": "waiting_person",
-                "stuck": "stuck",
-                "done": "done_today",
-            }.get(c.get("column"), "in_motion")
-        k[field] += 1
-
-    def _card(d: dict[str, Any], is_other: bool) -> dict[str, Any]:
-        return {
-            "workflow_id": d["workflow_id"],
-            "name": d["name"],
-            "in_motion": d["in_motion"],
-            "waiting_person": d["waiting_person"],
-            "stuck": d["stuck"],
-            "done_today": d["done_today"],
-            "ongoing": d["ongoing"],
-            "is_other": is_other,
-        }
-
-    declared = [_card(d, False) for wid, d in kinds.items() if wid is not None]
-    other = _card(kinds[None], True) if None in kinds else None
-    declared.sort(
-        key=lambda k: (
-            -(k["waiting_person"] + k["stuck"]),
-            -(k["in_motion"] + k["done_today"]),
-            k["name"].lower(),
-        )
-    )
-    return declared, other
+        for it in items:
+            if not _is_named_ask_title(it.get("title")):
+                continue
+            if not _status_matches(it.get("status"), want):
+                continue
+            if q:
+                title = (it.get("title") or "").lower()
+                if q not in title and q not in str(it.get("id")):
+                    continue
+            out.append(_ask_work_item(it))
+            if len(out) >= limit:
+                return out
+        if not cursor:
+            break
+    return out
 
 
 def _slim_event(ev: dict[str, Any]) -> dict[str, Any]:
@@ -1035,109 +1040,45 @@ def _slim_segment(seg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _yours_strip(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Same filter/sort as GET /work/summary `yours`."""
-    yours = [c for c in cards if c.get("is_yours")]
-    yours.sort(key=lambda c: -(c.get("age_seconds") or 0))
-    return [
-        {
-            "id": c["id"],
-            "title": c["title"],
-            "age_seconds": c.get("age_seconds"),
-            "holder": c.get("holder"),
-            "workflow": c.get("workflow"),
-            "handoff_event_id": c.get("handoff_event_id"),
-        }
-        for c in yours
-    ]
-
-
-def _find_tasks(
-    cards: list[dict[str, Any]],
-    query: str,
-    include_yours: bool,
-) -> list[dict[str, Any]]:
-    q = (query or "").strip().lower()
-    matched = cards
-    if q:
-        matched = [
-            c for c in cards
-            if q in (c.get("title") or "").lower() or q in str(c.get("id"))
-        ]
-    out: list[dict[str, Any]] = []
-    for c in matched[:_TOOL_ITEMS_CAP]:
-        item = {
-            "id": c["id"],
-            "title": c["title"],
-            "column": c.get("column"),
-            "state": c.get("state"),
-            "stuck_reason": c.get("stuck_reason"),
-            "waiting_on": c.get("waiting_on"),
-            "holder": c.get("holder"),
-            "age_seconds": c.get("age_seconds"),
-            "workflow": c.get("workflow"),
-            "workflow_id": c.get("workflow_id"),
-        }
-        if include_yours:
-            item["is_yours"] = bool(c.get("is_yours"))
-        out.append(item)
-    return out
-
-
 def _task_story(
     loop_id: int,
     account_id: int | None,
     viewer_user_id: int | None,
 ) -> dict[str, Any]:
-    loop = database.get_loop(loop_id, account_id, viewer_user_id=viewer_user_id)
-    if loop is None:
-        return {"error": "task not found"}
+    """Named-item story. Untitled / shell titles are not Work."""
+    item = database.get_work_item(
+        account_id, loop_id, viewer_user_id=viewer_user_id, include_agent=True,
+    )
+    if item is None or not _is_named_ask_title(item.get("title")):
+        return {
+            "error": "task not found",
+            "note": (
+                "Only named Work items (human-provided titles) have a story. "
+                "Untitled OTel loops are not Work."
+            ),
+        }
     stream = database.get_loop_stream(loop_id, account_id) or []
     narrated = loops.narrate_events(stream)
     segments = loops.compute_loop_segments(stream)
-    now_ns = time.time_ns()
-    # Prefer the board row when the task is on today's board so holder /
-    # waiting_on / stuck_reason match WorkTab. Fall back to loop + segments.
-    board_cards = _fetch_work_cards(account_id, viewer_user_id)
-    card = next((c for c in board_cards if c["id"] == loop_id), None)
-    last_seg = segments[-1] if segments else None
-    column = (card or {}).get("column") or _STATE_TO_COLUMN.get(
-        loop.get("cached_state") or "", "working"
-    )
-    age_s = (card or {}).get("age_seconds")
-    if age_s is None:
-        last = loop.get("last_event_unix")
-        age_s = (
-            max(0, int((now_ns - int(last)) // 1_000_000_000)) if last else None
-        )
-    holder = (
-        (card or {}).get("holder")
-        or loop.get("awaiting_human_name")
-        or (last_seg or {}).get("holder")
-        or loop.get("service_name")
-        or "an agent"
-    )
-    waiting_on = (card or {}).get("waiting_on") or loop.get("awaiting_human_name")
+    holder = item.get("holder") or {}
+    if not isinstance(holder, dict):
+        holder = {"kind": "unassigned", "name": str(holder)}
     out = {
-        "id": loop["id"],
-        "title": _work_title({**loop, "holder_name": holder}),
-        "state": loop.get("cached_state") or "",
-        "column": column,
-        "holder": holder,
-        "holder_type": (card or {}).get("holder_type") or (last_seg or {}).get("holder_type"),
-        "waiting_on": waiting_on,
-        "awaiting_human_name": loop.get("awaiting_human_name"),
-        "age_seconds": age_s,
-        "stuck_reason": (card or {}).get("stuck_reason"),
-        "workflow": loop.get("workflow_name"),
-        "workflow_id": loop.get("workflow_id"),
-        "handoff_event_id": loop.get("awaiting_handoff_event_id"),
+        "id": item["id"],
+        "title": item["title"],
+        "status": item.get("status") or "moving",
+        "holder": holder.get("name") or "Unassigned",
+        "holder_kind": holder.get("kind") or "unassigned",
+        "whats_next": item.get("whats_next") or item.get("whats_happening"),
+        "service_name": item.get("service_name"),
+        "agent_id": item.get("agent_id") or "main",
+        "updated_at": item.get("updated_at"),
         "events": [_slim_event(e) for e in narrated[-_TOOL_EVENTS_CAP:]],
         "event_count": len(narrated),
         "segments": [_slim_segment(s) for s in segments[-_TOOL_SEGMENTS_CAP:]],
     }
     if viewer_user_id is not None:
-        out["is_yours"] = bool(loop.get("awaiting_is_you"))
+        out["is_yours"] = item.get("status") == "waiting_on_you"
     return out
 
 
@@ -1162,51 +1103,50 @@ def _run_tool(
                     "message": _SIGN_IN_FOR_ME,
                     "tasks": [],
                 })
-            cards = _fetch_work_cards(account_id, viewer_user_id)
-            tasks = _yours_strip(cards)
-            return json.dumps({"signed_in": True, "count": len(tasks), "tasks": tasks})
+            tasks = _list_named_work_items(
+                account_id, viewer_user_id, status="waiting_on_you",
+            )
+            return json.dumps({
+                "signed_in": True,
+                "count": len(tasks),
+                "tasks": tasks,
+                "named_only": True,
+            })
 
         if name == "get_work_overview":
-            cards = _fetch_work_cards(account_id, viewer_user_id)
-            declared, other = _kind_rollups(cards)
-            totals = {
-                "in_motion": 0, "waiting_person": 0, "stuck": 0,
-                "done_today": 0, "ongoing": 0,
-            }
-            for k in declared + ([other] if other else []):
-                for field in totals:
-                    totals[field] += k[field]
+            counts = database.get_work_overview(
+                account_id, viewer_user_id=viewer_user_id,
+            )
             out: dict[str, Any] = {
-                "total": len(cards),
-                "kinds": declared,
-                "other": other,
-                **totals,
+                "needs_you": int(counts.get("needs_you") or 0),
+                "needs_attention": int(counts.get("needs_attention") or 0),
+                "open": int(counts.get("open") or 0),
+                "completed_week": int(counts.get("completed_week") or 0),
+                "named_only": True,
+                "note": _NAMED_ONLY_NOTE,
             }
             if viewer_user_id is None:
                 out["signed_in"] = False
-                out["note"] = (
-                    "Sign in to see which tasks are waiting on you. "
-                    "Rollups above are account-wide, not personal."
-                )
             else:
-                yours = _yours_strip(cards)
                 out["signed_in"] = True
-                out["yours_count"] = len(yours)
-                out["yours"] = yours
+                out["yours_count"] = out["needs_you"]
             return json.dumps(out)
 
-        if name == "find_tasks":
-            workflow_id = _as_int(inp.get("workflow_id"))
-            cards = _fetch_work_cards(
-                account_id, viewer_user_id, workflow_id=workflow_id,
-            )
+        if name in ("find_tasks", "get_work_items"):
             query = inp.get("query")
             if query is None:
                 query = inp.get("title") or ""
-            tasks = _find_tasks(
-                cards, str(query), include_yours=viewer_user_id is not None,
+            tasks = _list_named_work_items(
+                account_id,
+                viewer_user_id,
+                status=inp.get("status"),
+                query=str(query),
             )
-            return json.dumps({"count": len(tasks), "tasks": tasks})
+            return json.dumps({
+                "count": len(tasks),
+                "tasks": tasks,
+                "named_only": True,
+            })
 
         if name == "get_task_story":
             loop_id = _as_int(inp.get("loop_id"))

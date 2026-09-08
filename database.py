@@ -4418,8 +4418,14 @@ def _decorate_work_items(
         row["updated_at"] = _work_updated_at(row)
 
 
-def _row_to_work_item(r: dict[str, Any]) -> dict[str, Any] | None:
-    """Named-work row for /work/items. Plugin-provided human titles only."""
+def _row_to_work_item(
+    r: dict[str, Any], *, include_agent: bool = False,
+) -> dict[str, Any] | None:
+    """Named-work row for /work/items. Plugin-provided human titles only.
+
+    `include_agent` adds service_name / agent_id for Ask. Home HTTP must
+    leave this False — WorkItem forbids extra keys.
+    """
     title = (r.get("title") or "").strip()
     if (
         not title
@@ -4427,7 +4433,7 @@ def _row_to_work_item(r: dict[str, Any]) -> dict[str, Any] | None:
         or _is_shell_work_title(title)
     ):
         return None
-    return {
+    out = {
         "id": r["id"],
         "title": title,
         "status": r.get("status") or "moving",
@@ -4438,6 +4444,10 @@ def _row_to_work_item(r: dict[str, Any]) -> dict[str, Any] | None:
         "whats_next": r.get("whats_next") or "In progress",
         "updated_at": r.get("updated_at"),
     }
+    if include_agent:
+        out["service_name"] = r.get("service_name")
+        out["agent_id"] = r.get("agent_id") or "main"
+    return out
 
 
 def get_work_items(
@@ -4446,11 +4456,15 @@ def get_work_items(
     cursor: str | None = None,
     limit: int = _WORK_ITEMS_DEFAULT_LIMIT,
     now_ns: int | None = None,
+    include_agent: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Paginated named items for the Work home table. Plugin-provided human
     titles only — no untitled OTel flood, no Trovis-generated labels, no
     span-cost aggregates, no full-fleet event scan. Events load for this
-    page only."""
+    page only.
+
+    `include_agent` is for Ask (service_name / agent_id). Home leaves it off.
+    """
     now_ns = now_ns if now_ns is not None else time.time_ns()
     limit = max(1, min(int(limit or _WORK_ITEMS_DEFAULT_LIMIT), _WORK_ITEMS_MAX_LIMIT))
     week_ago = (_utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS)).strftime(
@@ -4489,7 +4503,7 @@ def get_work_items(
 
     items: list[dict[str, Any]] = []
     for r in rows:
-        item = _row_to_work_item(r)
+        item = _row_to_work_item(r, include_agent=include_agent)
         if item is None:
             continue
         items.append(item)
@@ -4910,6 +4924,7 @@ def _work_item_by_id(
     account_id: int | None,
     viewer_user_id: int | None = None,
     now_ns: int | None = None,
+    include_agent: bool = False,
 ) -> dict[str, Any] | None:
     now_ns = now_ns if now_ns is not None else time.time_ns()
     acct_sql, acct_args = _work_account_sql(account_id)
@@ -4927,7 +4942,7 @@ def _work_item_by_id(
         return None
     rows = [dict(row)]
     _decorate_work_items(cur, rows, account_id, viewer_user_id, now_ns)
-    return _row_to_work_item(rows[0])
+    return _row_to_work_item(rows[0], include_agent=include_agent)
 
 
 def get_work_item(
@@ -4935,12 +4950,14 @@ def get_work_item(
     item_id: int,
     viewer_user_id: int | None = None,
     now_ns: int | None = None,
+    include_agent: bool = False,
 ) -> dict[str, Any] | None:
     """Named work item plus the v1.1 detail spine, or None if not visible."""
     now_ns = now_ns if now_ns is not None else time.time_ns()
     with _connect() as conn, _cursor(conn) as cur:
         item = _work_item_by_id(
             cur, item_id, account_id, viewer_user_id=viewer_user_id, now_ns=now_ns,
+            include_agent=include_agent,
         )
         if item is None:
             return None
