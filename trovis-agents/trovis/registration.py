@@ -27,6 +27,13 @@ from typing import Any
 
 from opentelemetry import trace
 
+from trovis.loop_attrs import (
+    apply_handoff_attrs,
+    apply_loop_attrs,
+    first_user_text,
+    human_title,
+)
+
 logger = logging.getLogger("trovis")
 
 # 32 KB matches the OpenClaw plugin's truncation budget — comfortably
@@ -247,23 +254,43 @@ class CaptureProcessor:
     """OpenAI Agents SDK tracing processor that emits Trovis-named
     OTEL spans carrying actual content when capture-outputs is on.
 
-    Listens to FunctionSpanData (tool calls) and ResponseSpanData /
-    GenerationSpanData (LLM input/output). Emits one OTEL span per
-    captured event so the existing /agents/{name}/outputs endpoint
-    finds them just like it finds OpenClaw plugin output spans.
+    Listens to FunctionSpanData (tool calls), ResponseSpanData /
+    GenerationSpanData (LLM input/output), and HandoffSpanData.
+    Emits one OTEL span per captured event so the existing
+    /agents/{name}/outputs endpoint finds them just like it finds
+    OpenClaw plugin output spans.
+
+    Also stamps workloop attrs (`trovis.run.id`, `trovis.loop.title`,
+    handoffs) so a new run lands as named Work when a human title is
+    available (explicit `set_loop_title`, non-generic workflow name,
+    or first user task when capture is on).
     """
 
     def __init__(self) -> None:
         self._tracer = trace.get_tracer("trovis.capture")
+        self._run_id: str | None = None
+        self._external_id: str | None = None
+        self._titled = False
 
     # The OpenAI Agents SDK's TracingProcessor interface accepts these
     # four methods. We only care about `on_span_end` — that's when
-    # the input/output values are fully populated.
-    def on_trace_start(self, trace_obj: Any) -> None:  # noqa: ARG002
-        pass
+    # the input/output values are fully populated — plus `on_trace_start`
+    # so a title known at run start lands on the creating span.
+    def on_trace_start(self, trace_obj: Any) -> None:
+        try:
+            self._run_id = _trace_id(trace_obj)
+            self._external_id = _group_id(trace_obj)
+            self._titled = False
+            title = human_title(getattr(trace_obj, "name", None))
+            # Pending set_loop_title() wins over a workflow name.
+            self._emit_creating_if_titled(title)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Trovis] trace-start title emit failed: {e}")
 
     def on_trace_end(self, trace_obj: Any) -> None:  # noqa: ARG002
-        pass
+        self._run_id = None
+        self._external_id = None
+        self._titled = False
 
     def on_span_start(self, span: Any) -> None:  # noqa: ARG002
         pass
@@ -286,6 +313,37 @@ class CaptureProcessor:
 
     # ----- internal -----
 
+    def _stamp(self, span: Any, *, title: str | None = None) -> None:
+        from trovis.loop_attrs import peek_pending_title
+
+        had_title = bool(title or peek_pending_title())
+        apply_loop_attrs(
+            span,
+            run_id=self._run_id,
+            external_id=self._external_id,
+            title=title,
+            consume_title=not self._titled,
+        )
+        if had_title:
+            self._titled = True
+
+    def _emit_creating_if_titled(self, workflow_title: str | None) -> None:
+        from trovis.loop_attrs import consume_pending_title
+
+        title = consume_pending_title() or workflow_title
+        if not title:
+            return
+        with self._tracer.start_as_current_span("message_received") as s:
+            s.set_attribute("trovis.event.type", "message_received")
+            apply_loop_attrs(
+                s,
+                run_id=self._run_id,
+                external_id=self._external_id,
+                title=title,
+                consume_title=False,
+            )
+        self._titled = True
+
     def _handle(self, sdk_span: Any) -> None:
         sd = getattr(sdk_span, "span_data", None)
         if sd is None:
@@ -299,6 +357,8 @@ class CaptureProcessor:
                 self._emit_tool(sd)
         elif kind in ("ResponseSpanData", "GenerationSpanData"):
             self._emit_model_io(sd, kind, capture)
+        elif kind == "HandoffSpanData":
+            self._emit_handoff(sd)
 
     def _emit_tool(self, sd: Any) -> None:
         name = getattr(sd, "name", "") or ""
@@ -310,6 +370,7 @@ class CaptureProcessor:
             return
         with self._tracer.start_as_current_span("tool_call") as s:
             s.set_attribute("trovis.event.type", "tool_call")
+            self._stamp(s)
             if name:
                 s.set_attribute("trovis.tool.name", name)
             s.set_attribute(
@@ -331,11 +392,18 @@ class CaptureProcessor:
         output_value = getattr(sd, "output", None) or getattr(sd, "response", None)
 
         # message_received — prompt content only (no tokens). Capture-gated.
+        # First user task becomes the loop title (privacy: only when capture
+        # is on, matching OpenClaw). Skipped if a title already landed on
+        # the creating span (set_loop_title / workflow name).
+        task_title = None
+        if capture and input_value is not None and not self._titled:
+            task_title = first_user_text(input_value)
         if capture and input_value is not None:
             text = _json_safe(input_value)
             if text:
                 with self._tracer.start_as_current_span("message_received") as s:
                     s.set_attribute("trovis.event.type", "message_received")
+                    self._stamp(s, title=task_title)
                     s.set_attribute(
                         "trovis.message.content",
                         _truncate(text, _CONTENT_BYTE_LIMIT),
@@ -349,6 +417,7 @@ class CaptureProcessor:
         if has_usage or out_text:
             with self._tracer.start_as_current_span("llm_output") as s:
                 s.set_attribute("trovis.event.type", "llm_output")
+                self._stamp(s)
                 if model:
                     s.set_attribute("gen_ai.request.model", model)
                 if inp is not None:
@@ -363,3 +432,34 @@ class CaptureProcessor:
                         _truncate(out_text, _CONTENT_BYTE_LIMIT),
                     )
                     s.set_attribute("trovis.response.source", kind)
+
+    def _emit_handoff(self, sd: Any) -> None:
+        to_agent = getattr(sd, "to_agent", None) or getattr(sd, "to_agent_name", None)
+        from_agent = getattr(sd, "from_agent", None)
+        with self._tracer.start_as_current_span("handoff") as s:
+            s.set_attribute("trovis.event.type", "handoff")
+            self._stamp(s)
+            apply_handoff_attrs(
+                s,
+                direction="to_agent",
+                target=str(to_agent) if to_agent else None,
+                reason=f"from:{from_agent}" if from_agent else "handoff",
+            )
+
+
+def _trace_id(trace_obj: Any) -> str | None:
+    """OpenAI Agents SDK Trace.trace_id — omitted when the SDK didn't set one."""
+    tid = getattr(trace_obj, "trace_id", None) or getattr(trace_obj, "id", None)
+    if tid is None:
+        return None
+    text = str(tid).strip()
+    return text or None
+
+
+def _group_id(trace_obj: Any) -> str | None:
+    """Optional Trace.group_id — used as trovis.loop.external_id when present."""
+    gid = getattr(trace_obj, "group_id", None)
+    if gid is None:
+        return None
+    text = str(gid).strip()
+    return text or None

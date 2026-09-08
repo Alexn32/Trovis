@@ -7,7 +7,7 @@ Trovis plugin for OpenClaw — automatic agent telemetry and management.
 This plugin runs inside the OpenClaw gateway and sends two kinds of data to your Trovis instance:
 
 1. **Agent identity** (once at startup): the contents of each agent's `SOUL.md`, `IDENTITY.md`, and `AGENTS.md`. These define what the agent is and are required for accurate dashboard descriptions. On startup, the plugin reads these files from each agent's workspace and sends them to Trovis. **Review these files for secrets or sensitive instructions before enabling the plugin** — they leave your machine.
-2. **Operational telemetry** (during agent activity): by default, metadata only — message lengths, tool names, durations, success flags, opaque IDs. **Message content and tool outputs are NOT captured by default.** If you enable `captureOutputs` (see [Output capture](#output-capture)), the plugin will also send the text of messages, responses, and tool results.
+2. **Operational telemetry** (during agent activity): by default, metadata only — message lengths, tool names, durations, success flags, opaque IDs. **Message content and tool outputs are NOT captured by default.** If you enable `captureOutputs` (see [Output capture](#output-capture)), the plugin will also send the text of messages, responses, and tool results — and the inbound message becomes `trovis.loop.title` so the run lands as **named Work**.
 
 `USER.md` and `MEMORY.md` are **not** read by default. If you enable `readUserData`, they are also sent on startup. These files may contain personal preferences and accumulated history. Only enable if you trust the configured Trovis endpoint.
 
@@ -62,7 +62,7 @@ Add an `trovis` entry under `plugins.entries` in your `openclaw.json`:
 | `apiKey`         | string  | no       | —                | Sent as the `X-Trovis-Api-Key` header on every export. Required by hosted Trovis deployments.                                              |
 | `agentName`      | string  | see note | *(derived)*      | The agent's identity in Trovis. Derived from your gateway's configured agent id, else the workspace directory name. **If neither is available the plugin goes inert** — it will not fall back to a shared default. |
 | `enabled`        | boolean | no       | `true`           | Set to `false` to load the plugin without emitting telemetry.                                                                                |
-| `captureOutputs` | boolean | no       | `false`          | When `true`, include message text and tool results in spans (see [Output capture](#output-capture)). Off by default.                          |
+| `captureOutputs` | boolean | no       | `false`          | When `true`, include message text and tool results in spans, and name Work from the inbound message (`trovis.loop.title`). Off by default.     |
 | `readUserData`   | boolean | no       | `false`          | When `true`, include `USER.md` and `MEMORY.md` in the startup registration. May contain personal data — opt-in only.                          |
 | `handoffTools`   | string  | no       | *(empty)*        | Comma-separated `tool:direction` pairs marking tools as workloop handoffs (see [Workloops](#workloops)). Empty by default — never guessed.     |
 
@@ -125,6 +125,15 @@ Per-span attributes. The defaults are **metadata only** — no message bodies, n
 - `trovis.message.content` — inbound message text (on `message_received`)
 - `trovis.response.content` — outbound response text (on `message_sent`)
 - `trovis.tool.result` — tool return values, `JSON.stringify`'d when not already strings (on `after_tool_call`)
+
+The inbound message (collapsed, first 80 characters) is also stamped as
+`trovis.loop.title` on the creating span. That is what makes the run
+**named Work** in Trovis (`title_source=provided` on `GET /work/items`).
+Connect setup (`/trovis capture on`) turns this on. Privacy default is
+still off — titles derived from user messages follow the same opt-in.
+
+To name Work *without* sending message bodies, call `trovisSetLoopTitle("…")`
+from agent code (see [Workloops](#workloops)).
 
 > **These fields may contain private data, secrets, or business information.** Only enable `captureOutputs` if you trust the configured Trovis endpoint and its operators. Off by default for a reason.
 
@@ -189,9 +198,12 @@ two small hooks for the parts only your agent knows.
   carries the session key as `trovis.loop.external_id`, so all the turns of
   one conversation group together. Spans with no session continuity fall
   back to the run id, then to the backend's 30-minute gap rule.
-- When `captureOutputs` is on, the inbound message (collapsed, first 80
-  chars) becomes the loop's title. With capture off no title is sent —
-  titles are content-derived and follow the same opt-in.
+- **Named Work.** When `captureOutputs` is on, the inbound message
+  (collapsed, first 80 chars) becomes `trovis.loop.title` so the loop
+  lands as named Work (`title_source=provided`). With capture off no
+  content-derived title is sent — follow Connect (`/trovis capture on`)
+  or call `trovisSetLoopTitle("Refund order 42")` to name a run without
+  sending the prompt. We never invent placeholder titles.
 - **When a conversational turn ends (`agent_end`), the loop hands off to
   the human** — `to_human`, `reason: "turn_end"`, targeted at the sender
   we last heard from. The loop sits `awaiting_human` until the person
@@ -209,8 +221,9 @@ two small hooks for the parts only your agent knows.
 **Declared handoffs — helper:**
 
 ```ts
-import { trovisHandoff, trovisCloseLoop } from "@trovis/openclaw-plugin"
+import { trovisHandoff, trovisCloseLoop, trovisSetLoopTitle } from "@trovis/openclaw-plugin"
 
+trovisSetLoopTitle("Refund order 42")                          // named Work, capture still off
 trovisHandoff("to_human", "sarah@acme.com", "needs approval")  // loop -> awaiting_human
 trovisCloseLoop("done")                                        // close the loop early
 ```

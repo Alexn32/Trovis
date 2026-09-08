@@ -13,8 +13,10 @@
  *
  * Workloops (see "Workloop signals" section): every span carries OpenClaw's
  * runId verbatim as `trovis.run.id` so the backend groups one run into one
- * loop; agent_end auto-closes the loop as done; handoffs are declared via
- * the exported trovisHandoff() helper or the handoffTools config mapping.
+ * loop; `trovis.loop.title` is set from the inbound message when
+ * captureOutputs is on (or via trovisSetLoopTitle); agent_end auto-closes
+ * the loop as done; handoffs are declared via the exported trovisHandoff()
+ * helper or the handoffTools config mapping.
  * Attribute-only — span structure and the export path are unchanged, and
  * older backends simply ignore the extra attributes.
  *
@@ -52,7 +54,7 @@ import { randomUUID } from "node:crypto"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.6.2"
+const PLUGIN_VERSION = "0.6.3"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 //
@@ -788,6 +790,9 @@ let pendingHandoff: {
   id: string
 } | null = null
 let pendingClose: string | null = null
+// One-shot title queued by trovisSetLoopTitle(). Applied on the next span
+// so an operator can name Work without turning captureOutputs on.
+let pendingTitle: string | null = null
 
 // Run-keys (runId, else sessionKey) that emitted a handoff / an explicit
 // close during the current run. agent_end consults these so it (a) never
@@ -945,7 +950,12 @@ function parseHandoffTools(
  * every span-emitting hook handler. Attribute-only — never changes span
  * structure or the export path.
  */
-function applyLoopSignals(span: Span, event: unknown, ctx?: OpenClawContext): void {
+function applyLoopSignals(
+  span: Span,
+  event: unknown,
+  ctx?: OpenClawContext,
+  extra?: { title?: string },
+): void {
   setIfPresent(span, "trovis.run.id", pickRunId(event, ctx))
   // Loop grain: a CONVERSATION, not a turn. The backend keys loops on
   // loop.external_id in preference to run.id, so sending the session key
@@ -955,6 +965,11 @@ function applyLoopSignals(span: Span, event: unknown, ctx?: OpenClawContext): vo
   // gives no session continuity, and the run.id fallback then applies
   // unchanged (that is the one-shot case).
   setIfPresent(span, "trovis.loop.external_id", sessionKeyOf(event, ctx))
+  // Explicit trovisSetLoopTitle() wins over a content-derived title —
+  // the operator named the work without sending the prompt.
+  const title = pendingTitle || extra?.title
+  pendingTitle = null
+  setIfPresent(span, "trovis.loop.title", title)
   if (pendingHandoff) {
     const h = pendingHandoff
     pendingHandoff = null
@@ -1010,6 +1025,28 @@ export function trovisHandoff(
 export function trovisCloseLoop(reason: string = "done"): void {
   const r = typeof reason === "string" && reason.trim().length > 0 ? reason : "done"
   pendingClose = r
+}
+
+/**
+ * Queue a human title for the next span the plugin emits. Ingest reads
+ * `trovis.loop.title` only at loop INSERT (`title_source=provided`), so
+ * call this before or on the creating span.
+ *
+ * Use this to name Work without enabling `captureOutputs` (which would
+ * also send message bodies). Empty / whitespace-only titles are ignored.
+ * Returns the normalized title, or null if it was empty.
+ */
+export function trovisSetLoopTitle(title: string): string | null {
+  const t =
+    typeof title === "string"
+      ? title.replace(/\s+/g, " ").trim().slice(0, 80)
+      : ""
+  if (!t) {
+    console.warn(`${LOG} trovisSetLoopTitle: empty title — ignored.`)
+    return null
+  }
+  pendingTitle = t
+  return t
 }
 
 interface TokenUsage {
@@ -1659,7 +1696,20 @@ function wireEvents(api: OpenClawApi): void {
     // Multi-agent gateways: the backend uses this to split spans into
     // per-agent virtual service names (`<service>-<agent_id>`).
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
-    applyLoopSignals(span, event, ctx)
+    applyLoopSignals(span, event, ctx, {
+      // Workloop title: the inbound message is the best human-readable
+      // label for what this run is about. Content-derived, so it follows
+      // the same opt-in as content capture — with capture off, no title
+      // is sent unless the operator called trovisSetLoopTitle().
+      // Creation-only on the backend, so re-sending on a later message
+      // of the same run is harmless.
+      title:
+        state.captureOutputs &&
+        typeof event?.content === "string" &&
+        event.content.length > 0
+          ? event.content.replace(/\s+/g, " ").trim().slice(0, 80)
+          : undefined,
+    })
     // The human replied. Two things follow.
     const skey = sessionKeyOf(event, ctx)
     if (skey) {
@@ -1692,14 +1742,6 @@ function wireEvents(api: OpenClawApi): void {
         "trovis.message.content",
         truncate(event.content, 10_000),
       )
-      // Workloop title: the inbound message is the best human-readable
-      // label for what this run is about. Content-derived, so it follows
-      // the same opt-in as content capture — with capture off, no title
-      // is sent (the backend shows the loop untitled; we never send
-      // placeholders). Creation-only on the backend, so re-sending on a
-      // later message of the same run is harmless.
-      const title = event.content.replace(/\s+/g, " ").trim().slice(0, 80)
-      setIfPresent(span, "trovis.loop.title", title)
     }
     span.end()
   })
@@ -2145,9 +2187,13 @@ function wireCommands(api: OpenClawApi): void {
               ? `Message content and tool results will now appear on ` +
                 `spans as \`trovis.message.content\`, ` +
                 `\`trovis.response.content\`, and \`trovis.tool.result\` ` +
-                `(each truncated to 10 000 chars).\n\n`
+                `(each truncated to 10 000 chars). The inbound message ` +
+                `also becomes \`trovis.loop.title\` so the run lands as ` +
+                `named Work.\n\n`
               : `Message content and tool results will no longer be ` +
-                `captured. Existing spans aren't modified.\n\n`) +
+                `captured (and inbound messages will no longer name ` +
+                `Work). Existing spans aren't modified. Use ` +
+                `\`trovisSetLoopTitle()\` to name a run without capture.\n\n`) +
             persistHint("captureOutputs", enable),
         )
       }
@@ -2315,7 +2361,7 @@ function wireCommands(api: OpenClawApi): void {
           `• \`/trovis connect <url>\` — set the Trovis endpoint\n` +
           `• \`/trovis apikey <key>\` — set your API key\n\n` +
           `**Capture toggles**\n` +
-          `• \`/trovis capture on\` / \`off\` — message + tool output capture (default off)\n` +
+          `• \`/trovis capture on\` / \`off\` — message + tool output capture; also names Work from the inbound message (default off)\n` +
           `• \`/trovis userdata on\` / \`off\` — USER.md + MEMORY.md in registration (default off)\n\n` +
           `**Inspect**\n` +
           `• \`/trovis settings\` — show all current config\n` +
@@ -2368,6 +2414,7 @@ export const __internal = {
     closedRuns.clear()
     pendingHandoff = null
     pendingClose = null
+    pendingTitle = null
   },
 }
 

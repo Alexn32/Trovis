@@ -18,10 +18,19 @@ These are only available when the `anthropic` extra is installed.
 """
 
 from trovis.core import init
+from trovis.loop_attrs import mark_handoff, set_loop_title
 from trovis.propagation import continue_trace, extract, inject
 from trovis.version import __version__
 
-__all__ = ["init", "inject", "extract", "continue_trace", "__version__"]
+__all__ = [
+    "init",
+    "inject",
+    "extract",
+    "continue_trace",
+    "set_loop_title",
+    "mark_handoff",
+    "__version__",
+]
 
 # Optional Anthropic helpers — re-exported when the anthropic SDK is
 # available so users can do `from trovis import monitor`. We swallow

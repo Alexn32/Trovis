@@ -132,6 +132,10 @@ RUN_SPANS = [
         "trovis.session.key": "agent:main:s-run-A",
         "trovis.message.content_length": 18,
         "trovis.agent.id": AGENT_ID,
+        # captureOutputs=on path: inbound message → trovis.loop.title.
+        # This is what makes a new OpenClaw install (following Connect)
+        # land as named Work (title_source=provided).
+        "trovis.loop.title": "do the thing run-A",
     }, offset_ms=100, kind=2),
     span("tool_call", {
         "trovis.event.type": "tool_call",
@@ -250,6 +254,24 @@ with TestClient(main.app) as c:
         print("\n[5] The run loop holds exactly the run's spans")
         check("event count = 4 run spans + loop_opened + loop_closed",
               loop.get("event_count") == 6, f"event_count={loop.get('event_count')}")
+        check("plugin title landed on the loop",
+              loop.get("title") == "do the thing run-A",
+              f"title={loop.get('title')!r}")
+        # get_loops() does not surface title_source; read the row directly.
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT title_source FROM loops WHERE id = ?",
+                        (loop["id"],))
+            src = cur.fetchone()["title_source"]
+        check("title_source=provided (named work, not generated/LLM)",
+              src == "provided", f"title_source={src!r}")
+
+        print("\n[5b] Named Work — lean /work/items lists the capture-on title")
+        page = c.get("/work/items", headers=H).json()
+        titles = [it.get("title") for it in page.get("items") or []]
+        check("named work appears in GET /work/items",
+              "do the thing run-A" in titles, f"titles={titles}")
+        check("registration's untitled implicit loop is excluded",
+              titles == ["do the thing run-A"], f"titles={titles}")
 
     print("\n[6] Plugin platform identity is visible on the agent record")
     detail = c.get(f"/agents/{AGENT}/spans", headers=H).json()

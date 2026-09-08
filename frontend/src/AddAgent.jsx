@@ -792,6 +792,9 @@ result = await Runner.run(agent, "Help me with my order")`,
         every tool call, handoffs, guardrails, run completion. Message
         content is <em>not</em> captured unless you pass{' '}
         <code>capture_outputs=True</code> to <code>init()</code>.
+        To land as named Work, call <code>trovis.set_loop_title("…")</code>{' '}
+        or pass a non-generic workflow name; capture also names the run
+        from the first user task.
       </Callout>
 
       <h3 className="section-title section-title-spaced">Environment variables</h3>
@@ -898,7 +901,10 @@ for event in client.beta.sessions.stream(session.id):
         (name + system prompt + model + tool list), every user message
         and agent response, every tool use, and run completion. Message
         content is <em>not</em> captured unless you pass{' '}
-        <code>capture_outputs=True</code> to <code>init()</code>.
+        <code>capture_outputs=True</code> to <code>init()</code>
+        (that also names Work from the first user message via{' '}
+        <code>trovis.loop.title</code>). Or call{' '}
+        <code>trovis.set_loop_title("…")</code> without capturing content.
       </Callout>
 
       <h3 className="section-title section-title-spaced">Advanced: per-client instrumentation</h3>
@@ -1025,7 +1031,10 @@ async for message in query(
         message + tool-call metadata, token usage, and estimated cost.
         Message and response <em>content</em> are captured only when{' '}
         <code>capture_outputs=True</code> is passed to{' '}
-        <code>init()</code>.
+        <code>init()</code>
+        (that also names Work from <code>query(prompt=…)</code>).
+        Or call <code>trovis.set_loop_title("…")</code> without capturing
+        content.
       </Callout>
 
       <h3 className="section-title section-title-spaced">Environment variables</h3>
@@ -1224,11 +1233,12 @@ function OpenClawChatSetup({ endpoint, apiKey, installCmd }) {
       <NumberedStep n={4} title="Turn on output capture (recommended)">
         <CodeBlock code="/trovis capture on" />
         <p className="helper-text">
-          <strong>Do this or you'll only see metadata.</strong> Without capture,
-          Trovis records what ran, when, and how much it cost — but <em>not</em>{' '}
-          the actual messages, responses, or tool results, so you can't read
-          what your agent said or ask about its outputs. Turning it on sends
-          that content to Trovis; leave it off only if that's a concern.
+          <strong>Do this or you'll only see metadata — and Work stays untitled.</strong>{' '}
+          Without capture, Trovis records what ran, when, and how much it cost —
+          but <em>not</em> the actual messages, responses, or tool results, and
+          new runs will not land as named Work (<code>trovis.loop.title</code>).
+          Turning it on sends that content to Trovis and names each loop from
+          the inbound message; leave it off only if that's a concern.
         </p>
       </NumberedStep>
 
@@ -1270,11 +1280,12 @@ function OpenClawTerminalSetup({ endpoint, apiKey, installCmd }) {
       <NumberedStep n={3} title="Turn on output capture (recommended)">
         <CodeBlock code={captureCmd} />
         <p className="helper-text">
-          <strong>Do this or you'll only see metadata.</strong> Without capture,
-          Trovis records what ran, when, and cost — but <em>not</em> the actual
-          messages, responses, or tool results, so you can't read what your
-          agent said or ask about its outputs. Turning it on sends that content
-          to Trovis; leave it off only if that's a concern.
+          <strong>Do this or you'll only see metadata — and Work stays untitled.</strong>{' '}
+          Without capture, Trovis records what ran, when, and cost — but{' '}
+          <em>not</em> the actual messages, responses, or tool results, and new
+          runs will not land as named Work (<code>trovis.loop.title</code>).
+          Turning it on sends that content to Trovis and names each loop from
+          the inbound message; leave it off only if that's a concern.
         </p>
       </NumberedStep>
 

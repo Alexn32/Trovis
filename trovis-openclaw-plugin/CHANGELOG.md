@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.3
+
+### Added
+
+- **`trovisSetLoopTitle(title)`** — queue a human `trovis.loop.title` on
+  the next span without enabling `captureOutputs`. Use this to land named
+  Work (`title_source=provided`) when you have a task name but do not want
+  to send message bodies. Empty titles are ignored. An explicit title wins
+  over a capture-derived inbound-message title.
+- Docs + `/trovis capture on` copy now state the Connect claim: capture on
+  (or `trovisSetLoopTitle`) is how new OpenClaw installs get named Work.
+  Privacy default is unchanged (`captureOutputs: false`).
+
 ## 0.6.2
 
 ### Fixed

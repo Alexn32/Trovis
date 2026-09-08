@@ -35,6 +35,7 @@ from typing import Any, AsyncIterator, Optional
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
+from trovis.loop_attrs import apply_loop_attrs, first_user_text, human_title
 from trovis.registration import is_capture_enabled
 
 logger = logging.getLogger("trovis.claude_agent_sdk")
@@ -150,7 +151,14 @@ async def _instrumented_stream(
     """
     _maybe_register(call_kwargs)
     agent_name = _agent_name(call_kwargs)
-    state: dict[str, Any] = {"last_model": None, "session_id": None}
+    # query(prompt=...) is the user task. Used as a title fallback on the
+    # first UserMessage when capture is on (prompt text is user content).
+    prompt = call_kwargs.get("prompt")
+    state: dict[str, Any] = {
+        "last_model": None,
+        "session_id": None,
+        "prompt": prompt if isinstance(prompt, str) else None,
+    }
 
     async for message in inner:
         try:
@@ -182,11 +190,18 @@ def _emit_for_message(
 
     if kind == "UserMessage":
         text = _extract_text(_get(message, "content"))
+        title = None
+        if is_capture_enabled():
+            title = first_user_text(text) or human_title(state.get("prompt"))
         with tracer.start_as_current_span("message_received") as span:
             span.set_attribute("trovis.event.type", "message_received")
             span.set_attribute("trovis.agent.id", agent_name)
-            if run_id:
-                span.set_attribute("trovis.run.id", run_id)
+            apply_loop_attrs(
+                span,
+                run_id=run_id or None,
+                external_id=run_id or None,
+                title=title,
+            )
             if text:
                 span.set_attribute("trovis.message.content_length", len(text))
                 if is_capture_enabled():
@@ -235,8 +250,7 @@ def _emit_for_message(
             with tracer.start_as_current_span("llm_output") as span:
                 span.set_attribute("trovis.event.type", "llm_output")
                 span.set_attribute("trovis.agent.id", agent_name)
-                if run_id:
-                    span.set_attribute("trovis.run.id", run_id)
+                apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
                 if model:
                     span.set_attribute("gen_ai.request.model", str(model))
                 if text:
@@ -273,8 +287,7 @@ def _emit_tool_use(
     with tracer.start_as_current_span("tool_call") as span:
         span.set_attribute("trovis.event.type", "tool_call")
         span.set_attribute("trovis.agent.id", agent_name)
-        if run_id:
-            span.set_attribute("trovis.run.id", run_id)
+        apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
         name = _get(block, "name")
         if name:
             span.set_attribute("trovis.tool.name", str(name))
@@ -302,8 +315,7 @@ def _emit_result(
     with tracer.start_as_current_span("agent_run_complete") as span:
         span.set_attribute("trovis.event.type", "agent_run_complete")
         span.set_attribute("trovis.agent.id", agent_name)
-        if sid:
-            span.set_attribute("trovis.run.id", sid)
+        apply_loop_attrs(span, run_id=sid or None, external_id=sid or None)
         span.set_attribute("trovis.run.success", not is_error)
         if is_error:
             span.set_status(StatusCode.ERROR)
@@ -513,3 +525,9 @@ def _reset_for_tests() -> None:
     _ORIGINALS.clear()
     _REGISTERED.clear()
     _PATCHED = False
+    try:
+        from trovis.loop_attrs import _reset_for_tests as _reset_loop
+
+        _reset_loop()
+    except Exception:  # noqa: BLE001
+        pass
