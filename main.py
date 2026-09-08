@@ -844,7 +844,14 @@ async def ingest_traces(request: Request) -> IngestResponse:
 
       trovis.loop.external_id   explicit loop grouping key
                                 (falls back to trovis.run.id)
-      trovis.loop.title         plain-English title, used at loop creation
+      trovis.loop.title         plain-English title. Stamped at loop
+                                creation as title_source=provided, or
+                                adopted onto an existing untitled open
+                                loop (NULL/empty → provided). Never
+                                overwrites an existing title. Shells
+                                ("Task from …", "{agent} · {tool} · N
+                                actions") are rejected — they do not
+                                become title_source=provided.
       trovis.loop.close         'done' or a reason string -> agent-attributed
                                 loop_closed event (payload.reason =
                                 'completed_by_agent'); the loop goes 'done'.

@@ -2511,6 +2511,48 @@ def _upsert_loop_participant(
     )
 
 
+def _provided_loop_title(attrs: dict[str, Any] | None) -> str | None:
+    """Human title from span attrs, or None if missing / empty / shell.
+
+    Attr contract (unchanged): `trovis.loop.title`, legacy `oversee.loop.title`.
+    Shells ("Task from …", `{agent} · {tool} · N actions`) are rejected so
+    they never get `title_source=provided`. Must stay aligned with
+    `_is_shell_work_title` / `_SHELL_TITLE_SQL`.
+    """
+    raw = attr(attrs, "loop.title")
+    if raw is None:
+        return None
+    title = str(raw).strip()[:120]
+    if not title or _is_shell_work_title(title):
+        return None
+    return title
+
+
+def _adopt_loop_title_if_untitled(
+    cur,
+    loop_id: int,
+    attrs: dict[str, Any] | None,
+    account_id: int | None,
+) -> None:
+    """Adopt a human title onto an untitled *open* loop.
+
+    NULL/empty → `title_source=provided` only. Never overwrites an existing
+    title (provided or generated). Closed / grace-window loops are left
+    alone. Shells are rejected by `_provided_loop_title`.
+    """
+    title = _provided_loop_title(attrs)
+    if not title:
+        return
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    cur.execute(
+        f"UPDATE loops SET title = {PH}, title_source = {PH} "
+        f"WHERE id = {PH} "
+        f"AND (title IS NULL OR TRIM(title) = '') "
+        f"AND closed_at IS NULL {acct_sql}",
+        tuple([title, _TITLE_SOURCE_PROVIDED, loop_id, *acct_args]),
+    )
+
+
 def _resolve_loop_for_span(
     cur,
     attrs: dict[str, Any],
@@ -2532,6 +2574,12 @@ def _resolve_loop_for_span(
          event is < GAP_THRESHOLD old, else a new loop. (Per-agent_id —
          with no shared key there's nothing tying sub-agents together.)
 
+    Title: a non-shell `trovis.loop.title` (legacy `oversee.loop.title`)
+    is stamped at INSERT as `title_source=provided`, or adopted onto an
+    existing untitled open loop (NULL/empty → provided). An existing
+    title is never overwritten. Shells ("Task from …",
+    `{agent} · {tool} · N actions`) are rejected at both INSERT and adopt.
+
     Closed-loop rule, v2: a keyed span arriving within CLOSE_GRACE_S of its
     loop's close ATTACHES to the closed loop without reopening it — the
     record stays complete, the loop stays done. (v1 was "closed loops never
@@ -2547,7 +2595,9 @@ def _resolve_loop_for_span(
     key = str(key) if key else None
     cache_key = (service_name, key) if key else (service_name, agent_id, None)
     if cache_key in cache:
-        return cache[cache_key]
+        loop_id = cache[cache_key]
+        _adopt_loop_title_if_untitled(cur, loop_id, attrs, account_id)
+        return loop_id
 
     acct_sql, acct_args = _loop_account_clause(account_id)
     row = None
@@ -2590,12 +2640,10 @@ def _resolve_loop_for_span(
     if row:
         loop_id = row["id"]
         cache[cache_key] = loop_id
+        _adopt_loop_title_if_untitled(cur, loop_id, attrs, account_id)
         return loop_id
 
-    raw_title = attr(attrs, "loop.title")
-    title = str(raw_title).strip()[:120] if raw_title else None
-    if not title:
-        title = None
+    title = _provided_loop_title(attrs)
     actor = lp.agent_actor(service_name, agent_id)
     loop_id = _insert_returning_id(
         cur,
@@ -3021,9 +3069,10 @@ def _backfill_loop_title_source(cur) -> None:
     """Classify existing loops.title as provided vs generated. Idempotent.
 
     Plugin/operator titles arrive as `trovis.loop.title` (or oversee.*) on a
-    span at ingest and are stored on the loop at INSERT. Trovis-generated
-    titles (LLM / `{agent} · {tool} · N actions` template) are written later
-    by set_loop_title_if_missing and never stamped onto spans.
+    span at ingest and are stored on the loop at INSERT, or adopted onto an
+    untitled open loop. Trovis-generated titles (LLM /
+    `{agent} · {tool} · N actions` template) are written later by
+    set_loop_title_if_missing and never stamped onto spans.
 
     Work home (#120 lean endpoints) must only count provided titles; treating
     any non-empty title as named work is what flooded overview with OTel
@@ -3128,9 +3177,11 @@ def get_loop_title_shape(loop_id: int, account_id: int | None) -> dict[str, Any]
 def set_loop_title_if_missing(
     loop_id: int, title: str, account_id: int | None
 ) -> bool:
-    """The ONE allowed title write. NULL-guarded: a plugin-provided title is
+    """The generated-title write. NULL-guarded: a plugin-provided title is
     never replaced and a generated title is never overwritten — first title
-    wins, forever. Returns True only when this call set it."""
+    wins, forever. Ingest may also adopt a human title onto an untitled
+    open loop (`title_source=provided`); that path is separate and also
+    NULL/empty-guarded. Returns True only when this call set it."""
     if not title:
         return False
     sql = f"UPDATE loops SET title = {PH}, title_source = 'generated' WHERE id = {PH} AND title IS NULL"
