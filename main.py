@@ -34,6 +34,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 import alerts
 import asker
@@ -391,6 +392,13 @@ async def auth_middleware(request: Request, call_next):
     additionally sets `request.state.user` ({id,email,role}). Open paths and
     OPTIONS bypass. With no credential and an empty DB (no keys AND no users),
     we pass through (local dev); otherwise 401.
+
+    Starlette requires this be `async`, but every credential lookup below is a
+    blocking psycopg2/sqlite3 call and this runs on EVERY request. Calling
+    database.* directly here would put a synchronous query on the single
+    worker's event loop each time, stalling every other in-flight request.
+    Every DB call in this function therefore goes through run_in_threadpool —
+    keep it that way; no raw database.* on the event loop in this middleware.
     """
     request.state.account_id = None
     request.state.user = None
@@ -414,7 +422,7 @@ async def auth_middleware(request: Request, call_next):
     # 1. Bearer session — dashboard users.
     authz = request.headers.get("Authorization")
     if authz and authz.lower().startswith("bearer "):
-        sess = database.resolve_session(authz[7:].strip())
+        sess = await run_in_threadpool(database.resolve_session, authz[7:].strip())
         if not sess:
             return JSONResponse(
                 status_code=401, content={"error": "Invalid or expired session"}
@@ -436,7 +444,7 @@ async def auth_middleware(request: Request, call_next):
         "X-Oversee-Api-Key"
     )
     if header_key:
-        result = database.validate_api_key(header_key)
+        result = await run_in_threadpool(database.validate_api_key, header_key)
         if not result:
             return JSONResponse(
                 status_code=401, content={"error": "Invalid or missing API key"}
@@ -446,8 +454,11 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 3. No credential. Only allowed when the DB has neither keys nor users —
-    # the pre-signup / local-dev mode.
-    if database.has_any_keys() or database.has_any_users():
+    # the pre-signup / local-dev mode. `or` still short-circuits: has_any_users
+    # is only awaited when has_any_keys came back falsy.
+    if await run_in_threadpool(database.has_any_keys) or await run_in_threadpool(
+        database.has_any_users
+    ):
         return JSONResponse(
             status_code=401, content={"error": "Authentication required"}
         )
@@ -718,7 +729,7 @@ def _parse_otlp_json(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
+def health() -> HealthResponse:
     """Liveness only. No DB, no work/board/summary. The ASGI fastpath
     answers this before any other middleware; this route stays for OpenAPI."""
     return HealthResponse(status="ok", version=VERSION)
@@ -1008,7 +1019,7 @@ def _agent_id_for_span(span: dict[str, Any]) -> str:
 
 
 @app.get("/loops", response_model=list[LoopSummary])
-async def list_loops(
+def list_loops(
     request: Request,
     state: str | None = Query(default=None),
     assignee: str | None = Query(default=None),
@@ -1056,7 +1067,7 @@ async def list_loops(
 
 
 @app.get("/loops/stalled", response_model=list[LoopSummary])
-async def stalled_loops(
+def stalled_loops(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[LoopSummary]:
@@ -1074,7 +1085,7 @@ async def stalled_loops(
 
 
 @app.get("/loops/{loop_id}", response_model=LoopDetail)
-async def loop_detail(loop_id: int, request: Request) -> LoopDetail:
+def loop_detail(loop_id: int, request: Request) -> LoopDetail:
     """One loop with its participants, narrated event stream (plain-English
     `sentence` per entry, consecutive tool/LLM calls collapsed), and the
     possession-segments chain — the loop's story. Segments and sentences are
@@ -1097,7 +1108,7 @@ async def loop_detail(loop_id: int, request: Request) -> LoopDetail:
 
 
 @app.post("/loops/{loop_id}/close", response_model=LoopDetail)
-async def close_loop(loop_id: int, request: Request) -> LoopDetail:
+def close_loop(loop_id: int, request: Request) -> LoopDetail:
     """Close a loop: append a loop_closed EVENT attributed to the
     authenticated user and set closed_at. The only write endpoint on loops —
     it appends to the event record, it never mutates existing events.
@@ -1636,7 +1647,7 @@ def _handoff_detail(loop_id: int, handoff_event_id: int, request: Request,
     "/loops/{loop_id}/handoffs/{handoff_event_id}/accept",
     response_model=LoopDetail,
 )
-async def accept_handoff(
+def accept_handoff(
     loop_id: int, handoff_event_id: int, request: Request,
 ) -> LoopDetail:
     """Take ownership of a handoff: append handoff_accepted attributed to the
@@ -1648,7 +1659,7 @@ async def accept_handoff(
     "/loops/{loop_id}/handoffs/{handoff_event_id}/complete",
     response_model=LoopDetail,
 )
-async def complete_handoff(
+def complete_handoff(
     loop_id: int, handoff_event_id: int, request: Request,
 ) -> LoopDetail:
     """Report the handed-off work done: append handoff_completed attributed
@@ -1660,7 +1671,7 @@ async def complete_handoff(
     "/loops/{loop_id}/handoffs/{handoff_event_id}/decline",
     response_model=LoopDetail,
 )
-async def decline_handoff(
+def decline_handoff(
     loop_id: int,
     handoff_event_id: int,
     request: Request,
@@ -1692,7 +1703,7 @@ def _require_session_user(request: Request) -> dict:
 
 
 @app.post("/workflows", response_model=WorkflowDetail, status_code=201)
-async def declare_workflow(request: Request, body: WorkflowCreate) -> WorkflowDetail:
+def declare_workflow(request: Request, body: WorkflowCreate) -> WorkflowDetail:
     """Declare a workflow (creates version 1)."""
     account_id = getattr(request.state, "account_id", None)
     user = _require_session_user(request)
@@ -1711,7 +1722,7 @@ async def declare_workflow(request: Request, body: WorkflowCreate) -> WorkflowDe
 
 
 @app.post("/workflows/draft", response_model=WorkflowDraft)
-async def draft_workflow(
+def draft_workflow(
     request: Request, body: WorkflowDraftRequest
 ) -> WorkflowDraft:
     """Draft a declaration from a plain-English description of the process.
@@ -1744,7 +1755,7 @@ async def draft_workflow(
 
 
 @app.get("/workflows", response_model=list[WorkflowSummary])
-async def list_workflows(
+def list_workflows(
     request: Request,
     include_archived: bool = Query(default=False),
 ) -> list[WorkflowSummary]:
@@ -1754,7 +1765,7 @@ async def list_workflows(
 
 
 @app.get("/workflows/{workflow_id}", response_model=WorkflowDetail)
-async def workflow_detail(workflow_id: int, request: Request) -> WorkflowDetail:
+def workflow_detail(workflow_id: int, request: Request) -> WorkflowDetail:
     """Current definition + full version history."""
     account_id = getattr(request.state, "account_id", None)
     wf = database.get_workflow(workflow_id, account_id)
@@ -1764,7 +1775,7 @@ async def workflow_detail(workflow_id: int, request: Request) -> WorkflowDetail:
 
 
 @app.get("/workflows/{workflow_id}/loops", response_model=list[LoopSummary])
-async def workflow_loops(
+def workflow_loops(
     workflow_id: int,
     request: Request,
     state: str | None = Query(default=None),
@@ -1788,7 +1799,7 @@ async def workflow_loops(
 
 
 @app.get("/workflows/{workflow_id}/map", response_model=WorkflowMap)
-async def workflow_map(workflow_id: int, request: Request) -> WorkflowMap:
+def workflow_map(workflow_id: int, request: Request) -> WorkflowMap:
     """The workflow page's live station map: where every non-terminal
     matched loop currently sits (see loops.align_loop_to_stations), plus
     done-today. Reads work for both auth types, like all workflow reads."""
@@ -1800,7 +1811,7 @@ async def workflow_map(workflow_id: int, request: Request) -> WorkflowMap:
 
 
 @app.post("/workflows/{workflow_id}/versions", response_model=WorkflowDetail)
-async def add_workflow_version(
+def add_workflow_version(
     workflow_id: int, request: Request, body: WorkflowVersionCreate,
 ) -> WorkflowDetail:
     """Append a new full definition and bump current_version. Open loops
@@ -1825,7 +1836,7 @@ async def add_workflow_version(
 
 
 @app.post("/workflows/{workflow_id}/archive", response_model=WorkflowDetail)
-async def archive_workflow(workflow_id: int, request: Request) -> WorkflowDetail:
+def archive_workflow(workflow_id: int, request: Request) -> WorkflowDetail:
     """Archive (never delete): stops future matching; matched history and
     every version stay readable. Idempotent."""
     account_id = getattr(request.state, "account_id", None)
@@ -1923,7 +1934,7 @@ def _detail_status(stats: dict) -> tuple[str, str]:
 
 
 @app.get("/agents/{service_name}/summary", response_model=AgentSummary)
-async def agent_summary(
+def agent_summary(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -1982,7 +1993,7 @@ async def agent_summary(
 
 
 @app.get("/agents/{service_name}/drift", response_model=DriftReport)
-async def agent_drift(
+def agent_drift(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2060,7 +2071,7 @@ async def agent_drift(
 
 
 @app.get("/agents/{service_name}/spans", response_model=list[SpanRecord])
-async def agent_spans(
+def agent_spans(
     service_name: str,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
@@ -2079,7 +2090,7 @@ _REGISTRATION_SUMMARY = "Registered with the fleet and declared its identity"
 
 
 @app.get("/agents/{service_name}/records", response_model=AgentRecordsResponse)
-async def agent_records(
+def agent_records(
     service_name: str,
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
@@ -2175,7 +2186,7 @@ async def agent_records(
 
 
 @app.post("/agents/{service_name}/describe", response_model=AgentDescription)
-async def generate_description(
+def generate_description(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2208,7 +2219,7 @@ async def generate_description(
 
 
 @app.get("/agents/{service_name}/description", response_model=AgentDescription)
-async def latest_description(
+def latest_description(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2232,7 +2243,7 @@ async def latest_description(
 
 
 @app.put("/agents/{service_name}/display-name", status_code=204)
-async def set_agent_display_name(
+def set_agent_display_name(
     service_name: str,
     request: Request,
     body: DisplayNameRequest,
@@ -2253,7 +2264,7 @@ async def set_agent_display_name(
     "/agents/{service_name}",
     response_model=AgentDeleteResponse,
 )
-async def delete_agent(
+def delete_agent(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2291,7 +2302,7 @@ async def delete_agent(
 
 
 @app.put("/agents/{service_name}/owner", status_code=204)
-async def set_owner(
+def set_owner(
     service_name: str,
     request: Request,
     body: AgentOwnerSet,
@@ -2311,7 +2322,7 @@ async def set_owner(
 
 
 @app.delete("/agents/{service_name}/owner", status_code=204)
-async def clear_owner(
+def clear_owner(
     service_name: str,
     request: Request,
     agent_id: str = Query(default="main"),
@@ -2332,7 +2343,7 @@ async def clear_owner(
 
 
 @app.get("/team", response_model=list[TeamMember])
-async def list_team(request: Request) -> list[TeamMember]:
+def list_team(request: Request) -> list[TeamMember]:
     account_id = getattr(request.state, "account_id", None)
     return [
         TeamMember(**m)
@@ -2341,7 +2352,7 @@ async def list_team(request: Request) -> list[TeamMember]:
 
 
 @app.post("/team", response_model=TeamMember, status_code=201)
-async def add_team_member(
+def add_team_member(
     request: Request, body: TeamMemberCreate
 ) -> TeamMember:
     account_id = getattr(request.state, "account_id", None)
@@ -2370,7 +2381,7 @@ _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 @app.post("/waitlist", response_model=WaitlistResponse)
-async def join_waitlist(body: WaitlistRequest) -> WaitlistResponse:
+def join_waitlist(body: WaitlistRequest) -> WaitlistResponse:
     """Public marketing-site signup. No auth. Idempotent: a repeat email
     returns {"status": "already_joined"} with 200 rather than erroring."""
     email = (body.email or "").strip()
@@ -2385,13 +2396,13 @@ async def join_waitlist(body: WaitlistRequest) -> WaitlistResponse:
 
 
 @app.get("/waitlist/count", response_model=WaitlistCountResponse)
-async def get_waitlist_count() -> WaitlistCountResponse:
+def get_waitlist_count() -> WaitlistCountResponse:
     """Public count of waitlist signups (for display on the marketing site)."""
     return WaitlistCountResponse(count=database.get_waitlist_count())
 
 
 @app.delete("/waitlist/{email}", response_model=WaitlistDeleteResponse)
-async def delete_waitlist(email: str, request: Request) -> WaitlistDeleteResponse:
+def delete_waitlist(email: str, request: Request) -> WaitlistDeleteResponse:
     """Remove a waitlist signup — operator-only. Unlike POST/GET /waitlist this
     path is NOT in _OPEN_PATHS, so the auth middleware requires a valid Trovis
     credential (session or API key). Used to clear test/bogus entries so they
@@ -2404,7 +2415,7 @@ async def delete_waitlist(email: str, request: Request) -> WaitlistDeleteRespons
 
 
 @app.delete("/team/{member_id}", status_code=204)
-async def remove_team_member(member_id: int, request: Request) -> None:
+def remove_team_member(member_id: int, request: Request) -> None:
     """Delete a team member and clear any agent assignments that
     pointed to them. 204 even when no row was deleted — idempotent."""
     account_id = getattr(request.state, "account_id", None)
@@ -2412,7 +2423,7 @@ async def remove_team_member(member_id: int, request: Request) -> None:
 
 
 @app.get("/team/{member_id}/agents", response_model=list[OwnedAgent])
-async def get_team_member_agents(
+def get_team_member_agents(
     member_id: int, request: Request
 ) -> list[OwnedAgent]:
     """Return the agents owned by this team member, with display name
@@ -2427,7 +2438,7 @@ async def get_team_member_agents(
 
 
 @app.get("/agents/{service_name}/registration", response_model=AgentRegistration)
-async def latest_registration(
+def latest_registration(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2450,7 +2461,7 @@ async def latest_registration(
 
 
 @app.get("/agents/{service_name}/outputs", response_model=list[AgentOutput])
-async def agent_outputs(
+def agent_outputs(
     service_name: str,
     request: Request,
     limit: int = Query(default=20, ge=1, le=100),
@@ -2472,7 +2483,7 @@ async def agent_outputs(
 
 
 @app.get("/agents/{service_name}/costs", response_model=AgentCosts)
-async def agent_costs(
+def agent_costs(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2505,7 +2516,7 @@ async def agent_costs(
 
 
 @app.get("/admin/pricing")
-async def get_pricing(request: Request) -> dict[str, Any]:
+def get_pricing(request: Request) -> dict[str, Any]:
     """Current pricing-table state: model count, per-source breakdown, last
     refresh time, and a small sample. Handy for confirming the daily sync is
     landing."""
@@ -2513,7 +2524,7 @@ async def get_pricing(request: Request) -> dict[str, Any]:
 
 
 @app.get("/admin/pricing/coverage")
-async def get_pricing_coverage(
+def get_pricing_coverage(
     request: Request,
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict[str, Any]:
@@ -2609,7 +2620,7 @@ def _pct_delta(current: float, previous: float) -> float | None:
 
 
 @app.get("/agents/{service_name}/weekly", response_model=WeeklySummary)
-async def weekly_summary_endpoint(
+def weekly_summary_endpoint(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2771,7 +2782,7 @@ def _weekly_summary_impl(
 
 
 @app.get("/agents/{service_name}/capabilities", response_model=Capabilities)
-async def capabilities_endpoint(
+def capabilities_endpoint(
     service_name: str,
     request: Request,
     agent_id: str | None = Query(default=None),
@@ -2885,7 +2896,7 @@ def _bearer_token(request: Request) -> str | None:
 
 
 @app.post("/auth/signup", response_model=SignupResponse, status_code=201)
-async def signup(body: SignupRequest) -> SignupResponse:
+def signup(body: SignupRequest) -> SignupResponse:
     """Create a new organization + its owner login, mint an initial org API
     key (for agents), and start a session."""
     if body.account_type not in ("individual", "business"):
@@ -2923,7 +2934,7 @@ async def signup(body: SignupRequest) -> SignupResponse:
 
 
 @app.post("/auth/login", response_model=LoginResponse)
-async def login(body: LoginRequest) -> LoginResponse:
+def login(body: LoginRequest) -> LoginResponse:
     """Email + password → session token. Returns a single generic error for
     unknown email / no-password / wrong password to avoid enumeration."""
     user = database.get_user_by_email(body.email)
@@ -2943,7 +2954,7 @@ async def login(body: LoginRequest) -> LoginResponse:
 
 
 @app.post("/auth/forgot-password", status_code=204)
-async def forgot_password(request: Request, body: ForgotPasswordRequest) -> None:
+def forgot_password(request: Request, body: ForgotPasswordRequest) -> None:
     """Request a password-reset link. ALWAYS returns 204 — we never reveal
     whether an email is registered (no account enumeration). When the email
     matches a user we mint a one-time token and email the reset link; if email
@@ -2966,7 +2977,7 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest) -> None
 
 
 @app.post("/auth/reset-password", response_model=LoginResponse)
-async def reset_password(body: ResetPasswordRequest) -> LoginResponse:
+def reset_password(body: ResetPasswordRequest) -> LoginResponse:
     """Consume a reset token and set a new password. Invalidates the user's
     existing sessions, then signs them in with a fresh session. 400 on an
     invalid / expired / already-used token."""
@@ -2985,13 +2996,13 @@ async def reset_password(body: ResetPasswordRequest) -> LoginResponse:
 
 
 @app.post("/auth/logout", status_code=204)
-async def logout(request: Request) -> None:
+def logout(request: Request) -> None:
     """Invalidate the caller's session token."""
     database.delete_session(_bearer_token(request))
 
 
 @app.get("/auth/me", response_model=MeResponse)
-async def me(request: Request) -> MeResponse:
+def me(request: Request) -> MeResponse:
     """Current identity. `user` is None for API-key (agent/legacy) auth."""
     account_id = getattr(request.state, "account_id", None)
     auth = getattr(request.state, "auth", None) or "session"
@@ -3010,7 +3021,7 @@ async def me(request: Request) -> MeResponse:
 
 
 @app.post("/auth/claim", response_model=LoginResponse, status_code=201)
-async def claim_account(body: ClaimRequest) -> LoginResponse:
+def claim_account(body: ClaimRequest) -> LoginResponse:
     """One-time migration for a legacy passwordless account: prove ownership
     with a valid org API key, then create the owner login. Only works while
     the org has zero users (otherwise it would let any key-holder mint a new
@@ -3041,7 +3052,7 @@ async def claim_account(body: ClaimRequest) -> LoginResponse:
 
 
 @app.post("/auth/set-password", status_code=204)
-async def set_password(request: Request, body: SetPasswordRequest) -> None:
+def set_password(request: Request, body: SetPasswordRequest) -> None:
     """Set/change the logged-in user's password. Requires the current
     password when one is already set. Rotates the user's other sessions."""
     state_user = getattr(request.state, "user", None)
@@ -3060,7 +3071,7 @@ async def set_password(request: Request, body: SetPasswordRequest) -> None:
 
 
 @app.post("/auth/accept-invite", response_model=LoginResponse, status_code=201)
-async def accept_invite(body: AcceptInviteRequest) -> LoginResponse:
+def accept_invite(body: AcceptInviteRequest) -> LoginResponse:
     """Redeem a one-time invite link → create the member login + a session."""
     _validate_password(body.password)
     try:
@@ -3082,7 +3093,7 @@ async def accept_invite(body: AcceptInviteRequest) -> LoginResponse:
 
 
 @app.get("/org", response_model=OrgPublic)
-async def get_org(request: Request) -> OrgPublic:
+def get_org(request: Request) -> OrgPublic:
     account_id = getattr(request.state, "account_id", None)
     org = database.get_account(account_id) if account_id is not None else None
     if org is None:
@@ -3091,7 +3102,7 @@ async def get_org(request: Request) -> OrgPublic:
 
 
 @app.get("/account/usage", response_model=AccountUsage)
-async def account_usage(request: Request) -> AccountUsage:
+def account_usage(request: Request) -> AccountUsage:
     """Plan + agent count + limit + locked count — for the Fleet header and
     upgrade prompts. Agent count is distinct INSTANCES (service_name) — a
     multi-sub-agent instance counts once; limit is None for unlimited plans."""
@@ -3106,7 +3117,7 @@ async def account_usage(request: Request) -> AccountUsage:
 
 
 @app.get("/account/alerts", response_model=AlertSettings)
-async def get_alert_settings(request: Request) -> AlertSettings:
+def get_alert_settings(request: Request) -> AlertSettings:
     """The account's proactive-alert configuration (channels + rule toggles +
     thresholds). Returns defaults when nothing has been saved yet."""
     account_id = getattr(request.state, "account_id", None)
@@ -3116,7 +3127,7 @@ async def get_alert_settings(request: Request) -> AlertSettings:
 
 
 @app.put("/account/alerts", response_model=AlertSettings)
-async def update_alert_settings(
+def update_alert_settings(
     request: Request, body: AlertSettingsUpdate
 ) -> AlertSettings:
     """Partial update of the account's alert config. Only provided fields
@@ -3139,7 +3150,7 @@ async def test_alert(request: Request) -> dict:
 
 
 @app.put("/account/plan", response_model=PlanChangeResult)
-async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResult:
+def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResult:
     """Initiate a plan change for the caller's OWN account.
 
     The payment gate: a paid tier (starter/pro/enterprise) can only be reached
@@ -3220,7 +3231,7 @@ async def set_plan(request: Request, body: AccountPlanUpdate) -> PlanChangeResul
 
 
 @app.post("/account/billing-portal")
-async def billing_portal_session(request: Request) -> dict:
+def billing_portal_session(request: Request) -> dict:
     """Open a Stripe Customer Portal session for the caller's own account and
     return its URL — where they upgrade/downgrade, update payment, see invoices,
     and cancel (Stripe hosts it). 400 when the account has no Stripe customer yet
@@ -3326,7 +3337,7 @@ async def billing_webhook(request: Request) -> dict:
 
 
 @app.put("/org", response_model=OrgPublic)
-async def update_org(request: Request, body: OrgProfileUpdate) -> OrgPublic:
+def update_org(request: Request, body: OrgProfileUpdate) -> OrgPublic:
     """Owner-only: set the workspace (org) display name. Used by onboarding."""
     account_id = _require_owner(request)
     database.update_account_profile(account_id, body.name)
@@ -3337,7 +3348,7 @@ async def update_org(request: Request, body: OrgProfileUpdate) -> OrgPublic:
 
 
 @app.post("/auth/onboarding/complete", status_code=204)
-async def complete_onboarding(request: Request) -> None:
+def complete_onboarding(request: Request) -> None:
     """Mark the account's onboarding wizard as done (idempotent). The owner
     calls this when they finish or skip the post-signup wizard."""
     account_id = getattr(request.state, "account_id", None)
@@ -3347,7 +3358,7 @@ async def complete_onboarding(request: Request) -> None:
 
 
 @app.get("/org/members", response_model=list[UserPublic])
-async def list_members(request: Request) -> list[UserPublic]:
+def list_members(request: Request) -> list[UserPublic]:
     """All users in the caller's org (owner + members can view)."""
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
@@ -3356,7 +3367,7 @@ async def list_members(request: Request) -> list[UserPublic]:
 
 
 @app.post("/org/invites", response_model=InviteCreateResponse, status_code=201)
-async def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
+def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
     """Owner-only: mint a one-time invite link for a Business org."""
     account_id = _require_owner(request)
     org = database.get_account(account_id)
@@ -3391,21 +3402,21 @@ async def create_invite(request: Request, body: InviteCreate) -> InviteCreateRes
 
 
 @app.get("/org/invites", response_model=list[InvitePublic])
-async def list_org_invites(request: Request) -> list[InvitePublic]:
+def list_org_invites(request: Request) -> list[InvitePublic]:
     """Owner-only: pending invites for the org."""
     account_id = _require_owner(request)
     return [InvitePublic(**i) for i in database.list_invites(account_id)]
 
 
 @app.delete("/org/invites/{invite_id}", status_code=204)
-async def revoke_org_invite(invite_id: int, request: Request) -> None:
+def revoke_org_invite(invite_id: int, request: Request) -> None:
     account_id = _require_owner(request)
     if not database.revoke_invite(account_id, invite_id):
         raise HTTPException(status_code=404, detail="invite not found")
 
 
 @app.delete("/org/members/{user_id}", status_code=204)
-async def remove_member(user_id: int, request: Request) -> None:
+def remove_member(user_id: int, request: Request) -> None:
     """Owner-only: remove a member from the org. Refuses to remove the last
     owner. Account-scoped so an owner can't touch another org's users."""
     account_id = _require_owner(request)
@@ -3418,7 +3429,7 @@ async def remove_member(user_id: int, request: Request) -> None:
 
 
 @app.get("/org/api-keys", response_model=RevealKeysResponse)
-async def get_api_keys(request: Request) -> RevealKeysResponse:
+def get_api_keys(request: Request) -> RevealKeysResponse:
     """Return the org's API key(s) for the currently authenticated user. No
     password required — the user is already logged in. Used by the AddAgent
     setup page so the key can be copied into ChatGPT / SDK snippets."""
@@ -3434,7 +3445,7 @@ async def get_api_keys(request: Request) -> RevealKeysResponse:
 
 
 @app.post("/org/api-keys/reveal", response_model=RevealKeysResponse)
-async def reveal_api_keys(
+def reveal_api_keys(
     request: Request, body: RevealKeysRequest
 ) -> RevealKeysResponse:
     """Re-show the org's API key(s) — owner only, gated by re-entering the
@@ -3459,14 +3470,14 @@ async def reveal_api_keys(
 
 
 @app.get("/connections", response_model=list[Connection])
-async def list_connections(request: Request) -> list[Connection]:
+def list_connections(request: Request) -> list[Connection]:
     """All agent→agent connection edges for the account."""
     account_id = getattr(request.state, "account_id", None)
     return [Connection(**c) for c in database.get_connections(account_id)]
 
 
 @app.post("/connections/detect", response_model=list[Connection])
-async def detect_connections(request: Request) -> list[Connection]:
+def detect_connections(request: Request) -> list[Connection]:
     """Re-scan recent shared traces for agent→agent edges, then return the
     refreshed list. Detection preserves operator confirm/dismiss/manual."""
     account_id = getattr(request.state, "account_id", None)
@@ -3475,7 +3486,7 @@ async def detect_connections(request: Request) -> list[Connection]:
 
 
 @app.post("/connections/from-description", response_model=list[Connection])
-async def connections_from_description(
+def connections_from_description(
     request: Request, body: ConnectionsFromDescription
 ) -> list[Connection]:
     """AI builder: propose agent→agent connections from a description, create
@@ -3494,7 +3505,7 @@ async def connections_from_description(
 
 
 @app.post("/connections", response_model=Connection, status_code=201)
-async def add_connection(request: Request, body: ConnectionCreate) -> Connection:
+def add_connection(request: Request, body: ConnectionCreate) -> Connection:
     """Operator-drawn (manual) connection."""
     account_id = getattr(request.state, "account_id", None)
     c = database.add_manual_connection(
@@ -3508,7 +3519,7 @@ async def add_connection(request: Request, body: ConnectionCreate) -> Connection
 
 
 @app.patch("/connections/{conn_id}", response_model=Connection)
-async def update_connection(
+def update_connection(
     conn_id: int, request: Request, body: ConnectionStatusUpdate
 ) -> Connection:
     """Confirm / dismiss / re-detect an edge."""
@@ -3523,7 +3534,7 @@ async def update_connection(
 
 
 @app.delete("/connections/{conn_id}", status_code=204)
-async def remove_connection(conn_id: int, request: Request) -> None:
+def remove_connection(conn_id: int, request: Request) -> None:
     account_id = getattr(request.state, "account_id", None)
     if not database.delete_connection(account_id, conn_id):
         raise HTTPException(status_code=404, detail="connection not found")
@@ -3985,7 +3996,7 @@ def _daily_series(daily_rows: list[dict]) -> tuple[list[float], float, str]:
 
 
 @app.get("/dashboard/cost", response_model=CostResponse)
-async def dashboard_cost(request: Request) -> CostResponse:
+def dashboard_cost(request: Request) -> CostResponse:
     """Cost Intelligence card. `today` is the UTC-calendar-day fleet spend (sum
     of each agent's cost_today) — identical to the Fleet page's "cost today" and
     to the last point of the 30-day sparkline. Month-to-date vs. the org
@@ -4021,7 +4032,7 @@ async def dashboard_cost(request: Request) -> CostResponse:
 
 
 @app.get("/cost/overview", response_model=CostOverview)
-async def cost_overview(request: Request) -> CostOverview:
+def cost_overview(request: Request) -> CostOverview:
     """The dedicated cost page: today (UTC calendar day), month-to-date vs. the org
     budget, a 30-day trend, per-agent breakdown (today/7d/all-time/MTD + the
     editable monthly cap + over-cap flag), and an org-wide by-model breakdown."""
@@ -4077,7 +4088,7 @@ async def cost_overview(request: Request) -> CostOverview:
 
 
 @app.get("/cost/audit")
-async def cost_audit(
+def cost_audit(
     request: Request,
     service: str | None = Query(default=None),
     days: int = Query(default=30, ge=1, le=365),
@@ -4094,17 +4105,17 @@ async def cost_audit(
 
 
 @app.put("/cost/budget", response_model=CostOverview)
-async def set_cost_budget(request: Request, body: BudgetUpdate) -> CostOverview:
+def set_cost_budget(request: Request, body: BudgetUpdate) -> CostOverview:
     """Set (or clear) the org's monthly budget, then return the fresh overview."""
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
         raise HTTPException(status_code=401, detail="no account to set a budget on")
     database.set_account_budget(account_id, body.monthly_budget)
-    return await cost_overview(request)
+    return cost_overview(request)
 
 
 @app.put("/cost/agent-budget", response_model=CostOverview)
-async def set_cost_agent_budget(request: Request, body: AgentBudgetUpdate) -> CostOverview:
+def set_cost_agent_budget(request: Request, body: AgentBudgetUpdate) -> CostOverview:
     """Set (or clear) a per-agent monthly cap, then return the fresh overview."""
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
@@ -4112,7 +4123,7 @@ async def set_cost_agent_budget(request: Request, body: AgentBudgetUpdate) -> Co
     database.set_agent_budget(
         account_id, body.service_name, body.agent_id or "main", body.monthly_cap
     )
-    return await cost_overview(request)
+    return cost_overview(request)
 
 
 @app.get("/dashboard/work-feed", response_model=list[WorkFeedItem])
@@ -4186,7 +4197,7 @@ def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
 
 
 @app.get("/dashboard/activity", response_model=list[ActivityItem])
-async def dashboard_activity(
+def dashboard_activity(
     request: Request,
     hours: int = 24,
     limit: int = 200,
@@ -4206,7 +4217,7 @@ async def dashboard_activity(
 
 
 @app.post("/dashboard/ask", response_model=AskResponse)
-async def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
+def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
     """The floating Ask pill — concise, plain-prose fleet Q&A plus the live
     work record (what's waiting on the signed-in user, why a task is stuck).
     Reuses the fleet context builder with a tighter system prompt."""
@@ -4226,7 +4237,7 @@ async def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
 
 
 @app.post("/connect/ask", response_model=ConnectAskResponse)
-async def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
+def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
     """The guided add-agent chat ("Set up with AI"). Stateless — the client
     posts the full thread each turn. Replies carry optional quick-reply
     chips (`options`) and copy-paste snippets (`code`)."""
@@ -4242,7 +4253,7 @@ async def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
 
 
 @app.post("/ask", response_model=AskResponse)
-async def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
+def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
     """Answer a question about the user's whole fleet."""
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)
@@ -4260,7 +4271,7 @@ async def ask_fleet(request: Request, body: AskRequest) -> AskResponse:
 
 
 @app.post("/agents/{service_name}/ask", response_model=AskResponse)
-async def ask_agent(
+def ask_agent(
     service_name: str,
     request: Request,
     body: AskRequest,
@@ -4337,7 +4348,7 @@ from starlette.responses import HTMLResponse, RedirectResponse
 
 
 @app.get("/oauth/authorize", include_in_schema=False)
-async def oauth_authorize(
+def oauth_authorize(
     client_id: str = Query(default=""),
     redirect_uri: str = Query(default=""),
     response_type: str = Query(default="code"),
@@ -4680,7 +4691,7 @@ async def action_complete(request: Request):
 
 
 @app.get("/actions/status")
-async def action_status(request: Request):
+def action_status(request: Request):
     """Check monitoring connection status."""
     account_id = _resolve_action_account(request)
     if account_id is None:
@@ -4720,7 +4731,7 @@ async def action_ask(request: Request):
 
 
 @app.get("/actions/agents")
-async def action_list_agents(request: Request):
+def action_list_agents(request: Request):
     """Structured list of the caller's agents — name, description, most-recent
     activity, event count, errors, cost — newest-active first. Read-only,
     OAuth-scoped. Locked (plan-gated) agents are listed by name only, with
@@ -4748,7 +4759,7 @@ async def action_list_agents(request: Request):
 
 
 @app.get("/actions/recent-activity")
-async def action_recent_activity(request: Request, hours: int = 24, limit: int = 20):
+def action_recent_activity(request: Request, hours: int = 24, limit: int = 20):
     """Structured, fleet-wide recent work events (what ran, when, on which
     agent, success/failure), newest first. Read-only, OAuth-scoped. Captured
     output content is intentionally NOT included — use askFleet for detail."""
@@ -4774,7 +4785,7 @@ async def action_recent_activity(request: Request, hours: int = 24, limit: int =
 
 
 @app.get("/actions/openapi.json", include_in_schema=False)
-async def actions_openapi():
+def actions_openapi():
     """Serve the OpenAPI spec for the ChatGPT GPT Action."""
     return {
         "openapi": "3.1.0",
@@ -4914,7 +4925,7 @@ async def actions_openapi():
 
 
 @app.post("/auth/keys", response_model=NewKeyResponse)
-async def new_key(request: Request) -> NewKeyResponse:
+def new_key(request: Request) -> NewKeyResponse:
     """Mint a new API key for the currently authenticated account.
 
     Goes through the auth middleware just like every other protected
