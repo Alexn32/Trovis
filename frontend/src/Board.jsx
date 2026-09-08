@@ -7,8 +7,8 @@ import { lifecycleSentence } from './loops.js'
 
 // The Work board — a secondary view, not the Work home landing.
 // Home is overview + suggestions + the Monday table (WorkTab.jsx). This
-// four-column board stays for "Other views"; it must not load
-// until the operator asks for it (fat GET /work/board).
+// four-column board is unused from Work home until F4; it must not load
+// on the home path (fat GET /work/board).
 //
 // A board of TASKS. Every column, label and sentence here is written for
 // someone who has never heard of Trovis: work, waiting, stuck, done. The
