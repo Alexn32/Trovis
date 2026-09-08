@@ -266,7 +266,7 @@ function AppInner() {
             <TrovisLogo />
           </header>
           <div className="login-body">
-            <p className="login-prompt">Can't reach Trovis</p>
+            <p className="login-prompt">Can't reach Trovis — retry</p>
             <p className="login-note">
               The API didn't respond. Your session is still saved — retry, or sign in again.
             </p>

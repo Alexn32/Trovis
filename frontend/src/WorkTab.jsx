@@ -17,7 +17,8 @@ import {
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
 // auto-poll back into Loading.
-// Suggest approve/edit/decline never auto-create a named item.
+// Suggest approve/edit/decline are explicit clicks against /work/suggestions.
+// Never auto-create a named item on load or poll.
 
 const POLL_START_MS = 30000
 const POLL_MAX_MS = 120000
@@ -73,7 +74,7 @@ function OverviewStrip({ overview }) {
   )
 }
 
-function SuggestionsStrip({ suggestions, onDismiss }) {
+function SuggestionsStrip({ suggestions, busyId, onApprove, onEdit, onDecline }) {
   const rows = (suggestions || []).filter((s) => isNamedWorkTitle(s.title))
   if (!rows.length) return null
   return (
@@ -83,6 +84,7 @@ function SuggestionsStrip({ suggestions, onDismiss }) {
         {rows.map((s) => {
           const who = s.draft_holder?.name
           const why = [s.why, who ? `with ${who}` : ''].filter(Boolean).join(' · ')
+          const busy = busyId === s.id
           return (
             <li key={s.id} className="work-sug-row">
               <div className="work-sug-copy">
@@ -93,17 +95,24 @@ function SuggestionsStrip({ suggestions, onDismiss }) {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => onDismiss(s.id)}
+                  disabled={busy}
+                  onClick={() => onApprove(s)}
                 >
                   Approve
                 </button>
-                <button type="button" className="btn btn-ghost" disabled>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={busy}
+                  onClick={() => onEdit(s)}
+                >
                   Edit
                 </button>
                 <button
                   type="button"
                   className="work-sug-decline"
-                  onClick={() => onDismiss(s.id)}
+                  disabled={busy}
+                  onClick={() => onDecline(s)}
                 >
                   Decline
                 </button>
@@ -144,7 +153,10 @@ function WorkHome({
   suggestions,
   nextCursor,
   onLoadMore,
-  onDismissSuggestion,
+  sugBusyId,
+  onApproveSuggestion,
+  onEditSuggestion,
+  onDeclineSuggestion,
 }) {
   const [open, setOpen] = useState(null)
   const rows = namedRows(items)
@@ -164,7 +176,13 @@ function WorkHome({
       </header>
 
       <OverviewStrip overview={overview} />
-      <SuggestionsStrip suggestions={suggestions} onDismiss={onDismissSuggestion} />
+      <SuggestionsStrip
+        suggestions={suggestions}
+        busyId={sugBusyId}
+        onApprove={onApproveSuggestion}
+        onEdit={onEditSuggestion}
+        onDecline={onDeclineSuggestion}
+      />
 
       {empty && (
         <div className="board-empty">
@@ -238,6 +256,7 @@ export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
+  const [sugBusyId, setSugBusyId] = useState(null)
   const [nextCursor, setNextCursor] = useState(null)
   const [err, setErr] = useState(null)
 
@@ -258,7 +277,7 @@ export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
       setErr(e?.message || 'Could not load your work')
       throw e
     }
-    // Suggestions are a stub; never block home, never invent rows.
+    // Suggestions never block home, never invent rows.
     api
       .getWorkSuggestions()
       .then((s) => setSuggestions(Array.isArray(s?.suggestions) ? s.suggestions : []))
@@ -270,9 +289,53 @@ export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
     load().catch(() => {})
   }
 
-  function dismissSuggestion(id) {
-    // Local dismiss only. Approve/edit/decline must not create a named item.
+  function dropSuggestion(id) {
     setSuggestions((prev) => prev.filter((s) => s.id !== id))
+  }
+
+  async function approveSuggestion(s) {
+    setSugBusyId(s.id)
+    try {
+      const res = await api.approveWorkSuggestion(s.id)
+      dropSuggestion(s.id)
+      if (res?.item) {
+        setItems((prev) => [res.item, ...(prev || []).filter((it) => it.id !== res.item.id)])
+      }
+    } catch {
+      /* keep the strip row so the operator can retry or edit */
+    } finally {
+      setSugBusyId(null)
+    }
+  }
+
+  async function declineSuggestion(s) {
+    setSugBusyId(s.id)
+    try {
+      await api.declineWorkSuggestion(s.id)
+      dropSuggestion(s.id)
+    } catch {
+      /* keep the row */
+    } finally {
+      setSugBusyId(null)
+    }
+  }
+
+  async function editSuggestion(s) {
+    const next = window.prompt('Name this work', s.title || '')
+    if (next == null) return
+    const title = String(next).trim()
+    if (!title) return
+    setSugBusyId(s.id)
+    try {
+      const updated = await api.editWorkSuggestion(s.id, { title })
+      setSuggestions((prev) =>
+        prev.map((row) => (row.id === s.id ? { ...row, ...updated } : row)),
+      )
+    } catch {
+      /* keep the previous title */
+    } finally {
+      setSugBusyId(null)
+    }
   }
 
   useEffect(() => {
@@ -343,7 +406,10 @@ export default function WorkTab({ onConnectAgent, onOpenWorkflow }) {
       suggestions={suggestions}
       nextCursor={nextCursor}
       onLoadMore={loadMore}
-      onDismissSuggestion={dismissSuggestion}
+      sugBusyId={sugBusyId}
+      onApproveSuggestion={approveSuggestion}
+      onEditSuggestion={editSuggestion}
+      onDeclineSuggestion={declineSuggestion}
     />
   )
 }

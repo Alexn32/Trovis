@@ -54,7 +54,11 @@ The server creates `trovis.db` (SQLite) on first run. To use Postgres locally in
 | GET    | `/health`                            | Liveness probe. No DB. Never waits on `/work/*`. Returns `{"status": "ok", "version": "..."}`. |
 | GET    | `/work/overview`                     | Lean Work home counts: `needs_you`, `needs_attention`, `open`, `completed_week`. Named work only — not `/work/board`. |
 | GET    | `/work/items`                        | Paginated named items (`?cursor=&limit=`). Rows: `id`, `title`, `status`, `holder`, `whats_next`, `updated_at`. |
-| GET    | `/work/suggestions`                  | Stub (`suggestions: []`). Mutations are a follow-up. |
+| GET    | `/work/suggestions`                  | Pending suggestions `{ id, title, why, source?, draft_holder? }`. Empty until real rows exist. |
+| PATCH  | `/work/suggestions/{id}`             | Edit a pending suggestion in place. Session auth. |
+| POST   | `/work/suggestions/{id}/approve`     | Create a named work item (appears in `/work/items`). Optional body = edit-then-approve. Garbage titles 400. |
+| POST   | `/work/suggestions/{id}/decline`     | Remove from the strip. No work item (no ghost row). 204. |
+| GET    | `/work/items/{id}`                   | Named item + v1.1 spine: `whats_happening`, `process`, `timeline`, `provenance`. |
 | GET    | `/work/summary`                      | **Legacy / fat.** Loop-scans the full board. Do not call from home. |
 | GET    | `/work/board`                        | **Legacy / fat.** Whole board dump. Do not poll from home. |
 | POST   | `/v1/traces`                         | OTLP/JSON trace ingest. Accepts the standard OTEL export body.                    |

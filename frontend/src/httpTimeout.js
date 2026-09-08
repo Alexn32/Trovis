@@ -35,9 +35,33 @@ export function isTimeoutError(err) {
 export function isUnreachableError(err) {
   if (!err) return false
   if (isTimeoutError(err)) return true
+  if (err.name === 'AbortError' || err.code === 'ABORT_ERR') return true
   if (err.code === 'network' || err.status === 0) return true
   const msg = String(err.message || '')
-  return /failed to fetch|networkerror|load failed|network request failed/i.test(msg)
+  return /failed to fetch|networkerror|load failed|network request failed|operation was aborted|the user aborted a request/i.test(msg)
+}
+
+/** Login / auth gate copy. Never show AbortError or "Failed to fetch". */
+export const AUTH_UNREACHABLE_MESSAGE = "Can't reach Trovis — retry"
+export const UNREACHABLE_MESSAGE = "Trovis didn't respond"
+
+export function unreachableMessage(path) {
+  if (typeof path === 'string' && path.startsWith('/auth/')) {
+    return AUTH_UNREACHABLE_MESSAGE
+  }
+  return UNREACHABLE_MESSAGE
+}
+
+/** Map a login/auth failure to copy a person can act on. */
+export function authErrorMessage(err) {
+  if (isTimeoutError(err) || isUnreachableError(err)) {
+    return AUTH_UNREACHABLE_MESSAGE
+  }
+  const msg = String(err?.message || '').trim()
+  if (!msg || /abort|failed to fetch|networkerror|timed out|trovis didn't respond/i.test(msg)) {
+    return AUTH_UNREACHABLE_MESSAGE
+  }
+  return msg
 }
 
 /**

@@ -119,7 +119,11 @@ from models import (
     WorkKindCard,
     WorkOverview,
     WorkItem,
+    WorkItemDetail,
     WorkItemsResponse,
+    WorkSuggestion,
+    WorkSuggestionApproveResponse,
+    WorkSuggestionPatch,
     WorkSuggestionsResponse,
     MeResponse,
     WorkflowCreate,
@@ -1246,16 +1250,125 @@ def work_items(
     )
 
 
+def _parse_suggestion_id(raw: str) -> int:
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    return n
+
+
+def _require_suggestion_user(request: Request) -> dict:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=403, detail="sign in to manage suggestions")
+    return user
+
+
+@app.get("/work/items/{item_id}", response_model=WorkItemDetail)
+def work_item_detail(item_id: int, request: Request) -> WorkItemDetail:
+    """One named work item plus the v1.1 detail spine.
+
+    Lean: no full-board scan, no span dump. Untitled loops 404 — named
+    work only, same filter as GET /work/items.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    row = database.get_work_item(
+        account_id, item_id, viewer_user_id=user["id"] if user else None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    return WorkItemDetail(**row)
+
+
 @app.get("/work/suggestions", response_model=WorkSuggestionsResponse)
 def work_suggestions(request: Request) -> WorkSuggestionsResponse:
-    """Stub. Approve/edit/decline mutations are a follow-up.
+    """Pending suggestions for the Work home strip.
 
-    Empty on purpose: do not invent titles. When real rows exist they must
-    already have a human title (`id`, `title`, `why`; optional `source`,
-    `draft_holder`).
+    Empty until a real suggestion exists — never invent titles. Shape:
+    `{ id, title, why, source?, draft_holder? }`. Approve/edit/decline
+    are the mutations below.
     """
-    getattr(request.state, "account_id", None)  # account-scoped when filled in
-    return WorkSuggestionsResponse(suggestions=[])
+    account_id = getattr(request.state, "account_id", None)
+    return WorkSuggestionsResponse(
+        suggestions=[WorkSuggestion(**s) for s in database.list_work_suggestions(account_id)],
+    )
+
+
+@app.patch("/work/suggestions/{suggestion_id}", response_model=WorkSuggestion)
+def edit_work_suggestion(
+    suggestion_id: str,
+    request: Request,
+    body: WorkSuggestionPatch | None = None,
+) -> WorkSuggestion:
+    """Edit a pending suggestion in place (still in the strip). Title gate
+    runs on approve, so a half-typed edit is allowed to save."""
+    _require_suggestion_user(request)
+    account_id = getattr(request.state, "account_id", None)
+    sid = _parse_suggestion_id(suggestion_id)
+    patch = body or WorkSuggestionPatch()
+    row = database.edit_work_suggestion(
+        account_id,
+        sid,
+        title=patch.title,
+        why=patch.why,
+        draft_holder=patch.draft_holder.model_dump() if patch.draft_holder else None,
+        draft_holder_set=patch.draft_holder is not None,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    return WorkSuggestion(**row)
+
+
+@app.post(
+    "/work/suggestions/{suggestion_id}/approve",
+    response_model=WorkSuggestionApproveResponse,
+)
+def approve_work_suggestion(
+    suggestion_id: str,
+    request: Request,
+    body: WorkSuggestionPatch | None = None,
+) -> WorkSuggestionApproveResponse:
+    """Approve → named work item in GET /work/items. Optional body is
+    edit-then-approve (title/why/draft_holder). Garbage titles 400."""
+    user = _require_suggestion_user(request)
+    account_id = getattr(request.state, "account_id", None)
+    sid = _parse_suggestion_id(suggestion_id)
+    patch = body or WorkSuggestionPatch()
+    try:
+        item = database.approve_work_suggestion(
+            account_id,
+            sid,
+            user,
+            title=patch.title,
+            why=patch.why,
+            draft_holder=patch.draft_holder.model_dump() if patch.draft_holder else None,
+            draft_holder_set=patch.draft_holder is not None,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return WorkSuggestionApproveResponse(item=WorkItem(**item))
+
+
+@app.post("/work/suggestions/{suggestion_id}/decline", status_code=204)
+def decline_work_suggestion(suggestion_id: str, request: Request) -> None:
+    """Remove from the strip. Does not create a work item (no ghost row).
+    Idempotent on an already-declined id. 409 if it was already approved."""
+    _require_suggestion_user(request)
+    account_id = getattr(request.state, "account_id", None)
+    sid = _parse_suggestion_id(suggestion_id)
+    result = database.decline_work_suggestion(account_id, sid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    if result == "approved":
+        raise HTTPException(status_code=409, detail="already approved")
 
 
 @app.get("/work/summary", response_model=WorkSummary)

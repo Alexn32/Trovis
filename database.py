@@ -1236,6 +1236,40 @@ CREATE TABLE IF NOT EXISTS workflow_versions (
 )
 """
 
+# Pending Work-home suggestions. Approve creates a named loop (work item);
+# decline removes the row from GET /work/suggestions without creating one.
+# work_item_id is nullable with no FK (same posture as spans.loop_id) so
+# SQLite and Postgres stay schema-identical.
+_WORK_SUGGESTIONS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS work_suggestions (
+    id            SERIAL    PRIMARY KEY,
+    account_id    INTEGER   REFERENCES accounts(id),
+    title         TEXT      NOT NULL,
+    why           TEXT      NOT NULL DEFAULT '',
+    source        TEXT,
+    draft_holder  TEXT,
+    status        TEXT      NOT NULL DEFAULT 'pending',
+    work_item_id  INTEGER,
+    created_at    TIMESTAMP DEFAULT NOW(),
+    resolved_at   TIMESTAMP
+)
+"""
+
+_WORK_SUGGESTIONS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS work_suggestions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id    INTEGER REFERENCES accounts(id),
+    title         TEXT    NOT NULL,
+    why           TEXT    NOT NULL DEFAULT '',
+    source        TEXT,
+    draft_holder  TEXT,
+    status        TEXT    NOT NULL DEFAULT 'pending',
+    work_item_id  INTEGER,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at   TIMESTAMP
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -1306,6 +1340,7 @@ _INDEXES = [
     # Lean Work home (overview + items) pages named loops by recency without
     # the fat board's span-aggregate join.
     "CREATE INDEX IF NOT EXISTS idx_loops_account_updated ON loops(account_id, last_event_unix DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_work_suggestions_account_status ON work_suggestions(account_id, status, id)",
 ]
 
 
@@ -1354,6 +1389,7 @@ def init_db() -> None:
             _LOOP_PARTICIPANTS_DDL_PG,
             # References workflows (created far earlier in this list).
             _WORKFLOW_VERSIONS_DDL_PG,
+            _WORK_SUGGESTIONS_DDL_PG,
         ]
     else:
         ddls = [
@@ -1385,6 +1421,7 @@ def init_db() -> None:
             _LOOP_EVENTS_DDL_SQLITE,
             _LOOP_PARTICIPANTS_DDL_SQLITE,
             _WORKFLOW_VERSIONS_DDL_SQLITE,
+            _WORK_SUGGESTIONS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -4288,6 +4325,28 @@ def _decorate_work_items(
         row["updated_at"] = _work_updated_at(row)
 
 
+def _row_to_work_item(r: dict[str, Any]) -> dict[str, Any] | None:
+    """Named-work row for /work/items. Plugin-provided human titles only."""
+    title = (r.get("title") or "").strip()
+    if (
+        not title
+        or r.get("title_source") != _TITLE_SOURCE_PROVIDED
+        or _is_shell_work_title(title)
+    ):
+        return None
+    return {
+        "id": r["id"],
+        "title": title,
+        "status": r.get("status") or "moving",
+        "holder": {
+            "kind": r.get("holder_kind") or "unassigned",
+            "name": r.get("holder_name") or "Unassigned",
+        },
+        "whats_next": r.get("whats_next") or "In progress",
+        "updated_at": r.get("updated_at"),
+    }
+
+
 def get_work_items(
     account_id: int | None,
     viewer_user_id: int | None = None,
@@ -4337,31 +4396,511 @@ def get_work_items(
 
     items: list[dict[str, Any]] = []
     for r in rows:
-        title = (r.get("title") or "").strip()
-        if (
-            not title
-            or r.get("title_source") != _TITLE_SOURCE_PROVIDED
-            or _is_shell_work_title(title)
-        ):
+        item = _row_to_work_item(r)
+        if item is None:
             continue
-        items.append(
-            {
-                "id": r["id"],
-                "title": title,
-                "status": r.get("status") or "moving",
-                "holder": {
-                    "kind": r.get("holder_kind") or "unassigned",
-                    "name": r.get("holder_name") or "Unassigned",
-                },
-                "whats_next": r.get("whats_next") or "In progress",
-                "updated_at": r.get("updated_at"),
-            }
-        )
+        items.append(item)
     next_cursor = None
     if extra:
         last = rows[-1]
         next_cursor = f"{int(last.get('last_event_unix') or 0)}:{last['id']}"
     return items, next_cursor
+
+
+# ---------------------------------------------------------------------------
+# Work suggestions (pending strip on the Monday table)
+# ---------------------------------------------------------------------------
+# Approve creates a named loop so the row appears in GET /work/items.
+# Decline marks the suggestion resolved without creating a loop — no ghost
+# row. GET lists pending only. Titles are gated on approve: garbage
+# identifiers never become named work.
+
+_WORK_TITLE_JARGON_RE = re.compile(
+    r"\b(loops?|workloops?|possession|segments?|stations?|handoffs?)\b",
+    re.I,
+)
+_WORK_TITLE_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
+_WORK_TITLE_SNAKE_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
+_WORK_TITLE_HEX_RE = re.compile(r"^[0-9a-fA-F]{16,}$")
+_WORK_HOLDER_KINDS = ("human", "agent", "tool", "unassigned")
+_WORK_TITLE_MAX = 120
+_HUMAN_TITLE_DETAIL = "Give this a name a person can read"
+
+_TIMELINE_TEXT = {
+    "loop_opened": "Started",
+    "handoff_initiated": "Waiting on someone",
+    "handoff_accepted": "Picked up",
+    "handoff_completed": "Moved forward",
+    "handoff_declined": "Sent back",
+    "loop_closed": "Done",
+    "stall_detected": "Needs attention",
+}
+
+
+def is_human_work_title(title: str | None) -> bool:
+    """True when `title` is a name a person can read — not an id, UUID,
+    snake_case token, hex blob, or Trovis jargon. Same instinct as the
+    FE named-work filter; approve refuses anything that fails."""
+    t = (title or "").strip()
+    if len(t) < 3:
+        return False
+    if t.isdigit():
+        return False
+    if _WORK_TITLE_UUID_RE.match(t):
+        return False
+    if _WORK_TITLE_SNAKE_RE.match(t):
+        return False
+    if _WORK_TITLE_HEX_RE.match(t):
+        return False
+    if _WORK_TITLE_JARGON_RE.search(t):
+        return False
+    if _is_shell_work_title(t):
+        return False
+    if not re.search(r"[A-Za-z]", t):
+        return False
+    return True
+
+
+def _parse_holder(raw: Any) -> dict[str, str] | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+    kind = str(raw.get("kind") or "unassigned").strip() or "unassigned"
+    if kind not in _WORK_HOLDER_KINDS:
+        kind = "unassigned"
+    name = str(raw.get("name") or "").strip() or "Unassigned"
+    return {"kind": kind, "name": name}
+
+
+def _suggestion_public(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "title": (row.get("title") or "").strip(),
+        "why": row.get("why") or "",
+        "source": row.get("source") or None,
+        "draft_holder": _parse_holder(row.get("draft_holder")),
+    }
+
+
+def _suggestion_account_sql(account_id: int | None) -> tuple[str, list[Any]]:
+    if account_id is None:
+        return "", []
+    return f" AND account_id = {PH}", [account_id]
+
+
+def insert_work_suggestion(
+    account_id: int | None,
+    title: str,
+    why: str = "",
+    source: str | None = None,
+    draft_holder: dict | None = None,
+) -> dict[str, Any]:
+    """Insert a pending suggestion. Used by tests (and later, generators).
+    Does not invent a title — the caller must already have one."""
+    holder = _parse_holder(draft_holder)
+    with _connect() as conn, _cursor(conn) as cur:
+        sid = _insert_returning_id(
+            cur,
+            "INSERT INTO work_suggestions "
+            "(account_id, title, why, source, draft_holder, status) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, 'pending')",
+            (
+                account_id,
+                str(title or "").strip()[:_WORK_TITLE_MAX],
+                str(why or ""),
+                source or None,
+                json.dumps(holder) if holder else None,
+            ),
+        )
+        cur.execute(
+            "SELECT id, title, why, source, draft_holder, status "
+            f"FROM work_suggestions WHERE id = {PH}",
+            (sid,),
+        )
+        return _suggestion_public(dict(cur.fetchone()))
+
+
+def list_work_suggestions(account_id: int | None) -> list[dict[str, Any]]:
+    """Pending suggestions for the strip. Declined/approved never appear."""
+    acct_sql, acct_args = _suggestion_account_sql(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, title, why, source, draft_holder, status "
+            "FROM work_suggestions "
+            f"WHERE status = 'pending'{acct_sql} "
+            "ORDER BY id ASC",
+            tuple(acct_args),
+        )
+        return [_suggestion_public(dict(r)) for r in cur.fetchall()]
+
+
+def get_work_suggestion(
+    account_id: int | None, suggestion_id: int,
+) -> dict[str, Any] | None:
+    """Any-status row, account-scoped. None when missing / other tenant."""
+    acct_sql, acct_args = _suggestion_account_sql(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, title, why, source, draft_holder, status, work_item_id "
+            f"FROM work_suggestions WHERE id = {PH}{acct_sql}",
+            tuple([suggestion_id, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["draft_holder"] = _parse_holder(out.get("draft_holder"))
+        out["id"] = str(out["id"])
+        return out
+
+
+def edit_work_suggestion(
+    account_id: int | None,
+    suggestion_id: int,
+    *,
+    title: str | None = None,
+    why: str | None = None,
+    draft_holder: dict | None = None,
+    draft_holder_set: bool = False,
+) -> dict[str, Any] | None:
+    """Update a pending suggestion in place. None if missing or not pending."""
+    acct_sql, acct_args = _suggestion_account_sql(account_id)
+    sets: list[str] = []
+    args: list[Any] = []
+    if title is not None:
+        sets.append(f"title = {PH}")
+        args.append(str(title).strip()[:_WORK_TITLE_MAX])
+    if why is not None:
+        sets.append(f"why = {PH}")
+        args.append(str(why))
+    if draft_holder_set:
+        holder = _parse_holder(draft_holder)
+        sets.append(f"draft_holder = {PH}")
+        args.append(json.dumps(holder) if holder else None)
+    if not sets:
+        row = get_work_suggestion(account_id, suggestion_id)
+        if row is None or row.get("status") != "pending":
+            return None
+        return _suggestion_public(row)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE work_suggestions SET {', '.join(sets)} "
+            f"WHERE id = {PH} AND status = 'pending'{acct_sql}",
+            tuple([*args, suggestion_id, *acct_args]),
+        )
+        if cur.rowcount <= 0:
+            return None
+        cur.execute(
+            "SELECT id, title, why, source, draft_holder, status "
+            f"FROM work_suggestions WHERE id = {PH}",
+            (suggestion_id,),
+        )
+        updated = cur.fetchone()
+        return _suggestion_public(dict(updated)) if updated else None
+
+
+def decline_work_suggestion(
+    account_id: int | None, suggestion_id: int,
+) -> str | None:
+    """Mark pending → declined. Returns 'declined' (including idempotent
+    re-decline), 'approved' if it was already approved, None if missing."""
+    acct_sql, acct_args = _suggestion_account_sql(account_id)
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT status FROM work_suggestions "
+            f"WHERE id = {PH}{acct_sql}",
+            tuple([suggestion_id, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        status = row["status"]
+        if status == "approved":
+            return "approved"
+        if status != "declined":
+            cur.execute(
+                f"UPDATE work_suggestions SET status = 'declined', "
+                f"resolved_at = {now_sql} "
+                f"WHERE id = {PH} AND status = 'pending'",
+                (suggestion_id,),
+            )
+        return "declined"
+
+
+def _create_named_loop_from_suggestion(
+    cur,
+    *,
+    account_id: int | None,
+    user: dict[str, Any],
+    title: str,
+    draft_holder: dict | None,
+    suggestion_id: int,
+    source: str | None,
+) -> int:
+    """Insert a titled loop + opening event. Caller holds the transaction."""
+    now_ns = time.time_ns()
+    holder = _parse_holder(draft_holder) or {}
+    kind = holder.get("kind") or "unassigned"
+    name = (holder.get("name") or "").strip()
+    service_name = name if kind == "agent" and name else "trovis"
+    actor = str(user.get("id") or "")
+    last_ts = now_ns + 1
+    loop_id = _insert_returning_id(
+        cur,
+        "INSERT INTO loops (account_id, external_id, service_name, agent_id, "
+        "title, title_source, initiated_by_type, initiated_by, cached_state, "
+        "last_event_unix) "
+        f"VALUES ({PH}, {PH}, {PH}, 'main', {PH}, {PH}, 'human', {PH}, 'open', {PH})",
+        (
+            account_id,
+            f"suggestion:{suggestion_id}",
+            service_name,
+            title[:_WORK_TITLE_MAX],
+            _TITLE_SOURCE_PROVIDED,
+            actor,
+            last_ts,
+        ),
+    )
+    append_loop_event(
+        cur, loop_id, "loop_opened", "human", actor,
+        payload={
+            "source": "suggestion",
+            "suggestion_id": str(suggestion_id),
+            "suggestion_source": source,
+        },
+        account_id=account_id, event_time_unix=now_ns,
+    )
+    _upsert_loop_participant(cur, loop_id, "human", actor, "initiator")
+
+    if kind == "tool":
+        append_loop_event(
+            cur, loop_id, "handoff_initiated", "human", actor,
+            payload={
+                "direction": "to_system",
+                "target_id": name or "a tool",
+            },
+            account_id=account_id, event_time_unix=now_ns + 1,
+        )
+        if name:
+            try:
+                _upsert_loop_participant(cur, loop_id, "tool", name, "executor")
+            except ValueError:
+                pass
+    elif kind == "agent" and name:
+        _upsert_loop_participant(
+            cur, loop_id, "agent", f"{service_name}:main", "executor",
+        )
+    else:
+        # human / unassigned: the approver holds it unless a different
+        # person was named on the suggestion.
+        target_id = user.get("email") or actor
+        target_name = name or user.get("name") or user.get("email") or "a person"
+        user_names = {
+            str(user.get("name") or "").lower(),
+            str(user.get("email") or "").lower(),
+        }
+        if (
+            kind == "human"
+            and name
+            and name.lower() not in user_names
+            and name.lower() != "unassigned"
+        ):
+            target_id = name
+            target_name = name
+        append_loop_event(
+            cur, loop_id, "handoff_initiated", "human", actor,
+            payload={
+                "direction": "to_human",
+                "target_id": str(target_id),
+                "target_name": target_name,
+            },
+            account_id=account_id, event_time_unix=now_ns + 1,
+        )
+        _upsert_loop_participant(cur, loop_id, "human", str(target_id), "reviewer")
+
+    recompute_loop_state(cur, loop_id, now_ns=now_ns)
+    return loop_id
+
+
+def approve_work_suggestion(
+    account_id: int | None,
+    suggestion_id: int,
+    user: dict[str, Any],
+    *,
+    title: str | None = None,
+    why: str | None = None,
+    draft_holder: dict | None = None,
+    draft_holder_set: bool = False,
+) -> dict[str, Any]:
+    """Edit (optional) then create a named work item. Returns the item dict.
+
+    Raises ValueError on a garbage title. Raises LookupError if the
+    suggestion is missing / other-account. Raises PermissionError if it
+    was already declined (gone from the strip; do not resurrect).
+    Already-approved is idempotent and returns the existing item.
+    """
+    acct_sql, acct_args = _suggestion_account_sql(account_id)
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, title, why, source, draft_holder, status, work_item_id "
+            f"FROM work_suggestions WHERE id = {PH}{acct_sql}",
+            tuple([suggestion_id, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise LookupError("suggestion not found")
+        row = dict(row)
+        if row["status"] == "declined":
+            raise PermissionError("suggestion was declined")
+        if row["status"] == "approved" and row.get("work_item_id"):
+            item = _work_item_by_id(
+                cur, int(row["work_item_id"]), account_id,
+                viewer_user_id=user.get("id"),
+            )
+            if item:
+                return item
+
+        final_title = (title if title is not None else row["title"]) or ""
+        final_title = str(final_title).strip()[:_WORK_TITLE_MAX]
+        if not is_human_work_title(final_title):
+            raise ValueError(_HUMAN_TITLE_DETAIL)
+        final_why = why if why is not None else row.get("why")
+        if draft_holder_set:
+            holder = _parse_holder(draft_holder)
+        else:
+            holder = _parse_holder(row.get("draft_holder"))
+
+        loop_id = _create_named_loop_from_suggestion(
+            cur,
+            account_id=account_id,
+            user=user,
+            title=final_title,
+            draft_holder=holder,
+            suggestion_id=suggestion_id,
+            source=row.get("source"),
+        )
+        cur.execute(
+            f"UPDATE work_suggestions SET status = 'approved', "
+            f"title = {PH}, why = {PH}, draft_holder = {PH}, "
+            f"work_item_id = {PH}, resolved_at = {now_sql} "
+            f"WHERE id = {PH}",
+            (
+                final_title,
+                final_why if final_why is not None else "",
+                json.dumps(holder) if holder else None,
+                loop_id,
+                suggestion_id,
+            ),
+        )
+        item = _work_item_by_id(
+            cur, loop_id, account_id, viewer_user_id=user.get("id"),
+        )
+        if item is None:
+            raise RuntimeError("approved suggestion did not produce a work item")
+        return item
+
+
+def _work_item_by_id(
+    cur,
+    item_id: int,
+    account_id: int | None,
+    viewer_user_id: int | None = None,
+    now_ns: int | None = None,
+) -> dict[str, Any] | None:
+    now_ns = now_ns if now_ns is not None else time.time_ns()
+    acct_sql, acct_args = _work_account_sql(account_id)
+    cur.execute(
+        "SELECT l.id, l.title, l.title_source, l.cached_state, l.last_event_unix, "
+        "       l.closed_at, l.created_at, l.service_name, l.agent_id, "
+        "       l.workflow_id, wf.name AS workflow_name "
+        "FROM loops l "
+        "LEFT JOIN workflows wf ON wf.id = l.workflow_id "
+        f"WHERE l.id = {PH} AND {_NAMED_TITLE_SQL}{acct_sql}",
+        tuple([item_id, *acct_args]),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    rows = [dict(row)]
+    _decorate_work_items(cur, rows, account_id, viewer_user_id, now_ns)
+    return _row_to_work_item(rows[0])
+
+
+def get_work_item(
+    account_id: int | None,
+    item_id: int,
+    viewer_user_id: int | None = None,
+    now_ns: int | None = None,
+) -> dict[str, Any] | None:
+    """Named work item plus the v1.1 detail spine, or None if not visible."""
+    now_ns = now_ns if now_ns is not None else time.time_ns()
+    with _connect() as conn, _cursor(conn) as cur:
+        item = _work_item_by_id(
+            cur, item_id, account_id, viewer_user_id=viewer_user_id, now_ns=now_ns,
+        )
+        if item is None:
+            return None
+        cur.execute(
+            "SELECT l.workflow_id, wf.name AS workflow_name "
+            "FROM loops l LEFT JOIN workflows wf ON wf.id = l.workflow_id "
+            f"WHERE l.id = {PH}",
+            (item_id,),
+        )
+        meta = cur.fetchone() or {}
+        wid = meta["workflow_id"] if meta else None
+        wname = meta["workflow_name"] if meta else None
+        cur.execute(
+            "SELECT type, payload, event_time_unix FROM loop_events "
+            f"WHERE loop_id = {PH} ORDER BY event_time_unix, id LIMIT 20",
+            (item_id,),
+        )
+        events = [dict(r) for r in cur.fetchall()]
+        timeline = []
+        provenance = {"source": "telemetry", "suggestion_id": None}
+        for ev in events:
+            text = _TIMELINE_TEXT.get(ev.get("type") or "")
+            if text:
+                timeline.append({
+                    "at": _ns_to_iso(ev.get("event_time_unix")),
+                    "text": text,
+                })
+            if ev.get("type") == "loop_opened":
+                payload = ev.get("payload") or {}
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except (TypeError, ValueError):
+                        payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                if payload.get("source") == "suggestion":
+                    provenance = {
+                        "source": "suggestion",
+                        "suggestion_id": (
+                            str(payload["suggestion_id"])
+                            if payload.get("suggestion_id") is not None
+                            else None
+                        ),
+                    }
+        process = None
+        if wid is not None:
+            process = {"id": int(wid), "name": wname or "Workflow"}
+        item["whats_happening"] = item.get("whats_next") or "In progress"
+        item["process"] = process
+        item["timeline"] = timeline
+        item["provenance"] = provenance
+        return item
 
 
 def get_loop_stream(
