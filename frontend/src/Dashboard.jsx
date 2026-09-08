@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { isTimeoutError, isUnreachableError } from './httpTimeout.js'
 import { startAbortable } from './abortable.js'
 // Costs always render in dollars (e.g. "$0.68"); shared with Fleet so they match.
 import { formatCost as fmtMoney } from './utils.js'
@@ -93,7 +94,13 @@ export default function Dashboard({ onOpenAgent, onGoFleet, onOpenCost, onViewAl
         api
           .listAgents({ signal })
           .then((d) => isAlive() && setHasAgents(Array.isArray(d) && d.length > 0))
-          .catch(() => isAlive() && setHasAgents(false))
+          .catch((e) => {
+            if (!isAlive()) return
+            // Timeout / abort is not "zero agents" — leaving hasAgents null
+            // avoids the empty-onboarding flash on a hung GET /agents.
+            if (isTimeoutError(e) || isUnreachableError(e)) return
+            setHasAgents(false)
+          })
       }),
     [refreshKey],
   )
@@ -495,14 +502,23 @@ function WorkFeedCard({ onViewAll, refreshKey }) {
 
 function FleetGrid({ onOpenAgent, onGoFleet, refreshKey }) {
   const [agents, setAgents] = useState(null)
+  const [loadError, setLoadError] = useState(null)
 
   useEffect(
     () =>
       startAbortable(({ signal, isAlive }) => {
         api
           .listAgents({ signal })
-          .then((d) => isAlive() && setAgents(Array.isArray(d) ? d : []))
-          .catch(() => isAlive() && setAgents([]))
+          .then((d) => {
+            if (!isAlive()) return
+            setLoadError(null)
+            setAgents(Array.isArray(d) ? d : [])
+          })
+          .catch((e) => {
+            if (!isAlive()) return
+            setLoadError(e)
+            // Keep prior agents; timeout/abort is not an empty fleet.
+          })
       }),
     [refreshKey],
   )
@@ -515,9 +531,13 @@ function FleetGrid({ onOpenAgent, onGoFleet, refreshKey }) {
           Open Fleet →
         </button>
       </div>
-      {agents === null ? (
+      {agents === null && !loadError ? (
         <div className="dash-skel pad">
           <span style={{ width: '100%' }} />
+        </div>
+      ) : loadError ? (
+        <div className="dash-card dash-empty pad" role="alert">
+          Couldn't load agents. Trovis didn't respond — open Fleet to retry.
         </div>
       ) : agents.length === 0 ? (
         <div className="dash-card dash-empty pad">

@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,49 @@ from typing import Any, Iterator
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("trovis.database")
+
+
+class QueryTimeout(Exception):
+    """Postgres cancelled a survival-critical read (`statement_timeout`)."""
+
+
+# First-paint caps. A 400k-span / 75k-loop tenant must not pin the replica
+# for a minute; the FE already fail-softs on 504 / client abort.
+_AGENTS_LIST_TIMEOUT_MS = 8_000
+_WORK_OVERVIEW_TIMEOUT_MS = 8_000
+# Dashboard fires listAgents twice (hasAgents + Fleet grid) plus briefing.
+# 8s is long enough to collapse those onto one aggregate, short enough that
+# ingest still shows up on the next paint.
+_AGENTS_CACHE_TTL_S = 8.0
+_agents_list_cache: dict[Any, tuple[float, list[dict[str, Any]]]] = {}
+_agents_list_lock = threading.Lock()
+
+
+def _invalidate_agents_cache(account_id: int | None = None) -> None:
+    with _agents_list_lock:
+        if account_id is None:
+            _agents_list_cache.clear()
+            return
+        _agents_list_cache.pop(account_id, None)
+        # Plan-keyed entries: (account_id, plan)
+        for key in [k for k in _agents_list_cache if isinstance(k, tuple) and k[:1] == (account_id,)]:
+            _agents_list_cache.pop(key, None)
+        # Unscoped dumps include this tenant.
+        _agents_list_cache.pop(None, None)
+
+
+def _set_statement_timeout(cur, timeout_ms: int | None) -> None:
+    """Postgres only. SET LOCAL lasts for the current `_connect()` txn."""
+    if not USE_POSTGRES or not timeout_ms:
+        return
+    cur.execute(
+        "SET LOCAL statement_timeout = %s",
+        (f"{int(timeout_ms)}ms",),
+    )
+
+
+def _is_query_canceled(exc: BaseException) -> bool:
+    return bool(USE_POSTGRES and getattr(exc, "pgcode", None) == "57014")
 
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 USE_POSTGRES = bool(_DATABASE_URL)
@@ -1341,6 +1385,14 @@ _INDEXES = [
     # the fat board's span-aggregate join.
     "CREATE INDEX IF NOT EXISTS idx_loops_account_updated ON loops(account_id, last_event_unix DESC, id DESC)",
     "CREATE INDEX IF NOT EXISTS idx_work_suggestions_account_status ON work_suggestions(account_id, status, id)",
+    # Named-work overview: title_source='provided' must be sargable. Without
+    # this, COUNT + attention on a 75k-loop tenant seq-scans every loop
+    # (TRIM/LIKE after a heap read) and /work/overview times out at 60s.
+    # Plan: Index Scan on (account_id, title_source, closed_at).
+    "CREATE INDEX IF NOT EXISTS idx_loops_account_title_closed ON loops(account_id, title_source, closed_at)",
+    # GET /agents GROUP BY (service_name, agent_id) for one tenant. Stops the
+    # account_id index from fetching 400k heap rows just to discover 6 groups.
+    "CREATE INDEX IF NOT EXISTS idx_spans_account_service_agent ON spans(account_id, service_name, agent_id)",
 ]
 
 
@@ -2360,6 +2412,7 @@ def _insert_span_rows(
             sql += f" AND account_id = {PH}"
             args.append(account_id)
         cur.execute(sql, tuple(args))
+    _invalidate_agents_cache(account_id)
     return len(rows)
 
 
@@ -3775,7 +3828,7 @@ _ASSIGNEE_SCAN_LIMIT = 500
 
 
 def _loops_assigned_to(
-    cur, account_id: int | None, user_id: int
+    cur, account_id: int | None, user_id: int, *, named_only: bool = False,
 ) -> tuple[list[int], bool]:
     """Loop ids whose latest unresolved to_human handoff targets this user.
 
@@ -3785,6 +3838,10 @@ def _loops_assigned_to(
     Python then replays loops._unresolved_handoffs per candidate, because
     "latest UNRESOLVED handoff" is a stream fold, not a SQL predicate.
 
+    named_only=True (Work overview): restrict to plugin-provided titles so
+    a 75k untitled OTel flood is not scanned for assignee. The board path
+    keeps named_only=False (every open attention loop).
+
     Returns (ids, truncated).
     """
     acct = ""
@@ -3792,11 +3849,12 @@ def _loops_assigned_to(
     if account_id is not None:
         acct = f" AND l.account_id = {PH}"
         args.append(account_id)
+    named_sql = f" AND {_NAMED_TITLE_SQL}" if named_only else ""
     cur.execute(
         "SELECT l.id FROM loops l "
         "WHERE l.closed_at IS NULL "
         "  AND l.cached_state IN ('awaiting_human', 'stalled')"
-        f"  {acct}"
+        f"  {acct}{named_sql}"
         "  AND EXISTS (SELECT 1 FROM loop_events e "
         "              WHERE e.loop_id = l.id AND e.type = 'handoff_initiated') "
         f"ORDER BY l.id DESC LIMIT {PH}",
@@ -4056,9 +4114,11 @@ _SHELL_TITLE_SQL = (
     f"OR l.title LIKE '{_pct} · {_pct} · {_pct} actions'"
     ")"
 )
+# title_source first so idx_loops_account_title_closed can filter provided
+# rows before TRIM/LIKE. Leading with TRIM(title) forced a heap seq scan.
 _NAMED_TITLE_SQL = (
-    "l.title IS NOT NULL AND TRIM(l.title) != '' "
-    f"AND l.title_source = '{_TITLE_SOURCE_PROVIDED}' "
+    f"l.title_source = '{_TITLE_SOURCE_PROVIDED}' "
+    "AND l.title IS NOT NULL AND TRIM(l.title) != '' "
     f"AND NOT {_SHELL_TITLE_SQL}"
 )
 _WORK_ITEMS_DEFAULT_LIMIT = 50
@@ -4083,6 +4143,16 @@ def _work_account_sql(account_id: int | None) -> tuple[str, list[Any]]:
     if account_id is None:
         return "", []
     return f" AND l.account_id = {PH}", [account_id]
+
+
+def _work_named_scope_sql(account_id: int | None) -> tuple[str, list[Any]]:
+    """Index-friendly named-work predicate: account_id, then title_source.
+
+    Matches idx_loops_account_title_closed (account_id, title_source, closed_at).
+    """
+    if account_id is None:
+        return _NAMED_TITLE_SQL, []
+    return f"l.account_id = {PH} AND {_NAMED_TITLE_SQL}", [account_id]
 
 
 def _work_item_status(
@@ -4130,6 +4200,20 @@ def _work_updated_at(row: dict[str, Any]) -> str | None:
     return _ts_to_str(row.get("created_at"))
 
 
+def work_overview_open_sql(account_id: int | None) -> tuple[str, list[Any]]:
+    """Open-named COUNT. Exported so tests can EXPLAIN QUERY PLAN it.
+
+    Filter order is account_id, title_source, closed_at — the columns of
+    idx_loops_account_title_closed — so a 75k-loop tenant does not seq-scan.
+    """
+    scope, args = _work_named_scope_sql(account_id)
+    sql = (
+        "SELECT COUNT(*) AS c FROM loops l "
+        f"WHERE {scope} AND l.closed_at IS NULL"
+    )
+    return sql, args
+
+
 def get_work_overview(
     account_id: int | None,
     viewer_user_id: int | None = None,
@@ -4143,6 +4227,9 @@ def get_work_overview(
     minus those same ids so waiting_on_you is never double-counted.
 
     Generated titles (LLM / template / Task-from-X shells) are excluded.
+
+    Index: idx_loops_account_title_closed (account_id, title_source, closed_at).
+    Assignee scan is named_only so untitled OTel is not folded.
     """
     now_ns = now_ns if now_ns is not None else time.time_ns()
     lp = _loops_mod()
@@ -4151,56 +4238,57 @@ def get_work_overview(
     week_ago = (_utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
-    acct_sql, acct_args = _work_account_sql(account_id)
+    scope, scope_args = _work_named_scope_sql(account_id)
 
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM loops l "
-            f"WHERE l.closed_at IS NULL AND {_NAMED_TITLE_SQL}{acct_sql}",
-            tuple(acct_args),
-        )
-        open_n = int((cur.fetchone() or {"c": 0})["c"] or 0)
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            _set_statement_timeout(cur, _WORK_OVERVIEW_TIMEOUT_MS)
+            # One pass for open + completed_week. Both are named-work COUNTs
+            # over the same index prefix; combining them halves the round-trips.
+            cur.execute(
+                "SELECT "
+                "  COALESCE(SUM(CASE WHEN l.closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_n, "
+                "  COALESCE(SUM(CASE WHEN l.closed_at IS NOT NULL "
+                f"              AND l.closed_at >= {PH} THEN 1 ELSE 0 END), 0) AS completed_week "
+                f"FROM loops l WHERE {scope}",
+                tuple([week_ago, *scope_args]),
+            )
+            totals = dict(cur.fetchone() or {})
+            open_n = int(totals.get("open_n") or 0)
+            completed_week = int(totals.get("completed_week") or 0)
 
-        cur.execute(
-            "SELECT COUNT(*) AS c FROM loops l "
-            f"WHERE l.closed_at IS NOT NULL AND l.closed_at >= {PH} "
-            f"AND {_NAMED_TITLE_SQL}{acct_sql}",
-            tuple([week_ago, *acct_args]),
-        )
-        completed_week = int((cur.fetchone() or {"c": 0})["c"] or 0)
+            # stuck (engine) + aging awaiting_human. waiting_on_you rows that
+            # sit in this set are subtracted below. Named + open first so the
+            # title_source index applies before the state/age predicates.
+            cur.execute(
+                "SELECT l.id FROM loops l "
+                f"WHERE {scope} AND l.closed_at IS NULL "
+                "AND ("
+                "  l.cached_state IN ('stalled', 'awaiting_system') "
+                f"  OR (l.cached_state = 'awaiting_human' "
+                f"      AND COALESCE(l.last_event_unix, 0) <= {PH})"
+                ")",
+                tuple([*scope_args, stall_ns_cutoff]),
+            )
+            attention_ids = {int(r["id"]) for r in cur.fetchall()}
 
-        # stuck (engine) + aging awaiting_human. waiting_on_you rows that
-        # sit in this set are subtracted below.
-        cur.execute(
-            "SELECT l.id FROM loops l "
-            f"WHERE l.closed_at IS NULL AND {_NAMED_TITLE_SQL}{acct_sql} "
-            "AND ("
-            "  l.cached_state IN ('stalled', 'awaiting_system') "
-            f"  OR (l.cached_state = 'awaiting_human' "
-            f"      AND COALESCE(l.last_event_unix, 0) <= {PH})"
-            ")",
-            tuple([*acct_args, stall_ns_cutoff]),
-        )
-        attention_ids = {int(r["id"]) for r in cur.fetchall()}
-
-        needs_you_ids: set[int] = set()
-        if viewer_user_id is not None:
-            assigned, _ = _loops_assigned_to(cur, account_id, viewer_user_id)
-            if assigned:
-                ph_list = ", ".join([PH] * len(assigned))
-                cur.execute(
-                    f"SELECT id FROM loops l WHERE l.id IN ({ph_list}) "
-                    f"AND {_NAMED_TITLE_SQL}",
-                    tuple(assigned),
+            needs_you_ids: set[int] = set()
+            if viewer_user_id is not None:
+                assigned, _ = _loops_assigned_to(
+                    cur, account_id, viewer_user_id, named_only=True,
                 )
-                needs_you_ids = {int(r["id"]) for r in cur.fetchall()}
+                needs_you_ids = {int(i) for i in assigned}
 
-        return {
-            "needs_you": len(needs_you_ids),
-            "needs_attention": len(attention_ids - needs_you_ids),
-            "open": open_n,
-            "completed_week": completed_week,
-        }
+            return {
+                "needs_you": len(needs_you_ids),
+                "needs_attention": len(attention_ids - needs_you_ids),
+                "open": open_n,
+                "completed_week": completed_week,
+            }
+    except Exception as exc:
+        if _is_query_canceled(exc):
+            raise QueryTimeout("work overview timed out") from exc
+        raise
 
 
 def _decode_work_items_cursor(cursor: str | None) -> tuple[int, int] | None:
@@ -4368,17 +4456,17 @@ def get_work_items(
     week_ago = (_utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
-    acct_sql, acct_args = _work_account_sql(account_id)
+    scope, scope_args = _work_named_scope_sql(account_id)
     key = _decode_work_items_cursor(cursor)
 
     sql = (
         "SELECT l.id, l.title, l.title_source, l.cached_state, l.last_event_unix, "
         "       l.closed_at, l.created_at, l.service_name, l.agent_id "
         "FROM loops l "
-        f"WHERE {_NAMED_TITLE_SQL}{acct_sql} "
+        f"WHERE {scope} "
         f"AND (l.closed_at IS NULL OR l.closed_at >= {PH}) "
     )
-    args: list[Any] = [*acct_args, week_ago]
+    args: list[Any] = [*scope_args, week_ago]
     if key is not None:
         cursor_ts, cursor_id = key
         sql += (
@@ -5436,6 +5524,7 @@ def save_description(
                 account_id,
             ),
         )
+    _invalidate_agents_cache(account_id)
 
 
 # ---------------------------------------------------------------------------
@@ -5443,72 +5532,22 @@ def save_description(
 # ---------------------------------------------------------------------------
 
 
-def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
-    """Return the fleet as instance groups, each with a nested list of agents.
+def agents_list_agg_sql(
+    account_id: int | None, today_ns: int, week_ns: int,
+) -> tuple[str, tuple[Any, ...]]:
+    """Cheap per-(service, agent) aggregate for GET /agents first paint.
 
-    Spans are grouped by `(service_name, agent_id)` first to compute per-agent
-    stats, then folded into one record per `service_name`. A single-agent
-    instance still gets a one-element `agents` list — the frontend collapses
-    those visually.
+    No correlated subqueries — those were evaluated per input row on
+    Postgres (~400k × description/owner/sample lookups = 8s+ on Hammocks).
+    Sidecar tables (descriptions, registrations, display names, owners)
+    load in a second pass over the tiny N of groups, not over every span.
+    top_operations is omitted here (empty on the list); Agent Detail still
+    computes it from get_agent_summary.
 
-    When account_id is provided, results are strictly scoped to that account
-    (pre-multi-tenant rows with NULL account_id are excluded). When None,
-    returns ALL rows (local-dev / pre-auth behavior).
+    Plan: GROUP BY on idx_spans_account_service_agent.
     """
     span_filter = f"WHERE account_id = {PH}" if account_id is not None else ""
-    desc_filter = (
-        f"AND d.account_id = {PH}" if account_id is not None else ""
-    )
-    reg_filter = (
-        f"AND r.account_id = {PH}" if account_id is not None else ""
-    )
-    dn_filter = (
-        f"AND dn.account_id = {PH}" if account_id is not None else ""
-    )
-    own_filter = (
-        f"AND o.account_id = {PH}" if account_id is not None else ""
-    )
-    sample_acct_filter = (
-        f"AND s2.account_id = {PH}" if account_id is not None else ""
-    )
-
-    # Per (service_name, agent_id) aggregation — every row is one bubble in
-    # the nested `agents[]` list. The description and sample_resource lookup
-    # only need to fire once per service_name, but it's cheaper to repeat the
-    # subquery than to issue a separate round-trip per group; both are 1-row
-    # lookups with the right indexes.
-    #
-    # Note on GROUP BY: we group by the bare `agent_id` column (not
-    # `COALESCE(agent_id, 'main')`). Postgres is strict about subqueries
-    # referencing outer-query columns that aren't either in GROUP BY or
-    # aggregated, and the `has_registration` EXISTS subquery below
-    # correlates on `spans.agent_id`. SQLite tolerates the COALESCE-only
-    # grouping, but Postgres returns "column must appear in GROUP BY".
-    # In practice every row has `agent_id = 'main'` or an explicit value
-    # (the ADD COLUMN default backfills, and inserts always tag a value),
-    # so the two forms produce the same groups — but only the bare-column
-    # form is portable. COALESCE is moved into the SELECT projection.
-    # Both the description and the display_name subqueries correlate on
-    # `spans.agent_id` (so each sub-agent gets its own value). Postgres
-    # requires every column referenced in a subquery to be in the outer
-    # GROUP BY or aggregated — `agent_id` IS in the GROUP BY, so the
-    # `COALESCE(spans.agent_id, 'main')` reads are legal there.
-    # Day/week thresholds for the windowed cost columns (nanoseconds).
-    # "Today" is the UTC calendar day (since 00:00 UTC), matching the 30-day
-    # chart + month-to-date (both UTC-bucketed) and the providers' billing day,
-    # so "Today" equals the last point of the trend chart and lines up with the
-    # console. "7d" stays a rolling 7-day window.
-    from time import time as _time
-
-    _now_ns = int(_time() * 1_000_000_000)
-    _day_ns = 24 * 60 * 60 * 1_000_000_000
-    _utc_midnight = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    today_ns = int(_utc_midnight.timestamp() * 1_000_000_000)
-    week_ns = _now_ns - 7 * _day_ns
-
-    agg_sql = f"""
+    sql = f"""
         SELECT
             service_name,
             COALESCE(agent_id, 'main')                       AS agent_id,
@@ -5520,233 +5559,280 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
             SUM(total_tokens)                                AS total_tokens,
             SUM(estimated_cost_usd)                          AS estimated_cost_usd,
             SUM(CASE WHEN start_time_unix >= {PH} THEN estimated_cost_usd ELSE 0 END) AS cost_today,
-            SUM(CASE WHEN start_time_unix >= {PH} THEN estimated_cost_usd ELSE 0 END) AS cost_7d,
-            (
-                SELECT description
-                FROM descriptions d
-                WHERE d.service_name = spans.service_name
-                  AND COALESCE(d.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
-                  {desc_filter}
-                ORDER BY d.generated_at DESC, d.id DESC
-                LIMIT 1
-            )                                                AS description,
-            EXISTS (
-                SELECT 1
-                FROM agent_registrations r
-                WHERE r.service_name = spans.service_name
-                  AND COALESCE(r.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
-                  {reg_filter}
-            )                                                AS has_registration,
-            (
-                SELECT display_name
-                FROM agent_display_names dn
-                WHERE dn.service_name = spans.service_name
-                  AND COALESCE(dn.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
-                  {dn_filter}
-                LIMIT 1
-            )                                                AS display_name,
-            (
-                SELECT m.name
-                FROM agent_owners o
-                JOIN team_members m ON m.id = o.team_member_id
-                WHERE o.service_name = spans.service_name
-                  AND COALESCE(o.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
-                  {own_filter}
-                LIMIT 1
-            )                                                AS owner_name,
-            (
-                SELECT m.role
-                FROM agent_owners o
-                JOIN team_members m ON m.id = o.team_member_id
-                WHERE o.service_name = spans.service_name
-                  AND COALESCE(o.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
-                  {own_filter}
-                LIMIT 1
-            )                                                AS owner_role,
-            (
-                SELECT o.team_member_id
-                FROM agent_owners o
-                WHERE o.service_name = spans.service_name
-                  AND COALESCE(o.agent_id, 'main') = COALESCE(spans.agent_id, 'main')
-                  {own_filter}
-                LIMIT 1
-            )                                                AS owner_id,
-            (
-                SELECT resource_attributes
-                FROM spans s2
-                WHERE s2.service_name = spans.service_name
-                  {sample_acct_filter}
-                ORDER BY s2.start_time_unix DESC
-                LIMIT 1
-            )                                                AS sample_resource_attributes
+            SUM(CASE WHEN start_time_unix >= {PH} THEN estimated_cost_usd ELSE 0 END) AS cost_7d
         FROM spans
         {span_filter}
         GROUP BY service_name, agent_id
         ORDER BY last_seen_ns DESC
     """
-    # Argument order matches the {PH} occurrences left-to-right in the SQL:
-    # cost_today threshold (1) + cost_7d threshold (1) come first (they're
-    # in the SELECT, always present), THEN the account-scope placeholders
-    # when account_id is set: desc_filter (1) + reg_filter (1) +
-    # dn_filter (1) + 3× own_filter + sample_acct_filter (1) +
-    # span_filter (1) = 8.
     if account_id is not None:
-        agg_args = (today_ns, week_ns) + (account_id,) * 8
+        args: tuple[Any, ...] = (today_ns, week_ns, account_id)
     else:
-        agg_args = (today_ns, week_ns)
+        args = (today_ns, week_ns)
+    return sql, args
 
-    # Top operations are computed per instance (service_name), not per
-    # agent — useful at the group level. Per-agent top-ops would inflate
-    # the payload without buying much.
-    top_ops_args_extra = (account_id,) if account_id is not None else ()
-    top_ops_sql = f"""
-        SELECT span_name, COUNT(*) AS c
-        FROM spans
-        WHERE service_name = {PH}
-          {f"AND account_id = {PH}" if account_id is not None else ""}
-        GROUP BY span_name
-        ORDER BY c DESC
-        LIMIT 5
+
+def _fleet_sidecar(cur, account_id: int | None) -> dict[str, Any]:
+    """Descriptions / registrations / display names / owners for the fleet.
+
+    These tables are tiny (one row per agent, not per span). Loaded once
+    per GET /agents instead of correlated against every span row.
     """
+    acct = f"WHERE account_id = {PH}" if account_id is not None else ""
+    args = (account_id,) if account_id is not None else ()
 
-    # Fold the per-(service, agent) rows into groups keyed by service_name.
-    # Group-level totals are summed from the per-agent rows so a single SQL
-    # round-trip is enough.
+    cur.execute(
+        "SELECT service_name, COALESCE(agent_id, 'main') AS agent_id, description "
+        f"FROM descriptions {acct} "
+        "ORDER BY generated_at DESC, id DESC",
+        args,
+    )
+    descriptions: dict[tuple[str, str], Any] = {}
+    for r in cur.fetchall():
+        key = (r["service_name"], r["agent_id"] or "main")
+        if key not in descriptions:
+            descriptions[key] = r["description"]
+
+    cur.execute(
+        "SELECT DISTINCT service_name, COALESCE(agent_id, 'main') AS agent_id "
+        f"FROM agent_registrations {acct}",
+        args,
+    )
+    registrations = {
+        (r["service_name"], r["agent_id"] or "main") for r in cur.fetchall()
+    }
+
+    cur.execute(
+        "SELECT service_name, COALESCE(agent_id, 'main') AS agent_id, display_name "
+        f"FROM agent_display_names {acct}",
+        args,
+    )
+    display_names = {
+        (r["service_name"], r["agent_id"] or "main"): r["display_name"]
+        for r in cur.fetchall()
+    }
+
+    owner_acct = f"AND o.account_id = {PH}" if account_id is not None else ""
+    cur.execute(
+        "SELECT o.service_name, COALESCE(o.agent_id, 'main') AS agent_id, "
+        "       o.team_member_id, m.name, m.role "
+        "FROM agent_owners o JOIN team_members m ON m.id = o.team_member_id "
+        f"WHERE 1=1 {owner_acct}",
+        args,
+    )
+    owners = {
+        (r["service_name"], r["agent_id"] or "main"): r for r in cur.fetchall()
+    }
+    return {
+        "descriptions": descriptions,
+        "registrations": registrations,
+        "display_names": display_names,
+        "owners": owners,
+    }
+
+
+def _locked_service_names(
+    limit: int | None,
+    first_seen_ns: dict[str, int | None],
+) -> set[str]:
+    """Plan view-lock from already-aggregated first_seen — no second span scan."""
+    items = list(first_seen_ns.items())
+    items.sort(key=lambda t: (t[1] is None, t[1] or 0))
+    if limit is None:
+        return set()
+    return {s for (s, _ns) in items[limit:]}
+
+
+def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
+    """Return the fleet as instance groups, each with a nested list of agents.
+
+    First paint: one GROUP BY over spans (no per-row correlated subqueries,
+    no per-service top-ops scan of 400k rows, no second get_locked_state
+    span scan). Sidecar metadata is O(agents). 8s statement_timeout on
+    Postgres; 8s in-process cache collapses Dashboard's double fetch.
+
+    When account_id is provided, results are strictly scoped to that account
+    (pre-multi-tenant rows with NULL account_id are excluded). When None,
+    returns ALL rows (local-dev / pre-auth behavior).
+    """
+    plan = "free"
+    if account_id is not None:
+        acct = get_account(account_id)
+        if acct:
+            plan = acct.get("plan", "free")
+    plan_limit = agent_limit(plan)
+
+    now_mono = time.monotonic()
+    cache_key = (account_id, plan)
+    with _agents_list_lock:
+        hit = _agents_list_cache.get(cache_key)
+        if hit and (now_mono - hit[0]) < _AGENTS_CACHE_TTL_S:
+            return hit[1]
+
+    from time import time as _time
+
+    _now_ns = int(_time() * 1_000_000_000)
+    _day_ns = 24 * 60 * 60 * 1_000_000_000
+    _utc_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    today_ns = int(_utc_midnight.timestamp() * 1_000_000_000)
+    week_ns = _now_ns - 7 * _day_ns
+    agg_sql, agg_args = agents_list_agg_sql(account_id, today_ns, week_ns)
+
     groups: dict[str, dict[str, Any]] = {}
-
-    # View-lock state under the account's plan (telemetry is never gated).
-    lock = get_locked_state(account_id)
-    locked_keys = lock["locked"]
-
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(agg_sql, agg_args)
-        agg_rows = cur.fetchall()
-
-        for row in agg_rows:
-            sn = row["service_name"]
-            agent_record = {
-                "agent_id": row["agent_id"] or "main",
-                "span_count": row["span_count"],
-                "error_count": row["error_count"] or 0,
-                "avg_duration_ms": float(row["avg_duration_ms"] or 0.0),
-                "first_seen": _ns_to_iso(row["first_seen_ns"]),
-                "last_seen": _ns_to_iso(row["last_seen_ns"]),
-                "has_registration": bool(row["has_registration"]),
-                # Per-agent description and display name. Each sub-agent
-                # gets its own values — the group-level fields below
-                # surface the 'main' sub-agent's values as a default for
-                # the Fleet card.
-                "description": row["description"],
-                "display_name": row["display_name"],
-                # Owner — the human team member assigned. None when
-                # the sub-agent has no owner.
-                "owner_id": row["owner_id"],
-                "owner_name": row["owner_name"],
-                "owner_role": row["owner_role"],
-                # Token usage + cost. None/0 when this agent never
-                # reported usage data.
-                "total_tokens": int(row["total_tokens"] or 0),
-                "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
-                "cost_today": round(float(row["cost_today"] or 0.0), 6),
-                "cost_7d": round(float(row["cost_7d"] or 0.0), 6),
-                # View-locked when this agent's INSTANCE is beyond the plan's
-                # instance limit (sub-agents inherit their instance's lock).
-                # Telemetry is still fully recorded regardless.
-                "locked": sn in locked_keys,
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            _set_statement_timeout(cur, _AGENTS_LIST_TIMEOUT_MS)
+            cur.execute(agg_sql, agg_args)
+            agg_rows = cur.fetchall()
+            side = _fleet_sidecar(cur, account_id) if agg_rows else {
+                "descriptions": {},
+                "registrations": set(),
+                "display_names": {},
+                "owners": {},
             }
-            if sn not in groups:
-                groups[sn] = {
-                    "service_name": sn,
-                    "agents": [],
-                    "total_spans": 0,
-                    "total_errors": 0,
-                    # Weighted-duration accumulator + total span count for
-                    # the post-loop weighted average. Kept here so we don't
-                    # need a second SQL pass.
-                    "_weighted_sum_ms": 0.0,
-                    "first_seen": agent_record["first_seen"],
-                    "last_seen": agent_record["last_seen"],
-                    "top_operations": [],
-                    # Group-level description/display_name/owner start
-                    # with whatever the first sub-agent in this group
-                    # has; we'll prefer 'main' below if we see it.
-                    "description": agent_record["description"],
-                    "display_name": agent_record["display_name"],
-                    "owner_name": agent_record["owner_name"],
-                    "owner_role": agent_record["owner_role"],
-                    "has_registration": False,
-                    "platform": _detect_platform(
-                        row["sample_resource_attributes"]
+
+            first_seen_ns: dict[str, int | None] = {}
+            for row in agg_rows:
+                sn = row["service_name"]
+                aid = row["agent_id"] or "main"
+                key = (sn, aid)
+                owner = side["owners"].get(key) or {}
+                ns = row["first_seen_ns"]
+                if sn not in first_seen_ns:
+                    first_seen_ns[sn] = ns
+                elif ns is not None and (
+                    first_seen_ns[sn] is None or ns < first_seen_ns[sn]
+                ):
+                    first_seen_ns[sn] = ns
+                agent_record = {
+                    "agent_id": aid,
+                    "span_count": row["span_count"],
+                    "error_count": row["error_count"] or 0,
+                    "avg_duration_ms": float(row["avg_duration_ms"] or 0.0),
+                    "first_seen": _ns_to_iso(row["first_seen_ns"]),
+                    "last_seen": _ns_to_iso(row["last_seen_ns"]),
+                    "has_registration": key in side["registrations"],
+                    "description": side["descriptions"].get(key),
+                    "display_name": side["display_names"].get(key),
+                    "owner_id": owner.get("team_member_id"),
+                    "owner_name": owner.get("name"),
+                    "owner_role": owner.get("role"),
+                    "total_tokens": int(row["total_tokens"] or 0),
+                    "estimated_cost_usd": round(
+                        float(row["estimated_cost_usd"] or 0.0), 6
                     ),
-                    # Cost rollups across all sub-agents in the instance.
-                    "total_tokens": 0,
-                    "estimated_cost_usd": 0.0,
-                    "cost_today": 0.0,
-                    "cost_7d": 0.0,
-                    # Set in the finalize loop from the sub-agents' locked flags.
+                    "cost_today": round(float(row["cost_today"] or 0.0), 6),
+                    "cost_7d": round(float(row["cost_7d"] or 0.0), 6),
                     "locked": False,
-                    "locked_count": 0,
                 }
-            g = groups[sn]
-            g["agents"].append(agent_record)
-            g["total_spans"] += agent_record["span_count"]
-            g["total_errors"] += agent_record["error_count"]
-            g["total_tokens"] += agent_record["total_tokens"]
-            g["estimated_cost_usd"] += agent_record["estimated_cost_usd"]
-            g["cost_today"] += agent_record["cost_today"]
-            g["cost_7d"] += agent_record["cost_7d"]
-            # Prefer 'main' for the group-level description/display_name/
-            # owner when it exists; otherwise leave whatever was seen first.
-            if agent_record["agent_id"] == "main":
-                if agent_record["description"]:
-                    g["description"] = agent_record["description"]
-                if agent_record["display_name"]:
-                    g["display_name"] = agent_record["display_name"]
-                if agent_record["owner_name"]:
-                    g["owner_name"] = agent_record["owner_name"]
-                    g["owner_role"] = agent_record["owner_role"]
-            g["_weighted_sum_ms"] += (
-                agent_record["avg_duration_ms"] * agent_record["span_count"]
-            )
-            # Earliest/latest seen across all agents in the instance.
-            if (
-                agent_record["first_seen"]
-                and (not g["first_seen"] or agent_record["first_seen"] < g["first_seen"])
-            ):
-                g["first_seen"] = agent_record["first_seen"]
-            if (
-                agent_record["last_seen"]
-                and (not g["last_seen"] or agent_record["last_seen"] > g["last_seen"])
-            ):
-                g["last_seen"] = agent_record["last_seen"]
-            g["has_registration"] = g["has_registration"] or agent_record["has_registration"]
+                if sn not in groups:
+                    groups[sn] = {
+                        "service_name": sn,
+                        "agents": [],
+                        "total_spans": 0,
+                        "total_errors": 0,
+                        "_weighted_sum_ms": 0.0,
+                        "first_seen": agent_record["first_seen"],
+                        "last_seen": agent_record["last_seen"],
+                        # List paint skips per-service top-ops (would COUNT
+                        # every span of the 400k-span agent). Detail still has it.
+                        "top_operations": [],
+                        "description": agent_record["description"],
+                        "display_name": agent_record["display_name"],
+                        "owner_name": agent_record["owner_name"],
+                        "owner_role": agent_record["owner_role"],
+                        "has_registration": False,
+                        "platform": None,
+                        "total_tokens": 0,
+                        "estimated_cost_usd": 0.0,
+                        "cost_today": 0.0,
+                        "cost_7d": 0.0,
+                        "locked": False,
+                        "locked_count": 0,
+                    }
+                g = groups[sn]
+                g["agents"].append(agent_record)
+                g["total_spans"] += agent_record["span_count"]
+                g["total_errors"] += agent_record["error_count"]
+                g["total_tokens"] += agent_record["total_tokens"]
+                g["estimated_cost_usd"] += agent_record["estimated_cost_usd"]
+                g["cost_today"] += agent_record["cost_today"]
+                g["cost_7d"] += agent_record["cost_7d"]
+                if agent_record["agent_id"] == "main":
+                    if agent_record["description"]:
+                        g["description"] = agent_record["description"]
+                    if agent_record["display_name"]:
+                        g["display_name"] = agent_record["display_name"]
+                    if agent_record["owner_name"]:
+                        g["owner_name"] = agent_record["owner_name"]
+                        g["owner_role"] = agent_record["owner_role"]
+                g["_weighted_sum_ms"] += (
+                    agent_record["avg_duration_ms"] * agent_record["span_count"]
+                )
+                if (
+                    agent_record["first_seen"]
+                    and (not g["first_seen"] or agent_record["first_seen"] < g["first_seen"])
+                ):
+                    g["first_seen"] = agent_record["first_seen"]
+                if (
+                    agent_record["last_seen"]
+                    and (not g["last_seen"] or agent_record["last_seen"] > g["last_seen"])
+                ):
+                    g["last_seen"] = agent_record["last_seen"]
+                g["has_registration"] = (
+                    g["has_registration"] or agent_record["has_registration"]
+                )
 
-        # Resolve per-instance derived fields. top_operations needs one
-        # extra round-trip per group (small N — number of distinct services).
-        for sn, g in groups.items():
-            cur.execute(top_ops_sql, (sn, *top_ops_args_extra))
-            g["top_operations"] = [r["span_name"] for r in cur.fetchall()]
-            g["avg_duration_ms"] = (
-                g["_weighted_sum_ms"] / g["total_spans"]
-                if g["total_spans"]
-                else 0.0
+            locked_keys = _locked_service_names(plan_limit, first_seen_ns)
+            sample_acct = (
+                f"AND account_id = {PH}" if account_id is not None else ""
             )
-            del g["_weighted_sum_ms"]
-            # Tidy float accumulation noise on the cost rollups.
-            g["estimated_cost_usd"] = round(g["estimated_cost_usd"], 6)
-            g["cost_today"] = round(g["cost_today"], 6)
-            g["cost_7d"] = round(g["cost_7d"], 6)
-            # The instance card is locked only when every sub-agent is locked;
-            # locked_count drives the "N recording" hint.
-            g["locked_count"] = sum(1 for a in g["agents"] if a["locked"])
-            g["locked"] = bool(g["agents"]) and all(a["locked"] for a in g["agents"])
+            for sn, g in groups.items():
+                # One latest-resource lookup per instance (LIMIT 1), not a
+                # correlated subquery over 400k rows.
+                sample_args: tuple[Any, ...] = (
+                    (sn, account_id) if account_id is not None else (sn,)
+                )
+                cur.execute(
+                    f"SELECT resource_attributes FROM spans "
+                    f"WHERE service_name = {PH} {sample_acct} "
+                    "ORDER BY start_time_unix DESC LIMIT 1",
+                    sample_args,
+                )
+                sample = cur.fetchone()
+                g["platform"] = _detect_platform(
+                    sample["resource_attributes"] if sample else None
+                )
+                g["avg_duration_ms"] = (
+                    g["_weighted_sum_ms"] / g["total_spans"]
+                    if g["total_spans"]
+                    else 0.0
+                )
+                del g["_weighted_sum_ms"]
+                g["estimated_cost_usd"] = round(g["estimated_cost_usd"], 6)
+                g["cost_today"] = round(g["cost_today"], 6)
+                g["cost_7d"] = round(g["cost_7d"], 6)
+                for a in g["agents"]:
+                    a["locked"] = sn in locked_keys
+                g["locked_count"] = sum(1 for a in g["agents"] if a["locked"])
+                g["locked"] = bool(g["agents"]) and all(
+                    a["locked"] for a in g["agents"]
+                )
+    except Exception as exc:
+        if _is_query_canceled(exc):
+            raise QueryTimeout("agents list timed out") from exc
+        raise
 
-    # Sort instances by their most recent span across any agent.
-    return sorted(
+    result = sorted(
         groups.values(),
         key=lambda g: g["last_seen"] or "",
         reverse=True,
     )
+    with _agents_list_lock:
+        _agents_list_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def get_agent_spans(
@@ -6508,6 +6594,7 @@ def set_display_name(
             args = (*args, account_id)
         with _connect() as conn, _cursor(conn) as cur:
             cur.execute(sql, args)
+        _invalidate_agents_cache(account_id)
         return
 
     # Both backends support `INSERT ... ON CONFLICT ... DO UPDATE` for
@@ -6533,11 +6620,7 @@ def set_display_name(
         """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, (account_id, service_name, agent_id or "main", clean))
-
-
-# ---------------------------------------------------------------------------
-# Team members + agent ownership
-# ---------------------------------------------------------------------------
+    _invalidate_agents_cache(account_id)
 
 
 class TeamMemberEmailExistsError(Exception):
@@ -6777,6 +6860,7 @@ def set_agent_owner(
             sql,
             (account_id, service_name, agent_id or "main", team_member_id),
         )
+    _invalidate_agents_cache(account_id)
 
 
 def remove_agent_owner(
@@ -6800,7 +6884,10 @@ def remove_agent_owner(
         args = (*args, account_id)
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(sql, args)
-        return cur.rowcount > 0
+        removed = cur.rowcount > 0
+    if removed:
+        _invalidate_agents_cache(account_id)
+    return removed
 
 
 def get_agents_for_team_member(
@@ -7813,6 +7900,7 @@ def delete_agent(
         )
         summary["workflows"] = cur.rowcount
         summary.update(wf_children)
+    _invalidate_agents_cache(account_id)
     return summary
 
 
@@ -7929,6 +8017,7 @@ def set_account_plan(account_id: int, plan: str) -> None:
             f"UPDATE accounts SET plan = {PH} WHERE id = {PH}",
             ((plan or "free"), account_id),
         )
+    _invalidate_agents_cache(account_id)
 
 
 def set_account_stripe_customer(account_id: int, customer_id: str | None) -> None:

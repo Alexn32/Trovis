@@ -28,7 +28,12 @@ export function timeoutError(timeoutMs) {
 }
 
 export function isTimeoutError(err) {
-  return err?.code === 'timeout' || err?.name === 'TimeoutError'
+  return (
+    err?.code === 'timeout' ||
+    err?.name === 'TimeoutError' ||
+    err?.status === 504 ||
+    err?.status === 408
+  )
 }
 
 /** Hung TCP, aborted fetch, or the browser's raw "Failed to fetch". */

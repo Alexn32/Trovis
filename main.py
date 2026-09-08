@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -1219,7 +1220,10 @@ def work_overview(request: Request) -> WorkOverview:
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)
     viewer_user_id = user["id"] if user else None
-    counts = database.get_work_overview(account_id, viewer_user_id=viewer_user_id)
+    try:
+        counts = database.get_work_overview(account_id, viewer_user_id=viewer_user_id)
+    except database.QueryTimeout as exc:
+        raise HTTPException(status_code=504, detail="work overview timed out") from exc
     return WorkOverview(**counts)
 
 
@@ -1833,18 +1837,24 @@ async def archive_workflow(workflow_id: int, request: Request) -> WorkflowDetail
 
 
 @app.get("/agents", response_model=list[AgentGroup])
-async def list_agents(request: Request) -> list[AgentGroup]:
+def list_agents(request: Request) -> list[AgentGroup]:
     """Return the fleet grouped by `service.name`, with a nested list of
     sub-agents inside each instance.
+
+    Sync `def` so a large-tenant aggregate cannot pin the event loop (the
+    previous `async def` blocked /health and queued Dashboard's double
+    fetch). Cheap GROUP BY + 8s statement_timeout; 504 on timeout so the
+    client shows an error, not an empty fleet.
     """
     account_id = getattr(request.state, "account_id", None)
     # `status` is attached here rather than derived client-side, so the Fleet
     # page, the dashboard and the briefing all read the same verdict for the
     # same agent. See _agent_status for what they used to disagree about.
-    return [
-        AgentGroup(**a, status=_agent_status(a))
-        for a in database.get_agents(account_id=account_id)
-    ]
+    try:
+        rows = database.get_agents(account_id=account_id)
+    except database.QueryTimeout as exc:
+        raise HTTPException(status_code=504, detail="agents list timed out") from exc
+    return [AgentGroup(**a, status=_agent_status(a)) for a in rows]
 
 
 def _humanize_seconds(s: float) -> str:
@@ -2557,6 +2567,29 @@ _DRIFT_TTL_SECONDS = 6 * 60 * 60  # 6 hours — drift verdict (one Claude call/a
 # Sentinel service_name for account-level (not per-agent) cached insights.
 _DASHBOARD_SENTINEL = "__dashboard__"
 _NS_PER_DAY = 24 * 60 * 60 * 1_000_000_000
+
+# Dashboard Claude must never pin the ASGI event loop (the 40s briefing
+# starvation). Handlers are sync `def` (Starlette threadpool). The Claude
+# call itself is additionally capped so a cache miss fail-softs instead of
+# occupying a worker for a full Anthropic round-trip.
+_CLAUDE_DASH_TIMEOUT_S = 3.0
+_claude_dash_pool = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="claude-dash",
+)
+
+
+def _claude_dash(fn, fallback):
+    """Run one Claude dashboard call with a hard cap. Timeout/error → fallback."""
+    fut = _claude_dash_pool.submit(fn)
+    try:
+        return fut.result(timeout=_CLAUDE_DASH_TIMEOUT_S)
+    except FuturesTimeoutError:
+        return fallback
+    except describer.APIKeyMissingError:
+        return fallback
+    except Exception as e:  # noqa: BLE001
+        print(f"[Oversee] dashboard claude failed: {type(e).__name__}: {e}")
+        return fallback
 
 
 def _pct_delta(current: float, previous: float) -> float | None:
@@ -3730,9 +3763,14 @@ def _work_activity(spans: list[dict]) -> dict:
 
 
 @app.get("/dashboard/briefing", response_model=BriefingResponse)
-async def dashboard_briefing(request: Request) -> BriefingResponse:
+def dashboard_briefing(request: Request) -> BriefingResponse:
     """AI daily briefing + task counts. Counts are always fresh; the Claude
-    summary is cached for an hour and falls back to a plain line on failure."""
+    summary is cached for an hour and falls back to a plain line on failure.
+
+    Sync `def` so Claude cannot pin the event loop (login / GET /agents
+    starved for ~40s when this was `async def`). Cache miss: 3s Claude cap,
+    then fail-soft fallback — never wait out a hung Anthropic call.
+    """
     account_id = getattr(request.state, "account_id", None)
     from time import time as _time
 
@@ -3784,14 +3822,10 @@ async def dashboard_briefing(request: Request) -> BriefingResponse:
 
     agents = database.get_agents(account_id=account_id)
     stats = _briefing_stats(agents, tasks_yesterday, tasks_last_week, tasks_delta)
-    summary = ""
-    try:
-        summary = describer.fleet_briefing(stats).get("summary", "")
-    except describer.APIKeyMissingError:
-        summary = ""
-    except Exception as e:  # noqa: BLE001
-        print(f"[Oversee] /dashboard/briefing claude failed: {type(e).__name__}: {e}")
-        summary = ""
+    summary = _claude_dash(
+        lambda: describer.fleet_briefing(stats).get("summary", "") or "",
+        "",
+    )
     if summary:
         database.save_insight(
             account_id=account_id,
@@ -3870,10 +3904,13 @@ def _drift_attention_items(agents: list[dict], account_id: int | None) -> list[d
 
 
 @app.get("/dashboard/attention", response_model=list[AttentionItem])
-async def dashboard_attention(request: Request) -> list[AttentionItem]:
+def dashboard_attention(request: Request) -> list[AttentionItem]:
     """Needs-attention rows: genuine behavioral drift (from cached verdicts) plus
     fleet-health flags enriched by Claude (cached an hour, keyed on the current
-    flag set). Empty list when all clear."""
+    flag set). Empty list when all clear.
+
+    Sync `def` + 3s Claude cap — same event-loop reason as /dashboard/briefing.
+    """
     account_id = getattr(request.state, "account_id", None)
     agents = database.get_agents(account_id=account_id)
     # Drift first — it's the product's headline signal, and it's read-only here.
@@ -3902,21 +3939,19 @@ async def dashboard_attention(request: Request) -> list[AttentionItem]:
     ):
         return [AttentionItem(**it) for it in (drift_items + cached["data"]["items"])]
 
-    try:
-        items = describer.attention_items(flagged)
-        if items:
-            database.save_insight(
-                account_id=account_id,
-                service_name=_DASHBOARD_SENTINEL,
-                agent_id="main",
-                kind="attention",
-                data={"fingerprint": fingerprint, "items": items},
-            )
-    except describer.APIKeyMissingError:
-        items = _attention_fallback(flagged)
-    except Exception as e:  # noqa: BLE001
-        print(f"[Oversee] /dashboard/attention claude failed: {type(e).__name__}: {e}")
-        items = _attention_fallback(flagged)
+    flagged_fallback = _attention_fallback(flagged)
+    items = _claude_dash(
+        lambda: describer.attention_items(flagged) or flagged_fallback,
+        flagged_fallback,
+    )
+    if items and items != flagged_fallback:
+        database.save_insight(
+            account_id=account_id,
+            service_name=_DASHBOARD_SENTINEL,
+            agent_id="main",
+            kind="attention",
+            data={"fingerprint": fingerprint, "items": items},
+        )
     return [AttentionItem(**it) for it in (drift_items + items)]
 
 
@@ -4081,9 +4116,12 @@ async def set_cost_agent_budget(request: Request, body: AgentBudgetUpdate) -> Co
 
 
 @app.get("/dashboard/work-feed", response_model=list[WorkFeedItem])
-async def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
+def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
     """Plain-English feed of what each active agent recently did (last 24h).
-    One Claude summary per agent, cached an hour, with a non-AI fallback."""
+    One Claude summary per agent, cached an hour, with a non-AI fallback.
+
+    Sync `def` so a cache-miss Claude batch cannot pin the event loop.
+    """
     account_id = getattr(request.state, "account_id", None)
     from time import time as _time
 
@@ -4117,24 +4155,20 @@ async def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
         )
         summary = cached["data"].get("summary", "") if cached else ""
         if not summary:
-            try:
-                summary = describer.work_feed_summary(label, _work_activity(recent))
-                if summary:
-                    database.save_insight(
-                        account_id=account_id,
-                        service_name=svc,
-                        agent_id="main",
-                        kind="work_feed",
-                        data={"summary": summary},
-                    )
-            except describer.APIKeyMissingError:
-                summary = ""
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"[Oversee] /dashboard/work-feed claude failed for "
-                    f"'{svc}': {type(e).__name__}: {e}"
+            summary = _claude_dash(
+                lambda label=label, recent=recent: describer.work_feed_summary(
+                    label, _work_activity(recent)
+                ),
+                "",
+            )
+            if summary:
+                database.save_insight(
+                    account_id=account_id,
+                    service_name=svc,
+                    agent_id="main",
+                    kind="work_feed",
+                    data={"summary": summary},
                 )
-                summary = ""
         if not summary:
             ops = a.get("top_operations") or []
             summary = f"Ran {task_count} tasks" + (

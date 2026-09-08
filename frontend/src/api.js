@@ -149,6 +149,10 @@ async function request(path, options = {}) {
     const err = new Error(msg)
     err.status = res.status
     err.detail = detail
+    if (res.status === 504 || res.status === 408) {
+      err.code = 'timeout'
+      err.name = 'TimeoutError'
+    }
     throw err
   }
   // 204 No Content and other empty-body responses return null —
