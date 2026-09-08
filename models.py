@@ -1222,3 +1222,75 @@ class WorkBoard(BaseModel):
     total: int = 0
     has_agents: bool = False
 
+
+# ---------------------------------------------------------------------------
+# Lean Work home (overview + items). Fat /work/board and /work/summary must
+# not be the home path — they scan every open loop's events and starve the
+# single Uvicorn replica. These shapes are the Frontend/UX locked contract.
+# ---------------------------------------------------------------------------
+
+WORK_ITEM_STATUSES = (
+    "waiting_on_you",
+    "waiting_on_other",  # UI label is "Waiting on someone"; wire value stays this
+    "stuck",
+    "moving",
+    "done",
+)
+WORK_HOLDER_KINDS = ("human", "agent", "tool", "unassigned")
+
+
+class WorkOverview(BaseModel):
+    """GET /work/overview — counts only. Named work. No board dump.
+
+    needs_you = waiting_on_you ONLY.
+    needs_attention = stuck + aging waiting_on_other (never waiting_on_you).
+    """
+
+    needs_you: int = 0
+    needs_attention: int = 0
+    open: int = 0
+    completed_week: int = 0
+
+
+class WorkItemHolder(BaseModel):
+    kind: str  # human | agent | tool | unassigned
+    name: str
+
+
+class WorkItem(BaseModel):
+    """One named-work row for the Monday table. No raw OTel untitled loops."""
+
+    id: int
+    title: str
+    status: str  # waiting_on_you | waiting_on_other | stuck | moving | done
+    holder: WorkItemHolder
+    whats_next: str
+    updated_at: str | None = None
+
+
+class WorkItemsResponse(BaseModel):
+    """GET /work/items?cursor=&limit= — paginated named items."""
+
+    items: list[WorkItem] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
+class WorkSuggestion(BaseModel):
+    """Stub row for GET /work/suggestions. Mutations are a follow-up.
+
+    Never invent a title here — empty list until a real suggestion exists.
+    `source` and `draft_holder` are optional.
+    """
+
+    id: str
+    title: str
+    why: str
+    source: str | None = None
+    draft_holder: WorkItemHolder | None = None
+
+
+class WorkSuggestionsResponse(BaseModel):
+    """GET /work/suggestions — empty stub. Approve/edit/decline is follow-up."""
+
+    suggestions: list[WorkSuggestion] = Field(default_factory=list)
+

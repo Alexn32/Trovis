@@ -117,6 +117,10 @@ from models import (
     WorkBoard,
     WorkSummary,
     WorkKindCard,
+    WorkOverview,
+    WorkItem,
+    WorkItemsResponse,
+    WorkSuggestionsResponse,
     MeResponse,
     WorkflowCreate,
     WorkflowDetail,
@@ -534,6 +538,46 @@ class _MCPInterceptMiddleware:
 app.add_middleware(_MCPInterceptMiddleware)
 
 
+class _HealthFastpathMiddleware:
+    """Answer GET /health before auth, CORS routing, and any work/board path.
+
+    A single Uvicorn replica shares one event loop. Fat `/work/summary` and
+    `/work/board` used to run as async handlers that blocked on SQLite for
+    a minute-plus, so Railway probes and login 499'd. This middleware never
+    touches the DB. Pair with sync `def` on the fat work endpoints so they
+    run in the threadpool and cannot starve this path.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") == "http"
+            and scope.get("method") == "GET"
+            and scope.get("path", "").rstrip("/") == "/health"
+        ):
+            body = json.dumps({"status": "ok", "version": VERSION}).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                        (b"cache-control", b"no-store"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
+# Last-added = outermost, so /health never waits on MCP/CORS/auth/DB.
+app.add_middleware(_HealthFastpathMiddleware)
+
+
 # ---------------------------------------------------------------------------
 # OTLP/JSON parsing
 # ---------------------------------------------------------------------------
@@ -670,6 +714,8 @@ def _parse_otlp_json(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    """Liveness only. No DB, no work/board/summary. The ASGI fastpath
+    answers this before any other middleware; this route stays for OpenAPI."""
     return HealthResponse(status="ok", version=VERSION)
 
 
@@ -1153,16 +1199,73 @@ def _row_to_board_card(r: dict, now_ns: int) -> BoardCard:
     )
 
 
-@app.get("/work/summary", response_model=WorkSummary)
-async def work_summary(request: Request) -> WorkSummary:
-    """Level 1 of the Work tab: one card per kind of work (per workflow),
-    plus an 'Other work' catch-all, plus the cross-workflow strip of tasks
-    waiting on the caller.
+@app.get("/work/overview", response_model=WorkOverview)
+def work_overview(request: Request) -> WorkOverview:
+    """Lean Work home counts. Named work only. Does NOT call get_work_board.
 
-    ONE fetch. This reuses database.get_work_board UNFILTERED — the exact two
-    bounded queries the board runs — and groups the result in memory. No
-    per-workflow query, no N+1. The board (Level 2) is the same fetch with a
-    workflow_id filter; this is that fetch, grouped a different way.
+    Home (dashboard Work tab / Monday table) must use this + GET /work/items.
+    `/work/summary` and `/work/board` remain for the legacy board drill-in
+    and must not be polled as the primary path.
+
+    Sync `def` so SQLite stays off the event loop — /health can still answer.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    counts = database.get_work_overview(account_id, viewer_user_id=viewer_user_id)
+    return WorkOverview(**counts)
+
+
+@app.get("/work/items", response_model=WorkItemsResponse)
+def work_items(
+    request: Request,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> WorkItemsResponse:
+    """Paginated named items for the Monday table. No untitled OTel flood.
+
+    Status is the locked enum (waiting_on_other stays that wire value).
+    Sync `def` — same event-loop reason as /work/overview.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    items, next_cursor = database.get_work_items(
+        account_id,
+        viewer_user_id=viewer_user_id,
+        cursor=cursor,
+        limit=limit,
+    )
+    return WorkItemsResponse(
+        items=[WorkItem(**it) for it in items],
+        next_cursor=next_cursor,
+    )
+
+
+@app.get("/work/suggestions", response_model=WorkSuggestionsResponse)
+def work_suggestions(request: Request) -> WorkSuggestionsResponse:
+    """Stub. Approve/edit/decline mutations are a follow-up.
+
+    Empty on purpose: do not invent titles. When real rows exist they must
+    already have a human title (`id`, `title`, `why`; optional `source`,
+    `draft_holder`).
+    """
+    getattr(request.state, "account_id", None)  # account-scoped when filled in
+    return WorkSuggestionsResponse(suggestions=[])
+
+
+@app.get("/work/summary", response_model=WorkSummary)
+def work_summary(request: Request) -> WorkSummary:
+    """Level 1 of the Work tab (LEGACY). One card per kind of work (per
+    workflow), plus an 'Other work' catch-all, plus the cross-workflow strip
+    of tasks waiting on the caller.
+
+    FAT: reuses database.get_work_board UNFILTERED — the same loop-scanning
+    fetch as the board. Home must not call this. Use GET /work/overview and
+    GET /work/items instead. Kept for the legacy kind-card UI until Frontend
+    fully wires the Monday table.
+
+    Sync `def` so this cannot block /health on the event loop.
     """
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)
@@ -1249,16 +1352,15 @@ async def work_summary(request: Request) -> WorkSummary:
 
 
 @app.get("/work/board", response_model=WorkBoard)
-async def work_board(
+def work_board(
     request: Request,
     workflow_id: int | None = Query(default=None),
 ) -> WorkBoard:
     """The whole Work board in one request: every open task plus whatever
     finished today, already sorted and bucketed.
 
-    One endpoint on purpose — the board would otherwise be a request per
-    column plus one per card to resolve who holds it, and 'who holds it' is a
-    question only the server can answer.
+    FAT: not the Work home path. Home uses GET /work/overview + GET /work/items.
+    Sync `def` so a board fetch cannot block /health on the event loop.
     """
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)

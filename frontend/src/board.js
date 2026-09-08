@@ -134,3 +134,21 @@ export function workScreenEmpty(summary) {
     cta: null,
   }
 }
+
+/** Wire status → table label. waiting_on_other stays the API enum. */
+export function workItemStatusLabel(status) {
+  switch (status) {
+    case 'waiting_on_you':
+      return 'Waiting on you'
+    case 'waiting_on_other':
+      return 'Waiting on someone'
+    case 'stuck':
+      return 'Stuck'
+    case 'moving':
+      return 'Moving'
+    case 'done':
+      return 'Done'
+    default:
+      return ''
+  }
+}

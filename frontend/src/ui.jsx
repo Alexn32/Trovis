@@ -18,9 +18,9 @@ export function Stat({ label, value, tone, sub }) {
   )
 }
 
-// Fail-soft empty state when Work L1 (`/work/summary`) or L2 (`/work/board`)
-// times out or the network dies. Copy lives here so Board.jsx doesn't grow
-// new user-facing strings (its jargon sweep reads that file).
+// Fail-soft empty state when Work home (`/work/overview` + `/work/items`)
+// or legacy L2 (`/work/board`) times out or the network dies. Copy lives
+// here so Board.jsx doesn't grow new user-facing strings.
 export function WorkLoadFailed({ onRetry }) {
   return (
     <div className="board-empty" role="alert">

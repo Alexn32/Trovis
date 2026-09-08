@@ -51,7 +51,12 @@ The server creates `trovis.db` (SQLite) on first run. To use Postgres locally in
 
 | Method | Path                                 | Description                                                                       |
 | ------ | ------------------------------------ | --------------------------------------------------------------------------------- |
-| GET    | `/health`                            | Liveness probe. Returns `{"status": "ok", "version": "..."}`.                     |
+| GET    | `/health`                            | Liveness probe. No DB. Never waits on `/work/*`. Returns `{"status": "ok", "version": "..."}`. |
+| GET    | `/work/overview`                     | Lean Work home counts: `needs_you`, `needs_attention`, `open`, `completed_week`. Named work only — not `/work/board`. |
+| GET    | `/work/items`                        | Paginated named items (`?cursor=&limit=`). Rows: `id`, `title`, `status`, `holder`, `whats_next`, `updated_at`. |
+| GET    | `/work/suggestions`                  | Stub (`suggestions: []`). Mutations are a follow-up. |
+| GET    | `/work/summary`                      | **Legacy / fat.** Loop-scans the full board. Do not call from home. |
+| GET    | `/work/board`                        | **Legacy / fat.** Whole board dump. Do not poll from home. |
 | POST   | `/v1/traces`                         | OTLP/JSON trace ingest. Accepts the standard OTEL export body.                    |
 | GET    | `/agents`                            | List every agent that has reported telemetry, with their latest description.      |
 | GET    | `/agents/{service_name}/summary`     | Aggregate stats for one agent. 404 if unknown.                                    |

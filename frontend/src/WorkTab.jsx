@@ -1,185 +1,107 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
-import { UserIcon, ChevronRightIcon } from './Icons.jsx'
 import { WorkLoadFailed } from './ui.jsx'
-import Board from './Board.jsx'
-import {
-  boardAge,
-  boardCostLabel,
-  kindRollup,
-  kindNeedsAttention,
-  otherNudge,
-  workScreenEmpty,
-} from './board.js'
+import { workItemStatusLabel } from './board.js'
 
-// The Work tab.
-//   Level 1 — this screen: one card per kind of work (per workflow), plus an
-//             "Other work" catch-all. Above them, a strip of tasks waiting on
-//             YOU, across every kind.
-//   Level 2 — the board (Board.jsx), filtered to one kind. The Yours strip
-//             persists here too: your desk is never more than zero clicks away.
-//   Level 3 — the task story (the board's slide-over).
+// Work home — lean overview + named items. Must NOT call /work/summary or
+// /work/board (those starve the replica). Frontend owns the Monday table
+// polish; this is a minimal adapter against the locked shapes.
 //
-// Task language throughout. No loops, no stations, no handoffs.
+// Status wire value waiting_on_other → label "Waiting on someone".
+// Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
+// auto-poll back into Loading.
 
-const REFRESH_MS = 20000
+const POLL_START_MS = 30000
+const POLL_MAX_MS = 120000
 
-// ---------------------------------------------------------------------------
-// The "waiting on you" strip — shown on both levels, always cross-workflow.
-
-function YoursStrip({ yours, onOpen, onResolved }) {
-  if (!yours || yours.length === 0) return null
-  return (
-    <section className="yours-strip" aria-label="Waiting on you">
-      <div className="yours-head">Waiting on you</div>
-      <div className="yours-rail">
-        {yours.map((c) => (
-          <YoursCard key={c.id} card={c} onOpen={onOpen} onResolved={onResolved} />
-        ))}
-      </div>
-    </section>
-  )
+function fmtUpdated(iso) {
+  if (!iso) return ''
+  const ms = Date.now() - Date.parse(iso)
+  if (Number.isNaN(ms)) return ''
+  const m = Math.floor(ms / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
 }
 
-function YoursCard({ card, onOpen, onResolved }) {
-  const [busy, setBusy] = useState(null)
-  const [note, setNote] = useState(null)
-
-  async function resolve(e, action) {
-    e.stopPropagation()
-    if (busy) return
-    setBusy(action)
-    try {
-      const fn =
-        action === 'accept'
-          ? api.acceptHandoff
-          : action === 'complete'
-            ? api.completeHandoff
-            : api.declineHandoff
-      await fn(card.id, card.handoff_event_id)
-      onResolved?.()
-    } catch (err) {
-      setNote(
-        err?.status === 409
-          ? 'This finished while you were looking at it.'
-          : err?.message || 'Could not update this task.',
-      )
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const age = boardAge(card.age_seconds)
+function CountChip({ label, value, tone }) {
+  const n = value || 0
   return (
-    <div
-      className="yc"
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(card)}
-      onKeyDown={(e) => (e.key === 'Enter' ? onOpen(card) : null)}
-    >
-      <span className="yc-title">{card.title}</span>
-      {age && <span className="yc-age">waiting {age}</span>}
-      {card.handoff_event_id && (
-        <span className="yc-actions">
-          <button type="button" disabled={!!busy} onClick={(e) => resolve(e, 'complete')}>
-            {busy === 'complete' ? 'Saving…' : 'Done'}
-          </button>
-          <button type="button" disabled={!!busy} onClick={(e) => resolve(e, 'accept')}>
-            {busy === 'accept' ? 'Taking…' : 'I’ve got this'}
-          </button>
-          <button type="button" disabled={!!busy} onClick={(e) => resolve(e, 'decline')}>
-            {busy === 'decline' ? 'Passing…' : 'Not mine'}
-          </button>
-        </span>
-      )}
-      {note && <span className="yc-note">{note}</span>}
+    <div className={`work-chip${tone && n ? ` is-${tone}` : ''}`}>
+      <span className="work-chip-value">{n}</span>
+      <span className="work-chip-label">{label}</span>
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Level 1 — a card per kind of work
-
-function KindCard({ card, onOpen, onDeclare }) {
-  const rollup = kindRollup(card)
-  const nudge = card.is_other ? otherNudge(card) : ''
-  return (
-    <div
-      className={`kind ${kindNeedsAttention(card) ? 'attn' : ''} ${card.is_other ? 'is-other' : ''}`}
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(card)}
-      onKeyDown={(e) => (e.key === 'Enter' ? onOpen(card) : null)}
-    >
-      <div className="kind-top">
-        <span className="kind-name">{card.name}</span>
-        <ChevronRightIcon size={15} />
-      </div>
-      <div className="kind-rollup">
-        {rollup.map((p, i) => (
-          <span key={i} className={`kr kr-${p.tone}`}>
-            {p.value != null && <b>{p.value}</b>} {p.label}
-          </span>
-        ))}
-      </div>
-      {nudge && (
-        <button
-          type="button"
-          className="kind-nudge"
-          onClick={(e) => {
-            e.stopPropagation()
-            onDeclare?.()
-          }}
-        >
-          {nudge}
-        </button>
-      )}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-
-export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow }) {
-  const [summary, setSummary] = useState(null)
+export default function WorkTab({ onConnectAgent }) {
+  const [overview, setOverview] = useState(null)
+  const [items, setItems] = useState(null)
+  const [nextCursor, setNextCursor] = useState(null)
   const [err, setErr] = useState(null)
-  const [selected, setSelected] = useState(null) // { id, name } | null (Level 2)
 
   const failSoftRef = useRef(false)
-  failSoftRef.current = !summary && !!err
+  failSoftRef.current = !overview && !items && !!err
 
   const load = useCallback(async () => {
     try {
-      setSummary(await api.getWorkSummary())
+      const [ov, page] = await Promise.all([
+        api.getWorkOverview(),
+        api.getWorkItems({ limit: 50 }),
+      ])
+      setOverview(ov)
+      setItems(Array.isArray(page?.items) ? page.items : [])
+      setNextCursor(page?.next_cursor || null)
       setErr(null)
     } catch (e) {
       setErr(e?.message || 'Could not load your work')
+      throw e
     }
   }, [])
 
   function retry() {
     setErr(null)
-    load()
+    load().catch(() => {})
   }
 
   useEffect(() => {
-    load()
-    const t = setInterval(() => {
-      if (failSoftRef.current) return
-      load()
-    }, REFRESH_MS)
-    return () => clearInterval(t)
+    load().catch(() => {})
+    let delay = POLL_START_MS
+    let timer
+    function schedule() {
+      timer = setTimeout(() => {
+        if (failSoftRef.current || document.hidden) {
+          schedule()
+          return
+        }
+        load()
+          .then(() => {
+            delay = POLL_START_MS
+          })
+          .catch(() => {
+            delay = Math.min(delay * 2, POLL_MAX_MS)
+          })
+          .finally(schedule)
+      }, delay)
+    }
+    schedule()
+    return () => clearTimeout(timer)
   }, [load])
 
-  // A strip card's body click drills into that task's KIND on the board,
-  // where the full card and its story live and the item floats at the top.
-  // (The resolve actions on the strip itself need no navigation.)
-  const openTask = (card) =>
-    setSelected({ id: card.workflow_id || null, name: card.workflow_name || 'Other work' })
+  async function loadMore() {
+    if (!nextCursor) return
+    try {
+      const page = await api.getWorkItems({ cursor: nextCursor, limit: 50 })
+      setItems((prev) => [...(prev || []), ...(page?.items || [])])
+      setNextCursor(page?.next_cursor || null)
+    } catch {
+      /* keep last-good rows */
+    }
+  }
 
-  // First paint only: keep a last-good summary if a later refresh fails.
-  if (!summary && err) {
+  if (!overview && !items && err) {
     return (
       <div className="view board-view">
         <div className="board-head">
@@ -189,29 +111,11 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
       </div>
     )
   }
-  if (!summary) {
+  if (!overview || !items) {
     return <div className="view board-view"><div className="dash-empty pad">Loading…</div></div>
   }
 
-  // Level 2 — the board, filtered to the chosen kind, with the strip above it.
-  if (selected) {
-    return (
-      <div className="view board-view">
-        <YoursStrip yours={summary.yours} onOpen={openTask} onResolved={load} />
-        <Board
-          initialWorkflowId={selected.id || ''}
-          onBack={() => setSelected(null)}
-          onConnectAgent={onConnectAgent}
-          onOpenWorkflow={onOpenWorkflow}
-        />
-      </div>
-    )
-  }
-
-  // Level 1 — the Work screen.
-  const empty = workScreenEmpty(summary)
-  const kinds = summary.kinds || []
-  const other = summary.other
+  const empty = (overview.open || 0) === 0 && items.length === 0
 
   return (
     <div className="view board-view">
@@ -219,37 +123,55 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
         <h1>Work</h1>
       </div>
 
-      <YoursStrip yours={summary.yours} onOpen={openTask} onResolved={load} />
+      <div className="work-chips" aria-label="Work overview">
+        <CountChip label="Needs you" value={overview.needs_you} tone="warn" />
+        <CountChip label="Needs attention" value={overview.needs_attention} tone="stuck" />
+        <CountChip label="Open" value={overview.open} />
+        <CountChip label="Completed this week" value={overview.completed_week} />
+      </div>
 
       {empty && (
         <div className="board-empty">
-          <p className="board-empty-lead">{empty.lead}</p>
-          <p className="board-empty-sub">{empty.sub}</p>
-          {empty.cta && (
+          <p className="board-empty-lead">No named work yet.</p>
+          <p className="board-empty-sub">
+            Connect an agent and titled tasks show up here on their own. You will not have to enter any of it.
+          </p>
+          {onConnectAgent && (
             <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
-              {empty.cta}
+              Connect an agent
             </button>
           )}
         </div>
       )}
 
       {!empty && (
-        <div className="kinds">
-          {kinds.map((k) => (
-            <KindCard
-              key={k.workflow_id}
-              card={k}
-              onOpen={() => setSelected({ id: k.workflow_id, name: k.name })}
-              onDeclare={onNewWorkflow}
-            />
-          ))}
-          {/* Other work is always last. */}
-          {other && (
-            <KindCard
-              card={other}
-              onOpen={() => setSelected({ id: null, name: other.name })}
-              onDeclare={onNewWorkflow}
-            />
+        <div className="work-table-wrap">
+          <table className="work-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Holder</th>
+                <th>What&apos;s next</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => (
+                <tr key={row.id} className={row.status === 'waiting_on_you' ? 'is-yours' : ''}>
+                  <td className="work-td-title">{row.title}</td>
+                  <td>{workItemStatusLabel(row.status)}</td>
+                  <td>{row.holder?.name || ''}</td>
+                  <td>{row.whats_next}</td>
+                  <td className="work-td-updated">{fmtUpdated(row.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {nextCursor && (
+            <button type="button" className="btn work-more" onClick={loadMore}>
+              Load more
+            </button>
           )}
         </div>
       )}

@@ -18,6 +18,7 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   `asker.py` = fleet Q&A). Model lives in module-level `MODEL` constants.
 - **Frontend:** React + Vite (`frontend/`), CSS-variable theming (light/dark).
 - **Ingest:** OTLP/HTTP receiver at `POST /v1/traces`.
+- **Work home (lean):** `GET /work/overview` (counts) + `GET /work/items` (paginated named rows). Do **not** call `GET /work/board` or `GET /work/summary` from home — those scan every open loop and starve a single Uvicorn replica. `/health` is a DB-free fastpath.
 - **Distribution:** `trovis-agents/` (pip SDK for OpenAI Agents SDK / Claude Agent SDK /
   Claude Managed Agents), `trovis-openclaw-plugin/` (TS plugin), `mcp_server.py`
   (MCP server for ChatGPT, mounted on the FastAPI app — currently unlisted in the UI).
