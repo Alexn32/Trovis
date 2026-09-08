@@ -4045,10 +4045,15 @@ def get_work_board(
 
 # Shell titles: stored fallbacks / templates that look like a name but
 # aren't a human-provided work item. Excluded even if title_source slipped.
+#
+# psycopg2 treats every `%` as a bind placeholder whenever params are
+# passed (Railway: IndexError at get_work_overview / get_work_items).
+# Escape LIKE wildcards as `%%` on Postgres; SQLite `?` binding is fine.
+_pct = "%%" if USE_POSTGRES else "%"
 _SHELL_TITLE_SQL = (
     "("
-    "LOWER(l.title) LIKE 'task from %' "
-    "OR l.title LIKE '% · % · % actions'"
+    f"LOWER(l.title) LIKE 'task from {_pct}' "
+    f"OR l.title LIKE '{_pct} · {_pct} · {_pct} actions'"
     ")"
 )
 _NAMED_TITLE_SQL = (
