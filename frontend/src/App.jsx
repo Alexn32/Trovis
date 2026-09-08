@@ -466,8 +466,15 @@ function AppInner() {
       <TabPane id="dashboard" visible={dashboardVisible}>
         <Dashboard
           key={`dashboard-${shownEpoch.current.dashboard}`}
+          // Off screen, Home stops re-syncing on focus (same rule as Work).
+          active={dashboardVisible}
           onOpenAgent={openDetail}
-          onGoFleet={() => setTab('fleet')}
+          // Home v2 has no Fleet strip; its links go to Work instead — the
+          // briefing footer, the look-at header, and "+N more".
+          onGoWork={() => {
+            setTab('work')
+            setOverlay(null)
+          }}
           onOpenCost={() => setOverlay({ kind: 'cost' })}
           onViewAllWorkFeed={() => setOverlay({ kind: 'workfeed' })}
           userName={account.userName}

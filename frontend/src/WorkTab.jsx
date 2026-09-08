@@ -4,6 +4,7 @@ import Board, { TaskPanel } from './Board.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
   holderLabel,
+  itemToCard,
   sortWorkItems,
   workItemStatusLabel,
   workUpdatedLabel,
@@ -35,20 +36,6 @@ function rowClass(status) {
   if (status === 'waiting_on_you') return 'work-row is-waiting-you'
   if (status === 'stuck') return 'work-row is-stuck'
   return 'work-row'
-}
-
-function itemToCard(row) {
-  const ms = row.updated_at ? Date.now() - Date.parse(row.updated_at) : NaN
-  return {
-    id: row.id,
-    title: row.title,
-    holder_name: row.holder?.name || '',
-    holder_type: row.holder?.kind === 'human' ? 'human' : 'agent',
-    is_yours: row.status === 'waiting_on_you',
-    age_seconds: Number.isNaN(ms) ? null : Math.max(0, Math.floor(ms / 1000)),
-    standing: false,
-    standing_reason: null,
-  }
 }
 
 // Render the contract as the API sent it. Do not re-filter rows to "fix"
