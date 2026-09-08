@@ -1278,7 +1278,7 @@ class WorkItemsResponse(BaseModel):
 
 
 class WorkSuggestion(BaseModel):
-    """Stub row for GET /work/suggestions. Mutations are a follow-up.
+    """One pending suggestion for the Work home strip.
 
     Never invent a title here — empty list until a real suggestion exists.
     `source` and `draft_holder` are optional.
@@ -1292,7 +1292,50 @@ class WorkSuggestion(BaseModel):
 
 
 class WorkSuggestionsResponse(BaseModel):
-    """GET /work/suggestions — empty stub. Approve/edit/decline is follow-up."""
+    """GET /work/suggestions — pending rows only. Declined/approved are gone."""
 
     suggestions: list[WorkSuggestion] = Field(default_factory=list)
+
+
+class WorkSuggestionPatch(BaseModel):
+    """Edit a pending suggestion, or the optional body on approve (edit+approve)."""
+
+    title: str | None = None
+    why: str | None = None
+    draft_holder: WorkItemHolder | None = None
+
+
+class WorkSuggestionApproveResponse(BaseModel):
+    """POST /work/suggestions/{id}/approve — the named work item now in /work/items."""
+
+    item: WorkItem
+
+
+class WorkItemProcess(BaseModel):
+    id: int
+    name: str
+
+
+class WorkItemTimelineEntry(BaseModel):
+    at: str | None = None
+    text: str
+
+
+class WorkItemProvenance(BaseModel):
+    source: str  # telemetry | suggestion
+    suggestion_id: str | None = None
+
+
+class WorkItemDetail(WorkItem):
+    """GET /work/items/{id} — table row plus the v1.1 detail spine.
+
+    `whats_happening` is the current-state sentence (same idea as `whats_next`).
+    `process` / `timeline` / `provenance` are present even when empty so the
+    FE can render a detail pane without a second fat loop fetch.
+    """
+
+    whats_happening: str = ""
+    process: WorkItemProcess | None = None
+    timeline: list[WorkItemTimelineEntry] = Field(default_factory=list)
+    provenance: WorkItemProvenance | None = None
 
