@@ -148,3 +148,23 @@ test('RESTORE_RETRY_DELAY_MS is a short backoff, not another hang', () => {
   assert.ok(RESTORE_RETRY_DELAY_MS >= 200)
   assert.ok(RESTORE_RETRY_DELAY_MS <= 3_000)
 })
+
+test('a TCP hang (server accepts, never responds) aborts — the Railway-dead case', async () => {
+  const { createServer } = await import('node:http')
+  const server = createServer(() => {
+    /* never write a response */
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  const t0 = Date.now()
+  try {
+    await assert.rejects(
+      () => fetchWithTimeout(`http://127.0.0.1:${port}/auth/me`, {}, 80),
+      (err) => isTimeoutError(err),
+    )
+    const elapsed = Date.now() - t0
+    assert.ok(elapsed < 1500, `TCP hang settled in ${elapsed}ms`)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
