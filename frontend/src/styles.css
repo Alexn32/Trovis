@@ -4829,6 +4829,10 @@ a:hover {
   font-size: 14px; font-weight: 700; color: var(--text-primary);
   margin-right: auto;
 }
+/* Works-with strip inside the guided door — same honest split as the landing,
+   sat between the header and the thread so it frames the conversation. */
+.connect-works-with { padding: 10px 18px 0; }
+
 .connect-thread {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 12px;

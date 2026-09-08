@@ -279,8 +279,56 @@ function Callout({ variant = 'info', children }) {
 function SuccessCallout() {
   return (
     <Callout variant="success">
-      Once connected, your agent will appear on the Trovis dashboard within seconds.
+      Once connected, your agent shows up in Trovis within seconds. Runs that
+      carry a title arrive as named jobs you can open and follow — the rest is
+      recorded, just unnamed.
     </Callout>
+  )
+}
+
+/**
+ * The one rule every builder has to follow for their work to be legible:
+ * give the job a human title.
+ *
+ * Shared across the recipe pages so the guidance cannot drift between doors,
+ * and so the platform helpers (which set the attribute for you) are always
+ * offered before the raw attribute is.
+ */
+function NamedWorkGuidance() {
+  return (
+    <>
+      <p>
+        Trovis groups spans into <strong>jobs</strong> — one job is one piece of
+        work, however many runs, people and tools it passes through. A job needs
+        a title a person would recognise:
+      </p>
+      <CodeBlock code={'span.set_attribute("trovis.loop.title", "Approve refund for order #4821")'} />
+      <p className="helper-text">
+        <strong>Write it the way you would say it.</strong>{' '}
+        <code>Approve refund for order #4821</code> — not <code>run_4821</code>,{' '}
+        <code>handle_refund</code>, or a UUID. Generated and id-shaped titles are
+        filtered out of Work on purpose, so a job titled like that simply will
+        not appear there.
+      </p>
+      <p className="helper-text">
+        Set it once, on any span of the job. Pair it with{' '}
+        <code>trovis.loop.external_id</code> — the same id on every span of the
+        same job — so the steps group into one job instead of a row each.
+      </p>
+      <p className="helper-text">
+        <strong>On a supported platform you don&apos;t write this by hand.</strong>{' '}
+        The <code>trovis</code> SDK exposes{' '}
+        <code>trovis.set_loop_title(&quot;…&quot;)</code>, and OpenClaw names each
+        job from the inbound message once{' '}
+        <code>/trovis capture on</code> is set. Reach for the raw attribute only
+        when you are emitting OTEL yourself.
+      </p>
+      <p className="helper-text">
+        Titled jobs are what make hybrid work readable: a job hands off between
+        a person, an agent and a SaaS tool, and Work shows that route instead of
+        a pile of traces.
+      </p>
+    </>
   )
 }
 
@@ -635,10 +683,17 @@ provider.add_span_processor(
 )
 trace.set_tracer_provider(provider)
 
-# Create spans for your agent's operations
+# Create spans for your agent's operations.
+#
+# trovis.loop.title is what turns a trace into a named job on Work. Write it
+# the way a colleague would say it out loud — no ids, no snake_case. Without
+# it the run is still recorded, but it stays an unnamed trace.
 tracer = trace.get_tracer("AGENT_NAME")
-with tracer.start_as_current_span("my-operation") as span:
-    span.set_attribute("custom.key", "value")
+with tracer.start_as_current_span("handle_refund") as span:
+    span.set_attribute("trovis.loop.title", "Approve refund for order #4821")
+    # Same id on every span of the same job, so the steps group into one job
+    # instead of a row each.
+    span.set_attribute("trovis.loop.external_id", "order-4821")
     # your agent logic here`,
     agentName, endpoint,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
@@ -682,6 +737,9 @@ function CursorOtelInstructions({ agentName, endpoint }) {
       </NumberedStep>
       <NumberedStep n={2} title="Point traces at Trovis">
         <CodeBlock code={otelSetupBlock(agentName, resolvedEndpoint, apiKey)} />
+      </NumberedStep>
+      <NumberedStep n={3} title="Name the job (required for named Work)">
+        <NamedWorkGuidance />
       </NumberedStep>
       <Callout variant="info">
         Same door as any other OTEL app — Trovis does not install anything
@@ -1215,6 +1273,15 @@ Do the connect/log/complete calls silently in the background — don't mention T
         you tell it to log, and task completions. Everything runs on OpenAI's
         side, so token-level cost isn't available for GPT-Action agents — you
         see their activity, not per-call spend.
+      </Callout>
+
+      <Callout variant="info">
+        <strong>Activity, not named jobs — yet.</strong> The Actions door has
+        no field for a job title, so a GPT's steps land as agent activity rather
+        than named jobs on Work. That is a gap in the Actions contract, not
+        something you can fix from the GPT side. If you need this GPT&apos;s work
+        to appear as named jobs today, have it emit OpenTelemetry with{' '}
+        <code>trovis.loop.title</code> instead.
       </Callout>
 
       <SuccessCallout />
