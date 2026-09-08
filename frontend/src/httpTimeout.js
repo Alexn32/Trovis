@@ -31,6 +31,15 @@ export function isTimeoutError(err) {
   return err?.code === 'timeout' || err?.name === 'TimeoutError'
 }
 
+/** Hung TCP, aborted fetch, or the browser's raw "Failed to fetch". */
+export function isUnreachableError(err) {
+  if (!err) return false
+  if (isTimeoutError(err)) return true
+  if (err.code === 'network' || err.status === 0) return true
+  const msg = String(err.message || '')
+  return /failed to fetch|networkerror|load failed|network request failed/i.test(msg)
+}
+
 /**
  * Fetch with a hard deadline. Aborts the underlying request when `timeoutMs`
  * elapses and rejects with a TimeoutError — even if `fetchImpl` ignores

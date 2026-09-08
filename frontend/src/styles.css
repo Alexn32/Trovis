@@ -6032,6 +6032,9 @@ select.wf2-input { cursor: pointer; }
 }
 .bps-none, .bpanel-loading, .bpanel-err { font-size: 12.5px; color: var(--text-muted); }
 .bpanel-err { color: var(--error); }
+.bpanel-err .board-empty-lead { color: var(--text-primary); font-size: 14px; margin: 0 0 6px; }
+.bpanel-err .board-empty-sub { color: var(--text-muted); margin: 0 0 12px; font-size: 12.5px; }
+.bpanel-err .btn { display: inline-flex; }
 
 /* ==========================================================================
    WORK — LEVEL 1 (the Work screen) + the "waiting on you" strip

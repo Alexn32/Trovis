@@ -20,6 +20,8 @@ import {
   RESTORE_TIMEOUT_MS,
   WORK_TIMEOUT_MS,
   fetchWithTimeout,
+  isTimeoutError,
+  isUnreachableError,
 } from './httpTimeout.js'
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
@@ -112,7 +114,20 @@ async function request(path, options = {}) {
   if (fetchOpts.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json'
   }
-  const res = await fetchWithTimeout(`${BASE}${path}`, { ...fetchOpts, headers }, timeoutMs)
+  let res
+  try {
+    res = await fetchWithTimeout(`${BASE}${path}`, { ...fetchOpts, headers }, timeoutMs)
+  } catch (e) {
+    // Never leak "Failed to fetch" / AbortError to the UI. Timeout and a
+    // dead Railway look the same to the operator: Trovis didn't respond.
+    if (isTimeoutError(e) || isUnreachableError(e)) {
+      const err = new Error("Trovis didn't respond")
+      err.code = isTimeoutError(e) ? 'timeout' : 'network'
+      err.status = 0
+      throw err
+    }
+    throw e
+  }
   if (!res.ok) {
     let body
     try {
@@ -378,7 +393,7 @@ export const api = {
   getWorkSummary: () => request('/work/summary', { timeoutMs: WORK_TIMEOUT_MS }),
   // Loops needing a human — stalled or waiting on you, oldest first.
   getStalledLoops: (limit = 50) => request(`/loops/stalled?limit=${limit}`),
-  getLoop: (loopId) => request(`/loops/${loopId}`),
+  getLoop: (loopId) => request(`/loops/${loopId}`, { timeoutMs: WORK_TIMEOUT_MS }),
   // Session auth only (the backend 403s api-key auth). Idempotent.
   closeLoop: (loopId) => request(`/loops/${loopId}/close`, { method: 'POST' }),
   // --- handoff resolution (the human half of a workloop) ---

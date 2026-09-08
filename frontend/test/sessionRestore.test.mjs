@@ -5,6 +5,7 @@ import {
   fetchWithTimeout,
   timeoutError,
   isTimeoutError,
+  isUnreachableError,
   RESTORE_TIMEOUT_MS,
   WORK_TIMEOUT_MS,
 } from '../src/httpTimeout.js'
@@ -177,21 +178,34 @@ test('WORK_TIMEOUT_MS is a 10–15s hard cap for /work/summary and /work/board',
   assert.ok(WORK_TIMEOUT_MS <= 15_000)
 })
 
-test('getWorkBoard and getWorkSummary pass the work timeout (not a bare fetch)', async () => {
+test('getWorkBoard, getWorkSummary, and getLoop pass the work timeout', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
   assert.match(src, /getWorkBoard[\s\S]{0,280}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkSummary[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /getLoop[\s\S]{0,80}timeoutMs:\s*WORK_TIMEOUT_MS/)
 })
 
-test('Work L1 and L2 render a Retry empty state, not a stuck Loading', async () => {
+test('Work L1, L2, and TaskPanel render a Retry empty state, not stuck Loading', async () => {
   const { readFileSync } = await import('node:fs')
   const tab = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   const board = readFileSync(new URL('../src/Board.jsx', import.meta.url), 'utf8')
   const ui = readFileSync(new URL('../src/ui.jsx', import.meta.url), 'utf8')
+  const code = ui.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   assert.match(tab, /WorkLoadFailed/)
   assert.match(board, /WorkLoadFailed/)
-  assert.match(ui, /Can't load this work/)
-  assert.match(ui, />\s*Retry\s*</)
-  assert.doesNotMatch(ui, /\b(loops?|possession|segments?|stations?|handoffs?)\b/i)
+  assert.match(board, /StoryLoadFailed/)
+  assert.match(code, /Can't load this work/)
+  assert.match(code, /Can't load this task/)
+  assert.match(code, />\s*Retry\s*</)
+  assert.doesNotMatch(code, /Failed to fetch/)
+  assert.doesNotMatch(code, /\b(loops?|possession|segments?|stations?|handoffs?)\b/i)
+})
+
+test('isUnreachableError catches Failed to fetch and timeouts, not 401s', () => {
+  assert.equal(isUnreachableError(new TypeError('Failed to fetch')), true)
+  assert.equal(isUnreachableError(timeoutError(15_000)), true)
+  const auth = new Error('unauthorized')
+  auth.status = 401
+  assert.equal(isUnreachableError(auth), false)
 })
