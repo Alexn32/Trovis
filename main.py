@@ -3620,8 +3620,111 @@ def _fleet_health(agents: list[dict]) -> dict:
     return counts
 
 
+# How many named items the briefing prompt may look at. One lean page is
+# plenty to name the two or three things a standup would mention, and it keeps
+# the miss path bounded.
+_BRIEFING_WORK_LIMIT = 40
+# Titles handed to the prompt per bucket. The briefing is 2-3 sentences; more
+# than this is context it cannot spend and tokens we needn't pay for.
+_BRIEFING_TITLES_PER_BUCKET = 4
+
+
+def _briefing_work_context(
+    account_id: int | None, viewer_user_id: int | None
+) -> dict:
+    """Named work for the briefing prompt — the things a person would actually
+    name out loud, with how long they have been sitting and who holds them.
+
+    Lean pair only (/work/overview + one page of /work/items). NEVER the board:
+    this runs inside a request, and get_work_board loop-scans.
+
+    Fail-soft by design — a briefing about the fleet is still worth printing if
+    the work queries fall over, so an error here degrades the prose rather than
+    the endpoint.
+    """
+    try:
+        counts = database.get_work_overview(
+            account_id, viewer_user_id=viewer_user_id
+        )
+        items, _ = database.get_work_items(
+            account_id,
+            viewer_user_id=viewer_user_id,
+            limit=_BRIEFING_WORK_LIMIT,
+        )
+    except Exception:
+        logger.warning("briefing: work context unavailable", exc_info=True)
+        return {}
+
+    from datetime import datetime, timezone
+    from time import time as _time
+
+    now = _time()
+
+    def _age_h(iso: str | None) -> float | None:
+        """Hours since `updated_at`.
+
+        That field is `_ns_to_iso` output — full ISO-8601 with a 'T' and an
+        offset — so it must be parsed as ISO. database._ts_to_epoch only
+        understands the 'YYYY-MM-DD HH:MM:SS' TIMESTAMP-column form and
+        silently returns None here, which would strip the age off every row.
+        """
+        if not iso:
+            return None
+        try:
+            dt = datetime.fromisoformat(iso)
+        except ValueError:
+            secs = database._ts_to_epoch(iso)
+            return round(max(0.0, now - secs) / 3600.0, 1) if secs else None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return round(max(0.0, now - dt.timestamp()) / 3600.0, 1)
+
+    def _row(it: dict) -> dict:
+        row = {"title": it.get("title"), "status_note": it.get("whats_next")}
+        # The holder, named explicitly rather than left buried in the status
+        # note — it is what lets the prompt notice that one person or one tool
+        # is holding several things, which is usually the real story.
+        holder = (it.get("holder") or {}).get("name")
+        if holder and not str(holder).lower().startswith("unassigned"):
+            row["held_by"] = holder
+        age = _age_h(it.get("updated_at"))
+        if age is not None:
+            row["waiting_hours"] = age
+        return row
+
+    buckets: dict[str, list[dict]] = {
+        "needs_you": [], "stuck": [], "waiting_on_others": [], "moving": [],
+    }
+    for it in items or []:
+        status = it.get("status")
+        key = (
+            "needs_you" if status == "waiting_on_you"
+            else "stuck" if status == "stuck"
+            # Waits on other people are the biggest bucket in a hybrid team and
+            # carry the person-level patterns. Leaving them out told the prompt
+            # "5 need attention" while showing it only the 2 that were stuck.
+            else "waiting_on_others" if status == "waiting_on_other"
+            else "moving" if status == "moving"
+            else None
+        )
+        if key and len(buckets[key]) < _BRIEFING_TITLES_PER_BUCKET:
+            buckets[key].append(_row(it))
+
+    return {
+        "counts": counts,
+        "waiting_on_you": buckets["needs_you"],
+        "stuck": buckets["stuck"],
+        "waiting_on_others": buckets["waiting_on_others"],
+        "moving": buckets["moving"],
+    }
+
+
 def _briefing_stats(
-    agents: list[dict], tasks_yesterday: int, tasks_last_week: int, tasks_delta: str
+    agents: list[dict],
+    tasks_yesterday: int,
+    tasks_last_week: int,
+    tasks_delta: str,
+    work: dict | None = None,
 ) -> dict:
     health = _fleet_health(agents)
     top_errors: list[dict] = []
@@ -3634,7 +3737,11 @@ def _briefing_stats(
             )
         cost_today += a.get("cost_today") or 0.0
     top_errors.sort(key=lambda x: x["error_rate_pct"], reverse=True)
+    # `named_work` is the half the briefing is actually about. Absent (work
+    # queries failed, or nothing named yet) the prompt is told so explicitly,
+    # so the model reports the fleet rather than inventing tasks.
     return {
+        "named_work": work or {},
         "agent_count": len(agents),
         "healthy": health["healthy"],
         "degraded": health["degraded"],
@@ -3832,7 +3939,16 @@ def dashboard_briefing(request: Request) -> BriefingResponse:
         )
 
     agents = database.get_agents(account_id=account_id)
-    stats = _briefing_stats(agents, tasks_yesterday, tasks_last_week, tasks_delta)
+    # Named work, fetched ONLY here on the cache miss — the cache-hit branch
+    # above must stay as cheap as it is today. Without this the prompt has
+    # nothing but span counts and error rates, which is why the briefing used
+    # to read "5 agents reporting, 24 tasks in the last 24 hours": telemetry,
+    # not a standup. Named work is what lets it say what is actually going on.
+    user = getattr(request.state, "user", None)
+    work = _briefing_work_context(account_id, user["id"] if user else None)
+    stats = _briefing_stats(
+        agents, tasks_yesterday, tasks_last_week, tasks_delta, work=work
+    )
     summary = _claude_dash(
         lambda: describer.fleet_briefing(stats).get("summary", "") or "",
         "",
