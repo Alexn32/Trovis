@@ -7,7 +7,7 @@ import { lifecycleSentence } from './loops.js'
 
 // The Work board — a secondary view, not the Work home landing.
 // Home is overview + suggestions + the Monday table (WorkTab.jsx). This
-// four-column board stays for "Boards & other views"; it must not load
+// four-column board stays for "Other views"; it must not load
 // until the operator asks for it (fat GET /work/board).
 //
 // A board of TASKS. Every column, label and sentence here is written for

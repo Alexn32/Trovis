@@ -6185,7 +6185,21 @@ select.wf2-input { cursor: pointer; }
   font: inherit; font-size: 13px; cursor: pointer;
   color: var(--error); background: none; border: none; padding: 8px 10px;
 }
-.work-sug-decline:hover { color: var(--error); opacity: 0.85; }
+.work-sug-decline:hover:not(:disabled) { color: var(--error); opacity: 0.85; }
+.work-sug-decline:disabled { opacity: 0.5; cursor: not-allowed; }
+.work-sug-row.is-busy { opacity: 0.72; }
+.work-sug-input {
+  display: block; width: 100%; max-width: 420px;
+  font: inherit; font-size: 14px; font-weight: 650;
+  color: var(--text-primary); background: var(--bg-primary);
+  border: 1px solid var(--border-default); border-radius: 8px;
+  padding: 6px 10px;
+}
+.work-sug-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.work-sug-input:disabled { opacity: 0.6; }
+.work-sug-err {
+  font-size: 12.5px; color: var(--error); margin: 6px 0 0;
+}
 
 .work-table { overflow-x: auto; }
 .work-table-head,

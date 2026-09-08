@@ -253,13 +253,21 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /KindCard/)
   assert.match(work, /work-suggestions/)
   assert.match(work, /TaskPanel/)
-  assert.match(work, /Boards & other views/)
+  assert.match(work, /holderLabel/)
+  assert.match(work, /Other views →/)
+  assert.doesNotMatch(work, /Boards & other views/)
 })
 
 test('Work home never auto-creates from suggestion approve/edit/decline', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /insert_spans|createWork|postWork|\/work\/items['"`].*POST/i)
-  assert.match(work, /never auto-create|Local dismiss only/)
+  assert.match(work, /approveWorkSuggestion/)
+  assert.match(work, /editWorkSuggestion/)
+  assert.match(work, /declineWorkSuggestion/)
+  assert.doesNotMatch(work, /Local dismiss only|onDismissSuggestion/)
+  assert.match(work, /refreshHome|getWorkOverview/)
+  assert.match(work, /getWorkItems/)
+  assert.match(work, /isNamedWorkTitle/)
 })
 
 test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving → Done', async () => {
@@ -286,6 +294,18 @@ test('named-work title gate hides ids, UUIDs, snake_case, and jargon', async () 
   assert.equal(isNamedWorkTitle('loop_42'), false)
   assert.equal(isNamedWorkTitle('550e8400-e29b-41d4-a716-446655440000'), false)
   assert.equal(isNamedWorkTitle(''), false)
+})
+
+test('holderLabel prefixes kind when lean fields have it, else name-only', async () => {
+  const { holderLabel } = await import('../src/board.js')
+  assert.equal(holderLabel({ kind: 'human', name: 'Alex' }, 'waiting_on_you'), 'You Alex')
+  assert.equal(holderLabel({ kind: 'human', name: 'You' }, 'waiting_on_you'), 'You')
+  assert.equal(holderLabel({ kind: 'human', name: 'Sarah Chen' }, 'waiting_on_other'), 'Person Sarah Chen')
+  assert.equal(holderLabel({ kind: 'agent', name: 'Support Bot' }, 'moving'), 'Agent Support Bot')
+  assert.equal(holderLabel({ kind: 'tool', name: 'Stripe' }, 'stuck'), 'Tool Stripe')
+  assert.equal(holderLabel({ kind: 'unassigned', name: 'Unassigned' }, 'moving'), 'Unassigned')
+  assert.equal(holderLabel({ name: 'Alex' }, 'waiting_on_you'), 'Alex')
+  assert.equal(holderLabel(null, 'moving'), '')
 })
 
 test('workUpdatedLabel is compact like boardAge, not "2h ago"', async () => {

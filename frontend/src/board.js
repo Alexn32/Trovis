@@ -195,3 +195,25 @@ export function isNamedWorkTitle(title) {
   if (!t) return false
   return !looksInternal(t)
 }
+
+const HOLDER_KIND_PREFIX = {
+  human: 'Person',
+  agent: 'Agent',
+  tool: 'Tool',
+}
+
+/**
+ * Monday table holder cell. When lean `holder.kind` is present, prefix
+ * You / Person / Agent / Tool, then the name. Missing or unknown kind
+ * stays name-only. `status === 'waiting_on_you'` is the "You" signal —
+ * the lean item has no separate is_yours flag.
+ */
+export function holderLabel(holder, status) {
+  const name = String(holder?.name || '').trim()
+  const kind = holder?.kind
+  if (!kind) return name
+  const prefix = status === 'waiting_on_you' ? 'You' : HOLDER_KIND_PREFIX[kind]
+  if (!prefix) return name
+  if (!name || (prefix === 'You' && /^you$/i.test(name))) return prefix
+  return `${prefix} ${name}`
+}
