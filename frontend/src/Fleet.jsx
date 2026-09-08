@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { isTimeoutError, isUnreachableError } from './httpTimeout.js'
 import {
   bucketSpansForSparkline,
   formatCost,
@@ -36,20 +37,24 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [usage, setUsage] = useState(null) // {plan, agent_count, agent_limit, locked_count}
+  const [retryKey, setRetryKey] = useState(0)
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
+    setError(null)
     api
       .listAgents()
       .then((data) => {
         if (!cancelled) {
-          setGroups(data)
+          setGroups(Array.isArray(data) ? data : [])
           setLoading(false)
         }
       })
       .catch((e) => {
         if (!cancelled) {
-          setError(e.message)
+          // Keep prior groups if we had them; never treat timeout as empty.
+          setError(e)
           setLoading(false)
         }
       })
@@ -60,7 +65,7 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [retryKey])
 
   // Optimistic local update on delete — drops the sub-agent from
   // its group, and if the group becomes empty (its last sub-agent
@@ -146,6 +151,7 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
             groups={groups}
             loading={loading}
             error={error}
+            onRetry={() => setRetryKey((k) => k + 1)}
             onSelectAgent={onSelectAgent}
             onAddAgent={onAddAgent}
             onDeleteSubAgent={handleDeleteSubAgent}
@@ -231,15 +237,25 @@ function FleetSummary({ counts, usage, onUpgrade }) {
   )
 }
 
-function AgentList({ groups, loading, error, onSelectAgent, onAddAgent, onDeleteSubAgent }) {
+function AgentList({ groups, loading, error, onRetry, onSelectAgent, onAddAgent, onDeleteSubAgent }) {
   if (loading) {
     return <div className="state-card">Loading agents…</div>
   }
   if (error) {
+    const timedOut = isTimeoutError(error) || isUnreachableError(error)
     return (
-      <div className="state-card error">
+      <div className="state-card error" role="alert">
         <h2>Couldn't load agents</h2>
-        <p>{error}</p>
+        <p>
+          {timedOut
+            ? "Trovis didn't respond. Retry, or come back in a moment."
+            : error.message || String(error)}
+        </p>
+        {onRetry && (
+          <button type="button" className="btn btn-primary" onClick={onRetry}>
+            Retry
+          </button>
+        )}
       </div>
     )
   }

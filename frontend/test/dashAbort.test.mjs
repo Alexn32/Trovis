@@ -144,6 +144,8 @@ test('Dashboard unmount aborts briefing/attention/work-feed/cost; no 15s waiting
   assert.doesNotMatch(code, /setInterval/)
   assert.doesNotMatch(code, /15000/)
   assert.doesNotMatch(code, /15_000/)
+  // Timeout/abort on listAgents must not paint an empty fleet.
+  assert.doesNotMatch(code, /setAgents\(\[\]\)/)
 })
 
 test('dashboard API methods forward an AbortSignal', () => {

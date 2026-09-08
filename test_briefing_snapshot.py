@@ -16,8 +16,10 @@ process, so a second TestClient context in an existing suite fails.
 Run:
   OVERSEE_DISABLE_PRICING_SYNC=1 python3 test_briefing_snapshot.py
 """
+import inspect
 import os
 import tempfile
+import threading
 import time
 
 os.environ["OVERSEE_DISABLE_PRICING_SYNC"] = "1"
@@ -118,6 +120,62 @@ with TestClient(main.app) as c:
     check("falls back to live counts rather than erroring or showing zero",
           legacy["summary"] == "Legacy entry with no counts."
           and legacy["tasks_yesterday"] == 8)
+
+    print("\n--- briefing/attention/work-feed are sync def (not event-loop) ---")
+    check("briefing is sync def (Starlette threadpool)",
+          not inspect.iscoroutinefunction(main.dashboard_briefing))
+    check("attention is sync def",
+          not inspect.iscoroutinefunction(main.dashboard_attention))
+    check("work-feed is sync def",
+          not inspect.iscoroutinefunction(main.dashboard_work_feed))
+
+    print("\n--- slow Claude does not pin /health ---")
+    orig_fb = describer.fleet_briefing
+    def slow(stats):
+        time.sleep(1.2)
+        return orig_fb(stats)
+    describer.fleet_briefing = slow
+    database.save_insight(
+        account_id=acct, service_name=main._DASHBOARD_SENTINEL, agent_id="main",
+        kind="briefing", data={"summary": ""},
+    )
+    briefing_status = {"code": None}
+    def hit_briefing():
+        briefing_status["code"] = c.get("/dashboard/briefing", headers=H).status_code
+    th = threading.Thread(target=hit_briefing)
+    th.start()
+    time.sleep(0.15)
+    t0 = time.perf_counter()
+    health = c.get("/health")
+    health_dt = time.perf_counter() - t0
+    th.join(timeout=8)
+    describer.fleet_briefing = orig_fb
+    check("health 200 while briefing Claude is in flight", health.status_code == 200)
+    check("health returns in well under a second (event loop is free)",
+          health_dt < 0.5)
+    check("briefing still 200", briefing_status["code"] == 200)
+    print(f"    health_dt={health_dt:.3f}s briefing_status={briefing_status['code']}")
+
+    print("\n--- Claude timeout fail-softs instead of waiting ~40s ---")
+    def hang(stats):
+        time.sleep(main._CLAUDE_DASH_TIMEOUT_S + 2)
+        return {"summary": "should not appear"}
+    describer.fleet_briefing = hang
+    database.save_insight(
+        account_id=acct, service_name=main._DASHBOARD_SENTINEL, agent_id="main",
+        kind="briefing", data={"summary": ""},
+    )
+    t0 = time.perf_counter()
+    timed = c.get("/dashboard/briefing", headers=H)
+    cap_dt = time.perf_counter() - t0
+    describer.fleet_briefing = orig_fb
+    body = timed.json()
+    check("timeout still 200", timed.status_code == 200)
+    check("fail-soft is the non-AI fallback, not hung prose",
+          "should not appear" not in (body.get("summary") or ""))
+    check("Claude cap is a few seconds, not a 40s event-loop stall",
+          cap_dt < main._CLAUDE_DASH_TIMEOUT_S + 2)
+    print(f"    claude_cap_dt={cap_dt:.3f}s summary={body.get('summary', '')[:80]!r}")
 
 print()
 if failures:
