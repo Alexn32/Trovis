@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { UserIcon, ChevronRightIcon } from './Icons.jsx'
 import { WorkLoadFailed } from './ui.jsx'
@@ -146,18 +146,29 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
   const [err, setErr] = useState(null)
   const [selected, setSelected] = useState(null) // { id, name } | null (Level 2)
 
+  const failSoftRef = useRef(false)
+  failSoftRef.current = !summary && !!err
+
   const load = useCallback(async () => {
-    setErr(null)
     try {
       setSummary(await api.getWorkSummary())
+      setErr(null)
     } catch (e) {
       setErr(e?.message || 'Could not load your work')
     }
   }, [])
 
+  function retry() {
+    setErr(null)
+    load()
+  }
+
   useEffect(() => {
     load()
-    const t = setInterval(load, REFRESH_MS)
+    const t = setInterval(() => {
+      if (failSoftRef.current) return
+      load()
+    }, REFRESH_MS)
     return () => clearInterval(t)
   }, [load])
 
@@ -174,7 +185,7 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow 
         <div className="board-head">
           <h1>Work</h1>
         </div>
-        <WorkLoadFailed onRetry={load} />
+        <WorkLoadFailed onRetry={retry} />
       </div>
     )
   }

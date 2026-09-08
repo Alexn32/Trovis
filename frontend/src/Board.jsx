@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { ChevronRightIcon, UserIcon } from './Icons.jsx'
 import { WorkLoadFailed } from './ui.jsx'
@@ -219,18 +219,29 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
   const [workflowId, setWorkflowId] = useState(initialWorkflowId ? String(initialWorkflowId) : '')
   const [open, setOpen] = useState(null)
 
+  const failSoftRef = useRef(false)
+  failSoftRef.current = !board && !!err
+
   const load = useCallback(async () => {
-    setErr(null)
     try {
       setBoard(await api.getWorkBoard(workflowId || null))
+      setErr(null)
     } catch (e) {
       setErr(e?.message || 'Could not load this work')
     }
   }, [workflowId])
 
+  function retry() {
+    setErr(null)
+    load()
+  }
+
   useEffect(() => {
     load()
-    const t = setInterval(load, REFRESH_MS)
+    const t = setInterval(() => {
+      if (failSoftRef.current) return
+      load()
+    }, REFRESH_MS)
     return () => clearInterval(t)
   }, [load])
 
@@ -246,7 +257,7 @@ export default function Board({ onConnectAgent, onOpenWorkflow, initialWorkflowI
             <h1>Work</h1>
           )}
         </div>
-        <WorkLoadFailed onRetry={load} />
+        <WorkLoadFailed onRetry={retry} />
       </div>
     )
   }
