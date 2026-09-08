@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
-import Board, { TaskPanel } from './Board.jsx'
+import { TaskPanel } from './Board.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
   holderLabel,
@@ -13,7 +13,7 @@ import {
 // Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
 // Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
 // Must NOT call /work/summary or /work/board on this path (those starve
-// the replica). Board.jsx is a secondary view behind "Other views".
+// the replica). Board.jsx stays in the repo unused until F4 reopens it.
 //
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
@@ -201,7 +201,6 @@ function TableSkeleton() {
 
 function WorkHome({
   onConnectAgent,
-  onOpenBoards,
   overview,
   overviewErr,
   onRetryOverview,
@@ -307,12 +306,6 @@ function WorkHome({
         </div>
       )}
 
-      {onOpenBoards && (
-        <button type="button" className="work-other-views" onClick={onOpenBoards}>
-          Other views →
-        </button>
-      )}
-
       {open && (
         <TaskPanel
           card={itemToCard(open)}
@@ -329,9 +322,8 @@ function WorkHome({
 // not unmounted: the poll below skips its tick while hidden — exactly what it
 // already does for a backgrounded browser tab — instead of refetching for a
 // pane nobody can see. Defaults to true so other callers behave as before.
-export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow, active = true }) {
+export default function WorkTab({ onConnectAgent, onNewWorkflow, active = true }) {
   const connectAgent = onConnectAgent || onNewWorkflow
-  const [surface, setSurface] = useState('home')
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
@@ -498,20 +490,9 @@ export default function WorkTab({ onConnectAgent, onNewWorkflow, onOpenWorkflow,
     }
   }
 
-  if (surface === 'board') {
-    return (
-      <Board
-        onConnectAgent={connectAgent}
-        onOpenWorkflow={onOpenWorkflow}
-        onBack={() => setSurface('home')}
-      />
-    )
-  }
-
   return (
     <WorkHome
       onConnectAgent={connectAgent}
-      onOpenBoards={() => setSurface('board')}
       overview={overview}
       overviewErr={overviewErr}
       onRetryOverview={retryOverview}

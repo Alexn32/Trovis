@@ -237,6 +237,7 @@ test('Work home and Ask do not call fat /work/board or /work/summary', () => {
   assert.doesNotMatch(work, /getWorkSummary/)
   assert.doesNotMatch(work, /getWorkBoard/)
   assert.doesNotMatch(ask, /getWorkBoard/, 'Ask must not prefetch the fat board')
+  assert.doesNotMatch(ask, /getWorkSummary/, 'Ask must not prefetch the fat summary')
   assert.match(work, /getWorkOverview/)
   assert.match(work, /getWorkItems/)
   assert.match(work, /getWorkSuggestions/)
@@ -254,8 +255,11 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.match(work, /work-suggestions/)
   assert.match(work, /TaskPanel/)
   assert.match(work, /holderLabel/)
-  assert.match(work, /Other views →/)
+  assert.doesNotMatch(work, /Other views/)
   assert.doesNotMatch(work, /Boards & other views/)
+  assert.doesNotMatch(work, /onOpenBoards/)
+  assert.doesNotMatch(work, /setSurface/)
+  assert.doesNotMatch(work, /import Board\b/)
 })
 
 test('Work home never invents a named item from suggestion actions', () => {
