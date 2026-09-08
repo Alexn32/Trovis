@@ -1365,3 +1365,24 @@ class WorkItemDetail(WorkItem):
     # Only populated for ?include=runs. The collapsed section, never the spine.
     runs: list[WorkItemRun] | None = None
 
+
+class SaaSConnection(BaseModel):
+    """One connected SaaS provider (Stripe today). Tokens never leave the server."""
+
+    provider: str
+    status: str  # connected | disconnected
+    provider_account_id: str | None = None
+    livemode: bool = False
+    connected_at: str | None = None
+    updated_at: str | None = None
+
+
+class SaaSConnectionsResponse(BaseModel):
+    connections: list[SaaSConnection] = Field(default_factory=list)
+    # True when this deploy can start Stripe Connect OAuth.
+    stripe_oauth_configured: bool = False
+
+
+class SaaSStripeOAuthStart(BaseModel):
+    authorize_url: str
+

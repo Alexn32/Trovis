@@ -74,7 +74,7 @@ export const BRANDS = {
   stripe: {
     id: 'stripe',
     label: 'Stripe',
-    role: 'coming',
+    role: 'live',
     color: '#635bff',
     aliases: ['stripe'],
   },

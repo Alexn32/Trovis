@@ -364,6 +364,11 @@ export const api = {
   // account has never subscribed (no Stripe customer yet).
   billingPortal: () => request('/account/billing-portal', { method: 'POST' }),
 
+  // SaaS Connect (Stripe Work adapter — not Trovis billing).
+  getSaasConnections: () => request('/saas/connections'),
+  startStripeConnect: () => request('/saas/stripe/oauth/start'),
+  disconnectStripe: () => request('/saas/stripe', { method: 'DELETE' }),
+
   // --- proactive alerts (Settings → Alerts) ---
   getAlerts: () => request('/account/alerts'),
   updateAlerts: (patch) =>

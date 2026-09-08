@@ -1314,6 +1314,92 @@ CREATE TABLE IF NOT EXISTS work_suggestions (
 )
 """
 
+# SaaS Connect: one row per (account, provider). Tokens are stored like
+# api_keys (server-side, never logged). provider_account_id is the
+# connected Stripe acct_… / HubSpot portal id used to route webhooks.
+_SAAS_CONNECTIONS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS saas_connections (
+    id                   SERIAL    PRIMARY KEY,
+    account_id           INTEGER   NOT NULL REFERENCES accounts(id),
+    provider             TEXT      NOT NULL,
+    status               TEXT      NOT NULL DEFAULT 'connected',
+    provider_account_id  TEXT,
+    access_token         TEXT,
+    refresh_token        TEXT,
+    token_type           TEXT,
+    scope                TEXT,
+    livemode             BOOLEAN   DEFAULT FALSE,
+    connected_at         TIMESTAMP DEFAULT NOW(),
+    updated_at           TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, provider)
+)
+"""
+
+_SAAS_CONNECTIONS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS saas_connections (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id           INTEGER NOT NULL REFERENCES accounts(id),
+    provider             TEXT    NOT NULL,
+    status               TEXT    NOT NULL DEFAULT 'connected',
+    provider_account_id  TEXT,
+    access_token         TEXT,
+    refresh_token        TEXT,
+    token_type           TEXT,
+    scope                TEXT,
+    livemode             INTEGER DEFAULT 0,
+    connected_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, provider)
+)
+"""
+
+# Short-lived CSRF state for SaaS OAuth (Stripe Connect). Single-use.
+_SAAS_OAUTH_STATES_DDL_PG = """
+CREATE TABLE IF NOT EXISTS saas_oauth_states (
+    state       TEXT      PRIMARY KEY,
+    account_id  INTEGER   NOT NULL REFERENCES accounts(id),
+    provider    TEXT      NOT NULL,
+    created_at  TIMESTAMP DEFAULT NOW(),
+    expires_at  TIMESTAMP NOT NULL
+)
+"""
+
+_SAAS_OAUTH_STATES_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS saas_oauth_states (
+    state       TEXT    PRIMARY KEY,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id),
+    provider    TEXT    NOT NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at  TIMESTAMP NOT NULL
+)
+"""
+
+# Idempotency for inbound SaaS webhooks. Stripe event ids are globally
+# unique; UNIQUE(provider, event_id) makes retries a no-op.
+_SAAS_EVENTS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS saas_events (
+    id          SERIAL    PRIMARY KEY,
+    account_id  INTEGER,
+    provider    TEXT      NOT NULL,
+    event_id    TEXT      NOT NULL,
+    event_type  TEXT,
+    created_at  TIMESTAMP DEFAULT NOW(),
+    UNIQUE (provider, event_id)
+)
+"""
+
+_SAAS_EVENTS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS saas_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER,
+    provider    TEXT    NOT NULL,
+    event_id    TEXT    NOT NULL,
+    event_type  TEXT,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (provider, event_id)
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -1393,6 +1479,12 @@ _INDEXES = [
     # GET /agents GROUP BY (service_name, agent_id) for one tenant. Stops the
     # account_id index from fetching 400k heap rows just to discover 6 groups.
     "CREATE INDEX IF NOT EXISTS idx_spans_account_service_agent ON spans(account_id, service_name, agent_id)",
+    # SaaS connections (Stripe today; HubSpot later). Webhook lookup is
+    # (provider, provider_account_id); tenant list is account_id.
+    "CREATE INDEX IF NOT EXISTS idx_saas_connections_account ON saas_connections(account_id, provider)",
+    "CREATE INDEX IF NOT EXISTS idx_saas_connections_provider_acct ON saas_connections(provider, provider_account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_saas_oauth_states_state ON saas_oauth_states(state)",
+    "CREATE INDEX IF NOT EXISTS idx_saas_events_provider_event ON saas_events(provider, event_id)",
 ]
 
 
@@ -1442,6 +1534,10 @@ def init_db() -> None:
             # References workflows (created far earlier in this list).
             _WORKFLOW_VERSIONS_DDL_PG,
             _WORK_SUGGESTIONS_DDL_PG,
+            # SaaS Connect (after accounts — FKs reference it).
+            _SAAS_CONNECTIONS_DDL_PG,
+            _SAAS_OAUTH_STATES_DDL_PG,
+            _SAAS_EVENTS_DDL_PG,
         ]
     else:
         ddls = [
@@ -1474,6 +1570,9 @@ def init_db() -> None:
             _LOOP_PARTICIPANTS_DDL_SQLITE,
             _WORKFLOW_VERSIONS_DDL_SQLITE,
             _WORK_SUGGESTIONS_DDL_SQLITE,
+            _SAAS_CONNECTIONS_DDL_SQLITE,
+            _SAAS_OAUTH_STATES_DDL_SQLITE,
+            _SAAS_EVENTS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -4451,7 +4550,9 @@ def _decorate_work_items(
             elif direction == "to_system":
                 holder_kind = "tool"
                 holder_name = str(p.get("target_id") or "a tool")
-                waiting_on = holder_name
+                # SaaS waits may carry a more specific waiting_on
+                # ("payment processing") while the holder stays Stripe.
+                waiting_on = str(p.get("waiting_on") or holder_name)
             elif direction == "to_agent":
                 target = str(p.get("target_id") or "")
                 waiting_on = target or "another agent"
@@ -9361,3 +9462,399 @@ def get_fleet_activity(
             }
         )
     return items
+
+
+# ---------------------------------------------------------------------------
+# SaaS connections + Work-event spine helpers
+# ---------------------------------------------------------------------------
+# Stripe (PR A) and later HubSpot (PR B) share these writers. Tokens are
+# never logged. Webhook routing is provider + provider_account_id, always
+# account-scoped on the write side.
+
+
+def _saas_connection_public(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Strip tokens before anything leaves the data layer."""
+    if not row:
+        return None
+    d = dict(row)
+    d.pop("access_token", None)
+    d.pop("refresh_token", None)
+    live = d.get("livemode")
+    d["livemode"] = bool(live) if live is not None else False
+    d["connected_at"] = _ts_to_str(d.get("connected_at"))
+    d["updated_at"] = _ts_to_str(d.get("updated_at"))
+    return d
+
+
+def upsert_saas_connection(
+    account_id: int,
+    provider: str,
+    *,
+    provider_account_id: str | None = None,
+    access_token: str | None = None,
+    refresh_token: str | None = None,
+    token_type: str | None = None,
+    scope: str | None = None,
+    livemode: bool = False,
+    status: str = "connected",
+) -> dict[str, Any]:
+    """Insert or replace the (account, provider) connection. Tokens overwrite."""
+    provider = (provider or "").strip().lower()
+    status = (status or "connected").strip().lower()
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    live_val = (True if USE_POSTGRES else 1) if livemode else (False if USE_POSTGRES else 0)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id FROM saas_connections "
+            f"WHERE account_id = {PH} AND provider = {PH}",
+            (account_id, provider),
+        )
+        existing = cur.fetchone()
+        if existing:
+            cur.execute(
+                "UPDATE saas_connections SET "
+                f"status = {PH}, provider_account_id = {PH}, "
+                f"access_token = {PH}, refresh_token = {PH}, "
+                f"token_type = {PH}, scope = {PH}, livemode = {PH}, "
+                f"connected_at = {now_sql}, updated_at = {now_sql} "
+                f"WHERE id = {PH}",
+                (
+                    status, provider_account_id, access_token, refresh_token,
+                    token_type, scope, live_val, existing["id"],
+                ),
+            )
+            row_id = existing["id"]
+        else:
+            row_id = _insert_returning_id(
+                cur,
+                "INSERT INTO saas_connections "
+                "(account_id, provider, status, provider_account_id, "
+                "access_token, refresh_token, token_type, scope, livemode) "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                (
+                    account_id, provider, status, provider_account_id,
+                    access_token, refresh_token, token_type, scope, live_val,
+                ),
+            )
+        cur.execute(
+            "SELECT id, account_id, provider, status, provider_account_id, "
+            "livemode, connected_at, updated_at "
+            f"FROM saas_connections WHERE id = {PH}",
+            (row_id,),
+        )
+        return _saas_connection_public(dict(cur.fetchone()))
+
+
+def get_saas_connections(account_id: int) -> list[dict[str, Any]]:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, provider, status, provider_account_id, "
+            "livemode, connected_at, updated_at "
+            f"FROM saas_connections WHERE account_id = {PH} "
+            "ORDER BY provider",
+            (account_id,),
+        )
+        return [_saas_connection_public(dict(r)) for r in cur.fetchall()]
+
+
+def get_saas_connection(account_id: int, provider: str) -> dict[str, Any] | None:
+    provider = (provider or "").strip().lower()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, provider, status, provider_account_id, "
+            "livemode, connected_at, updated_at "
+            f"FROM saas_connections WHERE account_id = {PH} AND provider = {PH}",
+            (account_id, provider),
+        )
+        row = cur.fetchone()
+        return _saas_connection_public(dict(row)) if row else None
+
+
+def get_saas_connection_by_provider_account(
+    provider: str, provider_account_id: str,
+) -> dict[str, Any] | None:
+    """Webhook routing: Stripe acct_… → Trovis account. Tokens stay in DB."""
+    provider = (provider or "").strip().lower()
+    acct = (provider_account_id or "").strip()
+    if not acct:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, provider, status, provider_account_id, "
+            "livemode, connected_at, updated_at "
+            f"FROM saas_connections WHERE provider = {PH} "
+            f"AND provider_account_id = {PH} AND status = 'connected' "
+            f"ORDER BY id DESC LIMIT 1",
+            (provider, acct),
+        )
+        row = cur.fetchone()
+        return _saas_connection_public(dict(row)) if row else None
+
+
+def disconnect_saas_connection(account_id: int, provider: str) -> dict[str, Any] | None:
+    """Mark disconnected and wipe tokens. Row stays so the UI can reconnect."""
+    provider = (provider or "").strip().lower()
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "UPDATE saas_connections SET status = 'disconnected', "
+            "access_token = NULL, refresh_token = NULL, "
+            f"updated_at = {now_sql} "
+            f"WHERE account_id = {PH} AND provider = {PH}",
+            (account_id, provider),
+        )
+    return get_saas_connection(account_id, provider)
+
+
+def create_saas_oauth_state(account_id: int, provider: str, ttl_s: int = 600) -> str:
+    state = secrets.token_urlsafe(32)
+    expires = _utcnow() + timedelta(seconds=int(ttl_s))
+    expires_s = expires.strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "INSERT INTO saas_oauth_states (state, account_id, provider, expires_at) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH})",
+            (state, account_id, (provider or "").strip().lower(), expires_s),
+        )
+    return state
+
+
+def consume_saas_oauth_state(state: str, provider: str) -> int | None:
+    """Single-use CSRF consume. Returns account_id or None."""
+    raw = (state or "").strip()
+    provider = (provider or "").strip().lower()
+    if not raw:
+        return None
+    now_s = _utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT account_id, expires_at FROM saas_oauth_states "
+            f"WHERE state = {PH} AND provider = {PH}",
+            (raw, provider),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cur.execute(
+            f"DELETE FROM saas_oauth_states WHERE state = {PH}",
+            (raw,),
+        )
+        exp = row["expires_at"]
+        exp_s = exp if isinstance(exp, str) else (
+            exp.strftime("%Y-%m-%d %H:%M:%S") if exp is not None else ""
+        )
+        if exp_s and exp_s < now_s:
+            return None
+        return int(row["account_id"])
+
+
+def claim_saas_event(
+    account_id: int | None,
+    provider: str,
+    event_id: str,
+    event_type: str | None = None,
+) -> bool:
+    """True if this (provider, event_id) is new; False on a retry."""
+    event_id = (event_id or "").strip()
+    if not event_id:
+        return True
+    provider = (provider or "").strip().lower()
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(
+                "INSERT INTO saas_events (account_id, provider, event_id, event_type) "
+                f"VALUES ({PH}, {PH}, {PH}, {PH})",
+                (account_id, provider, event_id, event_type),
+            )
+        return True
+    except Exception as exc:
+        # UNIQUE (provider, event_id) — both backends raise on conflict.
+        msg = str(exc).lower()
+        if "unique" in msg or "duplicate" in msg:
+            return False
+        raise
+
+
+def find_open_loop_by_external_id(
+    account_id: int, external_id: str,
+) -> dict[str, Any] | None:
+    """Open loop for this tenant whose external_id equals the SaaS link key.
+
+    Most-recent open wins if several services share the same key. Closed
+    loops never match — SaaS V1 does not invent or reopen.
+    """
+    key = (external_id or "").strip()
+    if not key:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, external_id, service_name, agent_id, "
+            "cached_state, closed_at, last_event_unix "
+            f"FROM loops WHERE account_id = {PH} AND external_id = {PH} "
+            "AND closed_at IS NULL "
+            "ORDER BY COALESCE(last_event_unix, 0) DESC, id DESC LIMIT 1",
+            (account_id, key),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def _touch_loop_event(cur, loop_id: int, ts: int) -> None:
+    cur.execute(
+        f"SELECT last_event_unix FROM loops WHERE id = {PH}", (loop_id,),
+    )
+    row = cur.fetchone()
+    prev = int(row["last_event_unix"] or 0) if row else 0
+    if ts > prev:
+        cur.execute(
+            f"UPDATE loops SET last_event_unix = {PH} WHERE id = {PH}",
+            (ts, loop_id),
+        )
+    recompute_loop_state(cur, loop_id)
+
+
+def _unresolved_saas_handoffs(
+    cur, loop_id: int, provider: str, object_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Unresolved to_system handoffs this SaaS provider still owns."""
+    lp = _loops_mod()
+    pending = lp._unresolved_handoffs(_loop_events_with_ids(cur, loop_id))
+    provider = (provider or "").strip().lower()
+    label = provider
+    out = []
+    for h in pending:
+        p = h.get("payload") or {}
+        if p.get("direction") != "to_system":
+            continue
+        hid = str(p.get("handoff_id") or "")
+        tgt = str(p.get("target_id") or "").strip().lower()
+        owned = (
+            p.get("saas_provider") == provider
+            or hid.startswith(f"saas:{provider}:")
+            or tgt == provider
+            or tgt == label
+        )
+        if not owned:
+            continue
+        if object_id and hid and hid != f"saas:{provider}:{object_id}":
+            # Still count as owned if it's the same object; otherwise keep
+            # it — clear-all is the caller's choice.
+            if p.get("saas_object_id") not in (None, object_id):
+                continue
+        out.append(h)
+    return out
+
+
+def apply_saas_loop_effect(
+    account_id: int,
+    loop_id: int,
+    *,
+    provider: str,
+    effect: str,
+    object_id: str | None = None,
+    target_id: str,
+    waiting_on: str | None = None,
+    reason: str | None = None,
+    event_id: str | None = None,
+    event_type: str | None = None,
+    event_time_unix: int | None = None,
+) -> dict[str, Any]:
+    """Append wait/clear/stuck onto an existing open loop. One transaction."""
+    provider = (provider or "").strip().lower()
+    ts = int(event_time_unix or time.time_ns())
+    handoff_id = f"saas:{provider}:{object_id}" if object_id else f"saas:{provider}"
+    actor = provider
+
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id, closed_at FROM loops WHERE id = {PH} AND account_id = {PH}",
+            (loop_id, account_id),
+        )
+        loop = cur.fetchone()
+        if loop is None:
+            return {"status": "ignored_no_loop"}
+        if loop["closed_at"] is not None:
+            return {"status": "ignored_no_loop"}
+
+        pending = _unresolved_saas_handoffs(cur, loop_id, provider)
+        matching = [
+            h for h in pending
+            if (h.get("payload") or {}).get("handoff_id") == handoff_id
+            or (object_id and (h.get("payload") or {}).get("saas_object_id") == object_id)
+        ]
+
+        def _complete(h: dict) -> None:
+            hid = (h.get("payload") or {}).get("handoff_id")
+            payload: dict[str, Any] = {"saas_provider": provider}
+            if hid is not None:
+                payload["handoff_id"] = str(hid)
+            if reason:
+                payload["reason"] = str(reason)
+            append_loop_event(
+                cur, loop_id, "handoff_completed", "system", actor,
+                payload=payload, account_id=account_id, event_time_unix=ts,
+            )
+
+        def _initiate(effect_name: str, wait_on: str | None, why: str | None) -> None:
+            payload: dict[str, Any] = {
+                "direction": "to_system",
+                "target_id": target_id or provider,
+                "handoff_id": handoff_id,
+                "saas_provider": provider,
+                "saas_effect": effect_name,
+            }
+            if object_id:
+                payload["saas_object_id"] = object_id
+            if wait_on:
+                payload["waiting_on"] = str(wait_on)
+            if why:
+                payload["reason"] = str(why)
+            if event_type:
+                payload["saas_event_type"] = event_type
+            if event_id:
+                payload["saas_event_id"] = event_id
+            append_loop_event(
+                cur, loop_id, "handoff_initiated", "system", actor,
+                payload=payload, account_id=account_id, event_time_unix=ts,
+            )
+            _upsert_loop_participant(cur, loop_id, "tool", provider, "executor")
+
+        if effect == "wait":
+            already = matching or [
+                h for h in pending
+                if (h.get("payload") or {}).get("saas_effect") == "wait"
+            ]
+            if already:
+                _touch_loop_event(cur, loop_id, ts)
+                return {"status": "noop_already", "reason": "already_waiting"}
+            # A prior stuck on this object: processing again replaces it.
+            for h in matching:
+                _complete(h)
+            _initiate("wait", waiting_on or "payment processing", reason)
+            _touch_loop_event(cur, loop_id, ts)
+            return {"status": "applied"}
+
+        if effect == "clear":
+            to_clear = pending if pending else matching
+            if not to_clear:
+                _touch_loop_event(cur, loop_id, ts)
+                return {"status": "noop_already", "reason": "no_wait"}
+            for h in to_clear:
+                _complete(h)
+            _touch_loop_event(cur, loop_id, ts)
+            return {"status": "applied"}
+
+        if effect == "stuck":
+            # Replace any wait/stuck on this object with a failure/dispute wait.
+            for h in matching or pending:
+                _complete(h)
+            _initiate(
+                "stuck",
+                waiting_on or reason or "Needs attention",
+                reason,
+            )
+            _touch_loop_event(cur, loop_id, ts)
+            return {"status": "applied"}
+
+        return {"status": "ignored_unknown_effect"}
+

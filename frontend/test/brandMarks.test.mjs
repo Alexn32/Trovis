@@ -33,9 +33,9 @@ test('V1 catalog is locked — Zendesk is out', () => {
 })
 
 test('live doors are only the ones that work today', () => {
-  assert.deepEqual(LIVE_BRAND_IDS, ['openclaw', 'claude', 'chatgpt'])
+  assert.deepEqual(LIVE_BRAND_IDS, ['openclaw', 'claude', 'chatgpt', 'stripe'])
   assert.deepEqual(RECIPE_BRAND_IDS, ['cursor'])
-  assert.deepEqual(COMING_BRAND_IDS, ['slack', 'github', 'hubspot', 'stripe', 'intercom', 'shopify'])
+  assert.deepEqual(COMING_BRAND_IDS, ['slack', 'github', 'hubspot', 'intercom', 'shopify'])
 })
 
 test('resolveBrand maps platform / holder / tool text; unknown is silent', () => {
@@ -71,6 +71,15 @@ test('tooltips never claim a coming mark is connected', () => {
   assert.match(brandTooltip('cursor'), /OpenTelemetry/i)
   assert.doesNotMatch(brandTooltip('cursor'), /plugin/i)
   assert.doesNotMatch(brandTooltip('openclaw'), /connected/i)
+  assert.match(brandTooltip('stripe'), /connect today/i)
+})
+
+test('Settings exposes Stripe Connect; Add Agent stays an ingest picker', () => {
+  const settings = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
+  assert.match(settings, /Connect Stripe/)
+  assert.match(settings, /trovis_loop_external_id/)
+  assert.match(settings, /not Trovis billing/)
+  assert.match(settings, /startStripeConnect/)
 })
 
 test('Add Agent live tiles stay the real doors; SaaS is not a picker door', () => {
