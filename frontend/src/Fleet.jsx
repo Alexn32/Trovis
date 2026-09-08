@@ -32,7 +32,10 @@ import {
 // is called with (serviceName, agentId?) so AgentDetail can scope its
 // fetches via the ?agent_id= query param.
 
-export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
+// `onAgentsChanged` tells the shell the roster changed here. Fleet updates
+// itself optimistically, but the other keep-alive panes (App.jsx) stay
+// mounted and need to know their agent list is stale.
+export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade, onAgentsChanged }) {
   const [groups, setGroups] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -74,6 +77,7 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade }) {
   // server state anyway.
   async function handleDeleteSubAgent(serviceName, agentId) {
     await api.deleteAgent(serviceName, agentId)
+    if (onAgentsChanged) onAgentsChanged()
     setGroups((prev) =>
       prev
         .map((g) =>

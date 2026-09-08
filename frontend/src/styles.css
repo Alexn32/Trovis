@@ -379,6 +379,24 @@ a:hover {
   padding-bottom: 80px;
 }
 
+/* Keep-alive tab panes (App.jsx): Dashboard / Fleet / Work / Team all stay
+   mounted and only one is visible. The wrapper stands in for the flex child
+   `.app-main` used to hold directly — it grows the same way and is itself a
+   flex container — so page roots that rely on `flex: 1` (`.view`) or
+   `margin: 0 auto` (`.dash`) lay out exactly as before. The `!important`
+   guards the hidden state against any page-root display rule that would
+   otherwise win over the UA `[hidden]` rule. */
+.tab-pane {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tab-pane[hidden] {
+  display: none !important;
+}
+
 /* ---------- buttons ---------- */
 
 .btn {
