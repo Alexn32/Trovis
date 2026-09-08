@@ -1201,7 +1201,10 @@ def _row_to_board_card(r: dict, now_ns: int) -> BoardCard:
 
 @app.get("/work/overview", response_model=WorkOverview)
 def work_overview(request: Request) -> WorkOverview:
-    """Lean Work home counts. Named work only. Does NOT call get_work_board.
+    """Lean Work home counts. Named work only (plugin-provided human titles).
+
+    Untitled OTel loops, Trovis-generated labels, and "Task from …" shells
+    are excluded. Does NOT call get_work_board.
 
     Home (dashboard Work tab / Monday table) must use this + GET /work/items.
     `/work/summary` and `/work/board` remain for the legacy board drill-in
@@ -1222,7 +1225,8 @@ def work_items(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
 ) -> WorkItemsResponse:
-    """Paginated named items for the Monday table. No untitled OTel flood.
+    """Paginated named items for the Monday table. Plugin-provided human
+    titles only — no untitled OTel flood, no generated/template shells.
 
     Status is the locked enum (waiting_on_other stays that wire value).
     Sync `def` — same event-loop reason as /work/overview.

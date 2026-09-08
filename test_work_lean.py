@@ -1,7 +1,10 @@
 """Lean Work home: GET /work/overview + GET /work/items + /health survival.
 
 Home must not depend on fat /work/board or loop-scanning /work/summary.
-Named work only (titled loops). Locked shapes:
+Named work only (plugin-provided human titles). Untitled OTel loops,
+Trovis-generated template/LLM titles, and "Task from …" shells are excluded.
+
+Locked shapes:
 
   overview: { needs_you, needs_attention, open, completed_week? }
   items:    { id, title, status, holder:{kind,name}, whats_next, updated_at }
@@ -80,6 +83,20 @@ with TestClient(main.app) as c:
     # Untitled raw OTel — must not appear on home.
     post("flood-agent", [sp("message_received", 400, {"trovis.loop.external_id": "raw1"}),
         sp("tool_call", 200, {"trovis.loop.external_id": "raw1", "trovis.tool.name": "exec"})])
+    # Untitled + first handoff: ingest generates a template title
+    # (`{agent} · {tool} · N actions`). Generated ≠ named work.
+    post("shell-agent", [sp("message_received", 380, {"trovis.loop.external_id": "shell1"}),
+        sp("agent_run_complete", 370, {"trovis.loop.external_id": "shell1",
+            "trovis.handoff.direction": "to_system", "trovis.handoff.target_id": "Pager",
+            "trovis.handoff.id": "HS"})])
+    # Display-fallback shell stored as if it were a title.
+    post("main", [sp("message_received", 360, {"trovis.loop.title": "Task from main",
+        "trovis.loop.external_id": "tfm"})])
+    # Closed untitled OTel — sweep-style generated title must not inflate
+    # completed_week.
+    post("done-flood", [sp("message_received", 5000, {"trovis.loop.external_id": "df1"}),
+        sp("agent_run_complete", 4900, {"trovis.loop.external_id": "df1",
+            "trovis.loop.close": "done"})])
     # Fresh wait on someone else (Sarah) — waiting_on_other, NOT needs_attention.
     post("orders-agent", [sp("message_received", 300, {"trovis.loop.title": "Confirm address",
         "trovis.loop.external_id": "n2"}),
@@ -114,16 +131,47 @@ with TestClient(main.app) as c:
             "trovis.handoff.direction": "to_human", "trovis.handoff.target_id": "s@t.com",
             "trovis.handoff.id": "H7"})])
 
+    # Stamp a generated title on the closed untitled flood the way the
+    # sweep does — title present, source=generated, still not named work.
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("SELECT id, account_id, title, title_source FROM loops WHERE external_id = ?",
+                    ("df1",))
+        df1 = dict(cur.fetchone())
+        cur.execute("SELECT id, title, title_source FROM loops WHERE external_id = ?",
+                    ("shell1",))
+        shell1 = dict(cur.fetchone())
+        cur.execute("SELECT id, title, title_source FROM loops WHERE external_id = ?",
+                    ("tfm",))
+        tfm = dict(cur.fetchone())
+    check("handoff untitled loop got a generated template title",
+          bool((shell1.get("title") or "").strip())
+          and shell1.get("title_source") == "generated")
+    check("Task-from-main shell stored as provided (ingest) but is a shell",
+          tfm.get("title") == "Task from main" and tfm.get("title_source") == "provided")
+    check("closed untitled flood starts untitled",
+          not (df1.get("title") or "").strip())
+    database.set_loop_title_if_missing(
+        df1["id"], "done-flood · exec · 2 actions", df1["account_id"])
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("SELECT title, title_source FROM loops WHERE id = ?", (df1["id"],))
+        df1_titled = dict(cur.fetchone())
+    check("sweep-style write marks title_source=generated",
+          df1_titled.get("title_source") == "generated" and bool(df1_titled.get("title")))
+
     ov = overview()
     page = items(limit=50)
     by_title = {it["title"]: it for it in page["items"]}
+    item_ids = {it["id"] for it in page["items"]}
 
     print("\n--- overview counts ---")
     # named open: n1 (yours fresh), n2 (sarah fresh), n3 (sarah aging), n4 (stripe),
-    # n5 (moving), n7 (yours aging). n6 is done. untitled raw1 excluded.
+    # n5 (moving), n7 (yours aging). n6 is done. untitled raw1, generated
+    # shell1, Task-from-main tfm, generated closed df1 all excluded.
     check("open counts named open only (untitled flood excluded)",
           ov["open"] == 6)
     check("completed_week counts the named close",
+          ov["completed_week"] == 1)
+    check("generated closed title does not inflate completed_week",
           ov["completed_week"] == 1)
     # needs_you: n1 + n7 (both waiting_on_you). NOT n3.
     check("needs_you is waiting_on_you only (2: fresh + aging yours)",
@@ -135,6 +183,33 @@ with TestClient(main.app) as c:
     print("\n--- items shape + enums ---")
     check("untitled flood is not in the table",
           "raw1" not in by_title and all("flood" not in (it["title"] or "") for it in page["items"]))
+    check("generated template title is not in the table",
+          shell1["id"] not in item_ids
+          and all(" · " not in (it["title"] or "") or not (it["title"] or "").endswith(" actions")
+                  for it in page["items"]))
+    check("Task-from-main shell is not in the table",
+          tfm["id"] not in item_ids
+          and all(not (it["title"] or "").lower().startswith("task from ") for it in page["items"]))
+    check("items never return untitled/raw-loop rows",
+          all((it.get("title") or "").strip() and not database._is_shell_work_title(it["title"])
+              for it in page["items"]))
+
+    print("\n--- title_source backfill (pre-hotfix rows) ---")
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("SELECT id FROM loops WHERE title = ?", ("Reply to customer",))
+        named_id = int(cur.fetchone()["id"])
+        cur.execute("UPDATE loops SET title_source = NULL WHERE id = ?", (named_id,))
+        database._backfill_loop_title_source(cur)
+        cur.execute("SELECT title_source FROM loops WHERE id = ?", (named_id,))
+        restored = cur.fetchone()["title_source"]
+        cur.execute("SELECT id FROM loops WHERE external_id = ?", ("shell1",))
+        gen_id = int(cur.fetchone()["id"])
+        cur.execute("UPDATE loops SET title_source = NULL WHERE id = ?", (gen_id,))
+        database._backfill_loop_title_source(cur)
+        cur.execute("SELECT title_source FROM loops WHERE id = ?", (gen_id,))
+        gen_restored = cur.fetchone()["title_source"]
+    check("backfill restores plugin title as provided", restored == "provided")
+    check("backfill marks generated template as generated", gen_restored == "generated")
     check("every item has the locked keys",
           all(set(it.keys()) == ITEM_KEYS for it in page["items"]))
     check("status is the locked enum (waiting_on_other stays that wire value)",

@@ -1240,8 +1240,9 @@ WORK_HOLDER_KINDS = ("human", "agent", "tool", "unassigned")
 
 
 class WorkOverview(BaseModel):
-    """GET /work/overview — counts only. Named work. No board dump.
+    """GET /work/overview — counts only. Named work (human titles). No board dump.
 
+    Untitled / generated / "Task from …" shells are excluded.
     needs_you = waiting_on_you ONLY.
     needs_attention = stuck + aging waiting_on_other (never waiting_on_you).
     """
@@ -1258,7 +1259,8 @@ class WorkItemHolder(BaseModel):
 
 
 class WorkItem(BaseModel):
-    """One named-work row for the Monday table. No raw OTel untitled loops."""
+    """One named-work row for the Monday table. No raw OTel untitled loops,
+    no Trovis-generated titles, no Task-from-X shells."""
 
     id: int
     title: str
