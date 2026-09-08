@@ -253,7 +253,8 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /Priority/)
   assert.doesNotMatch(work, /KindCard/)
   assert.match(work, /work-suggestions/)
-  assert.match(work, /TaskPanel/)
+  // Clicking a row opens the job detail pane (was TaskPanel, the loop panel).
+  assert.match(work, /JobDetail/)
   assert.match(work, /holderLabel/)
   assert.doesNotMatch(work, /Other views/)
   assert.doesNotMatch(work, /Boards & other views/)

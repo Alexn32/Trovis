@@ -421,8 +421,16 @@ export const api = {
   // Pending suggestions for the home strip. Empty until a generator inserts
   // rows — never invent titles. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
-  getWorkItem: (id) =>
-    request(`/work/items/${encodeURIComponent(id)}`, { timeoutMs: WORK_TIMEOUT_MS }),
+  // One named item plus the detail spine. `include: 'runs'` adds the
+  // underlying agent runs — opt-in, because the job detail folds them away and
+  // the default read must not pay for them.
+  getWorkItem: (id, { include = null, signal = undefined } = {}) => {
+    const qs = include ? `?include=${encodeURIComponent(include)}` : ''
+    return request(`/work/items/${encodeURIComponent(id)}${qs}`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+    })
+  },
   // Approve → named work item `{ item }` in /work/items. Optional body is
   // edit-then-approve: { title?, why?, draft_holder? }. Garbage titles 400.
   approveWorkSuggestion: (id, patch = null) =>

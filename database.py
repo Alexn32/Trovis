@@ -4430,9 +4430,14 @@ def _decorate_work_items(
         holder_kind = "agent" if agent_label else "unassigned"
         holder_name = agent_label or "Unassigned"
         waiting_on = None
+        row["awaiting_handoff_event_id"] = None
 
         if pending:
             h = pending[-1]
+            # The row id of the open handoff, so the detail pane can resolve it
+            # (accept / complete / decline) without a second fat loop fetch.
+            # Free: this event is already in hand.
+            row["awaiting_handoff_event_id"] = h.get("_row_id")
             p = h.get("payload") or {}
             direction = p.get("direction")
             if direction == "to_human":
@@ -4470,7 +4475,7 @@ def _decorate_work_items(
 
 
 def _row_to_work_item(
-    r: dict[str, Any], *, include_agent: bool = False,
+    r: dict[str, Any], *, include_agent: bool = False, include_handoff: bool = False,
 ) -> dict[str, Any] | None:
     """Named-work row for /work/items. Plugin-provided human titles only.
 
@@ -4498,6 +4503,10 @@ def _row_to_work_item(
     if include_agent:
         out["service_name"] = r.get("service_name")
         out["agent_id"] = r.get("agent_id") or "main"
+    if include_handoff:
+        # Detail only. WorkItem (the list row) forbids extra keys, so this must
+        # never leak into /work/items.
+        out["awaiting_handoff_event_id"] = r.get("awaiting_handoff_event_id")
     return out
 
 
@@ -4976,6 +4985,7 @@ def _work_item_by_id(
     viewer_user_id: int | None = None,
     now_ns: int | None = None,
     include_agent: bool = False,
+    include_handoff: bool = False,
 ) -> dict[str, Any] | None:
     now_ns = now_ns if now_ns is not None else time.time_ns()
     acct_sql, acct_args = _work_account_sql(account_id)
@@ -4993,7 +5003,88 @@ def _work_item_by_id(
         return None
     rows = [dict(row)]
     _decorate_work_items(cur, rows, account_id, viewer_user_id, now_ns)
-    return _row_to_work_item(rows[0], include_agent=include_agent)
+    return _row_to_work_item(
+        rows[0], include_agent=include_agent, include_handoff=include_handoff,
+    )
+
+
+def _json_payload(raw: Any) -> dict[str, Any]:
+    """Loop-event payload as a dict. Stored as JSON text on SQLite and as a
+    dict on Postgres, so normalize both and never raise on garbage."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+# Which side of the process a step sits on. Handoffs say it outright in their
+# direction; everything else is the agent doing its work.
+_HANDOFF_ACTOR_KIND = {"to_human": "human", "to_system": "tool", "to_agent": "agent"}
+
+
+def _timeline_actor(
+    ev_type: str | None,
+    payload: dict[str, Any],
+    agent_label: str | None,
+    resolve_human=None,
+) -> dict[str, str]:
+    """{kind, name} for one step. `kind` reuses the holder vocabulary already
+    on the wire (human | agent | tool) — this PR does NOT invent a 'saas' kind;
+    a SaaS destination arrives as a tool named e.g. 'Stripe'.
+
+    `resolve_human` turns a handoff target id into a person's name, the same
+    way the holder cell does. Without it a step reads 'alex@rushmarket.com'
+    while the header two lines above says 'Alex Nielsen'.
+    """
+    if ev_type and ev_type.startswith("handoff_"):
+        direction = payload.get("direction")
+        kind = _HANDOFF_ACTOR_KIND.get(direction or "", "agent")
+        target = payload.get("target_id")
+        name = payload.get("target_name")
+        if kind == "human" and not name and target and resolve_human:
+            name = resolve_human(str(target))
+        name = name or target or (agent_label if kind == "agent" else "")
+        return {"kind": kind, "name": str(name or "")}
+    return {"kind": "agent", "name": str(agent_label or "")}
+
+
+# Recent underlying runs for one work item. Bounded and index-backed
+# (idx_spans_loop_id); this is the collapsed section of the detail pane, never
+# the spine, so a short page is the whole point.
+_WORK_ITEM_RUNS_LIMIT = 8
+
+
+def get_work_item_runs(
+    account_id: int | None, item_id: int, limit: int = _WORK_ITEM_RUNS_LIMIT
+) -> list[dict[str, Any]]:
+    """The agent runs behind a work item, newest first. Never called unless the
+    caller asks for ?include=runs — the spine must not pay for it."""
+    limit = max(1, min(int(limit or _WORK_ITEM_RUNS_LIMIT), 25))
+    acct_sql = f" AND s.account_id = {PH}" if account_id is not None else ""
+    args: list[Any] = [item_id]
+    if account_id is not None:
+        args.append(account_id)
+    args.append(limit)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT s.span_name, s.service_name, s.agent_id, s.status_code, "
+            "       s.start_time_unix "
+            f"FROM spans s WHERE s.loop_id = {PH}{acct_sql} "
+            f"ORDER BY s.start_time_unix DESC LIMIT {PH}",
+            tuple(args),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return [
+        {
+            "name": r.get("span_name") or "run",
+            "agent": r.get("service_name") or "",
+            "at": _ns_to_iso(r.get("start_time_unix")),
+            "errored": int(r.get("status_code") or 0) == _OTLP_STATUS_ERROR,
+        }
+        for r in rows
+    ]
 
 
 def get_work_item(
@@ -5008,17 +5099,17 @@ def get_work_item(
     with _connect() as conn, _cursor(conn) as cur:
         item = _work_item_by_id(
             cur, item_id, account_id, viewer_user_id=viewer_user_id, now_ns=now_ns,
-            include_agent=include_agent,
+            include_agent=include_agent, include_handoff=True,
         )
         if item is None:
             return None
         cur.execute(
-            "SELECT l.workflow_id, wf.name AS workflow_name "
+            "SELECT l.workflow_id, l.service_name, wf.name AS workflow_name "
             "FROM loops l LEFT JOIN workflows wf ON wf.id = l.workflow_id "
             f"WHERE l.id = {PH}",
             (item_id,),
         )
-        meta = cur.fetchone() or {}
+        meta = dict(cur.fetchone() or {})
         wid = meta["workflow_id"] if meta else None
         wname = meta["workflow_name"] if meta else None
         cur.execute(
@@ -5029,22 +5120,34 @@ def get_work_item(
         events = [dict(r) for r in cur.fetchall()]
         timeline = []
         provenance = {"source": "telemetry", "suggestion_id": None}
+        # The agent that runs this work — NOT holder.name, which is the person
+        # when a human is holding it.
+        agent_label = (meta or {}).get("service_name") or ""
+        _human_names: dict[str, str | None] = {}
+
+        def _resolve_step_human(tid: str) -> str | None:
+            """Person's name for a handoff target, memoised per item — the
+            same lookup the holder cell uses, so header and steps agree."""
+            if tid not in _human_names:
+                _human_names[tid] = _resolve_human_name(cur, tid, account_id)
+            return _human_names[tid]
+
         for ev in events:
+            payload = _json_payload(ev.get("payload"))
             text = _TIMELINE_TEXT.get(ev.get("type") or "")
             if text:
+                # Who the step is on. The detail pane draws a Human / Agent /
+                # Tool marker per step, and the payload carrying that is
+                # already in hand — it used to be dropped on the floor, which
+                # is why a step could only ever be a bare sentence.
                 timeline.append({
                     "at": _ns_to_iso(ev.get("event_time_unix")),
                     "text": text,
+                    "actor": _timeline_actor(
+                        ev.get("type"), payload, agent_label, _resolve_step_human,
+                    ),
                 })
             if ev.get("type") == "loop_opened":
-                payload = ev.get("payload") or {}
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                    except (TypeError, ValueError):
-                        payload = {}
-                if not isinstance(payload, dict):
-                    payload = {}
                 if payload.get("source") == "suggestion":
                     provenance = {
                         "source": "suggestion",

@@ -1316,14 +1316,35 @@ class WorkItemProcess(BaseModel):
     name: str
 
 
+class WorkItemActor(BaseModel):
+    """Who a step sits with. Reuses the holder vocabulary already on the wire
+    (human | agent | tool) — a SaaS destination is a tool named e.g. 'Stripe'.
+    No 'saas' kind is invented here."""
+
+    kind: str = "agent"  # human | agent | tool
+    name: str = ""
+
+
 class WorkItemTimelineEntry(BaseModel):
     at: str | None = None
     text: str
+    # Present so the detail pane can mark each step Human / Agent / Tool
+    # instead of rendering a bare sentence.
+    actor: WorkItemActor | None = None
 
 
 class WorkItemProvenance(BaseModel):
     source: str  # telemetry | suggestion
     suggestion_id: str | None = None
+
+
+class WorkItemRun(BaseModel):
+    """One underlying agent run behind a work item."""
+
+    name: str
+    agent: str = ""
+    at: str | None = None
+    errored: bool = False
 
 
 class WorkItemDetail(WorkItem):
@@ -1338,4 +1359,9 @@ class WorkItemDetail(WorkItem):
     process: WorkItemProcess | None = None
     timeline: list[WorkItemTimelineEntry] = Field(default_factory=list)
     provenance: WorkItemProvenance | None = None
+    # loop_events.id of the open handoff, so the pane can Approve / Send back
+    # without a second fat fetch. None when nothing is awaiting a decision.
+    awaiting_handoff_event_id: int | None = None
+    # Only populated for ?include=runs. The collapsed section, never the spine.
+    runs: list[WorkItemRun] | None = None
 

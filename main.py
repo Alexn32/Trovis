@@ -1290,11 +1290,19 @@ def _require_suggestion_user(request: Request) -> dict:
 
 
 @app.get("/work/items/{item_id}", response_model=WorkItemDetail)
-def work_item_detail(item_id: int, request: Request) -> WorkItemDetail:
+def work_item_detail(
+    item_id: int,
+    request: Request,
+    include: str | None = Query(default=None),
+) -> WorkItemDetail:
     """One named work item plus the v1.1 detail spine.
 
     Lean: no full-board scan, no span dump. Untitled loops 404 — named
     work only, same filter as GET /work/items.
+
+    `?include=runs` adds the underlying agent runs (bounded, index-backed).
+    They are the collapsed section of the detail pane, never the spine, so
+    they are opt-in: the default read must not pay for them.
     """
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)
@@ -1303,6 +1311,9 @@ def work_item_detail(item_id: int, request: Request) -> WorkItemDetail:
     )
     if row is None:
         raise HTTPException(status_code=404, detail="work item not found")
+    wants = {p.strip() for p in (include or "").split(",") if p.strip()}
+    if "runs" in wants:
+        row["runs"] = database.get_work_item_runs(account_id, item_id)
     return WorkItemDetail(**row)
 
 

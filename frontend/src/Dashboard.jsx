@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { startAbortable } from './abortable.js'
-import { TaskPanel } from './Board.jsx'
+import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import Sparkline from './Sparkline.jsx'
-import { itemToCard, workUpdatedLabel } from './board.js'
+import { workUpdatedLabel } from './board.js'
 // Costs always render in dollars (e.g. "$0.68"); shared with Fleet and the
 // Cost page so every surface prints the same number the same way.
 import { formatCost as fmtMoney } from './utils.js'
@@ -123,10 +123,13 @@ export default function Dashboard({
       )}
 
       {openItem && (
-        <TaskPanel
-          card={itemToCard(openItem)}
+        <JobDetail
+          item={openItem}
           onClose={() => setOpenItem(null)}
-          onResolved={() => setOpenItem(null)}
+          onResolved={() => {
+            setOpenItem(null)
+            setRefreshKey((k) => k + 1)
+          }}
         />
       )}
     </div>
