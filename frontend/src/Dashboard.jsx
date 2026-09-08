@@ -6,6 +6,7 @@ import { WorkLoadFailed } from './ui.jsx'
 import { itemToCard, workUpdatedLabel } from './board.js'
 // Costs always render in dollars (e.g. "$0.68"); shared with Fleet so they match.
 import { formatCost as fmtMoney } from './utils.js'
+import { buildInsights } from './insights.js'
 import {
   asOfLabel,
   briefingBullets,
@@ -21,9 +22,13 @@ import { TrovisMark } from './Icons.jsx'
 //
 // Sections, top to bottom:
 //   1. Daily Briefing   — today's state in one card, readable in <30s
+//   1b. Judgment ribbon — what to do about it; silent unless it has something
 //   2. What to look at  — needs you + needs attention, hidden when empty
 //   3. Work feed        — the ambient chronological story
 //   4. Cost pulse       — a whisper; hidden at $0
+//
+// The briefing sits in a hero cluster with the greeting so the first screen
+// answers "what matters today" rather than "hello, here is the date".
 //
 // NO Fleet on Home. Fleet is tab 2, and Home must not first-paint GET /agents:
 // that request is what made Home expensive, and the fleet grid was the only
@@ -112,19 +117,32 @@ export default function Dashboard({
 
   return (
     <div className="dash">
-      <Greeting userName={userName} />
-
       {firstRun ? (
-        <FirstRunCard onGoWork={onGoWork} />
+        <>
+          <Greeting userName={userName} />
+          <FirstRunCard onGoWork={onGoWork} />
+        </>
       ) : (
         <>
-          <DailyBriefing
-            briefing={briefing}
+          {/* Hero: greeting and briefing are one cluster, not two stacked
+              blocks. The first screen has to answer "what matters today",
+              so the date line does not get to occupy it alone. */}
+          <div className="home-hero">
+            <Greeting userName={userName} />
+            <DailyBriefing
+              briefing={briefing}
+              work={work}
+              health={health.data}
+              onOpenItem={setOpenItem}
+              onOpenAgent={onOpenAgent}
+              onGoWork={onGoWork}
+            />
+          </div>
+          <JudgmentRibbon
             work={work}
             health={health.data}
             onOpenItem={setOpenItem}
             onOpenAgent={onOpenAgent}
-            onGoWork={onGoWork}
           />
           <WhatToLookAt work={work} onOpenItem={setOpenItem} onGoWork={onGoWork} />
           <WorkFeedSection
@@ -458,6 +476,48 @@ function BriefGroup({ label, tone, items, extra = [], emptyText, onOpenItem, onO
         </ul>
       )}
     </div>
+  )
+}
+
+// --- 1b. Judgment ribbon ---------------------------------------------------
+
+// What Trovis makes of today, in at most three lines. Composed client-side
+// from the work and health data already on the page (see insights.js), so it
+// costs nothing on first paint and can never be the reason Home is slow.
+//
+// Silent by default: it renders only when it has something the rows below do
+// not already say. Loading and failure are both silent too — a ribbon that
+// announces its own absence is worse than no ribbon.
+function JudgmentRibbon({ work, health, onOpenItem, onOpenAgent }) {
+  if (work.items === null) return null
+  const insights = buildInsights({ items: work.items, health: health || [] })
+  if (insights.length === 0) return null
+
+  return (
+    <section className="home-ribbon" aria-label="What Trovis makes of today">
+      {/* Labelled so these read as a considered take rather than three more
+          queue rows. Deliberately NOT phrased as "what to look at first" —
+          the section directly beneath is "What to look at", and two near
+          identical headings in a row is worse than none. */}
+      <span className="dash-caps home-ribbon-label">Trovis suggests</span>
+      <ul className="home-ribbon-list">
+        {insights.map((ins) => (
+          <li key={ins.id}>
+            <button
+              type="button"
+              className={`home-ribbon-row tone-${ins.tone}`}
+              onClick={() =>
+                ins.item ? onOpenItem(ins.item) : onOpenAgent && onOpenAgent(ins.agent, 'main')
+              }
+            >
+              <span className="home-ribbon-dot" aria-hidden="true" />
+              <span className="home-ribbon-text">{ins.text}</span>
+              <span className="home-ribbon-go" aria-hidden="true">→</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

@@ -4355,6 +4355,10 @@ a:hover {
   border: 1px solid var(--border-default);
   border-radius: 12px;
   padding: 16px 20px;
+  /* A hair of lift so a card reads as a surface rather than an outline. Uses
+     the existing token, which is already tuned per theme (warm and nearly
+     invisible in light, deeper in dark). */
+  box-shadow: var(--shadow-sm);
 }
 
 .dash-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -4368,9 +4372,12 @@ a:hover {
 .dash-empty.pad { padding: 14px 18px; }
 
 /* ---------- 1. greeting ---------- */
-.dash-greeting { margin-bottom: 0; }
-.dash-hello { font-size: 20px; font-weight: 800; color: var(--text-primary); margin: 0; letter-spacing: -0.02em; }
-.dash-date { font-size: 12.5px; font-weight: 500; color: var(--text-muted); margin-top: 2px; }
+/* The greeting is a caption for the briefing, not a section of its own: it
+   sits inside .home-hero and gives up the vertical space it used to take, so
+   the first screen opens on what matters instead of on the date. */
+.dash-greeting { margin-bottom: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.dash-hello { font-size: 19px; font-weight: 800; color: var(--text-primary); margin: 0; letter-spacing: -0.022em; }
+.dash-date { font-size: 12.5px; font-weight: 500; color: var(--text-muted); margin-top: 0; }
 
 /* ---------- 2. daily briefing ---------- */
 .dash-briefing-label { font-size: 11.5px; font-weight: 700; color: var(--text-primary); }
@@ -4386,14 +4393,27 @@ a:hover {
    (--warm-fill / --error-faint) so Home and the Work tab read as one product.
    -------------------------------------------------------------------------- */
 
+/* Hero: greeting + briefing as ONE cluster. A tight gap between them (not the
+   page's 20px rhythm) is what makes the pair read as a single opening
+   statement instead of two stacked blocks. */
+.home-hero { display: flex; flex-direction: column; gap: 10px; }
+
 /* Briefing: the lead is the headline, Claude's narrative is colour beneath. */
+.home-brief {
+  /* The one card that carries the page — a touch more room to breathe and a
+     slightly stronger edge than the ambient cards below it. */
+  padding: 18px 22px 16px;
+  border-color: var(--border-hover);
+}
 .home-brief-lead {
-  font-size: 17px; font-weight: 650; line-height: 1.45; letter-spacing: -0.01em;
-  color: var(--text-primary); margin: 0 0 6px;
+  font-size: 19px; font-weight: 650; line-height: 1.4; letter-spacing: -0.018em;
+  color: var(--text-primary); margin: 0 0 7px;
+  /* Keep the headline to a comfortable measure even on a wide window. */
+  max-width: 46ch;
 }
 .home-brief-narrative {
-  font-size: 13.5px; font-weight: 440; line-height: 1.65;
-  color: var(--text-secondary); margin: 0 0 12px;
+  font-size: 13.5px; font-weight: 440; line-height: 1.62;
+  color: var(--text-secondary); margin: 0 0 13px; max-width: 68ch;
 }
 .home-brief-narrative.is-muted { color: var(--text-muted); }
 .home-brief-clear { font-size: 13px; color: var(--text-muted); margin: 2px 0 0; }
@@ -4422,6 +4442,46 @@ a:hover {
   padding-top: 10px; border-top: 1px solid var(--border-default);
   font-size: 11.5px; color: var(--text-muted);
 }
+
+/* Judgment ribbon: Trovis's read on today, between the briefing and the queue.
+   Deliberately quieter than "What to look at" — that section owns the alarm
+   colours. The ribbon carries tone in a 6px dot only, so it reads as a
+   considered remark rather than a second alert stack. */
+/* One grouped block with hairline dividers, not three floating pills — the
+   ribbon is a single considered take, and separate cards read as more alerts. */
+.home-ribbon { display: flex; flex-direction: column; gap: 6px; }
+.home-ribbon-label { margin: 0 0 0 2px; }
+.home-ribbon-list {
+  list-style: none; margin: 0; padding: 0;
+  border: 1px solid var(--border-default); border-radius: 10px;
+  background: var(--bg-elevated); overflow: hidden;
+}
+.home-ribbon-list > li + li { border-top: 1px solid var(--border-default); }
+.home-ribbon-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline; gap: 10px; width: 100%; text-align: left;
+  padding: 10px 14px; background: none; border: none;
+  transition: background 0.15s ease;
+}
+.home-ribbon-row:hover { background: var(--bg-surface-hover); }
+.home-ribbon-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-ribbon-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  /* Nudge the dot onto the text baseline rather than the box's. */
+  transform: translateY(-1px);
+}
+.home-ribbon-row.tone-act .home-ribbon-dot { background: var(--brand-accent); }
+.home-ribbon-row.tone-risk .home-ribbon-dot { background: var(--error); }
+.home-ribbon-row.tone-note .home-ribbon-dot { background: var(--warning); }
+.home-ribbon-text {
+  font-size: 13px; font-weight: 500; line-height: 1.5; color: var(--text-primary);
+}
+.home-ribbon-go {
+  font-size: 12px; color: var(--text-dim); opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.home-ribbon-row:hover .home-ribbon-go,
+.home-ribbon-row:focus-visible .home-ribbon-go { opacity: 1; }
 
 /* What to look at: the loudest thing on Home — and absent when empty. */
 .home-lookat-list { display: flex; flex-direction: column; gap: 6px; }
