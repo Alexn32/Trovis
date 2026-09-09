@@ -43,12 +43,14 @@ test('the strip labels the two groups differently — live is not "coming"', () 
 })
 
 test('the recognition brands are coming, and the doors are not', () => {
-  // The brief's recognition list. If one of these ever flips to a live door it
-  // should be a deliberate edit here, not a silent catalog change.
-  for (const id of ['slack', 'github', 'hubspot', 'stripe', 'intercom']) {
+  // Recognition-only logos. Stripe flipped to a live Settings door; if another
+  // of these ever becomes a door it should be a deliberate edit here.
+  for (const id of ['slack', 'github', 'hubspot', 'intercom', 'shopify']) {
     assert.equal(BRANDS[id].role, 'coming', `${id} is recognition-only`)
     assert.ok(COMING_BRAND_IDS.includes(id), `${id} sits in the Coming row`)
   }
+  assert.equal(BRANDS.stripe.role, 'live', 'stripe is a live SaaS door')
+  assert.ok(LIVE_BRAND_IDS.includes('stripe'), 'stripe sits in the Works-with row')
   // And the doors that do work today are not filed as coming.
   for (const id of [...LIVE_BRAND_IDS, ...RECIPE_BRAND_IDS]) {
     assert.notEqual(BRANDS[id].role, 'coming', `${id} is a real door`)
@@ -57,12 +59,13 @@ test('the recognition brands are coming, and the doors are not', () => {
 
 test('a recognition brand never becomes a clickable door in the picker', () => {
   // The picker is built from PLATFORMS / RECIPE_PLATFORMS. A SaaS logo showing
-  // up there would promise an OAuth flow that does not exist.
+  // up there would promise an agent-setup flow that does not exist — Stripe
+  // lives in Settings, not Add Agent.
   const picker = addAgent.slice(
     addAgent.indexOf('const PLATFORMS'),
     addAgent.indexOf('function '),
   )
-  for (const id of COMING_BRAND_IDS) {
+  for (const id of [...COMING_BRAND_IDS, 'stripe']) {
     assert.doesNotMatch(picker, new RegExp(`id: '${id}'`), `${id} is not a door`)
   }
 })
