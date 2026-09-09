@@ -140,8 +140,8 @@ test('Dashboard unmount aborts every Home GET; no 15s waiting poll', () => {
   assert.match(code, /getBriefing\(\{\s*signal\s*\}\)/)
   assert.match(code, /getAttention\(\{\s*signal\s*\}\)/)
   assert.match(code, /getCost\(\{\s*signal\s*\}\)/)
-  assert.match(code, /getWorkFeed\(\{\s*signal\s*\}\)/)
-  // Home v2's work pair carries the signal too.
+  // (No work-feed fetch: Home no longer renders that card.)
+  // Home's work pair carries the signal too.
   assert.match(code, /getWorkOverview\(\{\s*signal\s*\}\)/)
   assert.match(code, /getWorkItems\(\{[^}]*signal[^}]*\}\)/)
   assert.doesNotMatch(code, /setInterval/)

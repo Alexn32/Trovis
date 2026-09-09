@@ -20,7 +20,12 @@ def check(label, cond):
     print(("  PASS " if cond else "  FAIL ") + label)
     if not cond: failures.append(label)
 
-ITEM_KEYS = {"id", "title", "status", "holder", "whats_next", "updated_at"}
+ITEM_KEYS = {
+    "id", "title", "status", "holder", "whats_next", "updated_at",
+    # The open decision's event id, so Home's desk can offer Done / I've got
+    # this / Not mine on the row without a detail fetch per row.
+    "awaiting_handoff_event_id",
+}
 SUG_KEYS = {"id", "title", "why", "source", "draft_holder"}
 DETAIL_KEYS = ITEM_KEYS | {"whats_happening", "process", "timeline", "provenance"}
 

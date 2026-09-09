@@ -100,7 +100,7 @@ export default function CostPage({ onBack, onOpenAgent }) {
     return (
       <div className="dash costp">
         <button type="button" className="wf2-back" onClick={onBack}>
-          <ArrowLeftIcon size={14} /> Dashboard
+          <ArrowLeftIcon size={14} /> Home
         </button>
         <div className="dash-empty pad">{error}</div>
       </div>
@@ -123,7 +123,7 @@ export default function CostPage({ onBack, onOpenAgent }) {
   return (
     <div className="dash costp">
       <button type="button" className="wf2-back" onClick={onBack}>
-        <ArrowLeftIcon size={15} /> Dashboard
+        <ArrowLeftIcon size={15} /> Home
       </button>
       <div className="costp-titlerow">
         <h1 className="dash-hello" style={{ margin: 0 }}>

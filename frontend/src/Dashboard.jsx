@@ -3,66 +3,62 @@ import { api } from './api.js'
 import { startAbortable } from './abortable.js'
 import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
-import Sparkline from './Sparkline.jsx'
 import { workUpdatedLabel } from './board.js'
 // Costs always render in dollars (e.g. "$0.68"); shared with Fleet and the
 // Cost page so every surface prints the same number the same way.
 import { formatCost as fmtMoney } from './utils.js'
-import { asOfLabel, briefingLead, isFirstRun, partitionLookAt, workSplit } from './home.js'
+import {
+  asOfLabel,
+  briefingLead,
+  dayShape,
+  deskItems,
+  isFirstRun,
+  noticedLines,
+  proofCounts,
+} from './home.js'
 // A row's display label is not its route — see agentRoute.js.
 import { agentRoute } from './agentRoute.js'
+import { openAsk } from './askOpen.js'
 import { TrovisMark, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
-// Home — snapshots of pages that already exist.
+// Home — the worker's opening, not a sitemap of the other tabs.
 //
-// Home is a hub, not a product of its own. Every card is a preview of a real
-// page and every click lands on it: a row opens that work item, a header or
-// tile opens Work (filtered), the cost figure opens the Cost page, the feed
-// opens the Work feed, an agent opens that agent. Nothing here is a Home-only
-// invention, and nothing here is a dead tap.
+// First paint answers three questions, in this order:
+//   what is waiting on ME  ·  is anything stuck  ·  is the rest of the day moving
 //
-// Cards, in the order the brief numbers them:
-//   1. Needs attention — omitted ENTIRELY when empty (no "all clear" prose)
-//   2. Cost            — one today figure, from /dashboard/cost, + a 7d spark
-//   3. Work feed       — a few ambient lines
-//   4. Work            — Moving / Waiting / Stuck / Done
-//   5. Fleet           — health dots, omitted when nothing needs attention
+//   1. Greeting          — who and when. No stats in the header.
+//   2. Shape of the day  — one templated sentence. No counts, no money, no model.
+//   3. Your desk         — ONLY work waiting on the signed-in user. Gone when empty.
+//   4. Trovis noticed    — stuck first, then agent health. At most three lines.
+//   5. Proof strip       — the only place on Home that prints numbers.
+//   6. Ask               — the existing pill, given a real front door here.
 //
-// What Home deliberately does NOT do on first paint: no briefing essay (it is
-// behind a quiet disclosure that fetches only when opened), no judgment
-// ribbon, no suggestion strips, and exactly ONE dollar figure on the page.
+// Deliberately NOT here: the work feed (its page is unchanged, just unlinked
+// from Home), a Fleet roster preview, the briefing essay on first paint, and
+// any chart or kind-of-work grid.
 //
-// Data: the lean pair (/work/overview + /work/items) plus the existing feed,
-// cost and attention endpoints. Never /work/board, /work/summary or /agents —
-// those are what starve the single replica. Each card fetches independently,
-// carries an AbortSignal, and fails on its own.
+// Numbers rule: the sentence carries none, the strip owns them all, and the
+// one dollar figure comes from /dashboard/cost — the same call the Cost page
+// makes. Two sources for one number is how two surfaces start disagreeing.
+//
+// Data: the lean pair (/work/overview + /work/items) plus cost and attention.
+// Never /work/board, /work/summary or the agent roster. Each section fetches
+// independently, carries an AbortSignal, and fails on its own.
 // ---------------------------------------------------------------------------
 
-// One lean page of named work is enough for a snapshot; the real table lives
-// on Work, which every tile links to.
+// One lean page of named work is enough for the desk and the strip; the full
+// table lives on Work, which every count links to.
 const WORK_PAGE = 50
 
-// Rows shown in the Needs attention preview before it defers to Work.
-const ATTENTION_PREVIEW = 5
-
-function fmtRel(iso) {
-  const ms = Date.now() - Date.parse(iso)
-  if (Number.isNaN(ms)) return ''
-  const m = Math.floor(ms / 60000)
-  if (m < 1) return 'just now'
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
-}
+// Desk rows shown before it defers to Work. Your own waits are rarely many.
+const DESK_PREVIEW = 6
 
 export default function Dashboard({
   onOpenAgent,
   onOpenCost,
-  onViewAllWorkFeed,
   onGoWork,
-  onGoFleet,
+  onConnectAgent,
   userName,
   active = true,
 }) {
@@ -90,36 +86,65 @@ export default function Dashboard({
     }
   }, [])
 
-  // The lean work pair feeds both the Needs attention card and the Work card,
-  // so it is fetched once here rather than twice.
+  // The lean work pair feeds the sentence, the desk, the stuck line and the
+  // strip, so it is fetched once here rather than four times.
   const work = useWork(refreshKey)
   const cost = useSection((signal) => api.getCost({ signal }), refreshKey)
-  const feed = useSection((signal) => api.getWorkFeed({ signal }), refreshKey)
-  // Agent health. Also the Fleet card's only source: it names the agents that
-  // need looking at, and links to Fleet for the full roster.
+  // Agent health — the only other thing Trovis noticed is allowed to say.
   const health = useSection((signal) => api.getAttention({ signal }), refreshKey)
 
   const [openItem, setOpenItem] = useState(null)
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
-  const firstRun = isFirstRun({
-    overview: work.overview,
-    items: work.items,
-    feed: feed.data,
+  // "Is anything connected" comes from the agent list /dashboard/cost already
+  // returns — no extra request, and honest in a way "no work yet" is not.
+  const agents = Array.isArray(cost.data?.agents) ? cost.data.agents : null
+  const firstRun = isFirstRun({ overview: work.overview, items: work.items, agents })
+
+  const desk = deskItems(work.items)
+  const counts = proofCounts(work.items)
+  // The sentence reads the SAME rows the sections below render, so it can
+  // never claim work is waiting on you while the desk sits empty.
+  const sentence = dayShape({
+    hasRecord: work.items !== null,
+    connected: !firstRun,
+    deskCount: desk.length,
+    stuckCount: counts.stuck,
   })
+
+  function openTarget(target) {
+    if (!target) return
+    if (target.to === 'work-item') setOpenItem(target.item)
+    else if (target.to === 'work') onGoWork && onGoWork(target.filter)
+    else if (target.to === 'agent' && onOpenAgent) onOpenAgent(...agentRoute(target.row))
+  }
 
   return (
     <div className="dash home">
       <Greeting userName={userName} />
 
+      {sentence && <p className="home-shape">{sentence}</p>}
+
       {firstRun ? (
-        <FirstRunCard onGoWork={onGoWork} />
+        <FirstRunCta onConnectAgent={onConnectAgent} />
       ) : (
         <>
-          <NeedsAttentionCard work={work} onOpenItem={setOpenItem} onGoWork={onGoWork} />
-          <CostCard cost={cost} onOpenCost={onOpenCost} />
-          <WorkFeedCard feed={feed} onViewAll={onViewAllWorkFeed} onOpenAgent={onOpenAgent} />
-          <WorkCard work={work} onGoWork={onGoWork} />
-          <FleetCard health={health} onOpenAgent={onOpenAgent} onGoFleet={onGoFleet} />
+          <DeskSection
+            work={work}
+            desk={desk}
+            onOpenItem={setOpenItem}
+            onGoWork={onGoWork}
+            onResolved={refresh}
+          />
+          <NoticedSection work={work} health={health} onOpen={openTarget} />
+          <ProofStrip
+            work={work}
+            counts={counts}
+            cost={cost}
+            onGoWork={onGoWork}
+            onOpenCost={onOpenCost}
+          />
+          <AskEntry />
           <BriefingDisclosure work={work} refreshKey={refreshKey} />
         </>
       )}
@@ -130,7 +155,7 @@ export default function Dashboard({
           onClose={() => setOpenItem(null)}
           onResolved={() => {
             setOpenItem(null)
-            setRefreshKey((k) => k + 1)
+            refresh()
           }}
         />
       )}
@@ -141,9 +166,9 @@ export default function Dashboard({
 // --- data hooks ------------------------------------------------------------
 
 /**
- * One independent card fetch. Keeps the last good value on a refetch failure
- * (a blip must not blank a card that was already showing) and reports
- * `failed` only when there is nothing to show.
+ * One independent section fetch. Keeps the last good value on a refetch
+ * failure (a blip must not blank a section that was already showing) and
+ * reports `failed` only when there is nothing to show.
  */
 function useSection(fetcher, refreshKey) {
   const [data, setData] = useState(null)
@@ -206,7 +231,7 @@ function useWork(refreshKey) {
             if (!isAlive()) return
             setItems(Array.isArray(p?.items) ? p.items : [])
             // More pages exist, so any count derived from this page is a
-            // floor, not a total. The Work card says so rather than lying.
+            // floor, not a total. The strip says so rather than lying.
             setTruncated(Boolean(p?.next_cursor))
           })
         Promise.allSettled([ov, it]).then((rs) => {
@@ -235,8 +260,8 @@ function useWork(refreshKey) {
 
 /**
  * The briefing, fetched ONLY once someone opens the disclosure. It is the
- * slowest call the dashboard can make (a Claude call behind a 3s server cap),
- * and Home's first paint is now preview cards — so it must not be on it.
+ * slowest call Home can make (a Claude call behind a server cap), and it is
+ * not what a person opens Home to read — so it stays off the first paint.
  */
 function useLazyBriefing(open, refreshKey) {
   const [data, setData] = useState(null)
@@ -269,7 +294,7 @@ function useLazyBriefing(open, refreshKey) {
   }
 }
 
-// --- greeting --------------------------------------------------------------
+// --- 1. greeting -----------------------------------------------------------
 
 function Greeting({ userName }) {
   const now = new Date()
@@ -292,8 +317,8 @@ function Greeting({ userName }) {
   )
 }
 
-/** Card shell: title, an optional link to the page this previews, children. */
-function PreviewCard({ title, action, onAction, className = '', children }) {
+/** Section shell: title, an optional link onward, children. */
+function HomeSection({ title, action, onAction, className = '', children }) {
   return (
     <section className={`dash-card home-card ${className}`} aria-label={title}>
       <div className="home-card-head">
@@ -309,240 +334,268 @@ function PreviewCard({ title, action, onAction, className = '', children }) {
   )
 }
 
-// --- 1. Needs attention ----------------------------------------------------
+// --- 3. your desk ----------------------------------------------------------
 
-// Work that cannot move on its own: waiting on you, stuck, or sitting too
-// long with someone else. The whole card is absent on a healthy day — no
-// empty state, no "all clear" line.
-function NeedsAttentionCard({ work, onOpenItem, onGoWork }) {
+/**
+ * Only what is waiting on YOU. Not "needs a human", not a teammate's wait,
+ * not org-wide stuck work — those belong to their owner or to Trovis noticed.
+ *
+ * The whole section is absent when the desk is clear. There is no "all clear"
+ * card: an empty desk is best said by the sentence at the top and by silence
+ * here.
+ */
+function DeskSection({ work, desk, onOpenItem, onGoWork, onResolved }) {
   if (work.failed) {
     return (
-      <PreviewCard title="Needs attention">
-        <WorkLoadFailed lead="Can't load what needs you" onRetry={work.retry} />
-      </PreviewCard>
+      <HomeSection title="Your desk">
+        <WorkLoadFailed lead="Can't load what's waiting on you" onRetry={work.retry} />
+      </HomeSection>
     )
   }
   if (work.items === null) return null // loading: stay silent, reserve nothing
+  if (desk.length === 0) return null
 
-  const { needsYou, needsAttention } = partitionLookAt(work.items)
-  const rows = [...needsYou, ...needsAttention]
-  if (rows.length === 0) return null
-
-  const shown = rows.slice(0, ATTENTION_PREVIEW)
-  const hidden = rows.length - shown.length
+  const shown = desk.slice(0, DESK_PREVIEW)
+  const hidden = desk.length - shown.length
 
   return (
-    <PreviewCard
-      title="Needs attention"
+    <HomeSection
+      title="Your desk"
       action="Open in Work →"
-      onAction={onGoWork ? () => onGoWork('attention') : undefined}
-      className="home-attention"
+      onAction={onGoWork ? () => onGoWork('mine') : undefined}
+      className="home-desk"
     >
-      <ul className="home-att-list">
+      <ul className="home-desk-list">
         {shown.map((row) => (
-          <li key={row.id}>
-            <button
-              type="button"
-              className={`home-att-row ${
-                row.status === 'waiting_on_you' ? 'is-waiting-you' : 'is-stuck'
-              }`}
-              onClick={() => onOpenItem(row)}
-            >
-              <span className="home-att-title">{row.title}</span>
-              <span className="home-att-next">{row.whats_next || ''}</span>
-              <span className="home-att-age">{workUpdatedLabel(row.updated_at)}</span>
-            </button>
-          </li>
+          <DeskRow
+            key={row.id}
+            row={row}
+            onOpen={() => onOpenItem(row)}
+            onResolved={onResolved}
+          />
         ))}
       </ul>
       {hidden > 0 && onGoWork && (
-        <button type="button" className="dash-link home-card-more" onClick={() => onGoWork('attention')}>
+        <button
+          type="button"
+          className="dash-link home-card-more"
+          onClick={() => onGoWork('mine')}
+        >
           {hidden} more in Work →
         </button>
       )}
-    </PreviewCard>
+    </HomeSection>
   )
 }
 
-// --- 2. Cost ---------------------------------------------------------------
-
-// The only dollar figure on Home, and the same one the Cost page shows — both
-// read /dashboard/cost. Two sources would eventually disagree in prose.
-function CostCard({ cost, onOpenCost }) {
-  const c = cost.data
-  // Last 7 points of the daily series the endpoint already returns.
-  const week = Array.isArray(c?.daily) ? c.daily.slice(-7) : []
-
-  return (
-    <PreviewCard
-      title="Cost"
-      action="Open Cost →"
-      onAction={onOpenCost}
-      className="home-cost"
-    >
-      {cost.loading ? (
-        <div className="dash-skel"><span style={{ width: '40%', height: 22 }} /></div>
-      ) : cost.failed ? (
-        <div className="dash-empty" role="alert">
-          Couldn&apos;t load cost.{' '}
-          <button type="button" className="dash-link" onClick={cost.retry}>Retry</button>
-        </div>
-      ) : (
-        <button
-          type="button"
-          className="home-cost-body"
-          onClick={onOpenCost}
-          aria-label="Open the Cost page"
-        >
-          <span className="home-cost-figure">
-            <span className="home-cost-amount">{fmtMoney(c?.today || 0)}</span>
-            <span className="home-cost-label">today</span>
-          </span>
-          {week.length >= 2 && (
-            <Sparkline data={week} color="var(--brand-accent)" width={104} height={26} />
-          )}
-        </button>
-      )}
-    </PreviewCard>
-  )
-}
-
-// --- 3. Work feed ----------------------------------------------------------
-
-function WorkFeedCard({ feed, onViewAll, onOpenAgent }) {
-  const rows = (feed.data || []).slice(0, 4)
-  return (
-    <PreviewCard
-      title="Work feed"
-      action="Open feed →"
-      onAction={onViewAll}
-      className="home-feed"
-    >
-      {feed.loading ? (
-        <div className="dash-skel">
-          <span style={{ width: '70%' }} />
-          <span style={{ width: '88%' }} />
-        </div>
-      ) : feed.failed ? (
-        <div className="dash-empty" role="alert">
-          Couldn&apos;t load recent activity.{' '}
-          <button type="button" className="dash-link" onClick={feed.retry}>Retry</button>
-        </div>
-      ) : rows.length === 0 ? (
-        <div className="dash-empty">Nothing has happened in the last day.</div>
-      ) : (
-        <ul className="home-feed-list">
-          {rows.map((f, i) => (
-            <li key={`${f.agent}-${i}`}>
-              <button
-                type="button"
-                className="home-feed-row"
-                onClick={() => onOpenAgent && onOpenAgent(...agentRoute(f))}
-              >
-                <span className="home-feed-summary">{f.summary}</span>
-                <span className="home-feed-meta">
-                  {f.agent}
-                  <span className="dash-dot-sep">·</span>
-                  {fmtRel(f.time)}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </PreviewCard>
-  )
-}
-
-// --- 4. Work ---------------------------------------------------------------
-
-const WORK_TILES = [
-  { key: 'moving', label: 'Moving' },
-  { key: 'waiting', label: 'Waiting' },
-  { key: 'stuck', label: 'Stuck' },
-  { key: 'done', label: 'Done' },
+// The three answers a person can give without opening anything:
+//
+//   Done          — I did it. Ends here.
+//   I've got this — mine now, still going. Ends the wait, not the work.
+//   Not mine      — pass it back to whoever sent it.
+//
+// All three are only offered when the server gave us the open decision's id.
+// A button with nothing to call is worse than no button.
+const DESK_ACTIONS = [
+  { key: 'done', label: 'Done', busy: 'Marking done…', className: 'btn btn-primary' },
+  { key: 'mine', label: "I've got this", busy: 'Taking it…', className: 'btn btn-secondary' },
+  { key: 'not-mine', label: 'Not mine', busy: 'Passing back…', className: 'btn btn-secondary' },
 ]
 
-// A snapshot of the Work page's own buckets. "Waiting" is every wait, on you
-// or on someone else — deliberately a different cut from Needs attention,
-// which is only the work that has stopped moving.
-function WorkCard({ work, onGoWork }) {
-  if (work.failed) {
-    return (
-      <PreviewCard title="Work">
-        <WorkLoadFailed lead="Can't load this work" onRetry={work.retry} />
-      </PreviewCard>
-    )
+function DeskRow({ row, onOpen, onResolved }) {
+  const [busy, setBusy] = useState(null)
+  const [err, setErr] = useState(null)
+  const eventId = row.awaiting_handoff_event_id
+  const age = workUpdatedLabel(row.updated_at)
+
+  async function act(kind) {
+    if (!eventId || busy) return
+    setBusy(kind)
+    setErr(null)
+    try {
+      if (kind === 'done') await api.completeHandoff(row.id, eventId)
+      else if (kind === 'mine') await api.acceptHandoff(row.id, eventId)
+      // "Not mine" hands it back to whoever passed it over — never to nobody.
+      // The server records the refusal on the work's own history, so the agent
+      // that sent it can see the answer on its next turn.
+      else await api.declineHandoff(row.id, eventId)
+      onResolved()
+    } catch (e) {
+      setErr(e?.message || "That didn't go through")
+      setBusy(null)
+    }
   }
-  const counts = workSplit(work.items, work.overview)
-  const pending = work.items === null
 
   return (
-    <PreviewCard
-      title="Work"
-      action="Open Work →"
-      onAction={onGoWork ? () => onGoWork(null) : undefined}
-      className="home-work"
-    >
-      <div className="home-work-tiles">
-        {WORK_TILES.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            className={`home-work-tile tone-${t.key}`}
-            onClick={() => onGoWork && onGoWork(t.key)}
-            disabled={pending}
-          >
-            <span className="home-work-num">
-              {pending ? '—' : counts[t.key]}
-              {/* A page-derived count on a truncated list is a floor. Say so
-                  rather than printing a total we do not have. */}
-              {!pending && work.truncated && t.key !== 'done' ? '+' : ''}
-            </span>
-            <span className="home-work-lbl">{t.label}</span>
-          </button>
-        ))}
-      </div>
-    </PreviewCard>
+    <li className="home-desk-item">
+      <button type="button" className="home-desk-row" onClick={onOpen}>
+        <span className="home-desk-title">{row.title}</span>
+        <span className="home-desk-why">
+          Waiting on you
+          {age && (
+            <>
+              <span className="dash-dot-sep">·</span>
+              {age}
+            </>
+          )}
+        </span>
+      </button>
+      {eventId && (
+        <div className="home-desk-actions">
+          {DESK_ACTIONS.map((a) => (
+            <button
+              key={a.key}
+              type="button"
+              className={a.className}
+              disabled={!!busy}
+              onClick={() => act(a.key)}
+            >
+              {busy === a.key ? a.busy : a.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {err && (
+        <p className="home-desk-err" role="alert">
+          {err}
+        </p>
+      )}
+    </li>
   )
 }
 
-// --- 5. Fleet --------------------------------------------------------------
+// --- 4. Trovis noticed -----------------------------------------------------
 
-// Health dots only. Home never loads the agent roster (that request is what
-// made Home expensive), so this card can only speak about agents already
-// flagged as needing attention — and it says exactly that. The Fleet page
-// owns the full picture, and the header goes there.
-//
-// Absent when no agent needs attention: with no roster we cannot honestly
-// claim "all healthy", so we say nothing at all.
-function FleetCard({ health, onOpenAgent, onGoFleet }) {
-  const rows = (health.data || []).filter((h) => h && h.agent)
-  if (health.loading || health.failed || rows.length === 0) return null
+// Composed from the record, never by a model on the critical path: the stuck
+// line first, then agent health. Absent entirely when there is nothing to say.
+function NoticedSection({ work, health, onOpen }) {
+  if (work.items === null && health.loading) return null
+  const lines = noticedLines({
+    items: work.items,
+    attention: health.data,
+  })
+  // Anything stuck always produces a line, so an empty list genuinely means
+  // there is nothing to notice — no card, no "all clear".
+  if (lines.length === 0) return null
 
   return (
-    <PreviewCard
-      title="Fleet"
-      action="Open Fleet →"
-      onAction={onGoFleet}
-      className="home-fleet"
-    >
-      <ul className="home-fleet-list">
-        {rows.slice(0, 6).map((h, i) => (
-          <li key={`${h.agent}-${i}`}>
+    <HomeSection title="Trovis noticed" className="home-noticed">
+      <ul className="home-noticed-list">
+        {lines.map((line) => (
+          <li key={line.key}>
             <button
               type="button"
-              className="home-fleet-row"
-              onClick={() => onOpenAgent && onOpenAgent(...agentRoute(h))}
+              className={`home-noticed-row tone-${line.kind}`}
+              onClick={() => onOpen(line.target)}
             >
-              <span className={`home-fleet-dot sev-${h.severity || 'info'}`} aria-hidden="true" />
-              <span className="home-fleet-name">{h.agent}</span>
+              <span className="home-noticed-dot" aria-hidden="true" />
+              <span className="home-noticed-text">{line.text}</span>
             </button>
           </li>
         ))}
       </ul>
-      <p className="home-fleet-note">Agents needing a look. Open Fleet for all of them.</p>
-    </PreviewCard>
+    </HomeSection>
+  )
+}
+
+// --- 5. proof strip --------------------------------------------------------
+
+const STRIP_CELLS = [
+  { key: 'moving', label: 'moving', filter: 'moving' },
+  { key: 'waiting', label: 'waiting', filter: 'waiting' },
+  { key: 'stuck', label: 'stuck', filter: 'stuck' },
+  { key: 'done', label: 'done today', filter: 'done' },
+]
+
+/**
+ * The only place on Home that prints numbers.
+ *
+ * "waiting" here is EVERYONE's waits — deliberately wider than the desk above,
+ * which is only yours. The two are different questions, so they get different
+ * words and never share a figure.
+ *
+ * The dollar comes from /dashboard/cost, which is what the Cost page reads.
+ */
+function ProofStrip({ work, counts, cost, onGoWork, onOpenCost }) {
+  if (work.failed && cost.failed) return null
+  const pending = work.items === null
+  // A count off a truncated page is a floor. Say so rather than print a total
+  // we do not have. Done is a same-day slice of the same page, so it floors too.
+  const more = work.truncated ? '+' : ''
+
+  return (
+    <section className="home-strip" aria-label="Today by the numbers">
+      {STRIP_CELLS.map((c) => (
+        <StripCell
+          key={c.key}
+          label={c.label}
+          tone={c.key}
+          value={`${counts[c.key]}${more}`}
+          loading={pending && !work.failed}
+          failed={work.failed}
+          onRetry={work.retry}
+          onOpen={() => onGoWork && onGoWork(c.filter)}
+        />
+      ))}
+      <StripCell
+        label="today"
+        tone="cost"
+        value={fmtMoney(cost.data?.today || 0)}
+        loading={cost.loading}
+        failed={cost.failed}
+        onRetry={cost.retry}
+        onOpen={onOpenCost}
+      />
+    </section>
+  )
+}
+
+// One cell. A failed cell is never a dead end: it keeps its place in the row,
+// shows a dash instead of inventing a number, and the tap becomes Retry.
+function StripCell({ label, tone, value, loading, failed, onRetry, onOpen }) {
+  return (
+    <button
+      type="button"
+      className={`home-strip-cell tone-${tone}${failed ? ' is-failed' : ''}`}
+      onClick={failed ? onRetry : onOpen}
+      disabled={loading}
+      aria-label={failed ? `Couldn't load ${label} — retry` : undefined}
+    >
+      <span className="home-strip-num">{loading || failed ? '—' : value}</span>
+      <span className="home-strip-lbl">{failed ? 'retry' : label}</span>
+    </button>
+  )
+}
+
+// --- 6. Ask ----------------------------------------------------------------
+
+// The pill is always there on ⌘K, but a pill you have to know about is not an
+// invitation. This is the same control with a front door: it opens the real
+// Ask panel, and typing here sends the question straight in.
+function AskEntry() {
+  const [q, setQ] = useState('')
+
+  function submit(e) {
+    e.preventDefault()
+    const text = q.trim()
+    setQ('')
+    openAsk(text)
+  }
+
+  return (
+    <form className="home-ask" onSubmit={submit}>
+      <span className="dash-sq" aria-hidden="true">
+        <TrovisMark size={11} />
+      </span>
+      <input
+        className="home-ask-input"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Ask Trovis about today…"
+        aria-label="Ask Trovis about today"
+      />
+      <span className="home-ask-key" aria-hidden="true">⌘K</span>
+    </form>
   )
 }
 
@@ -594,22 +647,18 @@ function BriefingDisclosure({ work, refreshKey }) {
 
 // --- first run -------------------------------------------------------------
 
-function FirstRunCard({ onGoWork }) {
+// The sentence above already said nothing is connected. This is the one thing
+// to do about it — no tiles, and no strip of zeros pretending to be a product.
+function FirstRunCta({ onConnectAgent }) {
   return (
-    <div className="dash-card dash-waiting">
-      <div className="dash-waiting-pulse" aria-hidden="true">
-        <span className="dash-sq">
-          <TrovisMark size={11} />
-        </span>
-      </div>
-      <h2 className="dash-waiting-title">Nothing to show yet</h2>
-      <p className="dash-waiting-sub">
-        Once your agents and teammates start working, today&apos;s state shows up
-        here — what needs you, what&apos;s stuck, and what moved.
+    <div className="dash-card home-firstrun">
+      <p className="home-firstrun-sub">
+        Connect an agent and its work shows up here on its own — what needs you,
+        what&apos;s stuck, and what moved. You will not have to enter any of it.
       </p>
-      {onGoWork && (
-        <button type="button" className="btn btn-primary" onClick={() => onGoWork(null)}>
-          Go to Work
+      {onConnectAgent && (
+        <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
+          Connect an agent
         </button>
       )}
     </div>

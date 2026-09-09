@@ -53,10 +53,13 @@ test('a missing row does not throw on the way to a click handler', () => {
 // --- the call sites ---------------------------------------------------------
 
 test('every agent click on Home routes through the helper', () => {
-  // Two rows open an agent from Home: the work feed and the fleet dots. Both
-  // must spread agentRoute rather than reach for a field themselves.
-  const clicks = [...code.matchAll(/onOpenAgent\(([^)]*)\)/g)].map((m) => m[1].trim())
-  assert.ok(clicks.length >= 2, `expected the feed and fleet clicks, saw ${clicks.length}`)
+  // Home opens an agent from one place now — a Trovis noticed line about
+  // agent health — and it must spread agentRoute rather than reach for a
+  // field itself. Any future call site is held to the same rule.
+  const clicks = [...code.matchAll(/onOpenAgent\(([^)]*)\)/g)]
+    .map((m) => m[1].trim())
+    .filter((a) => a !== '')
+  assert.ok(clicks.length >= 1, `expected at least one agent click, saw ${clicks.length}`)
   for (const args of clicks) {
     assert.match(args, /^\.\.\.agentRoute\(/, `onOpenAgent(${args}) bypasses agentRoute`)
   }

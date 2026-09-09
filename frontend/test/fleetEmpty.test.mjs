@@ -52,15 +52,23 @@ test('a failed Home section shows Retry, never an empty state', () => {
   // The work pair survives one of its two calls failing.
   assert.match(code, /failed:\s*overview === null && items === null && !!err/)
   // Every section that can fail offers a way back.
-  for (const retry of [/onRetry=\{work\.retry\}/, /onClick=\{feed\.retry\}/, /onClick=\{briefing\.retry\}/]) {
+  for (const retry of [
+    /onRetry=\{work\.retry\}/, // the desk
+    /onClick=\{briefing\.retry\}/, // the briefing disclosure
+    // The strip has no room for a Retry link, so a failed cell keeps its place
+    // and becomes the retry itself rather than printing a number we don't have.
+    /onRetry=\{work\.retry\}/,
+    /onRetry=\{cost\.retry\}/,
+    /onClick=\{failed \? onRetry : onOpen\}/,
+  ]) {
     assert.match(code, retry)
   }
 })
 
-test('an empty look-at section disappears rather than announcing itself', () => {
+test('an empty desk disappears rather than announcing itself', () => {
   const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
   const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  assert.match(code, /if \(rows\.length === 0\) return null/)
+  assert.match(code, /if \(desk\.length === 0\) return null/)
   // Loading must not reserve alarm-coloured space either.
   assert.match(code, /if \(work\.items === null\) return null/)
 })
