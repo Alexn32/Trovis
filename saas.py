@@ -17,7 +17,9 @@ V1 link keys (require one; first present wins):
 
 Effects:
   wait  — unresolved to_system (lean holder kind tool) toward the SaaS.
-  clear — resolve that SaaS wait so work can move.
+  clear — resolve that SaaS wait so work can move. When ``waiting_on`` is
+          set, only that wait kind is cleared (Shopify payment vs
+          fulfillment). ``then_waiting_on`` may start the next wait.
   stuck — needs human attention (failure / dispute) on the same loop.
 """
 from __future__ import annotations
@@ -91,6 +93,8 @@ def apply_work_effect(
     event_time_unix: int | None = None,
     metadata: dict[str, Any] | None = None,
     link_key: str | None = None,
+    then_waiting_on: str | None = None,
+    then_reason: str | None = None,
 ) -> dict[str, Any]:
     """Attach a verified SaaS event to an existing open Work loop.
 
@@ -152,6 +156,8 @@ def apply_work_effect(
         event_id=event_id,
         event_type=event_type,
         event_time_unix=event_time_unix,
+        then_waiting_on=then_waiting_on,
+        then_reason=then_reason,
     )
     logger.info(
         "[saas] %s effect=%s provider=%s loop=%s object=%s event=%s type=%s",

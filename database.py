@@ -9806,6 +9806,21 @@ def _unresolved_saas_handoffs(
     return out
 
 
+def _saas_wait_kind(raw: Any) -> str | None:
+    """Normalize a wait label so Shopify can clear payment vs fulfillment.
+
+    Stripe / HubSpot pass no filter (None). Unknown labels compare as-is.
+    """
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    if "fulfill" in s:
+        return "fulfillment"
+    if "payment" in s or s in {"pending", "authorized", "partially_paid"}:
+        return "payment"
+    return s
+
+
 def apply_saas_loop_effect(
     account_id: int,
     loop_id: int,
@@ -9819,8 +9834,15 @@ def apply_saas_loop_effect(
     event_id: str | None = None,
     event_type: str | None = None,
     event_time_unix: int | None = None,
+    then_waiting_on: str | None = None,
+    then_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Append wait/clear/stuck onto an existing open loop. One transaction."""
+    """Append wait/clear/stuck onto an existing open loop. One transaction.
+
+    On clear, a set ``waiting_on`` filters to that wait kind only (Shopify
+    payment vs fulfillment). ``then_waiting_on`` starts the next wait after
+    a successful targeted clear. Stripe/HubSpot omit both — clear-all.
+    """
     provider = (provider or "").strip().lower()
     ts = int(event_time_unix or time.time_ns())
     handoff_id = f"saas:{provider}:{object_id}" if object_id else f"saas:{provider}"
@@ -9897,11 +9919,20 @@ def apply_saas_loop_effect(
 
         if effect == "clear":
             to_clear = pending if pending else matching
+            kind = _saas_wait_kind(waiting_on)
+            if kind:
+                to_clear = [
+                    h for h in to_clear
+                    if _saas_wait_kind((h.get("payload") or {}).get("waiting_on")) == kind
+                ]
             if not to_clear:
                 _touch_loop_event(cur, loop_id, ts)
                 return {"status": "noop_already", "reason": "no_wait"}
             for h in to_clear:
                 _complete(h)
+            next_wait = (then_waiting_on or "").strip() or None
+            if next_wait:
+                _initiate("wait", next_wait, then_reason)
             _touch_loop_event(cur, loop_id, ts)
             return {"status": "applied"}
 

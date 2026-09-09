@@ -14,17 +14,20 @@ Connect mapping contract (V1, folded here — surviving Shopify PR C):
     → open loop on this Trovis account; else no-op. Never invent a loop.
     No catalog / product / customer sync.
 
-  Events (minimal official Admin webhooks):
-    orders/create                         → wait
-      honest wait: "Waiting on payment" when financial_status is
-      pending / authorized / partially_paid; else "Waiting on fulfillment"
-    orders/paid                           → clear
-    orders/fulfilled                      → clear
-    fulfillments/create (success)         → clear
-    orders/cancelled                      → stuck
-    order_transactions/create (failure)   → stuck
+  Events (minimal official Admin webhooks). Payment and fulfillment
+  waits are modeled separately:
+    orders/create (unpaid/pending)        → wait (payment)
+    orders/updated while payment pending  → wait (payment)
+    orders/create already paid, unfulfilled → wait (fulfillment)
+    orders/paid                           → clear payment wait;
+      if still unfulfilled, keep a fulfillment wait
+    orders/fulfilled                      → clear fulfillment wait
+    fulfillments/create (success)         → clear fulfillment wait
+    orders/cancelled                      → stuck (open work)
+    order_transactions/create (failure or void) → stuck
     refunds/create                        → stuck (open work only)
     fulfillments/update (error/failure)   → stuck
+    orders/updated financial_status=voided → stuck
 
   Locks:
     reuse #143/#144 SaaS spine (saas.py / apply_work_effect / saas_connections);
@@ -74,6 +77,7 @@ _FULFILL_FAIL = frozenset({"error", "failure", "failed"})
 # GraphQL-style topic names some Partner-dashboard payloads still send.
 _TOPIC_ALIASES = {
     "orders_create": "orders/create",
+    "orders_updated": "orders/updated",
     "orders_paid": "orders/paid",
     "orders_fulfilled": "orders/fulfilled",
     "orders_cancelled": "orders/cancelled",
@@ -364,16 +368,54 @@ def _iso_to_unix_ns(raw: Any) -> int | None:
     return int(dt.timestamp() * 1_000_000_000)
 
 
-def _wait_copy(obj: dict[str, Any]) -> tuple[str, str]:
-    """Honest wait for orders/create.
+def _financial_status(obj: dict[str, Any]) -> str:
+    return str(obj.get("financial_status") or "").strip().lower()
 
-    Pending / authorized / partially_paid → Waiting on payment.
-    Otherwise the order exists and fulfillment is the remaining wait.
-    """
-    fin = str(obj.get("financial_status") or "").strip().lower()
-    if fin in _PAYMENT_PENDING:
+
+def _fulfillment_status(obj: dict[str, Any]) -> str:
+    return str(obj.get("fulfillment_status") or "").strip().lower()
+
+
+def _is_payment_pending(obj: dict[str, Any]) -> bool:
+    """Unpaid / pending payment — Connect wait trigger."""
+    fin = _financial_status(obj)
+    return fin in _PAYMENT_PENDING or fin in ("", "unpaid")
+
+
+def _is_fulfilled(obj: dict[str, Any]) -> bool:
+    return _fulfillment_status(obj) in {"fulfilled", "success"}
+
+
+def _is_voided(obj: dict[str, Any]) -> bool:
+    return _financial_status(obj) == "voided"
+
+
+def _wait_copy(obj: dict[str, Any]) -> tuple[str, str]:
+    """Honest wait: payment-pending vs fulfillment (modeled separately)."""
+    if _is_payment_pending(obj):
         return "payment", "Waiting on payment"
     return "fulfillment", "Waiting on fulfillment"
+
+
+def _order_create_effect(obj: dict[str, Any]) -> str | None:
+    """orders/create: unpaid/pending → payment wait; paid+unfulfilled →
+    fulfillment wait; paid+fulfilled → unmapped; voided → stuck."""
+    if _is_voided(obj):
+        return saas.EFFECT_STUCK
+    if _is_payment_pending(obj):
+        return saas.EFFECT_WAIT
+    if _is_fulfilled(obj):
+        return None
+    return saas.EFFECT_WAIT
+
+
+def _order_updated_effect(obj: dict[str, Any]) -> str | None:
+    """orders/updated: wait only while payment is pending; voided → stuck."""
+    if _is_voided(obj):
+        return saas.EFFECT_STUCK
+    if _is_payment_pending(obj):
+        return saas.EFFECT_WAIT
+    return None
 
 
 def _tx_failed(obj: dict[str, Any]) -> bool:
@@ -407,14 +449,24 @@ def _stuck_reason(topic: str, obj: dict[str, Any]) -> str:
     return "payment failed"
 
 
+def _tx_voided(obj: dict[str, Any]) -> bool:
+    return str(obj.get("kind") or "").strip().lower() == "void"
+
+
 def map_event(topic: str | None, obj: Any) -> dict[str, Any] | None:
     """Map a verified Shopify topic + object to a spine effect, or None."""
     etype = normalize_topic(topic)
     data = _as_dict(obj)
     effect: str | None
+    then_waiting_on = None
+    then_reason = None
     if etype == "orders/create":
-        effect = saas.EFFECT_WAIT
-    elif etype in ("orders/paid", "orders/fulfilled"):
+        effect = _order_create_effect(data)
+    elif etype == "orders/updated":
+        effect = _order_updated_effect(data)
+    elif etype == "orders/paid":
+        effect = saas.EFFECT_CLEAR
+    elif etype == "orders/fulfilled":
         effect = saas.EFFECT_CLEAR
     elif etype == "orders/cancelled":
         effect = saas.EFFECT_STUCK
@@ -425,7 +477,7 @@ def map_event(topic: str | None, obj: Any) -> dict[str, Any] | None:
     elif etype == "fulfillments/update":
         effect = _fulfillment_effect(data, create=False)
     elif etype == "order_transactions/create":
-        effect = saas.EFFECT_STUCK if _tx_failed(data) else None
+        effect = saas.EFFECT_STUCK if (_tx_failed(data) or _tx_voided(data)) else None
     else:
         return None
     if effect is None:
@@ -436,10 +488,23 @@ def map_event(topic: str | None, obj: Any) -> dict[str, Any] | None:
     if effect == saas.EFFECT_WAIT:
         waiting_on, reason = _wait_copy(data)
     elif effect == saas.EFFECT_STUCK:
-        reason = _stuck_reason(etype, data)
+        if _is_voided(data) or _tx_voided(data):
+            reason = "payment voided"
+        else:
+            reason = _stuck_reason(etype, data)
         waiting_on = reason
     else:
+        # Targeted clear: paid clears payment only; fulfillment clears
+        # fulfillment only. After paid, keep a fulfillment wait when the
+        # order is still unfulfilled (modeled separately — see PR).
         reason = "cleared"
+        if etype == "orders/paid":
+            waiting_on = "payment"
+            if not _is_fulfilled(data):
+                then_waiting_on = "fulfillment"
+                then_reason = "Waiting on fulfillment"
+        else:
+            waiting_on = "fulfillment"
 
     object_id = _order_id(data) or _object_id(data)
     return {
@@ -452,6 +517,8 @@ def map_event(topic: str | None, obj: Any) -> dict[str, Any] | None:
         "metadata": shopify_link_metadata(data),
         "waiting_on": waiting_on,
         "reason": reason,
+        "then_waiting_on": then_waiting_on,
+        "then_reason": then_reason,
         "event_time_unix": _iso_to_unix_ns(
             data.get("updated_at") or data.get("processed_at") or data.get("created_at")
         ),
@@ -554,6 +621,8 @@ def apply_verified_event(
         event_type=mapped.get("event_type"),
         event_time_unix=mapped.get("event_time_unix"),
         metadata=metadata,
+        then_waiting_on=mapped.get("then_waiting_on"),
+        then_reason=mapped.get("then_reason"),
     )
 
 

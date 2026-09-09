@@ -3622,10 +3622,11 @@ def saas_hubspot_disconnect(request: Request) -> SaaSConnection:
 #   Link keys (require one): trovis_loop_external_id |
 #     trovis.loop.external_id | trovis_run_id | trovis.run.id
 #     → open loop this account; else no-op. Never invent. No catalog sync.
-#   orders/create → wait (payment if pending/authorized/partially_paid,
-#     else fulfillment); orders/paid + orders/fulfilled +
-#     fulfillments/create (success) → clear; orders/cancelled +
-#     payment failure + refunds/create → stuck; fulfillments/update
+#   Payment vs fulfillment waits are separate:
+#     orders/create (unpaid/pending) + orders/updated while pending → wait payment
+#     orders/paid → clear payment wait (keep fulfillment wait if unfulfilled)
+#     fulfillments/create / orders/fulfilled → clear fulfillment wait
+#     cancelled / payment failure or void / refund (open) / fulfillment
 #     failure → stuck.
 #   Scopes: read_orders, read_fulfillments. Reuse #143/#144 spine.
 # Isolated from /billing/webhook. HMAC uses SHOPIFY_SAAS_CLIENT_SECRET.

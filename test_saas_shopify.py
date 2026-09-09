@@ -5,12 +5,13 @@ Connect mapping contract (folded into Shopify PR C):
     trovis.loop.external_id | trovis_run_id | trovis.run.id
     → open loop this account; else no-op. Never invent loops.
     No catalog / product / customer sync.
-  Events:
-    orders/create → wait (payment if pending/authorized/partially_paid,
-      else fulfillment)
-    orders/paid / orders/fulfilled / fulfillments/create (success) → clear
-    orders/cancelled / payment failure / refunds/create → stuck
-    fulfillments/update (error/failure) → stuck
+  Events (payment vs fulfillment waits modeled separately):
+    orders/create (unpaid/pending) or orders/updated while pending → wait payment
+    orders/create already paid, unfulfilled → wait fulfillment
+    orders/paid → clear payment wait; keep fulfillment wait if unfulfilled
+    fulfillments/create / orders/fulfilled → clear fulfillment wait
+    orders/cancelled / payment failure or void / refunds/create (open)
+      / fulfillment failure → stuck
   Locks: reuse #143/#144 SaaS spine; Shopify brand coming→live only after
     E2E; no Intercom/Slack/GitHub adapters; don't touch Stripe billing
     webhook or Stripe/HubSpot secrets.
@@ -257,17 +258,39 @@ m = saas_shopify.map_event("orders/create", order(financial_status="authorized")
 check("orders/create authorized → wait on payment",
       m and m["effect"] == "wait" and m["waiting_on"] == "payment")
 m = saas_shopify.map_event("orders/create", order(financial_status="paid"))
-check("orders/create paid → wait on fulfillment (honest wait)",
+check("orders/create paid → wait on fulfillment (modeled separately)",
       m and m["effect"] == "wait" and m["waiting_on"] == "fulfillment"
       and m["reason"] == "Waiting on fulfillment")
+check("orders/create paid+fulfilled is unmapped",
+      saas_shopify.map_event("orders/create", order(
+          financial_status="paid", fulfillment_status="fulfilled",
+      )) is None)
+m = saas_shopify.map_event("orders/updated", order(financial_status="pending"))
+check("orders/updated while pending → wait payment",
+      m and m["effect"] == "wait" and m["waiting_on"] == "payment")
+check("orders/updated when paid is unmapped (paid is orders/paid)",
+      saas_shopify.map_event("orders/updated", order(financial_status="paid")) is None)
+m = saas_shopify.map_event("orders/updated", order(financial_status="voided"))
+check("orders/updated voided → stuck",
+      m and m["effect"] == "stuck" and "void" in (m.get("reason") or ""))
 m = saas_shopify.map_event("orders/paid", order(financial_status="paid"))
-check("orders/paid → clear", m and m["effect"] == "clear")
+check("orders/paid → clear payment wait + keep fulfillment wait",
+      m and m["effect"] == "clear" and m["waiting_on"] == "payment"
+      and m["then_waiting_on"] == "fulfillment")
+m = saas_shopify.map_event("orders/paid", order(
+    financial_status="paid", fulfillment_status="fulfilled",
+))
+check("orders/paid when already fulfilled → clear payment only",
+      m and m["effect"] == "clear" and m["waiting_on"] == "payment"
+      and not m.get("then_waiting_on"))
 m = saas_shopify.map_event("orders/fulfilled", order(fulfillment_status="fulfilled"))
-check("orders/fulfilled → clear", m and m["effect"] == "clear")
+check("orders/fulfilled → clear fulfillment wait",
+      m and m["effect"] == "clear" and m["waiting_on"] == "fulfillment")
 m = saas_shopify.map_event("fulfillments/create", {
     "id": 9, "order_id": 1001, "status": "success",
 })
-check("fulfillments/create success → clear", m and m["effect"] == "clear")
+check("fulfillments/create success → clear fulfillment wait",
+      m and m["effect"] == "clear" and m["waiting_on"] == "fulfillment")
 check("fulfillments/create pending is unmapped (not yet fulfilled)",
       saas_shopify.map_event("fulfillments/create", {
           "id": 9, "order_id": 1001, "status": "pending",
@@ -284,6 +307,11 @@ check("successful transaction is unmapped",
       saas_shopify.map_event("order_transactions/create", {
           "id": 8, "order_id": 1001, "status": "success",
       }) is None)
+m = saas_shopify.map_event("order_transactions/create", {
+    "id": 6, "order_id": 1001, "kind": "void", "status": "success",
+})
+check("void transaction → stuck",
+      m and m["effect"] == "stuck" and "void" in (m.get("reason") or ""))
 m = saas_shopify.map_event("refunds/create", {"id": 3, "order_id": 1001})
 check("refunds/create → stuck", m and m["effect"] == "stuck" and m["reason"] == "refund")
 m = saas_shopify.map_event("fulfillments/update", {
@@ -458,7 +486,7 @@ with TestClient(main.app) as c:
     check("other tenant's same-key loop was not touched",
           other and other[0]["status"] == "moving")
 
-    print("\n--- clear (orders/paid) ---")
+    print("\n--- clear payment wait (orders/paid) keeps fulfillment wait ---")
     resp = post_shop(c, order(
         financial_status="paid",
         note_attributes=[{"name": "trovis_loop_external_id", "value": "loop-order"}],
@@ -466,11 +494,66 @@ with TestClient(main.app) as c:
     check("orders/paid applied",
           resp.status_code == 200 and resp.json().get("status") == "applied")
     item = work_item(c, H, "Ship the hammock")
-    check("clear: work is moving again",
-          item and item["status"] == "moving")
+    check("paid: still waiting on fulfillment (modeled separately)",
+          item and item["status"] == "stuck"
+          and "fulfillment" in (item.get("whats_next") or "").lower())
     evs = loop_events("loop-order")
-    check("clear wrote handoff_completed",
+    check("paid wrote handoff_completed for the payment wait",
           any(e["type"] == "handoff_completed" for e in evs))
+    resp = post_shop(c, order(
+        financial_status="paid", fulfillment_status="fulfilled",
+        note_attributes=[{"name": "trovis_loop_external_id", "value": "loop-order"}],
+    ), topic="orders/fulfilled", webhook_id="wh_paid_then_ful")
+    check("orders/fulfilled then clears the fulfillment wait",
+          resp.json().get("status") == "applied"
+          and work_item(c, H, "Ship the hammock")["status"] == "moving")
+
+    print("\n--- paid does not clear a fulfillment wait ---")
+    resp = post_shop(c, order(
+        financial_status="paid",
+        note_attributes=[{"name": "trovis_loop_external_id", "value": "loop-order"}],
+    ), webhook_id="wh_fulwait")
+    check("paid-on-create waits on fulfillment",
+          resp.json().get("status") == "applied"
+          and work_item(c, H, "Ship the hammock")["status"] == "stuck")
+    resp = post_shop(c, order(
+        financial_status="paid",
+        note_attributes=[{"name": "trovis_loop_external_id", "value": "loop-order"}],
+    ), topic="orders/paid", webhook_id="wh_paid_on_ful")
+    check("orders/paid against a fulfillment wait is a no-op",
+          resp.json().get("status") == "noop_already"
+          and work_item(c, H, "Ship the hammock")["status"] == "stuck"
+          and "fulfillment" in (work_item(c, H, "Ship the hammock").get("whats_next") or "").lower())
+
+    print("\n--- fulfillment clear does not clear a payment wait ---")
+    post_traces("shop-agent", [
+        sp("message_received", 30, {
+            "trovis.loop.title": "Collect then ship",
+            "trovis.loop.external_id": "loop-payful",
+        }),
+    ])
+    resp = post_shop(c, order(
+        oid=4001, financial_status="pending",
+        note_attributes=[{"name": "trovis_loop_external_id", "value": "loop-payful"}],
+    ), webhook_id="wh_payful_wait")
+    check("pending create waits on payment",
+          resp.json().get("status") == "applied"
+          and "payment" in (work_item(c, H, "Collect then ship").get("whats_next") or "").lower())
+    resp = post_shop(c, {"id": 78, "order_id": 4001, "status": "success",
+                         "note_attributes": [{"name": "trovis_loop_external_id", "value": "loop-payful"}]},
+                     topic="fulfillments/create", webhook_id="wh_payful_ful")
+    check("fulfillment create does not clear a payment wait",
+          resp.json().get("status") == "noop_already"
+          and work_item(c, H, "Collect then ship")["status"] == "stuck"
+          and "payment" in (work_item(c, H, "Collect then ship").get("whats_next") or "").lower())
+
+    print("\n--- orders/updated while pending ---")
+    resp = post_shop(c, order(
+        oid=4001, financial_status="pending",
+        note_attributes=[{"name": "trovis_loop_external_id", "value": "loop-payful"}],
+    ), topic="orders/updated", webhook_id="wh_updated_pending")
+    check("orders/updated pending is already_waiting (same payment wait)",
+          resp.json().get("status") == "noop_already")
 
     print("\n--- dotted + run_id link keys ---")
     resp = post_shop(c, order(
@@ -478,13 +561,19 @@ with TestClient(main.app) as c:
         note_attributes=[{"name": "trovis.loop.external_id", "value": "loop-order"}],
     ), webhook_id="wh_dotted")
     check("dotted trovis.loop.external_id waits",
-          resp.json().get("status") == "applied"
+          resp.json().get("status") in ("applied", "noop_already")
           and work_item(c, H, "Ship the hammock")["status"] == "stuck")
     resp = post_shop(c, order(
-        fulfillment_status="fulfilled",
+        financial_status="paid", fulfillment_status="fulfilled",
+        metafields=[{"key": "trovis_run_id", "value": "loop-order"}],
+    ), topic="orders/paid", webhook_id="wh_runid_paid")
+    # loop-order is on a fulfillment wait from earlier; paid is a no-op.
+    # Clear via fulfilled + run_id metafield.
+    resp = post_shop(c, order(
+        financial_status="paid", fulfillment_status="fulfilled",
         metafields=[{"key": "trovis_run_id", "value": "loop-order"}],
     ), topic="orders/fulfilled", webhook_id="wh_runid")
-    check("trovis_run_id on metafield clears",
+    check("trovis_run_id on metafield clears fulfillment wait",
           resp.json().get("status") in ("applied", "noop_already")
           and work_item(c, H, "Ship the hammock")["status"] == "moving")
 
