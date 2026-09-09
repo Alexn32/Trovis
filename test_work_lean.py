@@ -40,7 +40,12 @@ def sp(name, off, attrs):
 NS = 10**9
 NOW = time.time_ns()
 
-ITEM_KEYS = {"id", "title", "status", "holder", "whats_next", "updated_at"}
+ITEM_KEYS = {
+    "id", "title", "status", "holder", "whats_next", "updated_at",
+    # The open decision's event id, so Home's desk can offer Done / I've got
+    # this / Not mine on the row without a detail fetch per row.
+    "awaiting_handoff_event_id",
+}
 STATUSES = {"waiting_on_you", "waiting_on_other", "stuck", "moving", "done"}
 HOLDER_KINDS = {"human", "agent", "tool", "unassigned"}
 

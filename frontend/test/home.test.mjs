@@ -152,15 +152,19 @@ test('as-of footer is omitted rather than printing a placeholder', () => {
   assert.match(asOfLabel('2026-03-10T12:00:00Z'), /^As of /)
 })
 
-test('first run needs every section to have LANDED empty, not merely be missing', () => {
-  const empty = { overview: { open: 0 }, items: [], feed: [] }
+test('first run needs every input to have LANDED empty, not merely be missing', () => {
+  const empty = { overview: { open: 0 }, items: [], agents: [] }
   assert.equal(isFirstRun(empty), true)
   // Still loading / failed → not first run, so we show Retry, not a story.
   assert.equal(isFirstRun({ ...empty, items: null }), false)
-  assert.equal(isFirstRun({ ...empty, feed: null }), false)
+  assert.equal(isFirstRun({ ...empty, agents: null }), false)
   assert.equal(isFirstRun({ ...empty, overview: null }), false)
   // Real work exists.
   assert.equal(isFirstRun({ ...empty, overview: { open: 3 } }), false)
+  // Agents are connected and simply have not produced named work yet. That is
+  // a quiet day, NOT "nothing is connected" — the difference is the whole
+  // point of reading the agent list rather than only the work.
+  assert.equal(isFirstRun({ ...empty, agents: [{ name: 'Support Bot' }] }), false)
 })
 
 // --- copy + module discipline ----------------------------------------------

@@ -4589,6 +4589,11 @@ def _row_to_work_item(
 
     `include_agent` adds service_name / agent_id for Ask. Home HTTP must
     leave this False — WorkItem forbids extra keys.
+
+    `include_handoff` adds awaiting_handoff_event_id, which WorkItem now
+    carries: Home's desk needs to know whether a row has a real decision on it
+    before it offers one, and paying a detail fetch per row to find out would
+    undo the whole point of the lean list.
     """
     title = (r.get("title") or "").strip()
     if (
@@ -4612,8 +4617,6 @@ def _row_to_work_item(
         out["service_name"] = r.get("service_name")
         out["agent_id"] = r.get("agent_id") or "main"
     if include_handoff:
-        # Detail only. WorkItem (the list row) forbids extra keys, so this must
-        # never leak into /work/items.
         out["awaiting_handoff_event_id"] = r.get("awaiting_handoff_event_id")
     return out
 
@@ -4671,7 +4674,7 @@ def get_work_items(
 
     items: list[dict[str, Any]] = []
     for r in rows:
-        item = _row_to_work_item(r, include_agent=include_agent)
+        item = _row_to_work_item(r, include_agent=include_agent, include_handoff=True)
         if item is None:
             continue
         items.append(item)

@@ -4474,16 +4474,20 @@ a:hover {
 /* ---------- 2. daily briefing ---------- */
 .dash-briefing-label { font-size: 11.5px; font-weight: 700; color: var(--text-primary); }
 
-/* ---------- Home: page-preview cards -----------------------------------------
-   Home is a hub of snapshots, so every card reads the same: one titled shell
-   (.home-card) with a link to the page it previews, and a body sized to the
-   content rather than to the grid. Alarm colour appears in exactly one place
-   — the Needs attention rows — reusing the Work table's 3px rail vocabulary
-   so a row means the same thing on both surfaces. Everything else is quiet.
+/* ---------- Home: the worker's opening --------------------------------------
+   Home is read top to bottom, loud to quiet: the sentence that says how the
+   day looks, the work waiting on you, what Trovis noticed, then the numbers.
+   Alarm colour appears in exactly two places — a desk row and a noticed line
+   — reusing the Work table's 3px rail vocabulary so a row means the same
+   thing on both surfaces. Everything else is deliberately calm.
    Tokens only: no colours or fonts are introduced here.
    -------------------------------------------------------------------------- */
 
-.home { gap: 14px; }
+/* Home is read, not scanned across: one column at a comfortable measure.
+   `.dash` is a flex item here, so without an explicit width it would shrink to
+   whatever its widest child happens to be — a layout that changes shape with
+   the data. */
+.home { gap: 14px; width: 100%; max-width: 720px; }
 .home-card { padding: 14px 18px; }
 .home-card-head {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -4491,95 +4495,107 @@ a:hover {
 }
 .home-card-more { align-self: flex-start; margin-top: 8px; }
 
-/* 1. Needs attention — the only card allowed alarm colour, and absent when
-      there is nothing in it. */
-.home-att-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
-.home-att-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 14px; align-items: center; width: 100%; text-align: left;
-  padding: 10px 13px; border-radius: 9px; border: 1px solid transparent;
-  transition: background 0.15s ease;
+/* 2. Shape of the day — the loudest line on the page, and the only one that
+      is always there. Sized as a statement, not as a heading. */
+.home-shape {
+  font-size: 17px; font-weight: 650; line-height: 1.45;
+  color: var(--text-primary); letter-spacing: -0.012em;
+  margin: 2px 0 2px; max-width: 46ch;
 }
-.home-att-row.is-waiting-you {
-  background: var(--warm-fill); box-shadow: inset 3px 0 0 var(--warning);
-}
-.home-att-row.is-waiting-you:hover { background: var(--warm-fill-hover); }
-.home-att-row.is-stuck {
-  background: var(--error-faint); box-shadow: inset 3px 0 0 var(--error);
-}
-.home-att-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.home-att-title {
-  font-size: 13.5px; font-weight: 650; color: var(--text-primary);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.home-att-next { font-size: 12px; color: var(--text-secondary); }
-.home-att-age { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
-/* 2. Cost — one figure, one spark, the whole card a link to the Cost page. */
-.home-cost-body {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; width: 100%; background: none; border: none; padding: 0;
-  text-align: left;
+/* 3. Your desk — the one section that asks something of you, so the one that
+      carries the warm rail. Absent entirely when the desk is clear. */
+.home-desk-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.home-desk-item {
+  border-radius: 9px; border-left: 3px solid var(--warning);
+  background: var(--warm-fill); padding: 9px 12px;
+  display: flex; flex-direction: column; gap: 8px;
 }
-.home-cost-figure { display: flex; align-items: baseline; gap: 7px; }
-.home-cost-amount {
-  font-size: 26px; font-weight: 800; letter-spacing: -0.03em;
-  color: var(--text-primary); font-variant-numeric: tabular-nums;
-}
-.home-cost-label { font-size: 12px; font-weight: 500; color: var(--text-muted); }
-
-/* 3. Work feed — ambient. The summary leads; the agent and time trail it. */
-.home-feed-list { list-style: none; margin: 0; padding: 0; }
-.home-feed-list > li + li { border-top: 1px solid var(--border-default); }
-.home-feed-row {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
-  width: 100%; text-align: left; background: none; border: none;
-  padding: 9px 2px;
-}
-.home-feed-row:hover .home-feed-summary { color: var(--text-primary); }
-.home-feed-summary { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
-.home-feed-meta { font-size: 11.5px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
-
-/* 4. Work — four buckets, each a way into the Work table. */
-.home-work-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.home-work-tile {
+.home-desk-row {
   display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
-  padding: 10px 12px; border-radius: 9px; text-align: left;
-  background: var(--bg-surface); border: 1px solid transparent;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  width: 100%; text-align: left; background: none; border: none; padding: 0;
+  cursor: pointer; font-family: inherit;
 }
-.home-work-tile:hover:not(:disabled) {
-  background: var(--bg-surface-hover); border-color: var(--border-default);
+.home-desk-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 5px; }
+.home-desk-title {
+  font-size: 13.5px; font-weight: 650; color: var(--text-primary); line-height: 1.4;
 }
-.home-work-tile:disabled { opacity: 0.6; }
-.home-work-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.home-work-num {
-  font-size: 19px; font-weight: 750; letter-spacing: -0.02em;
-  color: var(--text-primary); font-variant-numeric: tabular-nums;
+.home-desk-row:hover .home-desk-title { text-decoration: underline; }
+.home-desk-why {
+  font-size: 11.5px; color: var(--text-muted);
+  display: flex; align-items: center; gap: 6px;
 }
-.home-work-lbl { font-size: 11.5px; font-weight: 550; color: var(--text-muted); }
-/* Only the two buckets that mean "someone has to do something" take colour. */
-.home-work-tile.tone-waiting .home-work-num { color: var(--warning); }
-.home-work-tile.tone-stuck .home-work-num { color: var(--error); }
+.home-desk-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.home-desk-actions .btn { padding: 4px 11px; font-size: 12px; }
+.home-desk-err { font-size: 11.5px; color: var(--error); margin: 0; }
 
-/* 5. Fleet — health dots only. No metrics, no strip. */
-.home-fleet-list {
-  list-style: none; margin: 0; padding: 0;
-  display: flex; flex-wrap: wrap; gap: 6px;
+/* 4. Trovis noticed — quiet rows, one dot each. The dot is the only colour;
+      the text stays reading colour so the section never shouts. */
+.home-noticed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.home-noticed-row {
+  display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+  padding: 7px 9px; border-radius: 8px; border: 1px solid transparent;
+  background: none; cursor: pointer; font-family: inherit;
 }
-.home-fleet-row {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 6px 11px; border-radius: 100px;
-  background: var(--bg-surface); border: 1px solid transparent;
-  transition: border-color 0.15s ease;
+.home-noticed-row:hover { background: var(--bg-surface-hover); }
+.home-noticed-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-noticed-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--text-dim); }
+.home-noticed-row.tone-stuck .home-noticed-dot { background: var(--error); }
+.home-noticed-row.tone-critical .home-noticed-dot { background: var(--error); }
+.home-noticed-row.tone-warning .home-noticed-dot { background: var(--warning); }
+.home-noticed-text { font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; }
+.home-noticed-row:hover .home-noticed-text { color: var(--text-primary); }
+
+/* 5. Proof strip — the only numbers on Home. One row, evenly divided, each
+      cell a way into the page that owns it. */
+.home-strip {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
+  background: var(--border-default); border: 1px solid var(--border-default);
+  border-radius: 11px; overflow: hidden;
 }
-.home-fleet-row:hover { border-color: var(--border-default); }
-.home-fleet-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.home-fleet-dot.sev-critical { background: var(--error); }
-.home-fleet-dot.sev-warning { background: var(--warning); }
-.home-fleet-dot.sev-info { background: var(--text-dim); }
-.home-fleet-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
-.home-fleet-note { font-size: 11.5px; color: var(--text-muted); margin: 9px 0 0; }
+.home-strip-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 11px 6px; background: var(--bg-surface); border: none;
+  cursor: pointer; font-family: inherit;
+}
+.home-strip-cell:hover:not(:disabled) { background: var(--bg-surface-hover); }
+.home-strip-cell:disabled { cursor: default; opacity: 0.65; }
+.home-strip-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.home-strip-num {
+  font-size: 18px; font-weight: 750; color: var(--text-primary);
+  letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+}
+.home-strip-lbl { font-size: 11px; font-weight: 550; color: var(--text-muted); }
+.home-strip-cell.tone-waiting .home-strip-num { color: var(--warning); }
+.home-strip-cell.tone-stuck .home-strip-num { color: var(--error); }
+
+/* 6. Ask — the pill's front door. Reads as an input because it is one; the
+      panel it opens is the same Ask that lives on every page. */
+.home-ask {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 13px; border-radius: 11px;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+}
+.home-ask:focus-within { border-color: var(--border-hover); }
+.home-ask-input {
+  flex: 1; background: none; border: none; outline: none;
+  font-family: inherit; font-size: 13px; color: var(--text-primary);
+}
+.home-ask-input::placeholder { color: var(--text-muted); }
+.home-ask-key {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; color: var(--text-dim);
+  border: 1px solid var(--border-default); border-radius: 5px; padding: 2px 5px;
+}
+
+/* First run — the sentence above already said nothing is connected. This is
+   only the one thing to do about it. */
+.home-firstrun { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.home-firstrun-sub {
+  font-size: 13px; line-height: 1.6; color: var(--text-secondary);
+  margin: 0; max-width: 52ch;
+}
+
 
 /* Briefing, behind a quiet disclosure — closed on first paint, fetched only
    when opened. It is the slowest call the page can make. */

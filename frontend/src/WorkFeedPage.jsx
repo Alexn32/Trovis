@@ -63,7 +63,7 @@ export default function WorkFeedPage({ onBack, onOpenAgent, sessionUser }) {
     return (
       <div className="dash wfp">
         <button type="button" className="wf2-back" onClick={onBack}>
-          <ArrowLeftIcon size={15} /> Dashboard
+          <ArrowLeftIcon size={15} /> Home
         </button>
         <div className="dash-empty pad">{error}</div>
       </div>
@@ -73,7 +73,7 @@ export default function WorkFeedPage({ onBack, onOpenAgent, sessionUser }) {
     return (
       <div className="dash wfp">
         <button type="button" className="wf2-back" onClick={onBack}>
-          <ArrowLeftIcon size={15} /> Dashboard
+          <ArrowLeftIcon size={15} /> Home
         </button>
         <div className="dash-skel">
           <span style={{ height: 60 }} />
@@ -94,7 +94,7 @@ export default function WorkFeedPage({ onBack, onOpenAgent, sessionUser }) {
   return (
     <div className="dash wfp">
       <button type="button" className="wf2-back" onClick={onBack}>
-        <ArrowLeftIcon size={15} /> Dashboard
+        <ArrowLeftIcon size={15} /> Home
       </button>
       <div className="wfp-titlerow">
         <h1 className="dash-hello" style={{ margin: 0 }}>

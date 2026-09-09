@@ -1282,6 +1282,12 @@ class WorkItem(BaseModel):
     holder: WorkItemHolder
     whats_next: str
     updated_at: str | None = None
+    # loop_events.id of the open decision, when there is one. Home's desk puts
+    # Done / I've got this / Not mine ON the row, and without this it would
+    # need a detail fetch per row to know whether those buttons are real.
+    # Free: the list decorator already resolves it while working out who the
+    # work is waiting on (database._decorate_work_items).
+    awaiting_handoff_event_id: int | None = None
 
 
 class WorkItemsResponse(BaseModel):

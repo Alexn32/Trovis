@@ -38,6 +38,10 @@ const OVERVIEW_PILLS = [
 // two surfaces show the same rows.
 const WORK_FILTER_LABELS = {
   attention: 'Needs attention',
+  // Home's desk is only YOUR waits, so its "Open in Work" has to land on the
+  // same set — 'waiting' is everyone's, which would be a wider list than the
+  // one you just tapped away from.
+  mine: 'Waiting on you',
   moving: 'Moving',
   waiting: 'Waiting',
   stuck: 'Stuck',
@@ -48,6 +52,8 @@ function matchesWorkFilter(row, filter) {
   switch (filter) {
     case 'moving':
       return row.status === 'moving'
+    case 'mine':
+      return row.status === 'waiting_on_you'
     case 'waiting':
       return row.status === 'waiting_on_you' || row.status === 'waiting_on_other'
     case 'stuck':

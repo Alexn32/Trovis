@@ -416,6 +416,11 @@ function AppInner() {
   } else if (overlay?.kind === 'cost') {
     overlayContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
   } else if (overlay?.kind === 'workfeed') {
+    // NOTE: nothing opens this today. Home used to carry the only link to the
+    // work feed and no longer previews it — Home answers what is waiting on
+    // YOU, and an ambient activity list is a different question. The page
+    // itself is unchanged and one prop away from being linked again; it is
+    // kept rather than deleted so that stays a decision, not a rewrite.
     overlayContent = (
       <WorkFeedPage
         onBack={closeOverlay}
@@ -477,19 +482,16 @@ function AppInner() {
           // Off screen, Home stops re-syncing on focus (same rule as Work).
           active={dashboardVisible}
           onOpenAgent={openDetail}
-          onGoFleet={() => {
-            setTab('fleet')
-            setOverlay(null)
-          }}
-          // Home's cards preview real pages: a Work card or tile opens Work,
-          // optionally filtered to the bucket that was clicked.
+          // Every count on Home's strip, and every line Trovis noticed, opens
+          // the real page behind it — Work filtered to the bucket that was
+          // clicked, or that agent.
           onGoWork={(filter = null) => {
             setWorkFilter({ value: filter, nonce: Date.now() })
             setTab('work')
             setOverlay(null)
           }}
           onOpenCost={() => setOverlay({ kind: 'cost' })}
-          onViewAllWorkFeed={() => setOverlay({ kind: 'workfeed' })}
+          onConnectAgent={openAddAgent}
           userName={account.userName}
         />
       </TabPane>
@@ -639,7 +641,9 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
   const isBusiness = me?.org?.account_type === 'business'
   // No Ask tab — the global AskPill (⌘K) covers asking from every page.
   const tabs = [
-    ['dashboard', 'Dashboard'],
+    // The pane id stays 'dashboard' (routes, session-restore, TabPane ids);
+    // what a person reads is Home, everywhere, always.
+    ['dashboard', 'Home'],
     ['fleet', 'Fleet'],
     ...(isBusiness ? [['team', 'Team']] : []),
     // Everything the agents are doing: loops, the by-workflow rollup, and
