@@ -4122,6 +4122,12 @@ a:hover {
 .saas-connect-actions {
   margin-top: 12px;
 }
+.saas-connect-shop {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  margin-top: 10px;
+}
 .saas-connect-actions + .settings-note {
   margin-top: 10px;
 }

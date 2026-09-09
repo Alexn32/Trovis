@@ -1,6 +1,6 @@
 """Shared SaaS → Work-event spine.
 
-Many transports (Stripe, HubSpot) collapse onto one Work Event.
+Many transports (Stripe, HubSpot, Shopify) collapse onto one Work Event.
 This module is the only writer of those effects. Adapters verify, map, and
 hand a structured event here. The spine then:
 
@@ -47,6 +47,7 @@ LINK_KEYS = (
 PROVIDER_LABELS = {
     "stripe": "Stripe",
     "hubspot": "HubSpot",
+    "shopify": "Shopify",
 }
 
 
@@ -54,7 +55,7 @@ def extract_link_key(metadata: Any) -> str | None:
     """Return the first non-empty V1 link key from a metadata dict, or None.
 
     Callers must pass the object's own metadata. The spine never invents a
-    key from surrounding Stripe/HubSpot fields.
+    key from surrounding Stripe/HubSpot/Shopify fields.
     """
     if not isinstance(metadata, dict):
         return None

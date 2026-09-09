@@ -1367,7 +1367,7 @@ class WorkItemDetail(WorkItem):
 
 
 class SaaSConnection(BaseModel):
-    """One connected SaaS provider (Stripe / HubSpot). Tokens never leave the server."""
+    """One connected SaaS provider (Stripe / HubSpot / Shopify). Tokens never leave the server."""
 
     provider: str
     status: str  # connected | disconnected
@@ -1383,6 +1383,8 @@ class SaaSConnectionsResponse(BaseModel):
     stripe_oauth_configured: bool = False
     # True when this deploy can start HubSpot OAuth.
     hubspot_oauth_configured: bool = False
+    # True when this deploy can start Shopify OAuth.
+    shopify_oauth_configured: bool = False
 
 
 class SaaSStripeOAuthStart(BaseModel):
@@ -1390,5 +1392,9 @@ class SaaSStripeOAuthStart(BaseModel):
 
 
 class SaaSHubSpotOAuthStart(BaseModel):
+    authorize_url: str
+
+
+class SaaSShopifyOAuthStart(BaseModel):
     authorize_url: str
 

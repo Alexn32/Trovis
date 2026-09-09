@@ -148,9 +148,9 @@ function BillingCard({ onUpgrade }) {
   )
 }
 
-// SaaS Connect — Work waits, not Trovis billing / not CRM sync. Isolated
-// from the plan webhook. Agents stamp a loop key on the Stripe object or
-// HubSpot deal/ticket.
+// SaaS Connect — Work waits, not Trovis billing / not CRM / not catalog sync.
+// Isolated from the plan webhook. Agents stamp a loop key on the Stripe
+// object, HubSpot deal/ticket, or Shopify order.
 function IntegrationsCard() {
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -218,6 +218,33 @@ function IntegrationsCard() {
         setBusy={setBusy}
         onChanged={load}
       />
+      <IntegrationProvider
+        brandId="shopify"
+        label="Shopify"
+        copy={(
+          <>
+            Connect your Shopify store so order, payment, and fulfillment
+            events can wait, clear, or flag a job — only when that order
+            (or fulfillment / refund) carries a Trovis loop key
+            (<code>trovis_loop_external_id</code>). Trovis never invents a
+            job from Shopify alone. This is not catalog, product, or
+            customer sync.
+          </>
+        )}
+        row={ (data?.connections || []).find((c) => c.provider === 'shopify') }
+        canOauth={!!data?.shopify_oauth_configured}
+        notConfigured="Shopify Connect isn’t configured on this deploy yet."
+        connectLabel="Connect Shopify"
+        start={api.startShopifyConnect}
+        disconnect={api.disconnectShopify}
+        startError="Could not start Shopify Connect."
+        disconnectError="Could not disconnect Shopify."
+        busy={busy}
+        setBusy={setBusy}
+        onChanged={load}
+        needsShop
+        shopPlaceholder="your-store.myshopify.com"
+      />
     </section>
   )
 }
@@ -237,18 +264,26 @@ function IntegrationProvider({
   busy,
   setBusy,
   onChanged,
+  needsShop = false,
+  shopPlaceholder,
 }) {
   const [error, setError] = useState(null)
+  const [shop, setShop] = useState('')
   const connected = row?.status === 'connected'
   const acct = row?.provider_account_id || ''
-  const acctShort = acct.length > 8 ? `…${acct.slice(-6)}` : acct
+  const acctShort = acct.includes('.') ? acct : (acct.length > 8 ? `…${acct.slice(-6)}` : acct)
   const mine = busy === brandId
+  const shopReady = !needsShop || !!shop.trim()
 
   async function connect() {
     setError(null)
+    if (needsShop && !shop.trim()) {
+      setError('Enter your Shopify store domain to connect.')
+      return
+    }
     setBusy(brandId)
     try {
-      const res = await start()
+      const res = await start(needsShop ? shop.trim() : undefined)
       if (res?.authorize_url) {
         window.location.href = res.authorize_url
         return
@@ -256,6 +291,7 @@ function IntegrationProvider({
       setError(startError)
     } catch (e) {
       if (e?.status === 503) setError(notConfigured)
+      else if (e?.status === 400 && needsShop) setError('Enter a valid Shopify store (your-store.myshopify.com).')
       else setError(`${startError} Please try again.`)
     } finally {
       setBusy(null)
@@ -287,6 +323,18 @@ function IntegrationProvider({
         </span>
       </div>
       <p className="settings-note">{copy}</p>
+      {!connected && needsShop && (
+        <input
+          className="text-input saas-connect-shop"
+          type="text"
+          value={shop}
+          onChange={(e) => setShop(e.target.value)}
+          placeholder={shopPlaceholder || 'your-store.myshopify.com'}
+          aria-label="Shopify store domain"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      )}
       <div className="saas-connect-actions">
         {connected ? (
           <button type="button" className="btn btn-secondary" onClick={onDisconnect} disabled={!!busy}>
@@ -297,7 +345,7 @@ function IntegrationProvider({
             type="button"
             className="btn btn-primary"
             onClick={connect}
-            disabled={!!busy || !canOauth}
+            disabled={!!busy || !canOauth || !shopReady}
           >
             {mine ? 'Opening…' : connectLabel}
           </button>

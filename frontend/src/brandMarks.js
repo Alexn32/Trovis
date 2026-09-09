@@ -88,7 +88,7 @@ export const BRANDS = {
   shopify: {
     id: 'shopify',
     label: 'Shopify',
-    role: 'coming',
+    role: 'live',
     color: '#96bf48',
     aliases: ['shopify'],
   },
