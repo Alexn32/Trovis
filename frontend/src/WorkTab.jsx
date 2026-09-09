@@ -3,9 +3,13 @@ import { api } from './api.js'
 import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
+  OTHER_KIND,
   holderLabel,
+  kindSegments,
+  matchesKind,
   sortWorkItems,
   workItemStatusLabel,
+  workKinds,
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
@@ -78,11 +82,20 @@ function rowClass(status) {
 // Render the contract as the API sent it. Do not re-filter rows to "fix"
 // overview totals if /work/items still includes flood until a hotfix.
 
-function OverviewStrip({ overview }) {
+// Two count rows competing for the same glance is one too many. Once the kind
+// cards are on the page they own moving / waiting / stuck, so the strip drops
+// to the two cuts a kind card structurally cannot express: whose work it is,
+// and what actually finished.
+const DEMOTED_PILLS = new Set(['needs_you', 'completed_week'])
+
+function OverviewStrip({ overview, demoted = false }) {
   // Counts are the server contract. Do not recompute or clamp them here.
+  const pills = demoted
+    ? OVERVIEW_PILLS.filter((p) => DEMOTED_PILLS.has(p.key))
+    : OVERVIEW_PILLS
   return (
-    <div className="work-overview" aria-label="Work overview">
-      {OVERVIEW_PILLS.map((p) => {
+    <div className={`work-overview${demoted ? ' is-demoted' : ''}`} aria-label="Work overview">
+      {pills.map((p) => {
         const n = overview[p.key] || 0
         const tone = p.tone && n ? p.tone : p.tone === 'quiet' ? 'quiet' : null
         return (
@@ -236,6 +249,53 @@ function TableSkeleton() {
   )
 }
 
+/**
+ * One quiet card per kind of work.
+ *
+ * The kind is `workflow_name` off /work/items — the declared workflow the
+ * matcher claimed the loop for. Nothing here is guessed from a title, and
+ * nothing here costs a second request: the cards are grouped from the rows
+ * the table is already showing.
+ *
+ * Absent entirely when no kind is declared anywhere, because one card reading
+ * "Other work" over the whole table is a heading, not a map.
+ *
+ * No cost figure: per-kind cost only exists on the board's span aggregate,
+ * which is the scan this page exists to avoid.
+ */
+function KindsStrip({ kinds, active, onPick }) {
+  if (kinds.length === 0) return null
+  // Everything unmatched is not a map of anything.
+  if (kinds.length === 1 && kinds[0].isOther) return null
+
+  return (
+    <div className="work-kinds" aria-label="Kinds of work">
+      {kinds.map((k) => {
+        const on = active === k.name
+        return (
+          <button
+            key={k.name}
+            type="button"
+            className={`work-kind${on ? ' is-active' : ''}${k.isOther ? ' is-other' : ''}`}
+            aria-pressed={on}
+            onClick={() => onPick(on ? null : k.name)}
+          >
+            <span className="work-kind-name">{k.name}</span>
+            <span className="work-kind-counts">
+              {kindSegments(k).map((seg) => (
+                <span key={seg.label} className={`work-kind-seg tone-${seg.tone}`}>
+                  <span className="work-kind-num">{seg.value}</span>
+                  <span className="work-kind-lbl">{seg.label}</span>
+                </span>
+              ))}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function WorkHome({
   onConnectAgent,
   overview,
@@ -257,9 +317,22 @@ function WorkHome({
   onItemResolved,
 }) {
   const [open, setOpen] = useState(null)
+  // The kind filter is in-page and composes with the one Home arrives with:
+  // "Stuck" from Home plus "Refunds" here is a legitimate question, and both
+  // chips stay visible and dismissible so the table never looks broken.
+  const [kind, setKind] = useState(null)
   const all = sortWorkItems(items || [])
-  const rows = filter ? all.filter((r) => matchesWorkFilter(r, filter)) : all
+  const kinds = workKinds(items || [])
+  // A kind that emptied out (resolved, or filtered away by Home's chip) must
+  // not leave the table showing nothing with no way back.
+  const activeKind = kinds.some((k) => k.name === kind) ? kind : null
+  const rows = all
+    .filter((r) => (filter ? matchesWorkFilter(r, filter) : true))
+    .filter((r) => matchesKind(r, activeKind))
   const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
+  // Filtered down to nothing is a different situation from having no work:
+  // the answer is to clear a chip, not to connect an agent.
+  const filteredOut = !!items && rows.length === 0 && all.length > 0
 
   function onRowKey(e, row) {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -285,9 +358,21 @@ function WorkHome({
             <span aria-hidden="true">×</span>
           </button>
         )}
+        {activeKind && (
+          <button
+            type="button"
+            className="work-filter-chip"
+            onClick={() => setKind(null)}
+            aria-label={`Clear the ${activeKind} filter`}
+          >
+            {activeKind}
+            <span aria-hidden="true">×</span>
+          </button>
+        )}
       </header>
 
-      {overview && <OverviewStrip overview={overview} />}
+      <KindsStrip kinds={kinds} active={activeKind} onPick={setKind} />
+      {overview && <OverviewStrip overview={overview} demoted={kinds.length > 1} />}
       {!overview && overviewErr && (
         <div className="work-section-failed">
           <WorkLoadFailed lead="Can't load these counts" onRetry={onRetryOverview} />
@@ -310,6 +395,13 @@ function WorkHome({
       )}
       {!items && !itemsErr && <TableSkeleton />}
 
+      {filteredOut && !empty && (
+        <div className="board-empty">
+          <p className="board-empty-lead">Nothing matches these filters.</p>
+          <p className="board-empty-sub">Clear a filter above to see the rest of the work.</p>
+        </div>
+      )}
+
       {empty && (
         <div className="board-empty">
           <p className="board-empty-lead">No named work yet.</p>
@@ -324,7 +416,7 @@ function WorkHome({
         </div>
       )}
 
-      {items && !empty && (
+      {items && !empty && !filteredOut && (
         <div className="work-table" role="table" aria-label="Work">
           <div className="work-table-head" role="row">
             <span role="columnheader">Task</span>

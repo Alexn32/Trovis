@@ -25,6 +25,8 @@ ITEM_KEYS = {
     # The open decision's event id, so Home's desk can offer Done / I've got
     # this / Not mine on the row without a detail fetch per row.
     "awaiting_handoff_event_id",
+    # The kind of work, read off the page's own rows.
+    "workflow_id", "workflow_name",
 }
 SUG_KEYS = {"id", "title", "why", "source", "draft_holder"}
 DETAIL_KEYS = ITEM_KEYS | {"whats_happening", "process", "timeline", "provenance"}

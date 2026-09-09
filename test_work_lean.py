@@ -45,6 +45,9 @@ ITEM_KEYS = {
     # The open decision's event id, so Home's desk can offer Done / I've got
     # this / Not mine on the row without a detail fetch per row.
     "awaiting_handoff_event_id",
+    # The kind of work, so Work home can group the table without the
+    # loop-scanning board. None means unmatched -> "Other work".
+    "workflow_id", "workflow_name",
 }
 STATUSES = {"waiting_on_you", "waiting_on_other", "stuck", "moving", "done"}
 HOLDER_KINDS = {"human", "agent", "tool", "unassigned"}

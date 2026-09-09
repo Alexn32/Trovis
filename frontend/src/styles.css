@@ -6749,3 +6749,36 @@ select.wf2-input { cursor: pointer; }
   color: var(--text-dim); margin: 16px 0 0;
   word-break: break-word;
 }
+
+/* --- Work home: kinds of work -----------------------------------------------
+   A quiet map of what kinds exist, above the table they filter. Colour only
+   where a person is needed — a kind with nothing waiting and nothing stuck is
+   a card you should be able to skip over. Tokens only. */
+.work-kinds {
+  display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px;
+}
+.work-kind {
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-start;
+  padding: 10px 13px; border-radius: 10px; text-align: left;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  cursor: pointer; font-family: inherit; min-width: 168px;
+}
+.work-kind:hover { border-color: var(--border-hover); }
+.work-kind:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.work-kind.is-active { border-color: var(--accent); background: var(--bg-surface-hover); }
+/* The catch-all is not a kind anyone declared. */
+.work-kind.is-other .work-kind-name { color: var(--text-muted); font-style: italic; }
+.work-kind-name {
+  font-size: 13px; font-weight: 650; color: var(--text-primary); line-height: 1.3;
+}
+.work-kind-counts { display: flex; gap: 10px; flex-wrap: wrap; }
+.work-kind-seg { display: inline-flex; align-items: baseline; gap: 4px; }
+.work-kind-num {
+  font-size: 12.5px; font-weight: 700; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.work-kind-lbl { font-size: 10.5px; color: var(--text-muted); }
+.work-kind-seg.tone-warn .work-kind-num { color: var(--warning); }
+.work-kind-seg.tone-stuck .work-kind-num { color: var(--error); }
+/* Once the kinds carry moving/waiting/stuck, the strip stops repeating them. */
+.work-overview.is-demoted { opacity: 0.9; }
