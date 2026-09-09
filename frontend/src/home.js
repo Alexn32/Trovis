@@ -122,11 +122,16 @@ function joinCounts(parts) {
  * Returns '' when we have no work signal at all — the caller then says
  * nothing rather than inventing a state.
  */
-export function briefingLead(counts) {
+export function briefingLead(counts, proof = null) {
   if (!counts) return ''
   const needsYou = Number(counts.needs_you) || 0
   const attention = Number(counts.needs_attention) || 0
   const open = Number(counts.open) || 0
+  // Progress is only claimed off a moving count we actually read. Without it
+  // (or with it at zero) the lead says nothing about progress: "Everything
+  // open is in progress" printed above a strip reading 0 moving / 3 waiting
+  // is the same class of lie as the old shape-of-the-day line.
+  const moving = Number(proof?.moving) || 0
 
   const parts = []
   if (needsYou > 0) parts.push('work is waiting on you')
@@ -134,10 +139,11 @@ export function briefingLead(counts) {
   // waiting too long on a person, which is not the same as stuck.
   if (attention > 0) parts.push('some work needs attention')
   if (parts.length > 0) {
-    const rest = open > needsYou + attention ? '. The rest is in progress.' : '.'
+    const rest =
+      moving > 0 && open > needsYou + attention ? '. The rest is in progress.' : '.'
     return `Today, ${joinCounts(parts)}${rest}`
   }
-  if (open > 0) return 'Nothing needs you. Everything open is in progress.'
+  if (open > 0 && moving > 0) return 'Nothing needs you. Everything open is in progress.'
   return 'Nothing needs you right now.'
 }
 
@@ -368,18 +374,66 @@ export function fleetPulse({ agentCount, attention }) {
   return { count, needLook }
 }
 
+// A timestamp that already says which zone it is in: trailing Z, or a
+// ±HH:MM / ±HHMM offset after the time.
+const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i
+
 /**
- * "As of 9:42 AM" for the briefing footer. Empty when the server sent no
- * generated_at, so the footer omits the segment rather than printing "As of —".
+ * Read a server timestamp as an instant.
+ *
+ * The briefing's `generated_at` comes off a TIMESTAMP column: SQLite hands
+ * back "2026-09-09 21:47:00" and a naive Postgres datetime isoformats to
+ * "2026-09-09T21:47:00" — both UTC, neither saying so. Date.parse treats a
+ * date-time with no offset as LOCAL, so a 21:47 UTC stamp rendered as
+ * "9:47 PM" on a Chicago machine that should read 4:47 PM. Anything without
+ * a zone is therefore pinned to UTC before parsing.
  */
-export function asOfLabel(iso, locale = undefined) {
-  if (!iso) return ''
+export function parseServerTime(value) {
+  if (!value) return null
+  if (typeof value !== 'string') {
+    const t = value instanceof Date ? value.getTime() : Number.NaN
+    return Number.isNaN(t) ? null : t
+  }
+  const s = value.trim()
+  if (!s) return null
+  const iso = HAS_ZONE.test(s) ? s : `${s.replace(' ', 'T')}Z`
   const t = Date.parse(iso)
-  if (Number.isNaN(t)) return ''
+  return Number.isNaN(t) ? null : t
+}
+
+/**
+ * "As of 4:47 PM" for the briefing footer — on the clock of the machine
+ * reading it. Empty when the server sent no generated_at, so the footer omits
+ * the segment rather than printing "As of —".
+ *
+ * `timeZone` is left undefined in the product so the browser uses the
+ * viewer's own zone; tests pass one to pin a fixture.
+ */
+export function asOfLabel(iso, locale = undefined, timeZone = undefined) {
+  const t = parseServerTime(iso)
+  if (t === null) return ''
   return `As of ${new Date(t).toLocaleTimeString(locale, {
     hour: 'numeric',
     minute: '2-digit',
+    ...(timeZone ? { timeZone } : {}),
   })}`
+}
+
+/**
+ * The reading machine's clock, for the briefing request.
+ *
+ * The model writes the opener, so it is the one thing on Home that can call
+ * 5pm "a quiet morning". Sending the viewer's hour and zone is what stops it
+ * guessing from a UTC server clock.
+ */
+export function viewerClock(now = new Date()) {
+  let timeZone = null
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || null
+  } catch {
+    /* Intl missing or blocked — the hour alone is still useful. */
+  }
+  return { localHour: now.getHours(), timeZone }
 }
 
 /**

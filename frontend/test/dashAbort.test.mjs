@@ -137,7 +137,9 @@ test('Dashboard unmount aborts every Home GET; no 15s waiting poll', () => {
   const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
   const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   assert.match(code, /startAbortable/)
-  assert.match(code, /getBriefing\(\{\s*signal\s*\}\)/)
+  // The briefing also carries the reader's clock now; the signal still rides
+  // with it, which is what lets a tab switch abort the slowest Home call.
+  assert.match(code, /getBriefing\(\{[^}]*signal[^}]*\}\)/)
   assert.match(code, /getAttention\(\{\s*signal\s*\}\)/)
   assert.match(code, /getCost\(\{\s*signal\s*\}\)/)
   // (No work-feed fetch: Home no longer renders that card.)
@@ -169,7 +171,12 @@ test('work pair forwards an AbortSignal from api.js', () => {
 
 test('dashboard API methods forward an AbortSignal', () => {
   const api = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
-  assert.match(api, /getBriefing:\s*\(opts = \{\}\) =>/)
+  // getBriefing peels the clock params off and spreads the rest (signal,
+  // timeoutMs) into request, so aborting still works.
+  assert.match(api, /getBriefing:\s*\(\{[^}]*\.\.\.opts\s*\}\s*=\s*\{\}\)/s)
+  const briefingBody = api.slice(api.indexOf('getBriefing:'), api.indexOf('getPulseInsight:'))
+  assert.match(briefingBody, /\/dashboard\/briefing/)
+  assert.match(briefingBody, /\.\.\.opts,/, 'signal/timeoutMs still reach request')
   assert.match(api, /getAttention:\s*\(opts = \{\}\) =>/)
   assert.match(api, /getCost:\s*\(opts = \{\}\) =>/)
   assert.match(api, /getWorkFeed:\s*\(opts = \{\}\) =>/)

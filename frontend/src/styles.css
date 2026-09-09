@@ -4696,12 +4696,8 @@ a:hover {
 .home-brief-lead {
   font-size: 14px; line-height: 1.55; color: var(--text-primary); margin: 0; max-width: 70ch;
 }
-.home-brief-more {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; font-weight: 600; color: var(--text-muted);
-  background: none; border: none; padding: 2px 0; cursor: pointer; font-family: inherit;
-}
-.home-brief-more:hover { color: var(--text-primary); }
+/* No .home-brief-more: the briefing does not collapse. The generated
+   narrative is the section's reason to exist, so it is always on screen. */
 .home-brief-body { display: flex; flex-direction: column; gap: 8px; max-width: 70ch; }
 .home-brief-narrative {
   font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin: 0;
