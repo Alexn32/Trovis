@@ -3,6 +3,7 @@ import { api } from './api.js'
 import { Spinner } from './ui.jsx'
 import { relativeTime } from './utils.js'
 import { ArrowLeftIcon, TrashIcon } from './Icons.jsx'
+import { BrandMark } from './BrandMarks.jsx'
 
 // Organization + account settings. Reachable from the account-badge dropdown.
 //   - Everyone: org info + change-password.
@@ -36,6 +37,8 @@ export default function Settings({ me, onClose, onUpdated, onUpgrade }) {
       </section>
 
       <BillingCard onUpgrade={onUpgrade} />
+
+      {user && <IntegrationsCard />}
 
       {user && <AlertsCard />}
 
@@ -140,6 +143,108 @@ function BillingCard({ onUpgrade }) {
       </div>
       {error && (
         <p className="settings-note" style={{ color: 'var(--error)', marginTop: 10 }}>{error}</p>
+      )}
+    </section>
+  )
+}
+
+// Stripe SaaS Connect — Work waits, not Trovis billing. Isolated from the
+// plan webhook. Agents stamp a loop key on the PaymentIntent / Invoice.
+function IntegrationsCard() {
+  const [data, setData] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  function load() {
+    return api.getSaasConnections().then(setData).catch(() => setData({ connections: [] }))
+  }
+
+  useEffect(() => {
+    let alive = true
+    api.getSaasConnections()
+      .then((d) => alive && setData(d))
+      .catch(() => alive && setData({ connections: [] }))
+    return () => { alive = false }
+  }, [])
+
+  const stripe = (data?.connections || []).find((c) => c.provider === 'stripe')
+  const connected = stripe?.status === 'connected'
+  const canOauth = !!data?.stripe_oauth_configured
+
+  async function connect() {
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await api.startStripeConnect()
+      if (res?.authorize_url) {
+        window.location.href = res.authorize_url
+        return
+      }
+      setError('Could not start Stripe Connect.')
+    } catch (e) {
+      if (e?.status === 503) setError('Stripe Connect isn’t configured on this deploy yet.')
+      else setError('Could not start Stripe Connect. Please try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function disconnect() {
+    setError(null)
+    setBusy(true)
+    try {
+      await api.disconnectStripe()
+      await load()
+    } catch (e) {
+      setError('Could not disconnect Stripe.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const acct = stripe?.provider_account_id || ''
+  const acctShort = acct.length > 8 ? `…${acct.slice(-6)}` : acct
+
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">Integrations</h3>
+      <div className="saas-connect-row">
+        <span className="saas-connect-brand">
+          <BrandMark id="stripe" size={18} />
+          <span>Stripe</span>
+        </span>
+        <span className={`saas-connect-status ${connected ? 'is-on' : ''}`}>
+          {connected ? `Connected${acctShort ? ` · ${acctShort}` : ''}` : 'Not connected'}
+        </span>
+      </div>
+      <p className="settings-note">
+        Connect your Stripe account so payment events can wait, clear, or
+        flag a job — only when the PaymentIntent, Invoice, Charge, or Dispute
+        carries a Trovis loop key
+        (<code>trovis_loop_external_id</code>). Trovis never invents a job
+        from Stripe alone. This is not Trovis billing.
+      </p>
+      <div className="saas-connect-actions">
+        {connected ? (
+          <button type="button" className="btn btn-secondary" onClick={disconnect} disabled={busy}>
+            {busy ? 'Working…' : 'Disconnect'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={connect}
+            disabled={busy || !canOauth}
+          >
+            {busy ? 'Opening…' : 'Connect Stripe'}
+          </button>
+        )}
+      </div>
+      {!canOauth && !connected && (
+        <p className="settings-note">Stripe Connect isn’t configured on this deploy yet.</p>
+      )}
+      {error && (
+        <p className="settings-note" style={{ color: 'var(--error)' }}>{error}</p>
       )}
     </section>
   )

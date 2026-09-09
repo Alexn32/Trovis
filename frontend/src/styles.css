@@ -4092,6 +4092,34 @@ a:hover {
   font-size: 13px;
   margin: 0;
 }
+.saas-connect-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.saas-connect-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.saas-connect-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.saas-connect-status.is-on {
+  color: var(--success);
+}
+.saas-connect-actions {
+  margin-top: 12px;
+}
+.saas-connect-actions + .settings-note {
+  margin-top: 10px;
+}
 .member-list {
   list-style: none;
   margin: 8px 0 0;

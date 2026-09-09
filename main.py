@@ -33,13 +33,14 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 import alerts
 import asker
 import billing
 import database
+import saas_stripe
 import describer
 import email_send
 import loops
@@ -158,6 +159,9 @@ from models import (
     WeeklySummary,
     WeeklyTrends,
     WorkFeedItem,
+    SaaSConnection,
+    SaaSConnectionsResponse,
+    SaaSStripeOAuthStart,
 )
 
 VERSION = "0.1.0"
@@ -180,7 +184,9 @@ _OPEN_PATHS = {
     "/actions/openapi.json",     # OpenAPI spec (public, no auth)
     "/waitlist",                 # public marketing-site signup
     "/waitlist/count",           # public signup count for the marketing site
-    "/billing/webhook",          # Stripe webhook — authenticated by signature, not a Trovis key
+    "/billing/webhook",          # Stripe *billing* webhook — Trovis plan gate. Isolated.
+    "/saas/stripe/webhook",      # Stripe *SaaS* Work webhook — signature, not a Trovis key
+    "/saas/stripe/oauth/callback",  # Stripe Connect redirects the browser here
 }
 
 
@@ -3352,6 +3358,128 @@ async def billing_webhook(request: Request) -> dict:
                 )
 
     return {"received": True}
+
+
+# ---------------------------------------------------------------------------
+# SaaS Stripe — Work-event adapter (NOT billing)
+# ---------------------------------------------------------------------------
+# Isolated from /billing/webhook. Signature uses STRIPE_SAAS_WEBHOOK_SECRET.
+# Metadata-link only: no trovis_* key → no-op. Never invents a Work loop.
+
+
+@app.post("/saas/stripe/webhook")
+async def saas_stripe_webhook(request: Request) -> dict:
+    """Verified Stripe SaaS events → wait/clear/stuck on an existing loop.
+
+    Authenticated by Stripe-Signature over the raw body (SaaS secret), so
+    this path is in _OPEN_PATHS. Account is resolved from the connected
+    Stripe account id on the event — never from the client.
+    """
+    payload = await request.body()
+    sig = request.headers.get("Stripe-Signature")
+    try:
+        result = saas_stripe.handle_webhook(payload, sig)
+    except saas_stripe.StripeSaaSNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except saas_stripe.StripeSaaSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"received": True, **result}
+
+
+@app.get("/saas/connections", response_model=SaaSConnectionsResponse)
+def list_saas_connections(request: Request) -> SaaSConnectionsResponse:
+    """Connected SaaS providers for this Trovis account. Tokens never returned."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    rows = database.get_saas_connections(account_id)
+    return SaaSConnectionsResponse(
+        connections=[SaaSConnection(**{
+            "provider": r["provider"],
+            "status": r["status"],
+            "provider_account_id": r.get("provider_account_id"),
+            "livemode": bool(r.get("livemode")),
+            "connected_at": r.get("connected_at"),
+            "updated_at": r.get("updated_at"),
+        }) for r in rows],
+        stripe_oauth_configured=saas_stripe.oauth_configured(),
+    )
+
+
+@app.get("/saas/stripe/oauth/start", response_model=SaaSStripeOAuthStart)
+def saas_stripe_oauth_start(request: Request) -> SaaSStripeOAuthStart:
+    """Begin Stripe Connect OAuth. Session required; returns the authorize URL."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    if not saas_stripe.oauth_configured():
+        raise HTTPException(
+            status_code=503, detail="Stripe SaaS OAuth is not configured",
+        )
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    redirect_uri = (
+        os.getenv("STRIPE_SAAS_REDIRECT_URI")
+        or f"{base}/saas/stripe/oauth/callback"
+    )
+    state = database.create_saas_oauth_state(account_id, "stripe")
+    try:
+        url = saas_stripe.authorize_url(redirect_uri=redirect_uri, state=state)
+    except saas_stripe.StripeSaaSNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return SaaSStripeOAuthStart(authorize_url=url)
+
+
+@app.get("/saas/stripe/oauth/callback", include_in_schema=False)
+def saas_stripe_oauth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    """Stripe Connect redirect. Open path — account rides in ``state``."""
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    if error:
+        return RedirectResponse(f"{base}/?saas=stripe_error")
+    account_id = database.consume_saas_oauth_state(state or "", "stripe")
+    if account_id is None:
+        return RedirectResponse(f"{base}/?saas=stripe_error")
+    if not code:
+        return RedirectResponse(f"{base}/?saas=stripe_error")
+    try:
+        tokens = saas_stripe.exchange_code(code)
+    except saas_stripe.StripeSaaSError:
+        return RedirectResponse(f"{base}/?saas=stripe_error")
+    database.upsert_saas_connection(
+        account_id,
+        "stripe",
+        provider_account_id=tokens.get("stripe_user_id"),
+        access_token=tokens.get("access_token"),
+        refresh_token=tokens.get("refresh_token"),
+        token_type=tokens.get("token_type"),
+        scope=tokens.get("scope"),
+        livemode=bool(tokens.get("livemode")),
+        status="connected",
+    )
+    return RedirectResponse(f"{base}/?saas=stripe_connected")
+
+
+@app.delete("/saas/stripe", response_model=SaaSConnection)
+def saas_stripe_disconnect(request: Request) -> SaaSConnection:
+    """Disconnect Stripe. Stops webhook apply for this account; tokens wiped."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    row = database.disconnect_saas_connection(account_id, "stripe")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Stripe is not connected")
+    return SaaSConnection(
+        provider=row["provider"],
+        status=row["status"],
+        provider_account_id=row.get("provider_account_id"),
+        livemode=bool(row.get("livemode")),
+        connected_at=row.get("connected_at"),
+        updated_at=row.get("updated_at"),
+    )
 
 
 @app.put("/org", response_model=OrgPublic)
