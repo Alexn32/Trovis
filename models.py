@@ -853,12 +853,20 @@ class BriefingResponse(BaseModel):
 
 
 class AttentionItem(BaseModel):
-    """One needs-attention row. `severity` is 'critical' | 'warning' | 'info';
-    `agent` is the service_name (or display name). Enrichment fields are
-    Claude-written and may be empty when the key is unset."""
+    """One needs-attention row. `severity` is 'critical' | 'warning' | 'info'.
+
+    `agent` is the human LABEL — a display name when the operator set one, and
+    for drift rows on a multi-agent service it also carries the sub-agent
+    ("Support Bot · researcher"). It is for reading only. Route with
+    `service_name` + `agent_id`, never with `agent`.
+
+    Enrichment fields are Claude-written and may be empty when the key is unset.
+    """
 
     severity: str
     agent: str
+    service_name: str | None = None
+    agent_id: str = "main"
     title: str = ""
     detail: str = ""
     recommendation: str = ""
@@ -976,7 +984,13 @@ class WorkFeedItem(BaseModel):
     its span count in the window."""
 
     time: str | None = None
+    # `agent` is the human LABEL (display name when one is set). It is for
+    # reading, never for routing — see service_name.
     agent: str
+    # Where the row actually points. The label can be "Support Bot" while the
+    # route needs "support-agent"; navigating by the label 404s the agent page.
+    service_name: str = ""
+    agent_id: str = "main"
     summary: str = ""
     tasks: int = 0
 

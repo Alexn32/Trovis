@@ -9,6 +9,8 @@ import { workUpdatedLabel } from './board.js'
 // Cost page so every surface prints the same number the same way.
 import { formatCost as fmtMoney } from './utils.js'
 import { asOfLabel, briefingLead, isFirstRun, partitionLookAt, workSplit } from './home.js'
+// A row's display label is not its route — see agentRoute.js.
+import { agentRoute } from './agentRoute.js'
 import { TrovisMark, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
@@ -435,7 +437,7 @@ function WorkFeedCard({ feed, onViewAll, onOpenAgent }) {
               <button
                 type="button"
                 className="home-feed-row"
-                onClick={() => onOpenAgent && onOpenAgent(f.agent, 'main')}
+                onClick={() => onOpenAgent && onOpenAgent(...agentRoute(f))}
               >
                 <span className="home-feed-summary">{f.summary}</span>
                 <span className="home-feed-meta">
@@ -531,7 +533,7 @@ function FleetCard({ health, onOpenAgent, onGoFleet }) {
             <button
               type="button"
               className="home-fleet-row"
-              onClick={() => onOpenAgent && onOpenAgent(h.agent, 'main')}
+              onClick={() => onOpenAgent && onOpenAgent(...agentRoute(h))}
             >
               <span className={`home-fleet-dot sev-${h.severity || 'info'}`} aria-hidden="true" />
               <span className="home-fleet-name">{h.agent}</span>

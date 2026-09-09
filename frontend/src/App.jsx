@@ -17,6 +17,9 @@ import UpgradeModal from './UpgradeModal.jsx'
 import Team from './Team.jsx'
 import Settings from './Settings.jsx'
 import Onboarding from './Onboarding.jsx'
+// A render crash used to blank the whole app; each pane and the overlay now
+// fail on their own. See ErrorBoundary.jsx.
+import ErrorBoundary from './ErrorBoundary.jsx'
 import {
   api,
   clearApiKey,
@@ -537,7 +540,18 @@ function AppInner() {
         onOpenSettings={openSettings}
       />
       <main className="app-main">
-        {overlayContent}
+        {/* Its own boundary, keyed on the overlay so a fresh one always gets a
+            clean slate: closing a crashed agent page must not poison the next.
+            The panes underneath keep rendering either way. */}
+        {overlayContent && (
+          <ErrorBoundary
+            key={`${overlay?.kind || ''}:${overlay?.serviceName || overlay?.id || ''}`}
+            label="this page"
+            onReset={closeOverlay}
+          >
+            {overlayContent}
+          </ErrorBoundary>
+        )}
         {panes}
       </main>
       {/* Global Trovis assistant — floating ⌘K pill, reachable on every page. */}
@@ -558,6 +572,9 @@ function AppInner() {
 // out of the accessibility tree, and `inert` keeps its buttons and inputs out
 // of the tab order — a hidden pane must not be focusable. `inert` isn't a
 // supported JSX attribute on React 18, so it's set on the node directly.
+// What each pane calls itself when it has to apologise.
+const PANE_LABELS = { dashboard: 'Home', fleet: 'Fleet', team: 'Team', work: 'Work' }
+
 function TabPane({ id, visible, children }) {
   const ref = useRef(null)
   useEffect(() => {
@@ -574,7 +591,9 @@ function TabPane({ id, visible, children }) {
       hidden={!visible}
       aria-hidden={!visible}
     >
-      {children}
+      {/* Per pane, so a crash in one tab leaves the others usable — and
+          leaves the header, so there is always a way out. */}
+      <ErrorBoundary label={PANE_LABELS[id] || id}>{children}</ErrorBoundary>
     </div>
   )
 }

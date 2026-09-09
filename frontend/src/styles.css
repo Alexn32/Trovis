@@ -6616,3 +6616,31 @@ select.wf2-input { cursor: pointer; }
   background: var(--bg-surface-hover); border-radius: 8px;
   padding: 8px 10px; margin: 8px 0 0;
 }
+
+/* --- Crash pane -----------------------------------------------------------
+   The visible face of an ErrorBoundary. Deliberately plain: existing tokens,
+   no alarm colours. A page that fell over should look calm and recoverable,
+   not like the app is on fire. */
+.crash-pane {
+  max-width: 520px;
+  margin: 48px auto;
+  padding: 24px 26px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+}
+.crash-title {
+  font-size: 18px; font-weight: 700; line-height: 1.35;
+  color: var(--text-primary); margin: 0 0 8px;
+}
+.crash-body {
+  font-size: 13.5px; line-height: 1.6;
+  color: var(--text-secondary); margin: 0 0 18px;
+}
+.crash-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.crash-detail {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; line-height: 1.5;
+  color: var(--text-dim); margin: 16px 0 0;
+  word-break: break-word;
+}

@@ -4221,7 +4221,11 @@ def _flag_attention(agents: list[dict]) -> list[dict]:
         severity = _decay_severity(severity, age)
         flagged.append(
             {
-                "agent": a["service_name"],
+                # Human label for the copy (and for Claude's prose); the route
+                # travels separately so a display name cannot break the link.
+                "agent": a.get("display_name") or a["service_name"],
+                "service_name": a["service_name"],
+                "agent_id": "main",
                 "severity": severity,
                 "error_rate_pct": round(rate, 1),
                 "span_count": spans,
@@ -4258,6 +4262,11 @@ def _attention_fallback(flagged: list[dict]) -> list[dict]:
             {
                 "severity": f["severity"],
                 "agent": f["agent"],
+                # Carry the route through. This rebuilds the row from scratch,
+                # so anything not copied here is silently lost — that is how
+                # the agent link ended up pointing at a display name.
+                "service_name": f.get("service_name"),
+                "agent_id": f.get("agent_id") or "main",
                 "title": title,
                 "detail": detail,
                 "recommendation": rec,
@@ -4430,6 +4439,8 @@ def _drift_attention_items(agents: list[dict], account_id: int | None) -> list[d
                 {
                     "severity": "warning",
                     "agent": label,
+                    "service_name": service,
+                    "agent_id": aid,
                     "title": data.get("headline") or "Behavior drifted from its declared job",
                     "detail": first.get("evidence") or "",
                     "recommendation": "Open this agent and review the drift findings against its declared identity.",
@@ -4714,7 +4725,12 @@ def dashboard_work_feed(request: Request) -> list[WorkFeedItem]:
         feed.append(
             WorkFeedItem(
                 time=a.get("last_seen"),
+                # Label for reading, service_name for routing. Clicking a feed
+                # row used to navigate by the label, so any agent with a
+                # display name opened a 404 "not found" page.
                 agent=label,
+                service_name=svc,
+                agent_id="main",
                 summary=summary,
                 tasks=task_count,
             )
