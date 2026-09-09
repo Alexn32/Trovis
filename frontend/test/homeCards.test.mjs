@@ -122,6 +122,26 @@ test('the pulse asks again only when the FACTS change', () => {
   assert.match(hook, /\}, \[key\]\)/)
 })
 
+test('the insight slot is never blank for a connected org', () => {
+  // The generated sentence is preferred and has already passed the entailment
+  // check; the templated line holds the slot until then and keeps it when the
+  // model is missing, slow, or refused. Always-on is the fallback's job, not
+  // a looser validator.
+  assert.match(code, /const pulseLine = insight\.insight \|\| fallbackInsight\(packet\)/)
+  assert.match(code, /insight=\{pulseLine\}/)
+})
+
+test('the insight line opens Ask with what it says', () => {
+  // The pulse has room for a sentence; Ask is where the depth lives. Clicking
+  // the line asks it rather than expanding anything on Home.
+  assert.match(code, /onClick=\{\(\) => openAsk\(askSeed\(insight\)\)\}/)
+  // It is a real button, not a styled div, so it is reachable by keyboard.
+  const fn = code.slice(code.indexOf('function FleetPulse'), code.indexOf('function PulseGraphic'))
+  assert.match(fn, /<button[^>]*className="home-pulse-insight"/s)
+  // And no second chat surface was invented for it.
+  assert.doesNotMatch(code, /InsightPanel|InsightsPage|useChat/)
+})
+
 test('the graphic is drawn in code, never by the model', () => {
   // The model may only NAME a series; the bars and the caption are computed.
   const fn = code.slice(code.indexOf('function PulseGraphic'))
