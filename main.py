@@ -41,6 +41,7 @@ import asker
 import billing
 import database
 import saas_hubspot
+import saas_shopify
 import saas_stripe
 import describer
 import email_send
@@ -163,6 +164,7 @@ from models import (
     SaaSConnection,
     SaaSConnectionsResponse,
     SaaSHubSpotOAuthStart,
+    SaaSShopifyOAuthStart,
     SaaSStripeOAuthStart,
 )
 
@@ -191,6 +193,8 @@ _OPEN_PATHS = {
     "/saas/stripe/oauth/callback",  # Stripe Connect redirects the browser here
     "/saas/hubspot/webhook",     # HubSpot *SaaS* Work webhook — signature, not a Trovis key
     "/saas/hubspot/oauth/callback",  # HubSpot OAuth redirects the browser here
+    "/saas/shopify/webhook",     # Shopify *SaaS* Work webhook — HMAC, not a Trovis key
+    "/saas/shopify/oauth/callback",  # Shopify OAuth redirects the browser here
 }
 
 
@@ -3408,6 +3412,7 @@ def list_saas_connections(request: Request) -> SaaSConnectionsResponse:
         }) for r in rows],
         stripe_oauth_configured=saas_stripe.oauth_configured(),
         hubspot_oauth_configured=saas_hubspot.oauth_configured(),
+        shopify_oauth_configured=saas_shopify.oauth_configured(),
     )
 
 
@@ -3600,6 +3605,137 @@ def saas_hubspot_disconnect(request: Request) -> SaaSConnection:
     row = database.disconnect_saas_connection(account_id, "hubspot")
     if row is None:
         raise HTTPException(status_code=404, detail="HubSpot is not connected")
+    return SaaSConnection(
+        provider=row["provider"],
+        status=row["status"],
+        provider_account_id=row.get("provider_account_id"),
+        livemode=bool(row.get("livemode")),
+        connected_at=row.get("connected_at"),
+        updated_at=row.get("updated_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# SaaS Shopify — Work-event adapter (NOT catalog sync, NOT billing)
+# ---------------------------------------------------------------------------
+# Connect mapping contract (V1, folded — surviving Shopify PR C):
+#   Link keys (require one): trovis_loop_external_id |
+#     trovis.loop.external_id | trovis_run_id | trovis.run.id
+#     → open loop this account; else no-op. Never invent. No catalog sync.
+#   Payment vs fulfillment waits are separate:
+#     orders/create (unpaid/pending) + orders/updated while pending → wait payment
+#     orders/paid → clear payment wait (keep fulfillment wait if unfulfilled)
+#     fulfillments/create / orders/fulfilled → clear fulfillment wait
+#     cancelled / payment failure or void / refund (open) / fulfillment
+#     failure → stuck.
+#   Scopes: read_orders, read_fulfillments. Reuse #143/#144 spine.
+# Isolated from /billing/webhook. HMAC uses SHOPIFY_SAAS_CLIENT_SECRET.
+
+
+@app.post("/saas/shopify/webhook")
+async def saas_shopify_webhook(request: Request) -> dict:
+    """Verified Shopify order/fulfillment events → wait/clear/stuck.
+
+    Authenticated by X-Shopify-Hmac-SHA256 over the raw body (app secret),
+    so this path is in _OPEN_PATHS. Account is resolved from
+    X-Shopify-Shop-Domain — never from the client.
+    """
+    payload = await request.body()
+    try:
+        result = saas_shopify.handle_webhook(
+            payload,
+            hmac_header=request.headers.get("X-Shopify-Hmac-SHA256"),
+            shop=request.headers.get("X-Shopify-Shop-Domain"),
+            topic=request.headers.get("X-Shopify-Topic"),
+            webhook_id=request.headers.get("X-Shopify-Webhook-Id"),
+        )
+    except saas_shopify.ShopifySaaSNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except saas_shopify.ShopifySaaSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"received": True, **result}
+
+
+@app.get("/saas/shopify/oauth/start", response_model=SaaSShopifyOAuthStart)
+def saas_shopify_oauth_start(
+    request: Request, shop: str | None = None,
+) -> SaaSShopifyOAuthStart:
+    """Begin Shopify OAuth. Session required; shop domain required."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    if not saas_shopify.oauth_configured():
+        raise HTTPException(
+            status_code=503, detail="Shopify SaaS OAuth is not configured",
+        )
+    host = saas_shopify.normalize_shop(shop)
+    if not host:
+        raise HTTPException(status_code=400, detail="valid Shopify shop is required")
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    redirect_uri = (
+        os.getenv("SHOPIFY_SAAS_REDIRECT_URI")
+        or f"{base}/saas/shopify/oauth/callback"
+    )
+    state = database.create_saas_oauth_state(account_id, "shopify", payload=host)
+    try:
+        url = saas_shopify.authorize_url(
+            shop=host, redirect_uri=redirect_uri, state=state,
+        )
+    except saas_shopify.ShopifySaaSNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except saas_shopify.ShopifySaaSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return SaaSShopifyOAuthStart(authorize_url=url)
+
+
+@app.get("/saas/shopify/oauth/callback", include_in_schema=False)
+def saas_shopify_oauth_callback(request: Request):
+    """Shopify OAuth redirect. Open path — account rides in ``state``."""
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    params = {k: v for k, v in request.query_params.items()}
+    if params.get("error"):
+        return RedirectResponse(f"{base}/?saas=shopify_error")
+    try:
+        saas_shopify.verify_oauth_query(params)
+    except (saas_shopify.ShopifySaaSError, saas_shopify.ShopifySaaSNotConfigured):
+        return RedirectResponse(f"{base}/?saas=shopify_error")
+    row = database.consume_saas_oauth_state_full(params.get("state") or "", "shopify")
+    if row is None:
+        return RedirectResponse(f"{base}/?saas=shopify_error")
+    shop = saas_shopify.normalize_shop(params.get("shop"))
+    expected = saas_shopify.normalize_shop(row.get("payload"))
+    if not shop or not expected or shop != expected:
+        return RedirectResponse(f"{base}/?saas=shopify_error")
+    code = (params.get("code") or "").strip()
+    if not code:
+        return RedirectResponse(f"{base}/?saas=shopify_error")
+    try:
+        tokens = saas_shopify.exchange_code(code, shop=shop)
+    except saas_shopify.ShopifySaaSError:
+        return RedirectResponse(f"{base}/?saas=shopify_error")
+    database.upsert_saas_connection(
+        int(row["account_id"]),
+        "shopify",
+        provider_account_id=shop,
+        access_token=tokens.get("access_token"),
+        refresh_token=tokens.get("refresh_token"),
+        token_type=tokens.get("token_type") or "bearer",
+        scope=tokens.get("scope"),
+        livemode=False,
+        status="connected",
+    )
+    return RedirectResponse(f"{base}/?saas=shopify_connected")
+
+
+@app.delete("/saas/shopify", response_model=SaaSConnection)
+def saas_shopify_disconnect(request: Request) -> SaaSConnection:
+    """Disconnect Shopify. Stops webhook apply for this account; tokens wiped."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    row = database.disconnect_saas_connection(account_id, "shopify")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Shopify is not connected")
     return SaaSConnection(
         provider=row["provider"],
         status=row["status"],

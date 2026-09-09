@@ -1316,7 +1316,8 @@ CREATE TABLE IF NOT EXISTS work_suggestions (
 
 # SaaS Connect: one row per (account, provider). Tokens are stored like
 # api_keys (server-side, never logged). provider_account_id is the
-# connected Stripe acct_… / HubSpot portal id used to route webhooks.
+# connected Stripe acct_… / HubSpot portal id / Shopify shop domain
+# used to route webhooks.
 _SAAS_CONNECTIONS_DDL_PG = """
 CREATE TABLE IF NOT EXISTS saas_connections (
     id                   SERIAL    PRIMARY KEY,
@@ -1353,12 +1354,14 @@ CREATE TABLE IF NOT EXISTS saas_connections (
 )
 """
 
-# Short-lived CSRF state for SaaS OAuth (Stripe Connect). Single-use.
+# Short-lived CSRF state for SaaS OAuth (Stripe Connect / HubSpot / Shopify).
+# payload holds provider-specific start data (Shopify shop domain). Single-use.
 _SAAS_OAUTH_STATES_DDL_PG = """
 CREATE TABLE IF NOT EXISTS saas_oauth_states (
     state       TEXT      PRIMARY KEY,
     account_id  INTEGER   NOT NULL REFERENCES accounts(id),
     provider    TEXT      NOT NULL,
+    payload     TEXT,
     created_at  TIMESTAMP DEFAULT NOW(),
     expires_at  TIMESTAMP NOT NULL
 )
@@ -1369,6 +1372,7 @@ CREATE TABLE IF NOT EXISTS saas_oauth_states (
     state       TEXT    PRIMARY KEY,
     account_id  INTEGER NOT NULL REFERENCES accounts(id),
     provider    TEXT    NOT NULL,
+    payload     TEXT,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at  TIMESTAMP NOT NULL
 )
@@ -1700,6 +1704,9 @@ def init_db() -> None:
         # FK: SQLite's ALTER ADD COLUMN can't enforce one, and the two
         # backends must stay schema-identical.
         _try_add_column(cur, "spans", "loop_id", "INTEGER DEFAULT NULL")
+        # Shopify OAuth start stores the shop domain so the callback can
+        # reject a shop-swap. NULL on Stripe / HubSpot rows.
+        _try_add_column(cur, "saas_oauth_states", "payload", "TEXT")
         # After loop_id exists: classify leftover titles from before
         # title_source. No-op on a fresh DB (no titled loops yet).
         _backfill_loop_title_source(cur)
@@ -9467,9 +9474,9 @@ def get_fleet_activity(
 # ---------------------------------------------------------------------------
 # SaaS connections + Work-event spine helpers
 # ---------------------------------------------------------------------------
-# Stripe (PR A) and HubSpot (PR B) share these writers. Tokens are
-# never logged. Webhook routing is provider + provider_account_id, always
-# account-scoped on the write side.
+# Stripe (PR A), HubSpot (PR B), and Shopify (PR C) share these writers.
+# Tokens are never logged. Webhook routing is provider + provider_account_id,
+# always account-scoped on the write side.
 
 
 def _saas_connection_public(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -9589,7 +9596,7 @@ def get_saas_connection_secrets(
 def get_saas_connection_secrets_by_provider_account(
     provider: str, provider_account_id: str,
 ) -> dict[str, Any] | None:
-    """Webhook routing with tokens. HubSpot portalId / Stripe acct_… → row."""
+    """Webhook routing with tokens. HubSpot portalId / Stripe acct_… / Shopify shop → row."""
     provider = (provider or "").strip().lower()
     acct = (provider_account_id or "").strip()
     if not acct:
@@ -9610,7 +9617,7 @@ def get_saas_connection_secrets_by_provider_account(
 def get_saas_connection_by_provider_account(
     provider: str, provider_account_id: str,
 ) -> dict[str, Any] | None:
-    """Webhook routing: Stripe acct_… / HubSpot portal → Trovis account. Tokens stay in DB."""
+    """Webhook routing: Stripe acct_… / HubSpot portal / Shopify shop → Trovis account. Tokens stay in DB."""
     provider = (provider or "").strip().lower()
     acct = (provider_account_id or "").strip()
     if not acct:
@@ -9643,21 +9650,28 @@ def disconnect_saas_connection(account_id: int, provider: str) -> dict[str, Any]
     return get_saas_connection(account_id, provider)
 
 
-def create_saas_oauth_state(account_id: int, provider: str, ttl_s: int = 600) -> str:
+def create_saas_oauth_state(
+    account_id: int, provider: str, ttl_s: int = 600, payload: str | None = None,
+) -> str:
+    """Create a single-use CSRF state. ``payload`` is Shopify shop (etc.)."""
     state = secrets.token_urlsafe(32)
     expires = _utcnow() + timedelta(seconds=int(ttl_s))
     expires_s = expires.strftime("%Y-%m-%d %H:%M:%S")
+    extra = (payload or "").strip() or None
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "INSERT INTO saas_oauth_states (state, account_id, provider, expires_at) "
-            f"VALUES ({PH}, {PH}, {PH}, {PH})",
-            (state, account_id, (provider or "").strip().lower(), expires_s),
+            "INSERT INTO saas_oauth_states "
+            "(state, account_id, provider, expires_at, payload) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH})",
+            (state, account_id, (provider or "").strip().lower(), expires_s, extra),
         )
     return state
 
 
-def consume_saas_oauth_state(state: str, provider: str) -> int | None:
-    """Single-use CSRF consume. Returns account_id or None."""
+def consume_saas_oauth_state_full(
+    state: str, provider: str,
+) -> dict[str, Any] | None:
+    """Single-use CSRF consume. Returns {account_id, payload} or None."""
     raw = (state or "").strip()
     provider = (provider or "").strip().lower()
     if not raw:
@@ -9665,7 +9679,7 @@ def consume_saas_oauth_state(state: str, provider: str) -> int | None:
     now_s = _utcnow().strftime("%Y-%m-%d %H:%M:%S")
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            f"SELECT account_id, expires_at FROM saas_oauth_states "
+            f"SELECT account_id, expires_at, payload FROM saas_oauth_states "
             f"WHERE state = {PH} AND provider = {PH}",
             (raw, provider),
         )
@@ -9682,7 +9696,17 @@ def consume_saas_oauth_state(state: str, provider: str) -> int | None:
         )
         if exp_s and exp_s < now_s:
             return None
-        return int(row["account_id"])
+        payload = row["payload"]
+        return {
+            "account_id": int(row["account_id"]),
+            "payload": (str(payload).strip() if payload not in (None, "") else None),
+        }
+
+
+def consume_saas_oauth_state(state: str, provider: str) -> int | None:
+    """Single-use CSRF consume. Returns account_id or None."""
+    row = consume_saas_oauth_state_full(state, provider)
+    return int(row["account_id"]) if row else None
 
 
 def claim_saas_event(
@@ -9782,6 +9806,21 @@ def _unresolved_saas_handoffs(
     return out
 
 
+def _saas_wait_kind(raw: Any) -> str | None:
+    """Normalize a wait label so Shopify can clear payment vs fulfillment.
+
+    Stripe / HubSpot pass no filter (None). Unknown labels compare as-is.
+    """
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    if "fulfill" in s:
+        return "fulfillment"
+    if "payment" in s or s in {"pending", "authorized", "partially_paid"}:
+        return "payment"
+    return s
+
+
 def apply_saas_loop_effect(
     account_id: int,
     loop_id: int,
@@ -9795,8 +9834,15 @@ def apply_saas_loop_effect(
     event_id: str | None = None,
     event_type: str | None = None,
     event_time_unix: int | None = None,
+    then_waiting_on: str | None = None,
+    then_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Append wait/clear/stuck onto an existing open loop. One transaction."""
+    """Append wait/clear/stuck onto an existing open loop. One transaction.
+
+    On clear, a set ``waiting_on`` filters to that wait kind only (Shopify
+    payment vs fulfillment). ``then_waiting_on`` starts the next wait after
+    a successful targeted clear. Stripe/HubSpot omit both — clear-all.
+    """
     provider = (provider or "").strip().lower()
     ts = int(event_time_unix or time.time_ns())
     handoff_id = f"saas:{provider}:{object_id}" if object_id else f"saas:{provider}"
@@ -9873,11 +9919,20 @@ def apply_saas_loop_effect(
 
         if effect == "clear":
             to_clear = pending if pending else matching
+            kind = _saas_wait_kind(waiting_on)
+            if kind:
+                to_clear = [
+                    h for h in to_clear
+                    if _saas_wait_kind((h.get("payload") or {}).get("waiting_on")) == kind
+                ]
             if not to_clear:
                 _touch_loop_event(cur, loop_id, ts)
                 return {"status": "noop_already", "reason": "no_wait"}
             for h in to_clear:
                 _complete(h)
+            next_wait = (then_waiting_on or "").strip() or None
+            if next_wait:
+                _initiate("wait", next_wait, then_reason)
             _touch_loop_event(cur, loop_id, ts)
             return {"status": "applied"}
 

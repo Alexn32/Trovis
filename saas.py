@@ -1,6 +1,6 @@
 """Shared SaaS → Work-event spine.
 
-Many transports (Stripe, HubSpot) collapse onto one Work Event.
+Many transports (Stripe, HubSpot, Shopify) collapse onto one Work Event.
 This module is the only writer of those effects. Adapters verify, map, and
 hand a structured event here. The spine then:
 
@@ -17,7 +17,9 @@ V1 link keys (require one; first present wins):
 
 Effects:
   wait  — unresolved to_system (lean holder kind tool) toward the SaaS.
-  clear — resolve that SaaS wait so work can move.
+  clear — resolve that SaaS wait so work can move. When ``waiting_on`` is
+          set, only that wait kind is cleared (Shopify payment vs
+          fulfillment). ``then_waiting_on`` may start the next wait.
   stuck — needs human attention (failure / dispute) on the same loop.
 """
 from __future__ import annotations
@@ -47,6 +49,7 @@ LINK_KEYS = (
 PROVIDER_LABELS = {
     "stripe": "Stripe",
     "hubspot": "HubSpot",
+    "shopify": "Shopify",
 }
 
 
@@ -54,7 +57,7 @@ def extract_link_key(metadata: Any) -> str | None:
     """Return the first non-empty V1 link key from a metadata dict, or None.
 
     Callers must pass the object's own metadata. The spine never invents a
-    key from surrounding Stripe/HubSpot fields.
+    key from surrounding Stripe/HubSpot/Shopify fields.
     """
     if not isinstance(metadata, dict):
         return None
@@ -90,6 +93,8 @@ def apply_work_effect(
     event_time_unix: int | None = None,
     metadata: dict[str, Any] | None = None,
     link_key: str | None = None,
+    then_waiting_on: str | None = None,
+    then_reason: str | None = None,
 ) -> dict[str, Any]:
     """Attach a verified SaaS event to an existing open Work loop.
 
@@ -151,6 +156,8 @@ def apply_work_effect(
         event_id=event_id,
         event_type=event_type,
         event_time_unix=event_time_unix,
+        then_waiting_on=then_waiting_on,
+        then_reason=then_reason,
     )
     logger.info(
         "[saas] %s effect=%s provider=%s loop=%s object=%s event=%s type=%s",
