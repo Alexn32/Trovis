@@ -17,6 +17,7 @@ import {
   isFirstRun,
   noticedLines,
   proofCounts,
+  chooseGraphic,
   pulseGraphic,
   pulsePacket,
 } from './home.js'
@@ -132,7 +133,10 @@ export default function Dashboard({
     agentCount,
   })
   const insight = usePulseInsight(packet)
-  const graphic = pulseGraphic(insight.graphic, packet)
+  // Chosen from the packet in this browser, so the chart is on screen with the
+  // rest of the pulse. The model's pick only overrides it once it arrives, and
+  // only if it names a series we can draw.
+  const graphic = pulseGraphic(chooseGraphic(packet, insight.graphic), packet)
   const chips = askChips({
     desk,
     counts,

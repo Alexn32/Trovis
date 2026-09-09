@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   askChips,
+  chooseGraphic,
   pulseGraphic,
   pulsePacket,
   clockLabel,
@@ -516,4 +517,59 @@ test('the caption never disagrees with the bars', () => {
   assert.match(g.caption, /4 stuck this week/)
   assert.match(g.caption, /9 last week/)
   assert.deepEqual(g.bars.map((b) => b.value), [9, 4])
+})
+
+// --- the graphic must not wait on the server -------------------------------
+
+const WEEKS = { finished_this_week: 18, finished_last_week: 12 }
+
+test('the graphic is chosen from the packet, before any answer arrives', () => {
+  // The regression: `graphic` was read off the insight response, so it stayed
+  // 'none' until the round trip landed — and stayed 'none' FOREVER if the
+  // endpoint 404'd, timed out, or had no model key behind it. The pulse then
+  // showed no chart at all despite the browser holding everything to draw it.
+  assert.equal(chooseGraphic(WEEKS, undefined), 'week_finished')
+  assert.equal(chooseGraphic(WEEKS, null), 'week_finished')
+  assert.equal(chooseGraphic(WEEKS, ''), 'week_finished')
+})
+
+test("a server 'none' does not suppress a chart the packet supports", () => {
+  // The server reached 'none' through this same order, so re-deriving agrees
+  // with it. Treating a missing or none answer as authoritative is precisely
+  // what hid the chart.
+  assert.equal(chooseGraphic(WEEKS, 'none'), 'week_finished')
+})
+
+test('a valid model choice wins; an undrawable one does not', () => {
+  const both = { ...WEEKS, stuck_this_week: 1, stuck_last_week: 4 }
+  assert.equal(chooseGraphic(both, 'week_stuck'), 'week_stuck')
+  // No stuck series in this packet, so the model naming it is overruled.
+  assert.equal(chooseGraphic(WEEKS, 'week_stuck'), 'week_finished')
+  assert.equal(chooseGraphic(WEEKS, 'pie_chart'), 'week_finished')
+})
+
+test('the client chooser agrees with the server order', () => {
+  // Mirrors pulse.choose_graphic: finished -> stuck -> need_a_look -> none.
+  assert.equal(chooseGraphic({ need_a_look: [{ name: 'x' }] }, null), 'need_a_look')
+  assert.equal(chooseGraphic({ agents_count: 3, need_a_look: [] }, null), 'none')
+  assert.equal(chooseGraphic({}, null), 'none')
+})
+
+test('need_a_look still draws no chart — the names already say it', () => {
+  assert.equal(pulseGraphic(chooseGraphic({ need_a_look: [{ name: 'x' }] }, null), { need_a_look: [{ name: 'x' }] }), null)
+})
+
+test('a chart of two zeroes is not drawn', () => {
+  // Nothing finished either week is not a comparison; the strip already says
+  // the org has no finished work.
+  assert.equal(pulseGraphic('week_finished', { finished_this_week: 0, finished_last_week: 0 }), null)
+  assert.equal(pulseGraphic('week_stuck', { stuck_this_week: 0, stuck_last_week: 0 }), null)
+  // But a zero week against a nonzero one is real news and IS drawn.
+  assert.ok(pulseGraphic('week_finished', { finished_this_week: 0, finished_last_week: 12 }))
+  assert.ok(pulseGraphic('week_finished', { finished_this_week: 12, finished_last_week: 0 }))
+  // ...and the chooser skips past it rather than picking a chart it cannot draw.
+  assert.equal(
+    chooseGraphic({ finished_this_week: 0, finished_last_week: 0, need_a_look: [{ name: 'a' }] }, null),
+    'need_a_look',
+  )
 })

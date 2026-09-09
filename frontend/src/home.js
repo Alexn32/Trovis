@@ -213,6 +213,33 @@ export function pulsePacket({ overview, items, truncated, cost, attention, agent
 }
 
 /**
+ * Which graphic to draw, decided HERE and not by the server.
+ *
+ * MIRRORS pulse.choose_graphic — keep the two in step. The client owns this
+ * because the pulse must draw immediately: the graphic is a fact about the
+ * packet the browser is already holding, so waiting on a round trip to learn
+ * it means showing nothing when the endpoint is slow, unreachable, or has no
+ * model key behind it. (It did exactly that: `graphic` was read off the
+ * insight response, so a 404 left the pulse with no chart at all.)
+ *
+ * A model choice only wins when it names a series we can actually draw. Its
+ * "none" is not honoured over our own reading — the server reached "none"
+ * through this same order, so re-deriving agrees with it, and treating a
+ * missing answer as "none" is what suppressed the chart.
+ */
+export function chooseGraphic(packet, modelChoice) {
+  const p = packet || {}
+  const drawable = (g) => pulseGraphic(g, p) !== null
+  if (modelChoice && modelChoice !== 'none' && drawable(modelChoice)) return modelChoice
+  if (drawable('week_finished')) return 'week_finished'
+  if (drawable('week_stuck')) return 'week_stuck'
+  // need_a_look draws no chart; it is still the honest answer for "what would
+  // this show", and pulseGraphic returns null for it.
+  if ((p.need_a_look || []).length > 0) return 'need_a_look'
+  return 'none'
+}
+
+/**
  * What the graphic draws and what its caption says, from the packet alone.
  *
  * Returns null when the chosen series is not in the packet — the caller then
@@ -223,6 +250,10 @@ export function pulseGraphic(kind, packet) {
   const p = packet || {}
   if (kind === 'week_finished') {
     if (!('finished_this_week' in p) || !('finished_last_week' in p)) return null
+    // Two empty bars prove nothing. A zero week against a nonzero one is real
+    // news; zero against zero is just an org with no finished work yet, which
+    // the strip already says.
+    if (!p.finished_this_week && !p.finished_last_week) return null
     return {
       kind,
       bars: [
@@ -237,6 +268,7 @@ export function pulseGraphic(kind, packet) {
   // GRAPHICS note in pulse.py. It returns null rather than an empty frame.
   if (kind === 'week_stuck') {
     if (!('stuck_this_week' in p) || !('stuck_last_week' in p)) return null
+    if (!p.stuck_this_week && !p.stuck_last_week) return null
     return {
       kind,
       bars: [
