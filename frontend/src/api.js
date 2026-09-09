@@ -364,10 +364,12 @@ export const api = {
   // account has never subscribed (no Stripe customer yet).
   billingPortal: () => request('/account/billing-portal', { method: 'POST' }),
 
-  // SaaS Connect (Stripe Work adapter — not Trovis billing).
+  // SaaS Connect (Stripe / HubSpot Work adapters — not Trovis billing).
   getSaasConnections: () => request('/saas/connections'),
   startStripeConnect: () => request('/saas/stripe/oauth/start'),
   disconnectStripe: () => request('/saas/stripe', { method: 'DELETE' }),
+  startHubSpotConnect: () => request('/saas/hubspot/oauth/start'),
+  disconnectHubSpot: () => request('/saas/hubspot', { method: 'DELETE' }),
 
   // --- proactive alerts (Settings → Alerts) ---
   getAlerts: () => request('/account/alerts'),

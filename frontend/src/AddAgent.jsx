@@ -47,9 +47,9 @@ const CLAUDE_VARIANTS = [
 
 // Live Connect doors — only the ones that already work today. Generic
 // Python / Node / framework pages still exist below; they are not
-// reachable from this picker. Slack / GitHub / HubSpot / Intercom /
-// Shopify are recognition-only (see WorksWithStrip) and must not
-// appear here as clickable doors. Stripe is a live *SaaS* door
+// reachable from this picker. Slack / GitHub / Intercom / Shopify
+// are recognition-only (see WorksWithStrip) and must not appear
+// here as clickable doors. Stripe and HubSpot are live *SaaS* doors
 // (Settings → Integrations), not an agent ingest picker.
 const PLATFORMS = [
   { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },

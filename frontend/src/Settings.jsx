@@ -148,12 +148,12 @@ function BillingCard({ onUpgrade }) {
   )
 }
 
-// Stripe SaaS Connect — Work waits, not Trovis billing. Isolated from the
-// plan webhook. Agents stamp a loop key on the PaymentIntent / Invoice.
+// SaaS Connect — Work waits, not Trovis billing / not CRM sync. Isolated
+// from the plan webhook. Agents stamp a loop key on the Stripe object or
+// HubSpot deal/ticket.
 function IntegrationsCard() {
   const [data, setData] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(null)
 
   function load() {
     return api.getSaasConnections().then(setData).catch(() => setData({ connections: [] }))
@@ -167,86 +167,149 @@ function IntegrationsCard() {
     return () => { alive = false }
   }, [])
 
-  const stripe = (data?.connections || []).find((c) => c.provider === 'stripe')
-  const connected = stripe?.status === 'connected'
-  const canOauth = !!data?.stripe_oauth_configured
+  return (
+    <section className="settings-card">
+      <h3 className="settings-card-title">Integrations</h3>
+      <IntegrationProvider
+        brandId="stripe"
+        label="Stripe"
+        copy={(
+          <>
+            Connect your Stripe account so payment events can wait, clear, or
+            flag a job — only when the PaymentIntent, Invoice, Charge, or Dispute
+            carries a Trovis loop key
+            (<code>trovis_loop_external_id</code>). Trovis never invents a job
+            from Stripe alone. This is not Trovis billing.
+          </>
+        )}
+        row={ (data?.connections || []).find((c) => c.provider === 'stripe') }
+        canOauth={!!data?.stripe_oauth_configured}
+        notConfigured="Stripe Connect isn’t configured on this deploy yet."
+        connectLabel="Connect Stripe"
+        start={api.startStripeConnect}
+        disconnect={api.disconnectStripe}
+        startError="Could not start Stripe Connect."
+        disconnectError="Could not disconnect Stripe."
+        busy={busy}
+        setBusy={setBusy}
+        onChanged={load}
+      />
+      <IntegrationProvider
+        brandId="hubspot"
+        label="HubSpot"
+        copy={(
+          <>
+            Connect your HubSpot account so deal-stage and ticket-status
+            changes can wait, clear, or flag a job — only when that deal or
+            ticket carries a Trovis loop key
+            (<code>trovis_loop_external_id</code>). Trovis never invents a job
+            from HubSpot alone. This is not CRM or contact sync.
+          </>
+        )}
+        row={ (data?.connections || []).find((c) => c.provider === 'hubspot') }
+        canOauth={!!data?.hubspot_oauth_configured}
+        notConfigured="HubSpot Connect isn’t configured on this deploy yet."
+        connectLabel="Connect HubSpot"
+        start={api.startHubSpotConnect}
+        disconnect={api.disconnectHubSpot}
+        startError="Could not start HubSpot Connect."
+        disconnectError="Could not disconnect HubSpot."
+        busy={busy}
+        setBusy={setBusy}
+        onChanged={load}
+      />
+    </section>
+  )
+}
+
+function IntegrationProvider({
+  brandId,
+  label,
+  copy,
+  row,
+  canOauth,
+  notConfigured,
+  connectLabel,
+  start,
+  disconnect,
+  startError,
+  disconnectError,
+  busy,
+  setBusy,
+  onChanged,
+}) {
+  const [error, setError] = useState(null)
+  const connected = row?.status === 'connected'
+  const acct = row?.provider_account_id || ''
+  const acctShort = acct.length > 8 ? `…${acct.slice(-6)}` : acct
+  const mine = busy === brandId
 
   async function connect() {
     setError(null)
-    setBusy(true)
+    setBusy(brandId)
     try {
-      const res = await api.startStripeConnect()
+      const res = await start()
       if (res?.authorize_url) {
         window.location.href = res.authorize_url
         return
       }
-      setError('Could not start Stripe Connect.')
+      setError(startError)
     } catch (e) {
-      if (e?.status === 503) setError('Stripe Connect isn’t configured on this deploy yet.')
-      else setError('Could not start Stripe Connect. Please try again.')
+      if (e?.status === 503) setError(notConfigured)
+      else setError(`${startError} Please try again.`)
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
-  async function disconnect() {
+  async function onDisconnect() {
     setError(null)
-    setBusy(true)
+    setBusy(brandId)
     try {
-      await api.disconnectStripe()
-      await load()
+      await disconnect()
+      await onChanged()
     } catch (e) {
-      setError('Could not disconnect Stripe.')
+      setError(disconnectError)
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
-
-  const acct = stripe?.provider_account_id || ''
-  const acctShort = acct.length > 8 ? `…${acct.slice(-6)}` : acct
 
   return (
-    <section className="settings-card">
-      <h3 className="settings-card-title">Integrations</h3>
+    <div className="saas-connect-block">
       <div className="saas-connect-row">
         <span className="saas-connect-brand">
-          <BrandMark id="stripe" size={18} />
-          <span>Stripe</span>
+          <BrandMark id={brandId} size={18} />
+          <span>{label}</span>
         </span>
         <span className={`saas-connect-status ${connected ? 'is-on' : ''}`}>
           {connected ? `Connected${acctShort ? ` · ${acctShort}` : ''}` : 'Not connected'}
         </span>
       </div>
-      <p className="settings-note">
-        Connect your Stripe account so payment events can wait, clear, or
-        flag a job — only when the PaymentIntent, Invoice, Charge, or Dispute
-        carries a Trovis loop key
-        (<code>trovis_loop_external_id</code>). Trovis never invents a job
-        from Stripe alone. This is not Trovis billing.
-      </p>
+      <p className="settings-note">{copy}</p>
       <div className="saas-connect-actions">
         {connected ? (
-          <button type="button" className="btn btn-secondary" onClick={disconnect} disabled={busy}>
-            {busy ? 'Working…' : 'Disconnect'}
+          <button type="button" className="btn btn-secondary" onClick={onDisconnect} disabled={!!busy}>
+            {mine ? 'Working…' : 'Disconnect'}
           </button>
         ) : (
           <button
             type="button"
             className="btn btn-primary"
             onClick={connect}
-            disabled={busy || !canOauth}
+            disabled={!!busy || !canOauth}
           >
-            {busy ? 'Opening…' : 'Connect Stripe'}
+            {mine ? 'Opening…' : connectLabel}
           </button>
         )}
       </div>
       {!canOauth && !connected && (
-        <p className="settings-note">Stripe Connect isn’t configured on this deploy yet.</p>
+        <p className="settings-note">{notConfigured}</p>
       )}
       {error && (
         <p className="settings-note" style={{ color: 'var(--error)' }}>{error}</p>
       )}
-    </section>
+    </div>
   )
 }
 

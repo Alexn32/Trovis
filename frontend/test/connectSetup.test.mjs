@@ -43,14 +43,16 @@ test('the strip labels the two groups differently — live is not "coming"', () 
 })
 
 test('the recognition brands are coming, and the doors are not', () => {
-  // Recognition-only logos. Stripe flipped to a live Settings door; if another
-  // of these ever becomes a door it should be a deliberate edit here.
-  for (const id of ['slack', 'github', 'hubspot', 'intercom', 'shopify']) {
+  // Recognition-only logos. Stripe / HubSpot flipped to live Settings doors;
+  // if another of these ever becomes a door it should be a deliberate edit.
+  for (const id of ['slack', 'github', 'intercom', 'shopify']) {
     assert.equal(BRANDS[id].role, 'coming', `${id} is recognition-only`)
     assert.ok(COMING_BRAND_IDS.includes(id), `${id} sits in the Coming row`)
   }
   assert.equal(BRANDS.stripe.role, 'live', 'stripe is a live SaaS door')
   assert.ok(LIVE_BRAND_IDS.includes('stripe'), 'stripe sits in the Works-with row')
+  assert.equal(BRANDS.hubspot.role, 'live', 'hubspot is a live SaaS door')
+  assert.ok(LIVE_BRAND_IDS.includes('hubspot'), 'hubspot sits in the Works-with row')
   // And the doors that do work today are not filed as coming.
   for (const id of [...LIVE_BRAND_IDS, ...RECIPE_BRAND_IDS]) {
     assert.notEqual(BRANDS[id].role, 'coming', `${id} is a real door`)
@@ -65,7 +67,7 @@ test('a recognition brand never becomes a clickable door in the picker', () => {
     addAgent.indexOf('const PLATFORMS'),
     addAgent.indexOf('function '),
   )
-  for (const id of [...COMING_BRAND_IDS, 'stripe']) {
+  for (const id of [...COMING_BRAND_IDS, 'stripe', 'hubspot']) {
     assert.doesNotMatch(picker, new RegExp(`id: '${id}'`), `${id} is not a door`)
   }
 })

@@ -1,6 +1,6 @@
 """Shared SaaS → Work-event spine.
 
-Many transports (Stripe today; HubSpot later) collapse onto one Work Event.
+Many transports (Stripe, HubSpot) collapse onto one Work Event.
 This module is the only writer of those effects. Adapters verify, map, and
 hand a structured event here. The spine then:
 
@@ -35,7 +35,7 @@ EFFECT_STUCK = "stuck"
 EFFECTS = frozenset({EFFECT_WAIT, EFFECT_CLEAR, EFFECT_STUCK})
 
 # Preferred first. Underscore and dotted forms are both accepted because
-# Stripe metadata keys cannot contain dots in some Dashboard UIs, while
+# Stripe metadata and HubSpot properties often forbid dots in UIs, while
 # agents emitting OTEL-shaped keys will send the dotted form.
 LINK_KEYS = (
     "trovis_loop_external_id",
@@ -46,6 +46,7 @@ LINK_KEYS = (
 
 PROVIDER_LABELS = {
     "stripe": "Stripe",
+    "hubspot": "HubSpot",
 }
 
 

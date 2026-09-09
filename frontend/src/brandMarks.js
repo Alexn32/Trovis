@@ -67,7 +67,7 @@ export const BRANDS = {
   hubspot: {
     id: 'hubspot',
     label: 'HubSpot',
-    role: 'coming',
+    role: 'live',
     color: '#ff7a59',
     aliases: ['hubspot', 'hub spot'],
   },

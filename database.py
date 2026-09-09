@@ -9467,7 +9467,7 @@ def get_fleet_activity(
 # ---------------------------------------------------------------------------
 # SaaS connections + Work-event spine helpers
 # ---------------------------------------------------------------------------
-# Stripe (PR A) and later HubSpot (PR B) share these writers. Tokens are
+# Stripe (PR A) and HubSpot (PR B) share these writers. Tokens are
 # never logged. Webhook routing is provider + provider_account_id, always
 # account-scoped on the write side.
 
@@ -9570,10 +9570,47 @@ def get_saas_connection(account_id: int, provider: str) -> dict[str, Any] | None
         return _saas_connection_public(dict(row)) if row else None
 
 
+def get_saas_connection_secrets(
+    account_id: int, provider: str,
+) -> dict[str, Any] | None:
+    """Server-only tokens for CRM/API calls. Never return from an HTTP handler."""
+    provider = (provider or "").strip().lower()
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, provider, status, provider_account_id, "
+            "access_token, refresh_token, token_type, scope "
+            f"FROM saas_connections WHERE account_id = {PH} AND provider = {PH}",
+            (account_id, provider),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def get_saas_connection_secrets_by_provider_account(
+    provider: str, provider_account_id: str,
+) -> dict[str, Any] | None:
+    """Webhook routing with tokens. HubSpot portalId / Stripe acct_… → row."""
+    provider = (provider or "").strip().lower()
+    acct = (provider_account_id or "").strip()
+    if not acct:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, provider, status, provider_account_id, "
+            "access_token, refresh_token, token_type, scope "
+            f"FROM saas_connections WHERE provider = {PH} "
+            f"AND provider_account_id = {PH} AND status = 'connected' "
+            f"ORDER BY id DESC LIMIT 1",
+            (provider, acct),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
 def get_saas_connection_by_provider_account(
     provider: str, provider_account_id: str,
 ) -> dict[str, Any] | None:
-    """Webhook routing: Stripe acct_… → Trovis account. Tokens stay in DB."""
+    """Webhook routing: Stripe acct_… / HubSpot portal → Trovis account. Tokens stay in DB."""
     provider = (provider or "").strip().lower()
     acct = (provider_account_id or "").strip()
     if not acct:
