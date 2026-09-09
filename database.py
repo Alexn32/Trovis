@@ -8555,23 +8555,80 @@ def create_user(
     return _user_public(row)
 
 
+def _user_auth(row: Any) -> dict[str, Any]:
+    """Public user shape plus password_hash — internal auth use only."""
+    out = _user_public(row)
+    out["password_hash"] = row["password_hash"]
+    return out
+
+
 def get_user_by_email(email: str) -> dict[str, Any] | None:
     """Look up a user by email INCLUDING password_hash — internal use only
-    (login / claim). Never return this shape from an endpoint."""
+    (login / claim). Never return this shape from an endpoint.
+
+    Match is case-insensitive: we always persist lowercased emails, but
+    older rows (and any raw insert) may not. Login and forgot-password
+    both go through here, so they must agree on the same row.
+    """
     email = (email or "").strip().lower()
     if not email:
         return None
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            f"SELECT {_USER_COLS}, password_hash FROM users WHERE email = {PH}",
+            f"SELECT {_USER_COLS}, password_hash FROM users WHERE lower(email) = {PH}",
             (email,),
         )
         row = cur.fetchone()
-    if row is None:
+    return _user_auth(row) if row else None
+
+
+def get_user_with_password(user_id: int) -> dict[str, Any] | None:
+    """Auth shape by id (includes password_hash). Internal use only."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_USER_COLS}, password_hash FROM users WHERE id = {PH}",
+            (user_id,),
+        )
+        row = cur.fetchone()
+    return _user_auth(row) if row else None
+
+
+def resolve_login_user(email: str) -> dict[str, Any] | None:
+    """Resolve an email+password login to a user (with password_hash).
+
+    Reset authenticates by user_id (from the token) and then mints a
+    session — it never asks for email. /auth/login *does* look up by
+    email. Those two paths must land on the same row, or a reset
+    "succeeds" (caller is signed in) and the next login fails.
+
+    Order: case-insensitive users.email, then case-insensitive
+    accounts.email → that org's owner (or sole) user. The second leg
+    covers claim / legacy orgs where accounts.email and users.email
+    diverged.
+    """
+    email = (email or "").strip().lower()
+    if not email:
         return None
-    out = _user_public(row)
-    out["password_hash"] = row["password_hash"]
-    return out
+    user = get_user_by_email(email)
+    if user:
+        return user
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id FROM accounts WHERE lower(email) = {PH}",
+            (email,),
+        )
+        acct = cur.fetchone()
+        if acct is None:
+            return None
+        cur.execute(
+            f"SELECT {_USER_COLS}, password_hash FROM users "
+            f"WHERE account_id = {PH} "
+            "ORDER BY CASE WHEN role = 'owner' THEN 0 ELSE 1 END, id ASC "
+            f"LIMIT 1",
+            (acct["id"],),
+        )
+        row = cur.fetchone()
+    return _user_auth(row) if row else None
 
 
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:
@@ -8583,11 +8640,19 @@ def get_user_by_id(user_id: int) -> dict[str, Any] | None:
 
 
 def set_user_password(user_id: int, password_hash: str) -> None:
+    """Persist a new password hash. Raises LookupError if no user row
+    was updated — callers must not treat a missed UPDATE as success
+    (reset used to mint a session anyway, which is the once-then-fail
+    bug: signed in now, cannot log in later)."""
+    if not password_hash:
+        raise ValueError("password_hash is required")
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             f"UPDATE users SET password_hash = {PH} WHERE id = {PH}",
             (password_hash, user_id),
         )
+        if cur.rowcount != 1:
+            raise LookupError("user not found")
 
 
 _PW_RESET_TTL_SECONDS = 3600  # 1 hour — short by design for a reset link
