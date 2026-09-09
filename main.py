@@ -102,6 +102,7 @@ from models import (
     BudgetUpdate,
     CostAgent,
     CostAgentRow,
+    CostDayPoint,
     CostModelRow,
     CostOverview,
     CostResponse,
@@ -4715,16 +4716,42 @@ def dashboard_cost(request: Request) -> CostResponse:
     )
 
 
+def _daily_points(daily_rows: list[dict], days: int) -> list[CostDayPoint]:
+    """`days`-element dated series (oldest→newest), zero-filling quiet days."""
+    from datetime import datetime, timezone, timedelta
+
+    today = datetime.now(timezone.utc).date()
+    by_date = {r["date"]: r for r in daily_rows}
+    out: list[CostDayPoint] = []
+    for i in range(days - 1, -1, -1):
+        day = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        row = by_date.get(day) or {}
+        out.append(
+            CostDayPoint(
+                date=day,
+                cost=round(row.get("cost") or 0.0, 6),
+                tokens=int(row.get("tokens") or 0),
+            )
+        )
+    return out
+
+
 @app.get("/cost/overview", response_model=CostOverview)
-def cost_overview(request: Request) -> CostOverview:
+def cost_overview(
+    request: Request,
+    days: int = Query(default=30, ge=7, le=90),
+) -> CostOverview:
     """The dedicated cost page: today (UTC calendar day), month-to-date vs. the org
-    budget, a 30-day trend, per-agent breakdown (today/7d/all-time/MTD + the
-    editable monthly cap + over-cap flag), and an org-wide by-model breakdown."""
+    budget, a `days`-long trend (7–90, default 30), per-agent breakdown
+    (today/7d/all-time/MTD + the editable monthly cap + over-cap flag), and an
+    org-wide by-model breakdown."""
     account_id = getattr(request.state, "account_id", None)
     agents = database.get_agents(account_id=account_id)
-    daily, month_total, _ = _daily_series(
-        database.get_fleet_daily_cost(account_id, days=30)
-    )
+    # Always pull at least 31 days so month-to-date stays correct even when the
+    # caller asked for a shorter chart window.
+    rows_for_series = database.get_fleet_daily_cost(account_id, days=max(days, 31))
+    daily, month_total, _ = _daily_series(rows_for_series)
+    series = _daily_points(rows_for_series, days)
     breakdown = database.get_cost_breakdown(account_id)
     mtd_by_service = breakdown.get("by_service_mtd", {})
     caps = {
@@ -4765,7 +4792,9 @@ def cost_overview(request: Request) -> CostOverview:
         month_budget=budget,
         budget_pct=budget_pct,
         over_budget=bool(budget > 0 and month_total > budget),
+        days=days,
         daily=daily,
+        series=series,
         agents=rows,
         by_model=by_model,
     )
@@ -4789,25 +4818,36 @@ def cost_audit(
 
 
 @app.put("/cost/budget", response_model=CostOverview)
-def set_cost_budget(request: Request, body: BudgetUpdate) -> CostOverview:
-    """Set (or clear) the org's monthly budget, then return the fresh overview."""
+def set_cost_budget(
+    request: Request,
+    body: BudgetUpdate,
+    days: int = Query(default=30, ge=7, le=90),
+) -> CostOverview:
+    """Set (or clear) the org's monthly budget, then return the fresh overview.
+    `days` echoes the chart window the caller is showing so the returned series
+    doesn't snap back to 30 days."""
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
         raise HTTPException(status_code=401, detail="no account to set a budget on")
     database.set_account_budget(account_id, body.monthly_budget)
-    return cost_overview(request)
+    return cost_overview(request, days=days)
 
 
 @app.put("/cost/agent-budget", response_model=CostOverview)
-def set_cost_agent_budget(request: Request, body: AgentBudgetUpdate) -> CostOverview:
-    """Set (or clear) a per-agent monthly cap, then return the fresh overview."""
+def set_cost_agent_budget(
+    request: Request,
+    body: AgentBudgetUpdate,
+    days: int = Query(default=30, ge=7, le=90),
+) -> CostOverview:
+    """Set (or clear) a per-agent monthly cap, then return the fresh overview.
+    `days` echoes the caller's chart window (see set_cost_budget)."""
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
         raise HTTPException(status_code=401, detail="no account to set a cap on")
     database.set_agent_budget(
         account_id, body.service_name, body.agent_id or "main", body.monthly_cap
     )
-    return cost_overview(request)
+    return cost_overview(request, days=days)
 
 
 @app.get("/dashboard/work-feed", response_model=list[WorkFeedItem])
