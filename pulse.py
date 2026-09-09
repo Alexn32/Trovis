@@ -95,17 +95,20 @@ GRAPHICS = ("week_finished", "week_stuck", "need_a_look", "none")
 
 SYSTEM_PROMPT = (
     "You write one insight for the person who owns this agent fleet.\n\n"
-    "Goal: something they would genuinely want to know this week — a change, "
-    "a concentration, a risk, or a win. Not a status report. Not "
-    "cheerleading.\n\n"
+    "Pick the single most USEFUL true thing in DATA — a change, a "
+    "concentration, a risk, or a win — and write it so they would want to "
+    "click and ask more. Not a status report. Not cheerleading. Not a list "
+    "of everything you were given.\n\n"
     "You may only use the facts in DATA. Every claim must be entailed by "
     "DATA. If DATA is too thin for a real insight, return "
-    '{"insight":"","graphic":"none"}.\n\n'
+    '{"insight":"","graphic":"none"}. An empty answer is correct and '
+    "expected when there is nothing worth saying — do not manufacture one.\n\n"
     "Do not invent: percentages, dollars, agents, kinds of work, causes, "
     '"efficiency", health, uptime, or motives that are not in DATA.\n'
     "Do not say work is moving/healthy unless DATA supports it.\n"
     "Do not mention fields that are missing.\n"
-    "If you use a number, copy it exactly from DATA.\n\n"
+    "Do not do arithmetic — no differences, totals, or rates. If you use a "
+    "number, copy it exactly from DATA.\n\n"
     "Return JSON only:\n"
     "{\n"
     '  "insight": "one or two short sentences, human language, no jargon",\n'

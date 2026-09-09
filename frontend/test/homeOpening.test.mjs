@@ -9,7 +9,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   askChips,
+  askSeed,
   chooseGraphic,
+  fallbackInsight,
   pulseGraphic,
   pulsePacket,
   clockLabel,
@@ -572,4 +574,123 @@ test('a chart of two zeroes is not drawn', () => {
     chooseGraphic({ finished_this_week: 0, finished_last_week: 0, need_a_look: [{ name: 'a' }] }, null),
     'need_a_look',
   )
+})
+
+// --- the insight slot is never empty for a connected org --------------------
+//
+// The model is missing, slow, unreachable or refused far more often than it
+// succeeds. A pulse that says nothing about the fleet on those loads is a
+// pulse that mostly says nothing — so a templated line holds the slot.
+// "Always on" is the FALLBACK's job, never a looser validator.
+
+test('a connected org with no model result still gets a line', () => {
+  const p = { agents_count: 6, need_a_look: [] }
+  assert.equal(fallbackInsight(p), '6 agents connected')
+  assert.notEqual(fallbackInsight(p), '')
+})
+
+test('the fallback order runs most-actionable first', () => {
+  const full = {
+    agents_count: 6,
+    need_a_look: [{ name: 'flaky-agent' }, { name: 'main' }],
+    finished_this_week: 18,
+    finished_last_week: 12,
+    stuck_now: 2,
+    waiting_now: 3,
+  }
+  // need_a_look beats the week compare...
+  assert.equal(fallbackInsight(full), '2 agents need a look')
+  // ...the week compare beats the counts...
+  const { need_a_look, ...noLook } = full
+  assert.equal(fallbackInsight({ ...noLook, need_a_look: [] }), 'Finished more work than last week · 18 vs 12')
+  // ...stuck beats waiting...
+  assert.equal(
+    fallbackInsight({ agents_count: 6, need_a_look: [], stuck_now: 2, waiting_now: 3 }),
+    '2 stuck right now',
+  )
+  assert.equal(
+    fallbackInsight({ agents_count: 6, need_a_look: [], stuck_now: 0, waiting_now: 3 }),
+    '3 waiting right now',
+  )
+  // ...and the count is the last thing left to say.
+  assert.equal(fallbackInsight({ agents_count: 6, need_a_look: [] }), '6 agents connected')
+})
+
+test('one flagged agent is named; several are counted', () => {
+  assert.equal(fallbackInsight({ need_a_look: [{ name: 'flaky-agent' }] }), 'flaky-agent needs a look')
+  assert.equal(fallbackInsight({ need_a_look: [{ name: 'a' }, { name: 'b' }] }), '2 agents need a look')
+  assert.equal(fallbackInsight({ agents_count: 1, need_a_look: [] }), '1 agent connected')
+})
+
+test('the fallback never invents a week it was not given', () => {
+  // has_prev_week false means pulsePacket omits finished_last_week entirely.
+  // The fallback must not fill that in as 0 and call it a decline.
+  const line = fallbackInsight({ finished_this_week: 18, need_a_look: [] })
+  assert.equal(line, '18 finished this week')
+  assert.doesNotMatch(line, /last week/)
+})
+
+test('two zeroes never win the slot', () => {
+  // "the same as last week" off 0 and 0 is a result dressed up out of nothing,
+  // and "0 finished this week" as the ONE thing Home says is worse than the
+  // next true statement down the list.
+  assert.equal(
+    fallbackInsight({ finished_this_week: 0, finished_last_week: 0, stuck_now: 2, need_a_look: [] }),
+    '2 stuck right now',
+  )
+  assert.equal(
+    fallbackInsight({ finished_this_week: 0, need_a_look: [], waiting_now: 1 }),
+    '1 waiting right now',
+  )
+  // But a zero against a real number IS the news.
+  assert.equal(
+    fallbackInsight({ finished_this_week: 0, finished_last_week: 12, need_a_look: [] }),
+    'Finished less work than last week · 0 vs 12',
+  )
+})
+
+test('a genuinely empty packet gets no line rather than a made-up one', () => {
+  assert.equal(fallbackInsight({}), '')
+  assert.equal(fallbackInsight(null), '')
+  // Zero agents is first-run territory, not "0 agents connected".
+  assert.equal(fallbackInsight({ agents_count: 0, need_a_look: [] }), '')
+})
+
+test('the fallback quotes only numbers it was given', () => {
+  // Same rule the generated sentence is held to: no arithmetic.
+  const line = fallbackInsight({ finished_this_week: 18, finished_last_week: 12, need_a_look: [] })
+  for (const n of line.match(/\d+/g) || []) {
+    assert.ok(['18', '12'].includes(n), `fallback invented ${n}`)
+  }
+})
+
+// --- the line is a door into Ask -------------------------------------------
+
+test('the seed asks the visible line, plus a cue to go deeper', () => {
+  const seed = askSeed('2 agents need a look')
+  assert.match(seed, /^2 agents need a look/)
+  assert.match(seed, /Go deeper/)
+})
+
+test('an empty line seeds nothing — no dead question', () => {
+  assert.equal(askSeed(''), '')
+  assert.equal(askSeed(null), '')
+  assert.equal(askSeed('   '), '')
+})
+
+test('fallback copy ships no jargon and no invented units', () => {
+  const lines = [
+    fallbackInsight({ need_a_look: [{ name: 'flaky-agent' }] }),
+    fallbackInsight({ need_a_look: [{ name: 'a' }, { name: 'b' }] }),
+    fallbackInsight({ finished_this_week: 18, finished_last_week: 12, need_a_look: [] }),
+    fallbackInsight({ finished_this_week: 18, need_a_look: [] }),
+    fallbackInsight({ stuck_now: 2, need_a_look: [] }),
+    fallbackInsight({ waiting_now: 3, need_a_look: [] }),
+    fallbackInsight({ agents_count: 6, need_a_look: [] }),
+  ]
+  for (const l of lines) {
+    assert.ok(!FORBIDDEN.test(l), `fallback ships jargon: ${JSON.stringify(l)}`)
+    assert.doesNotMatch(l, /[$%]/, `fallback invents a unit: ${JSON.stringify(l)}`)
+    assert.doesNotMatch(l, /efficien|uptime|healthy|best week|failure rate/i, l)
+  }
 })

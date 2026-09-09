@@ -213,6 +213,63 @@ export function pulsePacket({ overview, items, truncated, cost, attention, agent
 }
 
 /**
+ * The line the pulse shows when the model gave us nothing usable.
+ *
+ * Templated, never generated, so the slot is never empty for a connected org:
+ * the model is missing, slow, unreachable or refused far more often than it
+ * succeeds, and a pulse that says nothing about the fleet on those loads is a
+ * pulse that mostly says nothing.
+ *
+ * "Always on" is this function's job, NOT a looser validator. The generated
+ * sentence still has to earn its place against the same entailment check; it
+ * simply replaces this one when it passes.
+ *
+ * Order is most-actionable first. Two zeroes never win a slot: "the same as
+ * last week" off 0 and 0 dressed up as a result, and "0 finished this week"
+ * as the single thing Home says about your fleet, are both worse than the
+ * next true statement down the list.
+ */
+export function fallbackInsight(packet) {
+  const p = packet || {}
+  const look = p.need_a_look || []
+  if (look.length === 1 && look[0] && look[0].name) return `${look[0].name} needs a look`
+  if (look.length > 1) return `${look.length} agents need a look`
+
+  const tw = p.finished_this_week
+  const lw = p.finished_last_week
+  const haveBoth = Number.isFinite(tw) && Number.isFinite(lw)
+  // 0 vs 0 is not a comparison — fall through rather than call it "the same".
+  if (haveBoth && (tw || lw)) {
+    const shape = tw > lw ? 'more work than' : tw < lw ? 'less work than' : 'the same as'
+    return `Finished ${shape} last week · ${tw} vs ${lw}`
+  }
+  if (Number.isFinite(tw) && tw > 0) return `${tw} finished this week`
+
+  const stuck = Number(p.stuck_now) || 0
+  if (stuck > 0) return `${stuck} stuck right now`
+  const waiting = Number(p.waiting_now) || 0
+  if (waiting > 0) return `${waiting} waiting right now`
+
+  const agents = Number(p.agents_count) || 0
+  if (agents > 0) return `${agents} agent${agents === 1 ? '' : 's'} connected`
+  return ''
+}
+
+/**
+ * The insight is a door, not a verdict.
+ *
+ * Clicking it opens the existing Ask with the line already asked, so the one
+ * sentence the pulse has room for is the beginning of the conversation rather
+ * than the end of it. The cue is what turns a statement into a question Ask
+ * can actually answer.
+ */
+export function askSeed(line) {
+  const s = String(line || '').trim()
+  if (!s) return ''
+  return `${s}\n\nGo deeper — what's behind that?`
+}
+
+/**
  * Which graphic to draw, decided HERE and not by the server.
  *
  * MIRRORS pulse.choose_graphic — keep the two in step. The client owns this

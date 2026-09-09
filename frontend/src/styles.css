@@ -4509,13 +4509,24 @@ a:hover {
 .home-pulse-row {
   display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-width: 0;
 }
-/* The generated line. Sized as a caption, not a headline: it is the one thing
-   on the pulse that did not come from the record, and it earns no more
-   prominence than the facts beside it. */
+/* The one line about the fleet, and a door into Ask. Sized as a caption, not
+   a headline — the pulse has room for a sentence, and Ask is where the depth
+   lives. The cue only appears on hover/focus so the row stays quiet. */
 .home-pulse-insight {
-  font-size: 12.5px; line-height: 1.5; color: var(--text-secondary);
-  margin: 0; max-width: 72ch;
+  display: inline-flex; align-items: baseline; gap: 8px; max-width: 78ch;
+  font-family: inherit; font-size: 12.5px; line-height: 1.5;
+  color: var(--text-secondary); text-align: left;
+  background: none; border: none; padding: 2px 0; margin: 0; cursor: pointer;
 }
+.home-pulse-insight:hover { color: var(--text-primary); }
+.home-pulse-insight:hover .home-pulse-insight-text { text-decoration: underline; }
+.home-pulse-insight:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 5px; }
+.home-pulse-insight-cue {
+  font-size: 11px; font-weight: 600; color: var(--text-dim);
+  white-space: nowrap; opacity: 0; transition: opacity 90ms ease;
+}
+.home-pulse-insight:hover .home-pulse-insight-cue,
+.home-pulse-insight:focus-visible .home-pulse-insight-cue { opacity: 1; }
 /* Two bars proving one comparison. No pie, no gauge, no score. */
 .home-pulse-graphic {
   display: flex; align-items: center; gap: 10px; flex-shrink: 0;

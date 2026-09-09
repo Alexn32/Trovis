@@ -10,14 +10,16 @@ import { formatCost as fmtMoney } from './utils.js'
 import {
   asOfLabel,
   askChips,
+  askSeed,
   briefingLead,
+  chooseGraphic,
   deskEmptyCopy,
   deskItems,
+  fallbackInsight,
   fleetPulse,
   isFirstRun,
   noticedLines,
   proofCounts,
-  chooseGraphic,
   pulseGraphic,
   pulsePacket,
 } from './home.js'
@@ -137,6 +139,11 @@ export default function Dashboard({
   // rest of the pulse. The model's pick only overrides it once it arrives, and
   // only if it names a series we can draw.
   const graphic = pulseGraphic(chooseGraphic(packet, insight.graphic), packet)
+  // The slot is never empty for a connected org. The generated sentence is
+  // preferred and has already passed the entailment check server-side; the
+  // templated line holds the place until then, and keeps it when the model is
+  // missing, slow, or refused.
+  const pulseLine = insight.insight || fallbackInsight(packet)
   const chips = askChips({
     desk,
     counts,
@@ -165,7 +172,7 @@ export default function Dashboard({
           <FleetPulse
             pulse={pulse}
             health={health}
-            insight={insight.insight}
+            insight={pulseLine}
             graphic={graphic}
             onOpenAgent={onOpenAgent}
             onGoFleet={onGoFleet}
@@ -511,10 +518,19 @@ function FleetPulse({ pulse, health, insight, graphic, onOpenAgent, onGoFleet, o
           )}
         </div>
 
-        {/* The generated line, when there is a valid one. It arrives after
-            first paint and its absence is invisible — everything above and
-            beside it came from the record. */}
-        {insight && <p className="home-pulse-insight">{insight}</p>}
+        {/* One true line about the fleet, and a door into Ask. The pulse has
+            room for a sentence; Ask is where the depth lives, so clicking the
+            line asks it rather than expanding something here. */}
+        {insight && (
+          <button
+            type="button"
+            className="home-pulse-insight"
+            onClick={() => openAsk(askSeed(insight))}
+          >
+            <span className="home-pulse-insight-text">{insight}</span>
+            <span className="home-pulse-insight-cue" aria-hidden="true">Ask →</span>
+          </button>
+        )}
       </div>
 
       {graphic && <PulseGraphic graphic={graphic} onGoWork={onGoWork} />}
