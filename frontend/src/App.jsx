@@ -501,6 +501,11 @@ function AppInner() {
             setOverlay(null)
           }}
           onOpenCost={() => setOverlay({ kind: 'cost' })}
+          // The fleet pulse's count and its "need a look" both open Fleet.
+          onGoFleet={() => {
+            setTab('fleet')
+            setOverlay(null)
+          }}
           onConnectAgent={openAddAgent}
           userName={account.userName}
         />
@@ -566,8 +571,11 @@ function AppInner() {
         )}
         {panes}
       </main>
-      {/* Global Trovis assistant — floating ⌘K pill, reachable on every page. */}
-      <AskPill />
+      {/* Global Trovis assistant — reachable on every page. Home renders its
+          own Ask field, so the floating pill is suppressed there: two Ask
+          buttons on one screen is two answers to "where do I ask?". ⌘K and
+          openAsk() still work everywhere, including Home. */}
+      <AskPill hideLauncher={dashboardVisible} />
       <UpgradeModal
         open={upgradeOpen}
         me={me}

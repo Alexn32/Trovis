@@ -891,6 +891,10 @@ class CostResponse(BaseModel):
     month_total: float = 0.0
     month_budget: float = 0.0
     budget_pct: float = 0.0
+    # `agents` is the TOP SPENDERS, capped — never count it. `agent_count` is
+    # how many are actually reporting, which is what Home's fleet pulse says
+    # out loud; counting a capped list would print "8 agents" for a fleet of 30.
+    agent_count: int = 0
     agents: list[CostAgent] = Field(default_factory=list)
     daily: list[float] = Field(default_factory=list)
 

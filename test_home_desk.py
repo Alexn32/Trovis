@@ -216,5 +216,23 @@ with TestClient(main.app) as c:
     check("and appends nothing the second time",
           kinds2.count("handoff_declined") == 1)
 
+    print("\n--- the fleet pulse can count agents without loading the roster ---")
+    # Home says "N agents" out loud. The only agent data it may read is
+    # /dashboard/cost, whose `agents` list is capped at the top 8 spenders —
+    # counting THAT would print "8 agents" for a fleet of 11.
+    for i in range(11):
+        assert post(c, KEY, f"pulse-agent-{i}", [span("run", NOW - HOUR, {
+            "gen_ai.request.model": "claude-sonnet-4-6"})]).status_code == 200
+    cost = c.get("/dashboard/cost", headers=H).json()
+    seen = {a["service_name"] for a in c.get("/agents", headers=H).json()}
+    check("agent_count is the real total, not the capped list",
+          cost["agent_count"] == len(seen))
+    check("...and the fleet is bigger than the cap, so the two genuinely differ",
+          len(seen) > len(cost["agents"]))
+    check("the capped list is still capped", len(cost["agents"]) <= 8)
+    # First-run detection reads the same field: a non-zero count must never
+    # look like "nothing is connected".
+    check("a populated account never reads as a first run", cost["agent_count"] > 0)
+
 print("\n" + (f"FAILURES: {failures}" if failures else "All Home desk checks passed."))
 raise SystemExit(1 if failures else 0)

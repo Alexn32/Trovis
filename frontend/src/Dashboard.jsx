@@ -9,9 +9,11 @@ import { workUpdatedLabel } from './board.js'
 import { formatCost as fmtMoney } from './utils.js'
 import {
   asOfLabel,
+  askChips,
   briefingLead,
-  dayShape,
+  deskEmptyCopy,
   deskItems,
+  fleetPulse,
   isFirstRun,
   noticedLines,
   proofCounts,
@@ -22,25 +24,26 @@ import { openAsk } from './askOpen.js'
 import { TrovisMark, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
-// Home — the worker's opening, not a sitemap of the other tabs.
+// Home — the worker's opening, across the full width of the screen.
 //
 // First paint answers three questions, in this order:
 //   what is waiting on ME  ·  is anything stuck  ·  is the rest of the day moving
 //
-//   1. Greeting          — who and when. No stats in the header.
-//   2. Shape of the day  — one templated sentence. No counts, no money, no model.
-//   3. Your desk         — ONLY work waiting on the signed-in user. Gone when empty.
-//   4. Trovis noticed    — stuck first, then agent health. At most three lines.
-//   5. Proof strip       — the only place on Home that prints numbers.
-//   6. Ask               — the existing pill, given a real front door here.
+//   1. Greeting      — who and when. No stats in the header.
+//   2. Fleet pulse   — full width. How many agents, and which need a look.
+//   3. Two columns   — your desk (left) · Trovis noticed (right)
+//   4. Proof strip   — full width. The only place on Home that prints numbers.
+//   5. Ask           — one field, plus chips built from what is on the page.
+//   6. Briefing      — open, leading with a templated line.
 //
-// Deliberately NOT here: the work feed (its page is unchanged, just unlinked
-// from Home), a Fleet roster preview, the briefing essay on first paint, and
-// any chart or kind-of-work grid.
+// Deliberately NOT here: the work feed, a Fleet roster, any chart or
+// kind-of-work grid.
 //
-// Numbers rule: the sentence carries none, the strip owns them all, and the
-// one dollar figure comes from /dashboard/cost — the same call the Cost page
-// makes. Two sources for one number is how two surfaces start disagreeing.
+// THE NUMBERS RULE. The strip owns every count. No other block states one in
+// prose — not the desk box, not the briefing lead. This is not fussiness: the
+// old shape-of-the-day line inferred "Work is moving" from "nothing is stuck"
+// and printed it above a strip reading 0 moving. Prose that reasons about
+// counts it does not print is how a page contradicts itself.
 //
 // Data: the lean pair (/work/overview + /work/items) plus cost and attention.
 // Never /work/board, /work/summary or the agent roster. Each section fetches
@@ -54,10 +57,14 @@ const WORK_PAGE = 50
 // Desk rows shown before it defers to Work. Your own waits are rarely many.
 const DESK_PREVIEW = 6
 
+// Agents named in the pulse before it defers to Fleet.
+const PULSE_PREVIEW = 5
+
 export default function Dashboard({
   onOpenAgent,
   onOpenCost,
   onGoWork,
+  onGoFleet,
   onConnectAgent,
   userName,
   active = true,
@@ -86,30 +93,36 @@ export default function Dashboard({
     }
   }, [])
 
-  // The lean work pair feeds the sentence, the desk, the stuck line and the
-  // strip, so it is fetched once here rather than four times.
+  // The lean work pair feeds the desk, the stuck line, the strip and the
+  // briefing lead, so it is fetched once here rather than four times.
   const work = useWork(refreshKey)
   const cost = useSection((signal) => api.getCost({ signal }), refreshKey)
-  // Agent health — the only other thing Trovis noticed is allowed to say.
+  // Agent health — the fleet pulse and Trovis noticed both read this, and it
+  // is the only agent data Home is allowed to load.
   const health = useSection((signal) => api.getAttention({ signal }), refreshKey)
 
   const [openItem, setOpenItem] = useState(null)
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
-  // "Is anything connected" comes from the agent list /dashboard/cost already
-  // returns — no extra request, and honest in a way "no work yet" is not.
-  const agents = Array.isArray(cost.data?.agents) ? cost.data.agents : null
-  const firstRun = isFirstRun({ overview: work.overview, items: work.items, agents })
+  // "Is anything connected" comes from /dashboard/cost, which Home fetches for
+  // the strip anyway — no extra request, and honest in a way "no work yet" is
+  // not. `agent_count` is the real total; `agents` is a truncated top-spender
+  // list and must never be counted.
+  const agentCount = Number.isFinite(cost.data?.agent_count) ? cost.data.agent_count : null
+  const firstRun = isFirstRun({
+    overview: work.overview,
+    items: work.items,
+    agentCount,
+  })
 
   const desk = deskItems(work.items)
   const counts = proofCounts(work.items)
-  // The sentence reads the SAME rows the sections below render, so it can
-  // never claim work is waiting on you while the desk sits empty.
-  const sentence = dayShape({
-    hasRecord: work.items !== null,
-    connected: !firstRun,
-    deskCount: desk.length,
-    stuckCount: counts.stuck,
+  const pulse = fleetPulse({ agentCount, attention: health.data })
+  const chips = askChips({
+    desk,
+    counts,
+    attention: health.data,
+    costToday: cost.data?.today,
   })
 
   function openTarget(target) {
@@ -123,20 +136,32 @@ export default function Dashboard({
     <div className="dash home">
       <Greeting userName={userName} />
 
-      {sentence && <p className="home-shape">{sentence}</p>}
-
       {firstRun ? (
-        <FirstRunCta onConnectAgent={onConnectAgent} />
+        // Nothing connected: the desk box carries the whole message and the
+        // one thing to do. No fleet pulse (there is no fleet), and no strip —
+        // five theatrical zeros and $0.00 is a product pretending to have data.
+        <FirstRun work={work} onConnectAgent={onConnectAgent} />
       ) : (
         <>
-          <DeskSection
-            work={work}
-            desk={desk}
-            onOpenItem={setOpenItem}
-            onGoWork={onGoWork}
-            onResolved={refresh}
+          <FleetPulse
+            pulse={pulse}
+            health={health}
+            onOpenAgent={onOpenAgent}
+            onGoFleet={onGoFleet}
           />
-          <NoticedSection work={work} health={health} onOpen={openTarget} />
+
+          <div className="home-cols">
+            <DeskSection
+              work={work}
+              desk={desk}
+              connected
+              onOpenItem={setOpenItem}
+              onGoWork={onGoWork}
+              onResolved={refresh}
+            />
+            <NoticedSection work={work} health={health} onOpen={openTarget} />
+          </div>
+
           <ProofStrip
             work={work}
             counts={counts}
@@ -144,8 +169,8 @@ export default function Dashboard({
             onGoWork={onGoWork}
             onOpenCost={onOpenCost}
           />
-          <AskEntry />
-          <BriefingDisclosure work={work} refreshKey={refreshKey} />
+          <AskSection chips={chips} />
+          <Briefing work={work} refreshKey={refreshKey} />
         </>
       )}
 
@@ -259,9 +284,14 @@ function useWork(refreshKey) {
 }
 
 /**
- * The briefing, fetched ONLY once someone opens the disclosure. It is the
- * slowest call Home can make (a Claude call behind a server cap), and it is
- * not what a person opens Home to read — so it stays off the first paint.
+ * The Claude narrative, fetched ONLY once someone asks for it.
+ *
+ * The briefing section is open by default, but its body leads with the
+ * templated line — which is instant and cannot contradict the strip. The
+ * generated prose stays behind "More" for two reasons: it is the slowest call
+ * Home can make, and it is the one thing on the page whose wording we do not
+ * control, so it must not be able to state a number the strip disagrees with
+ * on first paint.
  */
 function useLazyBriefing(open, refreshKey) {
   const [data, setData] = useState(null)
@@ -334,26 +364,136 @@ function HomeSection({ title, action, onAction, className = '', children }) {
   )
 }
 
+// --- 2. fleet pulse --------------------------------------------------------
+
+/**
+ * The highest-level thing Home says about the agents, and the only thing it
+ * can say without loading the roster: how many are reporting, and which ones
+ * are already flagged.
+ *
+ * It never claims "all healthy". Home does not see the roster, so an agent
+ * not being flagged means nobody looked — not that it is fine. When nothing
+ * is flagged the row states the count and stops.
+ */
+function FleetPulse({ pulse, health, onOpenAgent, onGoFleet }) {
+  const { count, needLook } = pulse
+  // Nothing truthful to say yet.
+  if (count === null && needLook.length === 0) return null
+  const shown = needLook.slice(0, PULSE_PREVIEW)
+
+  return (
+    <section className="home-pulse" aria-label="Fleet">
+      <button
+        type="button"
+        className="home-pulse-count"
+        onClick={onGoFleet}
+        disabled={!onGoFleet}
+      >
+        <span className="home-pulse-num">{count === null ? '—' : count}</span>
+        <span className="home-pulse-lbl">{count === 1 ? 'agent' : 'agents'}</span>
+      </button>
+
+      {needLook.length > 0 ? (
+        <div className="home-pulse-look">
+          <button
+            type="button"
+            className="home-pulse-need"
+            onClick={onGoFleet}
+            disabled={!onGoFleet}
+          >
+            {needLook.length} need{needLook.length === 1 ? 's' : ''} a look
+          </button>
+          <ul className="home-pulse-list">
+            {shown.map((a, i) => (
+              <li key={`${a.service_name || a.agent}-${a.agent_id || 'main'}-${i}`}>
+                <button
+                  type="button"
+                  className={`home-pulse-agent sev-${a.severity || 'info'}`}
+                  onClick={() => onOpenAgent && onOpenAgent(...agentRoute(a))}
+                >
+                  <span className="home-pulse-dot" aria-hidden="true" />
+                  {a.agent}
+                </button>
+              </li>
+            ))}
+            {needLook.length > shown.length && (
+              <li>
+                <button type="button" className="dash-link" onClick={onGoFleet}>
+                  {needLook.length - shown.length} more →
+                </button>
+              </li>
+            )}
+          </ul>
+        </div>
+      ) : (
+        // Not "all healthy" — we only know that nothing was flagged.
+        !health.loading && !health.failed && (
+          <span className="home-pulse-quiet">Nothing flagged right now.</span>
+        )
+      )}
+    </section>
+  )
+}
+
 // --- 3. your desk ----------------------------------------------------------
+
+// The three answers a person can give without opening anything:
+//
+//   Done          — I did it. Ends here.
+//   I've got this — mine now, still going. Ends the wait, not the work.
+//   Not mine      — pass it back to whoever sent it.
+//
+// All three are only offered when the server gave us the open decision's id.
+// A button with nothing to call is worse than no button.
+const DESK_ACTIONS = [
+  { key: 'done', label: 'Done', busy: 'Marking done…', className: 'btn btn-primary' },
+  { key: 'mine', label: "I've got this", busy: 'Taking it…', className: 'btn btn-secondary' },
+  { key: 'not-mine', label: 'Not mine', busy: 'Passing back…', className: 'btn btn-secondary' },
+]
 
 /**
  * Only what is waiting on YOU. Not "needs a human", not a teammate's wait,
  * not org-wide stuck work — those belong to their owner or to Trovis noticed.
  *
- * The whole section is absent when the desk is clear. There is no "all clear"
- * card: an empty desk is best said by the sentence at the top and by silence
- * here.
+ * Unlike every other block, this one stays on the page when it is empty: a
+ * clear desk is the answer to the question Home exists to ask, so it gets a
+ * designed empty state rather than silence.
  */
-function DeskSection({ work, desk, onOpenItem, onGoWork, onResolved }) {
+function DeskSection({ work, desk, connected, onOpenItem, onGoWork, onResolved, onConnectAgent }) {
   if (work.failed) {
     return (
-      <HomeSection title="Your desk">
+      <HomeSection title="Your desk" className="home-desk">
         <WorkLoadFailed lead="Can't load what's waiting on you" onRetry={work.retry} />
       </HomeSection>
     )
   }
-  if (work.items === null) return null // loading: stay silent, reserve nothing
-  if (desk.length === 0) return null
+  if (connected && work.items === null) {
+    return (
+      <HomeSection title="Your desk" className="home-desk">
+        <div className="dash-skel">
+          <span style={{ width: '70%' }} />
+          <span style={{ width: '52%' }} />
+        </div>
+      </HomeSection>
+    )
+  }
+
+  if (desk.length === 0) {
+    // One fact, and nothing inferred about the rest of the day. The strip
+    // below says what is moving; this box does not guess at it.
+    const { lead, sub } = deskEmptyCopy({ connected })
+    return (
+      <HomeSection title="Your desk" className="home-desk is-clear">
+        <p className="home-desk-clear">{lead}</p>
+        <p className="home-desk-clear-sub">{sub}</p>
+        {!connected && onConnectAgent && (
+          <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
+            Connect an agent
+          </button>
+        )}
+      </HomeSection>
+    )
+  }
 
   const shown = desk.slice(0, DESK_PREVIEW)
   const hidden = desk.length - shown.length
@@ -387,20 +527,6 @@ function DeskSection({ work, desk, onOpenItem, onGoWork, onResolved }) {
     </HomeSection>
   )
 }
-
-// The three answers a person can give without opening anything:
-//
-//   Done          — I did it. Ends here.
-//   I've got this — mine now, still going. Ends the wait, not the work.
-//   Not mine      — pass it back to whoever sent it.
-//
-// All three are only offered when the server gave us the open decision's id.
-// A button with nothing to call is worse than no button.
-const DESK_ACTIONS = [
-  { key: 'done', label: 'Done', busy: 'Marking done…', className: 'btn btn-primary' },
-  { key: 'mine', label: "I've got this", busy: 'Taking it…', className: 'btn btn-secondary' },
-  { key: 'not-mine', label: 'Not mine', busy: 'Passing back…', className: 'btn btn-secondary' },
-]
 
 function DeskRow({ row, onOpen, onResolved }) {
   const [busy, setBusy] = useState(null)
@@ -467,7 +593,8 @@ function DeskRow({ row, onOpen, onResolved }) {
 // --- 4. Trovis noticed -----------------------------------------------------
 
 // Composed from the record, never by a model on the critical path: the stuck
-// line first, then agent health. Absent entirely when there is nothing to say.
+// line first, then agent health. Every row carries the one thing to do about
+// it — a notice you cannot act on is just worry.
 function NoticedSection({ work, health, onOpen }) {
   if (work.items === null && health.loading) return null
   const lines = noticedLines({
@@ -482,14 +609,15 @@ function NoticedSection({ work, health, onOpen }) {
     <HomeSection title="Trovis noticed" className="home-noticed">
       <ul className="home-noticed-list">
         {lines.map((line) => (
-          <li key={line.key}>
+          <li key={line.key} className={`home-noticed-row tone-${line.kind}`}>
+            <span className="home-noticed-dot" aria-hidden="true" />
+            <span className="home-noticed-text">{line.text}</span>
             <button
               type="button"
-              className={`home-noticed-row tone-${line.kind}`}
+              className="btn btn-secondary home-noticed-act"
               onClick={() => onOpen(line.target)}
             >
-              <span className="home-noticed-dot" aria-hidden="true" />
-              <span className="home-noticed-text">{line.text}</span>
+              {line.action}
             </button>
           </li>
         ))}
@@ -569,10 +697,16 @@ function StripCell({ label, tone, value, loading, failed, onRetry, onOpen }) {
 
 // --- 6. Ask ----------------------------------------------------------------
 
-// The pill is always there on ⌘K, but a pill you have to know about is not an
-// invitation. This is the same control with a front door: it opens the real
-// Ask panel, and typing here sends the question straight in.
-function AskEntry() {
+/**
+ * The one Ask affordance on Home. The floating pill is suppressed while this
+ * pane is on screen (see App.jsx) so there is a single target, and both open
+ * the same panel — this is a front door to the existing Ask, not a second
+ * chat.
+ *
+ * The chips are built from what is actually on the page right now, so a chip
+ * never asks about an empty set.
+ */
+function AskSection({ chips }) {
   const [q, setQ] = useState('')
 
   function submit(e) {
@@ -583,48 +717,80 @@ function AskEntry() {
   }
 
   return (
-    <form className="home-ask" onSubmit={submit}>
-      <span className="dash-sq" aria-hidden="true">
-        <TrovisMark size={11} />
-      </span>
-      <input
-        className="home-ask-input"
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder="Ask Trovis about today…"
-        aria-label="Ask Trovis about today"
-      />
-      <span className="home-ask-key" aria-hidden="true">⌘K</span>
-    </form>
+    <section className="home-ask-block" aria-label="Ask Trovis">
+      <form className="home-ask" onSubmit={submit}>
+        <span className="dash-sq" aria-hidden="true">
+          <TrovisMark size={11} />
+        </span>
+        <input
+          className="home-ask-input"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Ask Trovis about the work…"
+          aria-label="Ask Trovis about the work"
+        />
+        <span className="home-ask-key" aria-hidden="true">⌘K</span>
+      </form>
+      {chips.length > 0 && (
+        <div className="home-ask-chips">
+          {chips.map((c) => (
+            <button
+              key={c.key}
+              type="button"
+              className="dash-suggest-pill"
+              onClick={() => openAsk(c.query)}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
-// --- briefing, behind a quiet disclosure -----------------------------------
+// --- 7. daily briefing -----------------------------------------------------
 
-// Kept, but off the first paint: closed by default and fetched only on the
-// first open. The lead line is composed from counts (always truthful, always
-// available); the Claude narrative is the part that can be missing.
-function BriefingDisclosure({ work, refreshKey }) {
-  const [open, setOpen] = useState(false)
-  const briefing = useLazyBriefing(open, refreshKey)
+/**
+ * Open on first paint, leading with the templated line.
+ *
+ * The lead is composed from counts and states no figures — always available,
+ * always true, and it cannot disagree with the strip. The Claude narrative is
+ * the one piece of text on Home whose wording we do not control, so it sits
+ * behind "More" and is fetched only when asked for: that keeps the slowest
+ * call Home can make off the first paint AND guarantees nothing on the opening
+ * screen can contradict the numbers underneath it.
+ */
+function Briefing({ work, refreshKey }) {
+  const [showMore, setShowMore] = useState(false)
+  const briefing = useLazyBriefing(showMore, refreshKey)
   const lead = briefingLead(work.overview)
   const asOf = asOfLabel(briefing.data?.generated_at)
 
+  if (!lead && work.overview === null) return null
+
   return (
-    <div className="home-brief-disclosure">
+    <section className="home-brief" aria-label="Daily briefing">
+      <div className="home-card-head">
+        <span className="dash-section-title">
+          <span className="dash-sq"><TrovisMark size={10} /></span>
+          Daily briefing
+        </span>
+      </div>
+      <p className="home-brief-lead">{lead}</p>
+
       <button
         type="button"
-        className="home-brief-toggle"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
+        className="home-brief-more"
+        onClick={() => setShowMore((o) => !o)}
+        aria-expanded={showMore}
       >
-        <span className="dash-sq"><TrovisMark size={10} /></span>
-        <span className="home-brief-toggle-label">Daily briefing</span>
-        {open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
+        {showMore ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
+        <span>{showMore ? 'Less' : 'More'}</span>
       </button>
-      {open && (
+
+      {showMore && (
         <div className="home-brief-body">
-          {lead && <p className="home-brief-lead">{lead}</p>}
           {briefing.loading ? (
             <div className="dash-skel">
               <span style={{ width: '92%' }} />
@@ -641,26 +807,16 @@ function BriefingDisclosure({ work, refreshKey }) {
           {asOf && <div className="home-brief-foot">{asOf}</div>}
         </div>
       )}
-    </div>
+    </section>
   )
 }
 
 // --- first run -------------------------------------------------------------
 
-// The sentence above already said nothing is connected. This is the one thing
-// to do about it — no tiles, and no strip of zeros pretending to be a product.
-function FirstRunCta({ onConnectAgent }) {
+// Nothing is connected. The desk box says so and offers the one action; every
+// other block would be inventing data it does not have.
+function FirstRun({ work, onConnectAgent }) {
   return (
-    <div className="dash-card home-firstrun">
-      <p className="home-firstrun-sub">
-        Connect an agent and its work shows up here on its own — what needs you,
-        what&apos;s stuck, and what moved. You will not have to enter any of it.
-      </p>
-      {onConnectAgent && (
-        <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
-          Connect an agent
-        </button>
-      )}
-    </div>
+    <DeskSection work={work} desk={[]} connected={false} onConnectAgent={onConnectAgent} />
   )
 }

@@ -118,25 +118,27 @@ test('Work counts ignore shell titles and survive missing data', () => {
   assert.deepEqual(workSplit(null, null), { moving: 0, waiting: 0, stuck: 0, done: 0 })
 })
 
-test('the lead sentence states today in plain words, and survives a missing briefing', () => {
+test('the briefing lead states today in plain words, and prints no figures', () => {
+  // It says WHICH conditions hold; the proof strip says how many. Prose that
+  // repeats a count is how the two drift apart.
   assert.equal(
     briefingLead({ needs_you: 2, needs_attention: 1, open: 9 }),
-    '2 things need you and 1 needs attention.',
+    'Today, work is waiting on you and some work needs attention. The rest is in progress.',
   )
   assert.equal(
-    briefingLead({ needs_you: 1, needs_attention: 0, open: 4 }),
-    '1 thing needs you.',
+    briefingLead({ needs_you: 1, needs_attention: 0, open: 1 }),
+    'Today, work is waiting on you.',
   )
-  // "need attention", never "are stuck": the bucket includes work merely
+  // "needs attention", never "is stuck": the bucket includes work merely
   // waiting too long on a person, which is not the same thing as stuck.
   assert.equal(
-    briefingLead({ needs_you: 0, needs_attention: 3, open: 5 }),
-    '3 need attention.',
+    briefingLead({ needs_you: 0, needs_attention: 3, open: 3 }),
+    'Today, some work needs attention.',
   )
   // Healthy silence, not an alarm.
   assert.equal(
     briefingLead({ needs_you: 0, needs_attention: 0, open: 4 }),
-    'Nothing needs you. 4 things in progress.',
+    'Nothing needs you. Everything open is in progress.',
   )
   assert.equal(
     briefingLead({ needs_you: 0, needs_attention: 0, open: 0 }),
@@ -146,6 +148,29 @@ test('the lead sentence states today in plain words, and survives a missing brie
   assert.equal(briefingLead(null), '')
 })
 
+test('the briefing lead never claims a state it did not read', () => {
+  // The bug this replaces: a clause inferred from the ABSENCE of another one.
+  // "Work is moving" was derived from "nothing is stuck" and printed above a
+  // strip reading 0 moving. Every clause here is gated on its own count, and
+  // none of them carries a digit or a dollar.
+  for (const needs_you of [0, 1, 5]) {
+    for (const needs_attention of [0, 1, 4]) {
+      for (const open of [0, 1, 9]) {
+        const s = briefingLead({ needs_you, needs_attention, open })
+        assert.doesNotMatch(s, /\d/, `lead has a digit: ${s}`)
+        assert.doesNotMatch(s, /[$€£]/, `lead has money: ${s}`)
+        if (needs_you === 0) {
+          assert.doesNotMatch(s, /waiting on you/, `claims a wait it did not read: ${s}`)
+        }
+        // "in progress" may only appear when something is actually open.
+        if (open === 0) {
+          assert.doesNotMatch(s, /in progress/, `claims progress with nothing open: ${s}`)
+        }
+      }
+    }
+  }
+})
+
 test('as-of footer is omitted rather than printing a placeholder', () => {
   assert.equal(asOfLabel(null), '')
   assert.equal(asOfLabel('not a date'), '')
@@ -153,18 +178,19 @@ test('as-of footer is omitted rather than printing a placeholder', () => {
 })
 
 test('first run needs every input to have LANDED empty, not merely be missing', () => {
-  const empty = { overview: { open: 0 }, items: [], agents: [] }
+  const empty = { overview: { open: 0 }, items: [], agentCount: 0 }
   assert.equal(isFirstRun(empty), true)
   // Still loading / failed → not first run, so we show Retry, not a story.
   assert.equal(isFirstRun({ ...empty, items: null }), false)
-  assert.equal(isFirstRun({ ...empty, agents: null }), false)
+  assert.equal(isFirstRun({ ...empty, agentCount: null }), false)
+  assert.equal(isFirstRun({ ...empty, agentCount: undefined }), false)
   assert.equal(isFirstRun({ ...empty, overview: null }), false)
   // Real work exists.
   assert.equal(isFirstRun({ ...empty, overview: { open: 3 } }), false)
   // Agents are connected and simply have not produced named work yet. That is
   // a quiet day, NOT "nothing is connected" — the difference is the whole
-  // point of reading the agent list rather than only the work.
-  assert.equal(isFirstRun({ ...empty, agents: [{ name: 'Support Bot' }] }), false)
+  // point of reading the agent count rather than only the work.
+  assert.equal(isFirstRun({ ...empty, agentCount: 3 }), false)
 })
 
 // --- copy + module discipline ----------------------------------------------

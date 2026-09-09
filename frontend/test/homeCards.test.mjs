@@ -51,21 +51,27 @@ test('the cut blocks stay cut', () => {
     /function FleetCard/, /home-fleet-row/, // fleet roster preview
     /function WorkCard/, /home-work-tile/, // kind-of-work grid
     /Sparkline/, // no charts on Home
+    // The shape-of-the-day slogan: it inferred "Work is moving" from
+    // "nothing is stuck" and printed it above a strip reading 0 moving.
+    // The desk box's own empty state replaced it.
+    /dayShape/, /home-shape/,
   ]) {
     assert.doesNotMatch(code, banned)
   }
-  // The briefing survives only as a collapsed disclosure, never as the hero.
-  assert.match(code, /BriefingDisclosure/)
+  // The briefing survives — open, leading with the template line.
+  assert.match(code, /<Briefing work=/)
 })
 
 test('the blocks render in the order the brief numbers them', () => {
   const order = [
     'Greeting',
-    'home-shape',
+    'FleetPulse',
+    'home-cols',
     'DeskSection',
     'NoticedSection',
     'ProofStrip',
-    'AskEntry',
+    'AskSection',
+    'Briefing',
   ]
   // Read the render body only, so the definition order below cannot mask a
   // block rendered out of sequence.
@@ -78,13 +84,32 @@ test('the blocks render in the order the brief numbers them', () => {
   }
 })
 
-test('an empty desk removes the section entirely', () => {
-  const fn = code.slice(code.indexOf('function DeskSection'))
-  // No rows -> no section. Not an empty state, not an "all clear" line.
-  assert.match(fn, /if \(desk\.length === 0\) return null/)
-  // Loading is silent too, so the section never flashes in and out.
-  assert.match(fn, /if \(work\.items === null\) return null/)
-  assert.doesNotMatch(fn.slice(0, fn.indexOf('return (')), /All clear|all clear/)
+test('the desk stays on the page when it is empty, and says one fact', () => {
+  const fn = code.slice(code.indexOf('function DeskSection'), code.indexOf('function DeskRow'))
+  assert.match(fn, /deskEmptyCopy\(\{ connected \}\)/)
+  assert.match(fn, /home-desk-clear/)
+  // And it must not reach for a count to describe the rest of the day.
+  assert.doesNotMatch(fn, /counts\./)
+  assert.doesNotMatch(fn, /moving/)
+})
+
+test('the desk and the two columns sit side by side', () => {
+  assert.match(code, /<div className="home-cols">/)
+  const cols = code.slice(code.indexOf('<div className="home-cols">'))
+  const desk = cols.indexOf('<DeskSection')
+  const noticed = cols.indexOf('<NoticedSection')
+  assert.ok(desk > -1 && noticed > desk, 'desk leads, noticed sits beside it')
+})
+
+test('the fleet pulse never claims health it cannot see', () => {
+  // Home does not load the roster, so an agent not being flagged means nobody
+  // looked — not that it is fine.
+  const fn = code.slice(code.indexOf('function FleetPulse'), code.indexOf('// --- 3. your desk'))
+  assert.doesNotMatch(fn, /all healthy|All healthy|healthy/)
+  assert.match(fn, /Nothing flagged right now/)
+  // And the count comes from agent_count, never from the truncated list.
+  assert.match(code, /cost\.data\?\.agent_count/)
+  assert.doesNotMatch(code, /cost\.data\?\.agents\.length/)
 })
 
 test('Trovis noticed disappears when there is nothing to notice', () => {
@@ -114,7 +139,10 @@ test('every Home control has a real destination — no dead taps', () => {
   for (const dest of [
     /onClick=\{onOpen\}/, // desk row -> that job's detail
     /onGoWork\('mine'\)/, // desk header -> Work, filtered to YOUR waits
-    /onOpen\(line\.target\)/, // a noticed line -> its work or its agent
+    /onOpen\(line\.target\)/, // a noticed row's action -> its work or its agent
+    /onClick=\{onGoFleet\}/, // fleet pulse -> Fleet
+    /onOpenAgent\(\.\.\.agentRoute\(a\)\)/, // a flagged agent -> that agent
+    /openAsk\(c\.query\)/, // an Ask chip -> Ask, with that question
     /onGoWork && onGoWork\(c\.filter\)/, // strip count -> Work, filtered
     /onOpen=\{onOpenCost\}/, // strip dollar -> Cost page
     /onClick=\{failed \? onRetry : onOpen\}/, // ...and a failed cell -> retry
@@ -140,6 +168,33 @@ test('App wires every destination Home expects', () => {
   assert.match(app, /incomingFilter=\{workFilter\}/)
   assert.match(app, /onOpenCost=\{\(\) => setOverlay\(\{ kind: 'cost' \}\)\}/)
   assert.match(app, /onConnectAgent=\{openAddAgent\}/)
+  assert.match(app, /onGoFleet=\{\(\) => \{/)
+})
+
+test('Home has exactly one Ask affordance', () => {
+  // Two Ask buttons on one screen is two answers to "where do I ask?".
+  assert.match(app, /<AskPill hideLauncher=\{dashboardVisible\} \/>/)
+  const pill = readFileSync(new URL('../src/AskPill.jsx', import.meta.url), 'utf8')
+  assert.match(pill, /if \(hideLauncher\) return null/)
+  // Hiding the launcher must never hide Ask itself: the panel still opens on
+  // the keyboard and on openAsk() from anywhere.
+  const guard = pill.slice(pill.indexOf('if (hideLauncher)'))
+  assert.doesNotMatch(guard.slice(0, 200), /ASK_EVENT|addEventListener/)
+  // And Home renders exactly one input that opens it.
+  const inputs = [...code.matchAll(/className="home-ask-input"/g)]
+  assert.equal(inputs.length, 1)
+})
+
+test('the briefing is open on first paint, and leads with the template', () => {
+  const fn = code.slice(code.indexOf('function Briefing('))
+  // No closed accordion: the lead renders unconditionally.
+  assert.match(fn, /<p className="home-brief-lead">\{lead\}<\/p>/)
+  assert.doesNotMatch(fn, /if \(!showMore\) return null/)
+  // Only the GENERATED prose is deferred — it is the one text on Home whose
+  // wording we do not control, so it must not be able to contradict the strip
+  // on the opening screen.
+  assert.match(fn, /showMore && \(/)
+  assert.match(fn, /useLazyBriefing\(showMore, refreshKey\)/)
 })
 
 test('a Work filter arriving from Home is visible and clearable', () => {

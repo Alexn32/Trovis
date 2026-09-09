@@ -65,10 +65,15 @@ test('a failed Home section shows Retry, never an empty state', () => {
   }
 })
 
-test('an empty desk disappears rather than announcing itself', () => {
+test('an empty desk shows a designed empty state, not a blank card', () => {
+  // The desk is the one block that stays when it is empty: a clear desk is
+  // the answer to the question Home exists to ask. It says ONE fact and
+  // infers nothing about the rest of the day — the strip owns that.
   const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
   const code = dash.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  assert.match(code, /if \(desk\.length === 0\) return null/)
-  // Loading must not reserve alarm-coloured space either.
-  assert.match(code, /if \(work\.items === null\) return null/)
+  assert.match(code, /if \(desk\.length === 0\) \{/)
+  assert.match(code, /deskEmptyCopy\(\{ connected \}\)/)
+  assert.match(code, /home-desk-clear/)
+  // Loading is a skeleton in the box, never alarm-coloured space.
+  assert.match(code, /if \(connected && work\.items === null\)/)
 })
