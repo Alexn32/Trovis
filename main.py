@@ -4838,6 +4838,12 @@ def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
         result = asker.ask_connect(account_id, msgs)
     except asker.AskApiKeyMissingError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except asker.ConnectCodeMissingError as e:
+        # The guide promised a snippet twice without attaching one (a reply
+        # truncated at MAX_TOKENS looks like this). Better a plain "try
+        # again" turn — which the guide already renders, next to its manual
+        # path — than telling the user to paste lines they were never given.
+        raise HTTPException(status_code=502, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return ConnectAskResponse(**result)

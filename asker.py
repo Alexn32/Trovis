@@ -20,6 +20,7 @@ session state.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -28,6 +29,9 @@ import anthropic
 
 import database
 import loops
+
+# Same logger name main.py uses, so these land in the same stream.
+logger = logging.getLogger("oversee")
 
 # The Ask assistant is a primary product surface (global ⌘K pill) — use the
 # most capable model. Setup walkthroughs need more room than quick answers.
@@ -294,8 +298,9 @@ SYSTEM_CONNECT = (
     "multiple-choice question (2-5 options, each under 30 characters). Leave "
     "[] for open-ended questions.\n"
     "- code: copy-paste snippets, each {\"title\": \"...\", \"language\": "
-    "\"bash|python|json\", \"content\": \"...\"}. Leave [] when there is "
-    "nothing to run.\n"
+    "\"bash|python|json\", \"content\": \"...\"}. All three keys are "
+    "required on every snippet — use \"\" for a title a step doesn't need. "
+    "Leave the array [] when there is nothing to run.\n"
     "\n"
     "CRITICAL — code must be attached, never just promised:\n"
     "- The `code` array IS what the user sees as a copy-paste block. The "
@@ -339,6 +344,133 @@ SYSTEM_CONNECT = (
     + _SETUP_KNOWLEDGE
     + _CONNECT_SETUP_EXTRAS
 )
+
+# The shape SYSTEM_CONNECT asks for, as a schema the API enforces (structured
+# outputs — output_config.format). Prompting for "raw JSON" was
+# prompt-and-hope: a stray ``` fence or a sentence outside the object left
+# _parse_connect_response degrading the whole turn to plain text, which drops
+# `code` — the copy-paste blocks the guide exists to hand over.
+#
+# `title` and `language` are required strings rather than nullable ones so the
+# schema stays in the simple subset; the model sends "" when a snippet needs
+# no title, and the UI already renders nothing for an empty title.
+CONNECT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "options": {"type": "array", "items": {"type": "string"}},
+        "code": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "language": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["title", "language", "content"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["answer", "options", "code"],
+    "additionalProperties": False,
+}
+CONNECT_OUTPUT_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "schema": CONNECT_RESPONSE_SCHEMA,
+}
+
+# Sentences that promise a snippet in THIS turn. When one of these matches and
+# `code` came back empty, the user would be told to "add these two lines" with
+# no lines to add — the exact thing SYSTEM_CONNECT forbids, and what a reply
+# truncated at MAX_TOKENS looks like after salvage. One re-ask fixes it; a
+# second failure fails soft instead of shipping the promise.
+#
+# Deliberately deictic ("these lines", "run this", "the snippet below") so a
+# backward-looking confirmation about code already handed over — "Run that,
+# then tell me how it went" — and an ask for their output — "paste any error"
+# — do not count as promises.
+_CODE_NOUN = r"(?:lines?|snippets?|commands?|code|config|block)"
+_CODE_PROMISE_PATTERNS = [
+    # "Here are the two lines to paste", "Here's the command" — a few words
+    # may sit between the opener and the noun ("the two", "your init").
+    r"\bhere(?:'s|’s| is| are)\b(?:\s+\S+){0,4}?\s+" + _CODE_NOUN + r"\b",
+    # "Add these", "paste this", "run the following". Deictic only: the
+    # object of the verb has to point at something in this very turn.
+    r"\b(?:add|paste|copy|drop|insert|put|run|execute|append)\s+"
+    r"(?:these|this|those|the following)\b",
+    r"\b(?:these|those)\s+(?:\S+\s+){0,2}?(?:lines?|snippets?|commands?)\b",
+    r"\b" + _CODE_NOUN + r"\s+below\b",
+    r"\bfollowing\s+" + _CODE_NOUN + r"\b",
+    r"\bpaste\s+(?:it|this)\b",
+]
+_CODE_PROMISE_RE = re.compile("|".join(_CODE_PROMISE_PATTERNS), re.IGNORECASE)
+
+# Appended as one synthetic user turn on the re-ask. Also asks for a shorter
+# answer, which is what makes the retry fit when the first reply was cut off
+# at MAX_TOKENS.
+_CODE_RETRY_NUDGE = (
+    "You referred to a snippet but the `code` array was empty, so I saw no "
+    "copy-paste block at all. Send that same step again with the exact code "
+    "in `code`, and keep `answer` to one short sentence."
+)
+
+
+class ConnectCodeMissingError(RuntimeError):
+    """The connect guide promised a snippet twice without attaching one.
+
+    Raised instead of returning the promise, so the guide shows its ordinary
+    "something went wrong — try again" turn (with the manual path one click
+    away) rather than prose the user cannot act on.
+    """
+
+
+def _promises_code(answer: str) -> bool:
+    """True when `answer` tells the user to run/paste code from this turn."""
+    return bool(_CODE_PROMISE_RE.search(answer or ""))
+
+
+def _connect_reply_incomplete(
+    result: dict[str, Any], truncated: bool = False
+) -> bool:
+    """True when a connect turn must not be shown to the user as-is.
+
+    Two ways that happens: the answer promises code that isn't attached, or
+    the reply was cut off at MAX_TOKENS (structured outputs make the JSON
+    valid, not complete — a truncated object loses `code`, or ends mid-snippet
+    with code that won't run). An empty answer counts too; there is nothing
+    to render."""
+    answer = (result.get("answer") or "").strip()
+    if not answer:
+        return True
+    if truncated:
+        return True
+    return not result.get("code") and _promises_code(answer)
+
+
+def _connect_call(
+    api_key: str, context: str, msgs: list[dict[str, str]]
+) -> tuple[str, bool]:
+    """One connect turn, constrained to CONNECT_RESPONSE_SCHEMA.
+
+    Structured outputs are the guarantee; the tolerant parser behind this is
+    the safety net. If the API ever rejects the schema itself (a 400 — an
+    unsupported model or a schema the endpoint won't take), fall back to the
+    prompt-only request rather than taking the whole guide down: that is
+    exactly the behaviour this flow had before, and the caller's
+    promise/truncation check still runs on the result."""
+    try:
+        return _call_claude(
+            api_key, SYSTEM_CONNECT, context, msgs,
+            output_format=CONNECT_OUTPUT_FORMAT,
+        )
+    except anthropic.BadRequestError:
+        logger.warning(
+            "connect guide: structured output rejected, retrying unconstrained",
+            exc_info=True,
+        )
+        return _call_claude(api_key, SYSTEM_CONNECT, context, msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +590,13 @@ def ask_connect(
     seeds the thread with a hardcoded assistant greeting; the Anthropic API
     requires the first message to be role=user, so prepend a synthetic primer
     when the history starts with the assistant (also covers histories whose
-    head was trimmed by the client's turn cap)."""
+    head was trimmed by the client's turn cap).
+
+    A reply whose answer promises a snippet but carries no `code` is never
+    returned: the turn is re-asked once (see _CODE_RETRY_NUDGE), and a second
+    failure raises ConnectCodeMissingError. `answer` is capped by MAX_TOKENS
+    together with thinking, so truncation — which salvages the prose and loses
+    the code — is the case this closes."""
     api_key = _require_api_key()
     agents = database.get_agents(account_id=account_id)
     context = _format_fleet_context(agents)
@@ -471,8 +609,22 @@ def ask_connect(
                 "content": "(I just opened the guided agent-connect flow.)",
             },
         )
-    raw = _call_claude(api_key, SYSTEM_CONNECT, context, msgs)
-    return _parse_connect_response(raw)
+    raw, truncated = _connect_call(api_key, context, msgs)
+    result = _parse_connect_response(raw)
+    if not _connect_reply_incomplete(result, truncated):
+        return result
+
+    retry_msgs = msgs + [
+        {"role": "assistant", "content": result["answer"] or "(no reply)"},
+        {"role": "user", "content": _CODE_RETRY_NUDGE},
+    ]
+    raw, truncated = _connect_call(api_key, context, retry_msgs)
+    retried = _parse_connect_response(raw)
+    if _connect_reply_incomplete(retried, truncated):
+        raise ConnectCodeMissingError(
+            "the connect guide promised a snippet without attaching one"
+        )
+    return retried
 
 
 def ask_about_agent(
@@ -1390,7 +1542,12 @@ def _call_claude(
     system_prompt: str,
     context: str,
     messages: list[dict[str, str]],
-) -> str:
+    output_format: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
+    """One non-agentic Claude turn. Returns (text, truncated) — `truncated` is
+    stop_reason == "max_tokens", i.e. the reply is cut off and whatever the
+    caller parses out of it is partial. `output_format` is a structured-output
+    schema (output_config.format) the reply is constrained to."""
     # Normalize the message list. We accept anything shaped like
     # {role, content}; drop empties and non-user/assistant roles. The last
     # turn must be from the user — that's how Claude's API expects it.
@@ -1407,17 +1564,22 @@ def _call_claude(
 
     full_system = system_prompt + "\n\n---\n\nDATA:\n\n" + context
 
+    output_config = dict(OUTPUT_CONFIG)
+    if output_format is not None:
+        output_config["format"] = output_format
+
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=MODEL,
         thinking=THINKING,
-        output_config=OUTPUT_CONFIG,
+        output_config=output_config,
         max_tokens=MAX_TOKENS,
         system=full_system,
         messages=cleaned,
     )
-    return "".join(
+    text = "".join(
         block.text
         for block in response.content
         if getattr(block, "type", None) == "text"
     ).strip()
+    return text, getattr(response, "stop_reason", None) == "max_tokens"

@@ -3,6 +3,14 @@ import { api, getApiKey } from './api.js'
 import { CodeBlock, computeOverseeEndpoint } from './AddAgent.jsx'
 import { TrovisMark, SendIcon, CheckCircleIcon } from './Icons.jsx'
 import { QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
+// Placeholder → real key/endpoint substitution, and the wire-history
+// flattening that keeps the placeholders. Extracted so both are covered by
+// frontend/test/connectSnippets.test.mjs.
+import {
+  KEY_PLACEHOLDER,
+  flattenAssistant,
+  substitute,
+} from './connectSnippets.js'
 
 // The conversational "Set up with AI" flow. Trovis asks one question at a
 // time (with quick-reply chips), emits copy-paste snippets carrying the
@@ -30,23 +38,6 @@ const OPENING_TURN = {
 
 // Turns posted to the backend (the model only needs role + content).
 const MAX_HISTORY = 24
-
-// Fill the user's real key/endpoint into a snippet at render time. The
-// negative lookahead skips placeholders used as an env-var NAME
-// (`export TROVIS_API_KEY=...`) so only value positions are substituted —
-// the copy button then copies exactly what's shown.
-function substitute(text, key, endpoint) {
-  return (text || '')
-    .replace(/TROVIS_ENDPOINT(?!\s*=)/g, endpoint)
-    .replace(/TROVIS_API_KEY(?!\s*=)/g, key || 'ov_sk_…')
-}
-
-// Flatten an assistant turn (answer + its code snippets, placeholders intact)
-// so the model recalls exactly what it already handed the user.
-function flattenAssistant(m) {
-  const codeText = (m.code || []).map((c) => c.content).join('\n\n')
-  return codeText ? `${m.content}\n\n${codeText}` : m.content
-}
 
 export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, onUpgrade }) {
   const [messages, setMessages] = useState([OPENING_TURN])
@@ -301,7 +292,7 @@ function GuideBubble({ m, orgKey, endpoint, chipsEnabled, onPick }) {
           <div className="connect-code" key={ci}>
             {c.title && <div className="connect-code-title">{c.title}</div>}
             <CodeBlock code={substitute(c.content, orgKey, endpoint)} />
-            {orgKey === null && c.content.includes('TROVIS_API_KEY') && (
+            {orgKey === null && c.content.includes(KEY_PLACEHOLDER) && (
               <div className="connect-code-note">
                 No key in this session — replace ov_sk_… with your key from Settings.
               </div>

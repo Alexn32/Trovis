@@ -3,10 +3,14 @@
 Run:
   OVERSEE_DISABLE_PRICING_SYNC=1 python3 test_connect_ask.py
 (uses an isolated temp SQLite DB; never touches the dev/prod DB)
+
+Covers the shape of the reply, the structured-output request, and the rule
+that a turn promising a snippet never reaches the user without one.
 """
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 
 os.environ["OVERSEE_DISABLE_PRICING_SYNC"] = "1"
 os.environ.pop("DATABASE_URL", None)          # force the SQLite branch
@@ -87,6 +91,122 @@ check("empty reply → empty answer, no crash",
       r == {"answer": "", "options": [], "code": []})
 
 
+print("\n-- code-promise detector --")
+# Promises a snippet in THIS turn → an empty `code` array is a broken turn.
+for promise in [
+    "Add these two lines at the very top of your entry file.",
+    "Here are the lines to paste into ~/.claude/settings.json.",
+    "Here are the two lines to paste at the top.",
+    "Here's the config block for your exporter.",
+    "Here's the command for that.",
+    "Paste this into your settings file, then restart.",
+    "Run this command in the project directory.",
+    "Copy the snippet below and run it.",
+    "Use the following config for the exporter.",
+]:
+    check(f"promise detected: {promise[:34]!r}", asker._promises_code(promise))
+
+# Backward-looking or code-free turns must NOT be treated as promises —
+# otherwise a legitimate question would be retried and then failed.
+for benign in [
+    "Run that, then tell me how it went — or paste any error.",
+    "What's your agent built with?",
+    "Did that work? Paste the error you saw and I'll read it.",
+    "Your agent is connected. Rename it on the dashboard whenever you like.",
+    "Does your code call query() or client.beta.agents?",
+    "That error means init() ran after the framework import.",
+]:
+    check(f"not a promise: {benign[:34]!r}", not asker._promises_code(benign))
+
+print("\n-- incomplete-reply rule --")
+GOOD = {"answer": "Add these two lines.", "options": [],
+        "code": [{"title": "Init", "language": "python", "content": "x = 1"}]}
+PROMISE_NO_CODE = {"answer": "Add these two lines.", "options": [], "code": []}
+QUESTION = {"answer": "What's your agent built with?", "options": ["A", "B"],
+            "code": []}
+I = asker._connect_reply_incomplete
+check("answer + code → complete", not I(GOOD))
+check("promise with empty code → incomplete", I(PROMISE_NO_CODE))
+check("plain question with empty code → complete", not I(QUESTION))
+check("empty answer → incomplete", I({"answer": "", "options": [], "code": []}))
+# Truncated at MAX_TOKENS: even a reply that looks whole is partial (its last
+# snippet can end mid-line), so it is never shown as-is.
+check("truncated → incomplete even with code", I(GOOD, truncated=True))
+check("truncated → incomplete for a question too", I(QUESTION, truncated=True))
+
+
+print("\n-- structured output request (_call_claude) --")
+# Stub the Anthropic client itself so the request kwargs can be inspected.
+sent = {}
+
+
+class _FakeMessages:
+    def __init__(self, reply, stop_reason="end_turn"):
+        self._reply = reply
+        self._stop_reason = stop_reason
+
+    def create(self, **kwargs):
+        sent.clear()
+        sent.update(kwargs)
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=self._reply)],
+            stop_reason=self._stop_reason,
+        )
+
+
+def _fake_anthropic(reply, stop_reason="end_turn"):
+    class _FakeClient:
+        def __init__(self, api_key=None):
+            self.messages = _FakeMessages(reply, stop_reason)
+    return SimpleNamespace(Anthropic=_FakeClient)
+
+
+real_anthropic = asker.anthropic
+reply_json = json.dumps({"answer": "Hi.", "options": [], "code": []})
+try:
+    asker.anthropic = _fake_anthropic(reply_json)
+    text, truncated = asker._call_claude(
+        "k", "SYS", "CTX", [{"role": "user", "content": "hello"}],
+        output_format=asker.CONNECT_OUTPUT_FORMAT,
+    )
+    check("returns the reply text", text == reply_json)
+    check("end_turn → not truncated", truncated is False)
+    check("output_config carries effort AND the json_schema format",
+          sent["output_config"].get("effort") == asker.OUTPUT_CONFIG["effort"]
+          and sent["output_config"].get("format") is asker.CONNECT_OUTPUT_FORMAT)
+    check("format is a json_schema with the connect schema",
+          asker.CONNECT_OUTPUT_FORMAT["type"] == "json_schema"
+          and asker.CONNECT_OUTPUT_FORMAT["schema"] is asker.CONNECT_RESPONSE_SCHEMA)
+    # Mutating the shared OUTPUT_CONFIG would put the connect schema on every
+    # Ask call in the process.
+    check("module OUTPUT_CONFIG not mutated", "format" not in asker.OUTPUT_CONFIG)
+    check("model/thinking/max_tokens unchanged",
+          sent["model"] == asker.MODEL and sent["thinking"] == asker.THINKING
+          and sent["max_tokens"] == asker.MAX_TOKENS)
+
+    # No schema requested → no format key (the fleet/agent paths).
+    asker._call_claude("k", "SYS", "CTX", [{"role": "user", "content": "hi"}])
+    check("no output_format → plain output_config",
+          "format" not in sent["output_config"])
+
+    asker.anthropic = _fake_anthropic(reply_json, stop_reason="max_tokens")
+    _, truncated = asker._call_claude(
+        "k", "SYS", "CTX", [{"role": "user", "content": "hello"}],
+    )
+    check("stop_reason max_tokens → truncated", truncated is True)
+finally:
+    asker.anthropic = real_anthropic
+
+schema = asker.CONNECT_RESPONSE_SCHEMA
+check("schema requires answer/options/code",
+      sorted(schema["required"]) == ["answer", "code", "options"]
+      and schema["additionalProperties"] is False)
+code_item = schema["properties"]["code"]["items"]
+check("schema requires all three snippet keys",
+      sorted(code_item["required"]) == ["content", "language", "title"]
+      and code_item["additionalProperties"] is False)
+
+
 print("\n-- /connect/ask endpoint --")
 with TestClient(main.app) as c:
     body = {"messages": [
@@ -113,20 +233,50 @@ with TestClient(main.app) as c:
 
     os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-dummy"
 
-    # Stub the Claude call; capture the messages it would have sent.
+    # Stub the Claude call; capture the messages it would have sent. Replies
+    # are (text, truncated) — same contract as the real _call_claude.
     captured = {}
-    def fake_call(api_key, system_prompt, context, messages):
-        captured["system"] = system_prompt
-        captured["messages"] = messages
-        return json.dumps({
-            "answer": "Great — install the SDK first.",
-            "options": ["Done", "I got an error"],
-            "code": [{"title": "Install", "language": "bash",
-                      "content": "pip install trovis-agents[openai]"}],
-        })
+    calls = []
+
+    def stub_replies(*replies):
+        """Install a stub that returns `replies` in order (last one repeats)."""
+        queue = list(replies)
+
+        def fake_call(api_key, system_prompt, context, messages,
+                      output_format=None):
+            captured["system"] = system_prompt
+            captured["messages"] = messages
+            captured["output_format"] = output_format
+            calls.append(messages)
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+        asker._call_claude = fake_call
+
+    HAPPY = (json.dumps({
+        "answer": "Great — install the SDK first.",
+        "options": ["Done", "I got an error"],
+        "code": [{"title": "Install", "language": "bash",
+                  "content": "pip install trovis-agents[openai]"}],
+    }), False)
+    # What a reply truncated at MAX_TOKENS looks like after salvage: the prose
+    # survives, the snippet it promises does not.
+    TRUNCATED = ('{"answer": "Add these two lines at the top of your entry '
+                 'file.", "options": [], "code": [{"title": "Init", '
+                 '"language": "python", "content": "from trovis import ini',
+                 True)
+    PROMISE_NO_CODE = (json.dumps({
+        "answer": "Here are the two lines to paste at the top.",
+        "options": [], "code": [],
+    }), False)
+    QUESTION = (json.dumps({
+        "answer": "Which framework does your code import?",
+        "options": ["OpenAI Agents SDK", "Claude Agent SDK"], "code": [],
+    }), False)
+
     real_call = asker._call_claude
-    asker._call_claude = fake_call
     try:
+        calls.clear()
+        stub_replies(HAPPY)
         r = c.post("/connect/ask", json=body, headers=headers)
         check("stubbed happy path → 200", r.status_code == 200)
         data = r.json() if r.status_code == 200 else {}
@@ -134,6 +284,7 @@ with TestClient(main.app) as c:
               data.get("answer") == "Great — install the SDK first."
               and data.get("options") == ["Done", "I got an error"]
               and data.get("code", [{}])[0].get("language") == "bash")
+        check("a complete turn is not re-asked", len(calls) == 1)
         check("assistant-first history got a synthetic user primer",
               captured["messages"][0]["role"] == "user"
               and "connect" in captured["messages"][0]["content"]
@@ -141,6 +292,82 @@ with TestClient(main.app) as c:
         check("connect system prompt used (placeholders + chips rules)",
               "TROVIS_API_KEY" in captured["system"]
               and "options" in captured["system"])
+        check("the turn is constrained to the connect schema",
+              captured["output_format"] is asker.CONNECT_OUTPUT_FORMAT)
+
+        # Truncated first reply, good second → the user gets the snippet, and
+        # never the promise with an empty code array.
+        calls.clear()
+        stub_replies(TRUNCATED, HAPPY)
+        r = c.post("/connect/ask", json=body, headers=headers)
+        data = r.json() if r.status_code == 200 else {}
+        check("truncated reply → re-asked once, 200 with code",
+              r.status_code == 200 and len(calls) == 2
+              and len(data.get("code") or []) == 1)
+        check("the re-ask asks for the missing snippet",
+              calls[1][-1]["role"] == "user"
+              and "code" in calls[1][-1]["content"]
+              and calls[1][-2]["role"] == "assistant")
+
+        # Promise with no snippet (not truncated) → same rule.
+        calls.clear()
+        stub_replies(PROMISE_NO_CODE, HAPPY)
+        r = c.post("/connect/ask", json=body, headers=headers)
+        data = r.json() if r.status_code == 200 else {}
+        check("promise without code → re-asked once, 200 with code",
+              r.status_code == 200 and len(calls) == 2
+              and len(data.get("code") or []) == 1)
+
+        # Both attempts promise code without attaching it: fail soft (the
+        # guide shows "try again" next to its manual path) rather than 200
+        # with prose the user cannot act on.
+        calls.clear()
+        stub_replies(PROMISE_NO_CODE)
+        r = c.post("/connect/ask", json=body, headers=headers)
+        check("promise twice → 502, never a 200 with empty code",
+              r.status_code == 502)
+        check("exactly one re-ask, no retry storm", len(calls) == 2)
+
+        calls.clear()
+        stub_replies(TRUNCATED)
+        r = c.post("/connect/ask", json=body, headers=headers)
+        check("truncated twice → 502", r.status_code == 502)
+
+        # A genuine question has nothing to attach — it must sail through.
+        calls.clear()
+        stub_replies(QUESTION)
+        r = c.post("/connect/ask", json=body, headers=headers)
+        data = r.json() if r.status_code == 200 else {}
+        check("code-free question → 200, no re-ask",
+              r.status_code == 200 and len(calls) == 1
+              and data.get("code") == [] and len(data.get("options") or []) == 2)
+
+        # If the API ever rejects the schema, the guide degrades to the
+        # prompt-only request instead of going dark.
+        import anthropic as _anthropic
+        import httpx as _httpx
+
+        formats = []
+
+        def reject_schema(api_key, system_prompt, context, messages,
+                          output_format=None):
+            formats.append(output_format)
+            if output_format is not None:
+                raise _anthropic.BadRequestError(
+                    "output_config.format is not supported",
+                    response=_httpx.Response(
+                        400, request=_httpx.Request("POST", "http://x")
+                    ),
+                    body=None,
+                )
+            return HAPPY
+
+        asker._call_claude = reject_schema
+        r = c.post("/connect/ask", json=body, headers=headers)
+        data = r.json() if r.status_code == 200 else {}
+        check("schema rejected → falls back unconstrained, still 200",
+              r.status_code == 200 and len(data.get("code") or []) == 1
+              and formats == [asker.CONNECT_OUTPUT_FORMAT, None])
     finally:
         asker._call_claude = real_call
 
