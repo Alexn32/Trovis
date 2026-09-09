@@ -349,6 +349,66 @@ with TestClient(main.app) as c:
           "Task from adopt-agent" not in after_titles
           and "Some other name" not in after_titles)
 
+    print("\n--- the kind page's two filters (still one lean scan) ---")
+    # The Work kind page needs "this kind's work" and "this kind's finished
+    # work". Both are column predicates on the scan this endpoint already
+    # does; the alternative was GET /work/board, whose whole-fleet fold these
+    # endpoints exist to avoid.
+    wf = c.post("/workflows", headers=H,
+                json={"name": "Refunds", "stations": [], "match_hints": []}).json()
+    post("refund-agent", [
+        sp("message_received", 900, {"trovis.loop.title": "Refund order #1",
+                                     "trovis.loop.external_id": "k1"})])
+    post("refund-agent", [
+        sp("message_received", 880, {"trovis.loop.title": "Refund order #2",
+                                     "trovis.loop.external_id": "k2"}),
+        sp("agent_run_complete", 870, {"trovis.loop.external_id": "k2",
+                                       "trovis.loop.close": "refunded"})])
+    # Matching is the matcher's job and has its own tests; this one is about
+    # the filters, so the link is made directly.
+    with database._connect() as _con, database._cursor(_con) as _cur:
+        for ext in ("k1", "k2"):
+            _cur.execute(
+                f"UPDATE loops SET workflow_id = {database.PH}, workflow_version = 1 "
+                f"WHERE external_id = {database.PH}",
+                (wf["id"], ext),
+            )
+
+    def titles(**q):
+        return {i["title"] for i in items(**q)["items"]}
+
+    all_titles = titles(limit=100)
+    check("unfiltered still carries both kinds and the rest",
+          {"Refund order #1", "Refund order #2"} <= all_titles and len(all_titles) > 2)
+    check("workflow_id narrows to that kind",
+          titles(limit=100, workflow_id=wf["id"]) == {"Refund order #1", "Refund order #2"})
+    check("the kind's rows carry its name, so the page needs no second call",
+          {i["workflow_name"] for i in items(limit=100, workflow_id=wf["id"])["items"]}
+          == {"Refunds"})
+    check("workflow_id=none is the undeclared work, and excludes the declared",
+          "Refund order #1" not in titles(limit=100, workflow_id="none")
+          and len(titles(limit=100, workflow_id="none")) > 0)
+    check("status=done is the finished work only",
+          "Refund order #2" in titles(limit=100, status="done")
+          and "Refund order #1" not in titles(limit=100, status="done"))
+    check("the two compose — this kind's finished work in ONE request",
+          titles(limit=100, workflow_id=wf["id"], status="done") == {"Refund order #2"})
+
+    # Every other status is derived from the event stream, so a SQL predicate
+    # for it would either be wrong or need the fold back. Narrowing nothing is
+    # a superset; 400-ing a client that guessed is not worth it.
+    check("a status we cannot filter in SQL narrows nothing rather than 400s",
+          titles(limit=100, status="stuck") == all_titles
+          and titles(limit=100, status="bogus") == all_titles)
+
+    # workflow_id arrives from a query string.
+    r_junk = c.get("/work/items?limit=100&workflow_id=abc", headers=H)
+    check("an unreadable kind id is not a 500", r_junk.status_code == 200)
+    check("...and matches NOTHING, rather than filing every kind under it",
+          r_junk.json()["items"] == [])
+    check("a kind id that does not exist is empty too",
+          items(limit=100, workflow_id=999999)["items"] == [])
+
     print("\n--- engine states untouched ---")
     check("engine states unchanged",
           loops_mod.STATES == ("open", "working", "awaiting_human", "awaiting_agent",

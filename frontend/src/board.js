@@ -324,3 +324,121 @@ export function kindSegments(kind) {
     { value: k.stuck || 0, label: 'stuck', tone: k.stuck ? 'stuck' : 'muted' },
   ]
 }
+
+// ---------------------------------------------------------------------------
+// Kind page: the path this kind of work travels
+// ---------------------------------------------------------------------------
+
+// The hands work passes through, in the order work moves. Ordering is
+// canonical rather than observed: the list rows say WHERE each job sits right
+// now, never the sequence it took, and a per-job detail fetch to learn the
+// real sequence would be one request per row.
+const PATH_ORDER = ['agent', 'tool', 'human']
+const PATH_LABEL = { agent: 'Agent', tool: 'Tool', human: 'Person' }
+
+/**
+ * The spine for one kind, inferred from the rows already loaded.
+ *
+ * Each node is a kind of holder actually seen on this kind's work, plus the
+ * exceptions sitting on it. Healthy nodes carry no counts — a node with
+ * nothing waiting and nothing stuck should read as quiet.
+ *
+ * Returns null when there is not enough to draw honestly. That is a real
+ * outcome, not a failure: with one kind of holder there is no path, only a
+ * holder, and drawing a one-node "spine" would dress a single fact up as a
+ * process.
+ *
+ * `done` is appended only when this kind has actually finished something, so
+ * the spine never promises an ending the record has not seen.
+ */
+export function kindPath(items) {
+  const nodes = new Map()
+  let doneCount = 0
+  for (const it of items || []) {
+    if (!isNamedWorkTitle(it?.title) || it?.id == null) continue
+    if (it.status === 'done') {
+      doneCount += 1
+      continue
+    }
+    const kind = it?.holder?.kind
+    if (!PATH_ORDER.includes(kind)) continue
+    let n = nodes.get(kind)
+    if (!n) {
+      n = { kind, label: PATH_LABEL[kind], names: new Set(), waiting: 0, stuck: 0 }
+      nodes.set(kind, n)
+    }
+    const name = String(it?.holder?.name || '').trim()
+    if (name) n.names.add(name)
+    if (it.status === 'stuck') n.stuck += 1
+    else if (it.status === 'waiting_on_you' || it.status === 'waiting_on_other') n.waiting += 1
+  }
+
+  const path = PATH_ORDER.filter((k) => nodes.has(k)).map((k) => {
+    const n = nodes.get(k)
+    return {
+      kind: n.kind,
+      // A tool node is worth naming — "Stripe" says more than "Tool" — but
+      // only when the work all sits on the same one.
+      label: n.kind === 'tool' && n.names.size === 1 ? [...n.names][0] : n.label,
+      waiting: n.kind === 'human' ? n.waiting : 0,
+      stuck: n.stuck,
+    }
+  })
+  // One holder is not a path.
+  if (path.length < 2) return null
+  if (doneCount > 0) path.push({ kind: 'done', label: 'Done', waiting: 0, stuck: 0 })
+  return path
+}
+
+/**
+ * Finished and stuck work for this kind, newest first — the technical band.
+ *
+ * `Sent back` is not inferable from a list row (it lives in the item's own
+ * history), so a closed job reads as Done and an open one that cannot move
+ * reads as Stuck. Naming an outcome we did not observe would be worse than
+ * naming the two we did.
+ *
+ * The caller merges two overlapping sources — the rows the section already
+ * holds and a focused request for this kind's finished work — so a job is
+ * kept once by id. A run listed twice reads as two runs.
+ */
+export function pastRuns(items, limit = 8) {
+  const seen = new Set()
+  const rows = (items || [])
+    .filter((it) => isNamedWorkTitle(it?.title) && it?.id != null)
+    .filter((it) => it.status === 'done' || it.status === 'stuck')
+    .filter((it) => {
+      if (seen.has(it.id)) return false
+      seen.add(it.id)
+      return true
+    })
+    .map((it) => ({
+      id: it.id,
+      title: it.title,
+      result: it.status === 'done' ? 'Done' : 'Stuck',
+      status: it.status,
+      at: it.updated_at || null,
+      // Work language, already on the row. Never a stack trace.
+      reason: it.status === 'stuck' ? String(it.whats_next || '').trim() : '',
+      item: it,
+    }))
+  rows.sort((a, b) => (Date.parse(b.at || '') || 0) - (Date.parse(a.at || '') || 0))
+  return rows.slice(0, limit)
+}
+
+/** The one live thing worth naming on a kind page: what needs a person most. */
+export function hottestOpen(items) {
+  const open = (items || []).filter(
+    (it) => isNamedWorkTitle(it?.title) && it?.id != null && it.status !== 'done',
+  )
+  if (open.length === 0) return null
+  const rank = { stuck: 0, waiting_on_you: 1, waiting_on_other: 2, moving: 3 }
+  const sorted = [...open].sort((a, b) => {
+    const ra = rank[a.status] ?? 9
+    const rb = rank[b.status] ?? 9
+    if (ra !== rb) return ra - rb
+    // Oldest first inside a bucket: age is the urgency signal.
+    return (Date.parse(a.updated_at || '') || 0) - (Date.parse(b.updated_at || '') || 0)
+  })
+  return sorted[0]
+}

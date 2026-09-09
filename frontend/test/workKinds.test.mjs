@@ -167,7 +167,10 @@ test('Work home still uses only the lean pair', () => {
 })
 
 test('a row still opens JobDetail', () => {
-  assert.match(code, /setOpen\(row\)/)
+  // The table is a shared component now, so both Work home and the Kind page
+  // open the same detail from the same row.
+  assert.match(code, /function WorkTable\(\{ rows, onOpen/)
+  assert.match(code, /onClick=\{\(\) => onOpen\(row\)\}/)
   assert.match(code, /<JobDetail/)
 })
 

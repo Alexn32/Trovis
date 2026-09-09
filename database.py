@@ -4656,6 +4656,8 @@ def get_work_items(
     limit: int = _WORK_ITEMS_DEFAULT_LIMIT,
     now_ns: int | None = None,
     include_agent: bool = False,
+    workflow_id: int | str | None = None,
+    finished_only: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Paginated named items for the Work home table. Plugin-provided human
     titles only — no untitled OTel flood, no Trovis-generated labels, no
@@ -4663,6 +4665,18 @@ def get_work_items(
     page only.
 
     `include_agent` is for Ask (service_name / agent_id). Home leaves it off.
+
+    `workflow_id` narrows to one kind of work; the string "none" narrows to
+    the undeclared ones. `finished_only` narrows to work that has closed.
+
+    Both are COLUMN predicates (l.workflow_id, l.closed_at) on the same scan
+    this function already does — which is the point. The Work section's kind
+    page needs "this kind's finished work" and the alternative was
+    GET /work/board, whose whole-fleet fold is what these lean endpoints
+    exist to avoid. Status beyond `finished` is deliberately NOT filterable
+    here: every other status is derived from the event stream in
+    _decorate_work_items, so a SQL predicate for it would either be wrong or
+    would need the fold back.
     """
     now_ns = now_ns if now_ns is not None else time.time_ns()
     limit = max(1, min(int(limit or _WORK_ITEMS_DEFAULT_LIMIT), _WORK_ITEMS_MAX_LIMIT))
@@ -4690,6 +4704,21 @@ def get_work_items(
         f"AND (l.closed_at IS NULL OR l.closed_at >= {PH}) "
     )
     args: list[Any] = [*scope_args, week_ago]
+    if workflow_id == "none":
+        sql += "AND l.workflow_id IS NULL "
+    elif workflow_id is not None:
+        try:
+            wid = int(workflow_id)
+        except (TypeError, ValueError):
+            # It arrives from a query string. A kind id we cannot read is a
+            # kind that cannot exist, so match nothing — widening to the whole
+            # account would file every other kind's work under this heading,
+            # and 500-ing would be a crash over a typo.
+            return [], None
+        sql += f"AND l.workflow_id = {PH} "
+        args.append(wid)
+    if finished_only:
+        sql += "AND l.closed_at IS NOT NULL "
     if key is not None:
         cursor_ts, cursor_id = key
         sql += (

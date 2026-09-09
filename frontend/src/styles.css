@@ -6778,3 +6778,82 @@ select.wf2-input { cursor: pointer; }
 .work-kind-seg.tone-stuck .work-kind-num { color: var(--error); }
 /* Once the kinds carry moving/waiting/stuck, the strip stops repeating them. */
 .work-overview.is-demoted { opacity: 0.9; }
+
+/* --- Work page 2: one kind of work ------------------------------------------
+   Bands of air, not boxes. Colour only where a person is needed. Tokens only. */
+.work-kind-page { display: flex; flex-direction: column; gap: 22px; }
+/* The column's own gap is the spacing; the head must not add a second one,
+   and the title needs the same rule Work home gives its h1 or it falls back
+   to the browser's default heading margins. */
+.work-kind-page .work-home-head {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 0;
+}
+.work-kind-page h1 {
+  font-size: 32px; font-weight: 700; letter-spacing: -0.03em;
+  color: var(--text-primary); margin: 0;
+}
+.kind-band { display: flex; flex-direction: column; gap: 10px; }
+.kind-quiet { font-size: 13px; color: var(--text-muted); margin: 0; }
+
+/* Band A — the path. A spine, not a diagram. */
+.kind-path {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+}
+.kind-node {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 13px; border-radius: 999px;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
+}
+.kind-node + .kind-node::before,
+.kind-node.kind-done::before {
+  content: '→'; color: var(--text-dim); margin: 0 10px 0 -3px; font-weight: 400;
+}
+.kind-node.kind-done { background: none; border-color: transparent; color: var(--text-muted); }
+.kind-node-flag {
+  font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+}
+.kind-node-flag.is-stuck { color: var(--error); background: var(--error-faint); }
+.kind-node-flag.is-waiting { color: var(--warning); background: var(--warm-fill); }
+
+/* Band B — now. */
+.kind-live-lead {
+  font-size: 13.5px; color: var(--text-secondary); margin: 0;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
+.kind-live-row {
+  display: flex; flex-direction: column; gap: 3px; align-items: flex-start;
+  width: 100%; text-align: left; padding: 10px 13px; border-radius: 9px;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  cursor: pointer; font-family: inherit;
+}
+.kind-live-row:hover { border-color: var(--border-hover); }
+.kind-live-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kind-live-title { font-size: 13.5px; font-weight: 650; color: var(--text-primary); }
+.kind-live-meta {
+  font-size: 11.5px; color: var(--text-muted);
+  display: flex; align-items: center; gap: 6px;
+}
+
+/* Band C — past runs. The technical door: dense, quiet, tabular. */
+.kind-runs { list-style: none; margin: 0; padding: 0; }
+.kind-runs > li + li { border-top: 1px solid var(--border-default); }
+.kind-run {
+  display: grid; grid-template-columns: 56px 74px minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline; gap: 12px; width: 100%; text-align: left;
+  padding: 9px 4px; background: none; border: none; cursor: pointer;
+  font-family: inherit;
+}
+.kind-run:hover { background: var(--bg-surface-hover); }
+.kind-run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.kind-run-when {
+  font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.kind-run-result { font-size: 11.5px; font-weight: 700; color: var(--text-muted); }
+.kind-run-result.is-stuck { color: var(--error); }
+.kind-run-what { font-size: 13px; color: var(--text-primary); }
+.kind-run-why { font-size: 11.5px; color: var(--text-muted); }
+@media (max-width: 720px) {
+  .kind-run { grid-template-columns: 1fr; gap: 2px; }
+}
