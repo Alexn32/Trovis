@@ -2968,8 +2968,15 @@ def signup(body: SignupRequest) -> SignupResponse:
 @app.post("/auth/login", response_model=LoginResponse)
 def login(body: LoginRequest) -> LoginResponse:
     """Email + password → session token. Returns a single generic error for
-    unknown email / no-password / wrong password to avoid enumeration."""
-    user = database.get_user_by_email(body.email)
+    unknown email / no-password / wrong password to avoid enumeration.
+
+    Uses resolve_login_user so this lookup matches forgot-password (and
+    the user_id reset just updated): users.email, then accounts.email →
+    owner. Reset signs the caller in by user_id without checking email;
+    if login resolved a different row, the new password would "work
+    once" (the reset session) and fail after logout.
+    """
+    user = database.resolve_login_user(body.email)
     if user is None or not database.verify_password(
         body.password, user.get("password_hash")
     ):
@@ -2991,7 +2998,7 @@ def forgot_password(request: Request, body: ForgotPasswordRequest) -> None:
     whether an email is registered (no account enumeration). When the email
     matches a user we mint a one-time token and email the reset link; if email
     isn't configured the send is a no-op (logged) and the response is unchanged."""
-    user = database.get_user_by_email(body.email)
+    user = database.resolve_login_user(body.email)
     if user is not None:
         raw = database.create_password_reset(user["id"])
         base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
@@ -3017,14 +3024,23 @@ def reset_password(body: ResetPasswordRequest) -> LoginResponse:
     user_id = database.consume_password_reset(body.token)
     if user_id is None:
         raise HTTPException(status_code=400, detail="invalid or expired reset link")
-    database.set_user_password(user_id, database.hash_password(body.new_password))
-    database.delete_sessions_for_user(user_id)
-    user = database.get_user_by_id(user_id)
-    if user is None:
+    try:
+        database.set_user_password(user_id, database.hash_password(body.new_password))
+    except LookupError:
         raise HTTPException(status_code=400, detail="invalid or expired reset link")
+    # Reset mints a session without going through /auth/login. Confirm the
+    # new hash actually verifies on a fresh read — otherwise the caller is
+    # signed in now and locked out after logout.
+    user = database.get_user_with_password(user_id)
+    if user is None or not database.verify_password(
+        body.new_password, user.get("password_hash")
+    ):
+        raise HTTPException(status_code=500, detail="could not update password")
+    database.delete_sessions_for_user(user_id)
     org = database.get_account(user["account_id"])
     token = database.create_session(user_id, user["account_id"])
-    return LoginResponse(token=token, user=UserPublic(**user), org=OrgPublic(**org))
+    public = {k: v for k, v in user.items() if k != "password_hash"}
+    return LoginResponse(token=token, user=UserPublic(**public), org=OrgPublic(**org))
 
 
 @app.post("/auth/logout", status_code=204)
