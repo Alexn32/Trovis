@@ -1104,6 +1104,11 @@ def attention_items(flagged: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "severity": f["severity"],
                 "agent": f["agent"],
+                # Identity comes from OUR classification, never Claude's — the
+                # model only writes prose. Dropping these here made the row's
+                # link fall back to the display label, which 404s.
+                "service_name": f.get("service_name"),
+                "agent_id": f.get("agent_id") or "main",
                 "title": str(e.get("title") or "Needs attention").strip(),
                 "detail": str(e.get("detail") or "").strip(),
                 "recommendation": str(e.get("recommendation") or "").strip(),

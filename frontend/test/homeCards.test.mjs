@@ -81,11 +81,15 @@ test('every Home control has a real destination — no dead taps', () => {
     /onClick=\{onOpenCost\}/, // cost body -> Cost page
     /onViewAll=\{onViewAllWorkFeed\}/, // feed card is handed the overlay opener
     /onAction=\{onViewAll\}/, // ...and its header fires it
-    /onOpenAgent\(f\.agent, 'main'\)/, // feed row -> agent
+    // Feed row and fleet dot open that agent BY ROUTE. They used to pass the
+    // row's `agent`, which is a display label once anyone renames an agent —
+    // /agents/Support%20Bot 404s, and the 404 page read as a blank screen.
+    // See agentRoute.test.mjs.
+    /onOpenAgent\(\.\.\.agentRoute\(f\)\)/, // feed row -> agent
     /onGoWork\(t\.key\)/, // work tile -> Work, filtered
     /onGoWork\('attention'\)/, // attention header -> Work, filtered
     /onAction=\{onGoFleet\}/, // fleet header -> Fleet tab
-    /onOpenAgent\(h\.agent, 'main'\)/, // fleet dot -> that agent
+    /onOpenAgent\(\.\.\.agentRoute\(h\)\)/, // fleet dot -> that agent
   ]) {
     assert.match(code, dest, `missing destination: ${dest}`)
   }

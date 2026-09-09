@@ -761,6 +761,8 @@ export default function AgentDetail({ serviceName, agentId, account, onBack, onD
   const [costDays, setCostDays] = useState(() => Array(14).fill(0))
   const [capabilities, setCapabilities] = useState(null)
   const [error, setError] = useState(null)
+  // Bumped by "Try again" so the load effect re-runs without a remount.
+  const [reloadKey, setReloadKey] = useState(0)
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -782,7 +784,7 @@ export default function AgentDetail({ serviceName, agentId, account, onBack, onD
       setCostDays(padded)
     }).catch(() => {})
     return () => { mounted.current = false }
-  }, [serviceName, agentId])
+  }, [serviceName, agentId, reloadKey])
 
   function Shell({ children }) {
     return (
@@ -796,10 +798,35 @@ export default function AgentDetail({ serviceName, agentId, account, onBack, onD
   }
 
   if (error && !summary) {
+    // A back-link over one muted line of raw error text reads as a blank page
+    // on a full-width screen — which is exactly how a bad agent link was
+    // reported. Say what happened, and give a way out.
+    const missing = /not found/i.test(String(error))
     return (
       <Shell>
         <button onClick={onBack} style={{ background: 'none', border: 'none', color: C.muted, fontSize: 13.5, fontFamily: F.body, cursor: 'pointer', padding: 0, marginBottom: 18 }}>← Back to fleet</button>
-        <div style={{ color: C.muted, fontFamily: F.body }}>{error}</div>
+        <div style={{ fontFamily: F.body, maxWidth: 520 }}>
+          <h1 style={{ fontSize: 20, fontWeight: 700, color: C.ink, margin: '0 0 8px' }}>
+            {missing ? "We couldn't find that agent" : "Couldn't load this agent"}
+          </h1>
+          <p style={{ fontSize: 13.5, lineHeight: 1.6, color: C.muted, margin: '0 0 18px' }}>
+            {missing
+              ? `Nothing is reporting as “${serviceName}”. It may have been renamed or removed since this link was made.`
+              : error}
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => { setError(null); setReloadKey((n) => n + 1) }}
+            >
+              Try again
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={onBack}>
+              Back to fleet
+            </button>
+          </div>
+        </div>
       </Shell>
     )
   }
