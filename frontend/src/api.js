@@ -492,20 +492,22 @@ export const api = {
       body: JSON.stringify(reason ? { reason } : {}),
     }),
   // --- dedicated cost page ---
-  getCostOverview: () => request('/cost/overview'),
+  // `days` is the trend window (7–90) the chart is showing; the budget writes
+  // below echo it so the returned overview keeps the same series.
+  getCostOverview: (days = 30) => request(`/cost/overview?days=${days}`),
   // Per-day / per-model cost audit — surfaces tokens that landed unpriced
   // (cost undercounted) so a pricing/capture gap is visible, not silent.
   getCostAudit: (service, days = 30) =>
     request(
       `/cost/audit?days=${days}${service ? `&service=${encodeURIComponent(service)}` : ''}`,
     ),
-  setBudget: (monthlyBudget) =>
-    request('/cost/budget', {
+  setBudget: (monthlyBudget, days = 30) =>
+    request(`/cost/budget?days=${days}`, {
       method: 'PUT',
       body: JSON.stringify({ monthly_budget: monthlyBudget }),
     }),
-  setAgentBudget: (serviceName, agentId, monthlyCap) =>
-    request('/cost/agent-budget', {
+  setAgentBudget: (serviceName, agentId, monthlyCap, days = 30) =>
+    request(`/cost/agent-budget?days=${days}`, {
       method: 'PUT',
       body: JSON.stringify({
         service_name: serviceName,

@@ -953,6 +953,15 @@ class CostAgentRow(BaseModel):
     trend: str = "flat"
 
 
+class CostDayPoint(BaseModel):
+    """One UTC calendar day on the cost trend. Days with no usage are still
+    emitted (cost 0) so the chart's x-axis is evenly spaced."""
+
+    date: str  # YYYY-MM-DD (UTC)
+    cost: float = 0.0
+    tokens: int = 0
+
+
 class CostOverview(BaseModel):
     """Response for GET /cost/overview — the dedicated cost page."""
 
@@ -961,7 +970,12 @@ class CostOverview(BaseModel):
     month_budget: float = 0.0
     budget_pct: float = 0.0
     over_budget: bool = False
+    # `daily` is the bare cost series (oldest → newest) kept for older clients;
+    # `series` carries the same days with their date + token count so the chart
+    # can label and inspect each point. `days` echoes the requested window.
+    days: int = 30
     daily: list[float] = Field(default_factory=list)
+    series: list[CostDayPoint] = Field(default_factory=list)
     agents: list[CostAgentRow] = Field(default_factory=list)
     by_model: list[CostModelRow] = Field(default_factory=list)
 

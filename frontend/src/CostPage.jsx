@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { ArrowLeftIcon } from './Icons.jsx'
 import { formatCost as fmtMoney } from './utils.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
+const RANGES = [
+  { days: 7, label: '7d' },
+  { days: 30, label: '30d' },
+  { days: 90, label: '90d' },
+]
 
 function agoLabel(ts) {
   if (!ts) return ''
@@ -28,6 +33,43 @@ function fmtTokens(n) {
   return String(v)
 }
 
+// "2026-09-08" → "Mon, Sep 8". Parsed as UTC so the label matches the UTC day
+// the backend bucketed by, whatever the reader's timezone.
+function fmtDay(iso, withYear = false) {
+  if (!iso) return ''
+  const d = new Date(`${iso}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(undefined, {
+    timeZone: 'UTC',
+    weekday: withYear ? undefined : 'short',
+    month: 'short',
+    day: 'numeric',
+    year: withYear ? 'numeric' : undefined,
+  })
+}
+
+function fmtDayShort(iso) {
+  if (!iso) return ''
+  const d = new Date(`${iso}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(undefined, {
+    timeZone: 'UTC',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+// Axis ceiling: the next round number above the peak, so gridline labels land
+// on whole dollars. The steps are deliberately fine (a 1/2/5 ladder would put a
+// $64 peak on a $100 axis and squash the whole series into the bottom half).
+const CEIL_STEPS = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 10]
+function niceCeil(v) {
+  if (!(v > 0)) return 1
+  const base = 10 ** Math.floor(Math.log10(v))
+  const n = v / base
+  return (CEIL_STEPS.find((s) => n <= s) ?? 10) * base
+}
+
 export default function CostPage({ onBack, onOpenAgent }) {
   const [data, setData] = useState(null)
   const [audit, setAudit] = useState(null)
@@ -36,12 +78,15 @@ export default function CostPage({ onBack, onOpenAgent }) {
   const [savingBudget, setSavingBudget] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [range, setRange] = useState(30) // trend window in days (7 / 30 / 90)
   const [, forceTick] = useState(0) // keeps the "updated X ago" label live
+  const rangeRef = useRef(range)
+  rangeRef.current = range
 
   const load = useCallback(async () => {
     setRefreshing(true)
     try {
-      const d = await api.getCostOverview()
+      const d = await api.getCostOverview(rangeRef.current)
       setData(d)
       setBudgetInput(d.month_budget ? String(d.month_budget) : '')
       setLastUpdated(Date.now())
@@ -56,12 +101,13 @@ export default function CostPage({ onBack, onOpenAgent }) {
     }
   }, [])
 
-  // Initial load + auto-refresh once a day while the page stays open.
+  // Initial load, a refetch whenever the trend window changes, and an
+  // auto-refresh once a day while the page stays open.
   useEffect(() => {
     load()
     const id = setInterval(load, DAY_MS)
     return () => clearInterval(id)
-  }, [load])
+  }, [load, range])
 
   // Re-render every 30s so the "updated X ago" label stays current.
   useEffect(() => {
@@ -75,7 +121,7 @@ export default function CostPage({ onBack, onOpenAgent }) {
     if (val != null && (Number.isNaN(val) || val < 0)) return
     setSavingBudget(true)
     try {
-      const d = await api.setBudget(val)
+      const d = await api.setBudget(val, range)
       setData(d)
       setBudgetInput(d.month_budget ? String(d.month_budget) : '')
     } catch (e) {
@@ -87,7 +133,7 @@ export default function CostPage({ onBack, onOpenAgent }) {
 
   async function saveAgentCap(serviceName, cap) {
     try {
-      const d = await api.setAgentBudget(serviceName, 'main', cap)
+      const d = await api.setAgentBudget(serviceName, 'main', cap, range)
       setData(d)
     } catch (e) {
       setError(e.message || 'Could not save cap')
@@ -119,6 +165,18 @@ export default function CostPage({ onBack, onOpenAgent }) {
 
   const over = data.over_budget
   const pct = Math.round(data.budget_pct || 0)
+
+  // Dated trend points. Older servers only send the bare `daily` cost array —
+  // fall back to dating it backwards from today so the chart still works.
+  const points = seriesFrom(data)
+  // Straight-line month-end projection from the month-to-date burn.
+  const now = new Date()
+  const dayOfMonth = now.getUTCDate()
+  const daysInMonth = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0),
+  ).getUTCDate()
+  const projected = (data.month_total || 0) * (daysInMonth / dayOfMonth)
+  const projOver = data.month_budget > 0 && projected > data.month_budget
 
   return (
     <div className="dash costp">
@@ -205,16 +263,41 @@ export default function CostPage({ onBack, onOpenAgent }) {
           </div>
           <span className="costp-sum-sub">Drives the budget bar + over-budget warning.</span>
         </div>
-      </div>
-
-      {/* 30-day trend */}
-      <div className="dash-card">
-        <div className="dash-card-head">
-          <span className="dash-section-title">Last 30 days</span>
+        <div className="costp-sum-box">
+          <span className="costp-sum-label">Projected month</span>
+          <span className="costp-bignum">{fmtMoney(projected)}</span>
+          <span className={`costp-sum-sub ${projOver ? 'over' : ''}`}>
+            At today’s pace · day {dayOfMonth} of {daysInMonth}
+            {projOver ? ' · will exceed budget' : ''}
+          </span>
         </div>
-        <AreaChart data={data.daily} />
       </div>
 
+      {/* Trend */}
+      <div className="dash-card costp-chart-card">
+        <div className="dash-card-head spread">
+          <span className="dash-section-title">
+            Daily spend · last {range} days
+          </span>
+          <div className="costp-range" role="group" aria-label="Trend window">
+            {RANGES.map((r) => (
+              <button
+                key={r.days}
+                type="button"
+                className={`costp-range-btn ${range === r.days ? 'on' : ''}`}
+                aria-pressed={range === r.days}
+                onClick={() => setRange(r.days)}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <CostTrend points={points} dimmed={refreshing} />
+      </div>
+
+      {/* Breakdowns — side by side once there's width for them */}
+      <div className="costp-tables">
       {/* By agent */}
       <div className="dash-card" style={{ padding: 0 }}>
         <div className="dash-card-head spread" style={{ padding: '14px 18px 0' }}>
@@ -268,6 +351,7 @@ export default function CostPage({ onBack, onOpenAgent }) {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }
@@ -322,35 +406,254 @@ function AgentRow({ a, onSaveCap, onOpenAgent }) {
   )
 }
 
-function AreaChart({ data }) {
-  const w = 720
-  const h = 90
-  const series = Array.isArray(data) ? data : []
-  if (series.length < 2) return <div className="dash-empty">Not enough data yet.</div>
-  const max = Math.max(...series, 0.0001)
-  const pts = series.map((v, i) => [
-    (i / (series.length - 1)) * w,
-    h - (v / max) * (h - 8) - 4,
-  ])
-  const line = pts
-    .map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`)
+// Dated points for the trend. Prefers the server's `series` (date + tokens);
+// falls back to the bare `daily` cost array from older servers, dating it
+// backwards from today in UTC.
+function seriesFrom(data) {
+  if (Array.isArray(data?.series) && data.series.length) return data.series
+  const daily = Array.isArray(data?.daily) ? data.daily : []
+  const today = new Date()
+  return daily.map((cost, i) => {
+    const d = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()),
+    )
+    d.setUTCDate(d.getUTCDate() - (daily.length - 1 - i))
+    return { date: d.toISOString().slice(0, 10), cost: Number(cost) || 0, tokens: 0 }
+  })
+}
+
+// Live element width, so the chart draws in real pixels (no viewBox stretching
+// of stroke widths and type) and reflows with the full-width layout.
+function useElementWidth() {
+  const ref = useRef(null)
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return undefined
+    setWidth(el.getBoundingClientRect().width)
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width
+      if (w) setWidth(w)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, width]
+}
+
+// Interactive daily-spend trend: area + line over a real dollar axis, with a
+// crosshair that snaps to the nearest day on hover and on arrow-key focus, and
+// a tooltip reading out that day's cost and tokens. A dashed line marks the
+// window's daily average. Single series, so no legend — the card head names it.
+function CostTrend({ points, dimmed }) {
+  const [wrapRef, width] = useElementWidth()
+  const [hover, setHover] = useState(null) // hovered/focused index
+
+  const n = points.length
+  const stats = useMemo(() => {
+    if (!n) return { total: 0, avg: 0, peak: null }
+    let total = 0
+    let peak = points[0]
+    for (const p of points) {
+      total += p.cost || 0
+      if ((p.cost || 0) > (peak.cost || 0)) peak = p
+    }
+    return { total, avg: total / n, peak }
+  }, [points, n])
+
+  if (n < 2) return <div className="dash-empty pad">Not enough data yet.</div>
+  // A flat line at zero is noise, not a chart — say the window is empty.
+  if (stats.total <= 0)
+    return <div className="dash-empty pad">No spend recorded in this window.</div>
+
+  const H = 232
+  const padL = 56
+  const padR = 18
+  const padT = 16
+  const padB = 28
+  const w = Math.max(width || 0, 320)
+  const plotW = Math.max(w - padL - padR, 40)
+  const plotH = H - padT - padB
+
+  const maxCost = Math.max(...points.map((p) => p.cost || 0), 0)
+  const top = niceCeil(maxCost || 1)
+  const xFor = (i) => padL + (i / (n - 1)) * plotW
+  const yFor = (v) => padT + plotH - (Math.max(v, 0) / top) * plotH
+
+  const line = points
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${xFor(i).toFixed(1)},${yFor(p.cost).toFixed(1)}`)
     .join(' ')
-  const area = `${line} L${w},${h} L0,${h} Z`
+  const area = `${line} L${xFor(n - 1).toFixed(1)},${padT + plotH} L${padL},${padT + plotH} Z`
+
+  const gridVals = [0, top / 2, top]
+  // Roughly one x label per 110px, always including the first and last day.
+  const labelEvery = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(plotW / 110))))
+  const xLabels = points
+    .map((p, i) => ({ p, i }))
+    .filter(({ i }) => i === n - 1 || i % labelEvery === 0)
+    .filter(({ i }) => i === n - 1 || xFor(n - 1) - xFor(i) > 46)
+
+  const step = plotW / (n - 1)
+  function indexFromEvent(e) {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left - padL
+    return Math.max(0, Math.min(n - 1, Math.round(x / step)))
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault()
+      const dir = e.key === 'ArrowRight' ? 1 : -1
+      setHover((h) => {
+        const base = h == null ? (dir > 0 ? -1 : n) : h
+        return Math.max(0, Math.min(n - 1, base + dir))
+      })
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      setHover(0)
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      setHover(n - 1)
+    } else if (e.key === 'Escape') {
+      setHover(null)
+    }
+  }
+
+  // Guard the index: switching the range swaps the series under a live hover.
+  const active = hover != null && hover < n ? points[hover] : null
+  // Keep the tooltip inside the card: it flips to the left of the crosshair
+  // once the hovered day is past the halfway mark.
+  const tipLeft = active ? xFor(hover) : 0
+  const flip = active && tipLeft > padL + plotW / 2
+
   return (
-    <svg
-      className="costp-chart"
-      viewBox={`0 0 ${w} ${h}`}
-      preserveAspectRatio="none"
-      aria-hidden="true"
-    >
-      <defs>
-        <linearGradient id="costpFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--dash-spark)" stopOpacity="0.18" />
-          <stop offset="100%" stopColor="var(--dash-spark)" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={area} fill="url(#costpFill)" />
-      <path d={line} fill="none" stroke="var(--dash-spark)" strokeWidth="1.5" strokeOpacity="0.6" />
-    </svg>
+    <div className="costp-trend">
+      <div className="costp-trend-stats">
+        <span>
+          <b>{fmtMoney(stats.total)}</b> total
+        </span>
+        <span>
+          <b>{fmtMoney(stats.avg)}</b> / day avg
+        </span>
+        {stats.peak && (
+          <span>
+            <b>{fmtMoney(stats.peak.cost)}</b> peak · {fmtDayShort(stats.peak.date)}
+          </span>
+        )}
+        <span className="costp-trend-hint">Hover or use ← → to inspect a day</span>
+      </div>
+
+      <div
+        className={`costp-plot ${dimmed ? 'dim' : ''}`}
+        ref={wrapRef}
+        tabIndex={0}
+        role="img"
+        aria-label={`Daily spend over the last ${n} days. Total ${fmtMoney(
+          stats.total,
+        )}, averaging ${fmtMoney(stats.avg)} per day.`}
+        onKeyDown={onKeyDown}
+        onBlur={() => setHover(null)}
+      >
+        <svg
+          className="costp-chart"
+          width={w}
+          height={H}
+          viewBox={`0 0 ${w} ${H}`}
+          onPointerMove={(e) => setHover(indexFromEvent(e))}
+          onPointerLeave={() => setHover(null)}
+        >
+          <defs>
+            <linearGradient id="costpFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--dash-spark)" stopOpacity="0.22" />
+              <stop offset="100%" stopColor="var(--dash-spark)" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+
+          {gridVals.map((v) => (
+            <g key={v}>
+              <line
+                className="costp-grid"
+                x1={padL}
+                x2={padL + plotW}
+                y1={yFor(v)}
+                y2={yFor(v)}
+              />
+              <text className="costp-axis" x={padL - 10} y={yFor(v) + 3.5} textAnchor="end">
+                {fmtMoney(v)}
+              </text>
+            </g>
+          ))}
+
+          {stats.avg > 0 && (
+            <line
+              className="costp-avgline"
+              x1={padL}
+              x2={padL + plotW}
+              y1={yFor(stats.avg)}
+              y2={yFor(stats.avg)}
+            />
+          )}
+
+          <path d={area} fill="url(#costpFill)" />
+          <path
+            d={line}
+            fill="none"
+            stroke="var(--dash-spark)"
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+
+          {xLabels.map(({ p, i }) => (
+            <text
+              key={p.date}
+              className="costp-axis"
+              x={xFor(i)}
+              y={H - 8}
+              textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}
+            >
+              {fmtDayShort(p.date)}
+            </text>
+          ))}
+
+          {active && (
+            <g>
+              <line
+                className="costp-crosshair"
+                x1={xFor(hover)}
+                x2={xFor(hover)}
+                y1={padT}
+                y2={padT + plotH}
+              />
+              <circle
+                cx={xFor(hover)}
+                cy={yFor(active.cost)}
+                r="4.5"
+                fill="var(--dash-spark)"
+                stroke="var(--bg-elevated)"
+                strokeWidth="2"
+              />
+            </g>
+          )}
+        </svg>
+
+        {active && (
+          <div
+            className="costp-tip"
+            style={{
+              left: `${tipLeft}px`,
+              transform: `translateX(${flip ? 'calc(-100% - 12px)' : '12px'})`,
+            }}
+          >
+            <span className="costp-tip-val">{fmtMoney(active.cost)}</span>
+            <span className="costp-tip-day">{fmtDay(active.date)}</span>
+            {active.tokens > 0 && (
+              <span className="costp-tip-sub">{fmtTokens(active.tokens)} tokens</span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
