@@ -40,6 +40,7 @@ import alerts
 import asker
 import billing
 import database
+import saas_hubspot
 import saas_stripe
 import describer
 import email_send
@@ -161,6 +162,7 @@ from models import (
     WorkFeedItem,
     SaaSConnection,
     SaaSConnectionsResponse,
+    SaaSHubSpotOAuthStart,
     SaaSStripeOAuthStart,
 )
 
@@ -187,6 +189,8 @@ _OPEN_PATHS = {
     "/billing/webhook",          # Stripe *billing* webhook — Trovis plan gate. Isolated.
     "/saas/stripe/webhook",      # Stripe *SaaS* Work webhook — signature, not a Trovis key
     "/saas/stripe/oauth/callback",  # Stripe Connect redirects the browser here
+    "/saas/hubspot/webhook",     # HubSpot *SaaS* Work webhook — signature, not a Trovis key
+    "/saas/hubspot/oauth/callback",  # HubSpot OAuth redirects the browser here
 }
 
 
@@ -3403,6 +3407,7 @@ def list_saas_connections(request: Request) -> SaaSConnectionsResponse:
             "updated_at": r.get("updated_at"),
         }) for r in rows],
         stripe_oauth_configured=saas_stripe.oauth_configured(),
+        hubspot_oauth_configured=saas_hubspot.oauth_configured(),
     )
 
 
@@ -3472,6 +3477,124 @@ def saas_stripe_disconnect(request: Request) -> SaaSConnection:
     row = database.disconnect_saas_connection(account_id, "stripe")
     if row is None:
         raise HTTPException(status_code=404, detail="Stripe is not connected")
+    return SaaSConnection(
+        provider=row["provider"],
+        status=row["status"],
+        provider_account_id=row.get("provider_account_id"),
+        livemode=bool(row.get("livemode")),
+        connected_at=row.get("connected_at"),
+        updated_at=row.get("updated_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# SaaS HubSpot — Work-event adapter (NOT CRM sync, NOT billing)
+# ---------------------------------------------------------------------------
+# Isolated from /billing/webhook. Signature uses HUBSPOT_SAAS_CLIENT_SECRET.
+# Metadata-link only: no trovis_* key on the deal/ticket → no-op. Never invents
+# a Work loop. Never writes a Stripe plan.
+
+
+@app.post("/saas/hubspot/webhook")
+async def saas_hubspot_webhook(request: Request) -> dict:
+    """Verified HubSpot deal/ticket events → wait/clear/stuck on an open loop.
+
+    Authenticated by HubSpot signature over the raw body (app client secret),
+    so this path is in _OPEN_PATHS. Account is resolved from portalId on the
+    event — never from the client.
+    """
+    payload = await request.body()
+    app_url = (database.env("APP_URL") or "").rstrip("/")
+    uri = (
+        os.getenv("HUBSPOT_SAAS_WEBHOOK_URI")
+        or (f"{app_url}/saas/hubspot/webhook" if app_url else str(request.url))
+    )
+    try:
+        result = saas_hubspot.handle_webhook(
+            payload,
+            signature_v3=request.headers.get("X-HubSpot-Signature-v3"),
+            signature_v1=request.headers.get("X-HubSpot-Signature"),
+            timestamp=request.headers.get("X-HubSpot-Request-Timestamp"),
+            method=request.method,
+            uri=uri,
+        )
+    except saas_hubspot.HubSpotSaaSNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except saas_hubspot.HubSpotSaaSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"received": True, **result}
+
+
+@app.get("/saas/hubspot/oauth/start", response_model=SaaSHubSpotOAuthStart)
+def saas_hubspot_oauth_start(request: Request) -> SaaSHubSpotOAuthStart:
+    """Begin HubSpot OAuth. Session required; returns the authorize URL."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    if not saas_hubspot.oauth_configured():
+        raise HTTPException(
+            status_code=503, detail="HubSpot SaaS OAuth is not configured",
+        )
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    redirect_uri = (
+        os.getenv("HUBSPOT_SAAS_REDIRECT_URI")
+        or f"{base}/saas/hubspot/oauth/callback"
+    )
+    state = database.create_saas_oauth_state(account_id, "hubspot")
+    try:
+        url = saas_hubspot.authorize_url(redirect_uri=redirect_uri, state=state)
+    except saas_hubspot.HubSpotSaaSNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return SaaSHubSpotOAuthStart(authorize_url=url)
+
+
+@app.get("/saas/hubspot/oauth/callback", include_in_schema=False)
+def saas_hubspot_oauth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    """HubSpot OAuth redirect. Open path — account rides in ``state``."""
+    base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
+    redirect_uri = (
+        os.getenv("HUBSPOT_SAAS_REDIRECT_URI")
+        or f"{base}/saas/hubspot/oauth/callback"
+    )
+    if error:
+        return RedirectResponse(f"{base}/?saas=hubspot_error")
+    account_id = database.consume_saas_oauth_state(state or "", "hubspot")
+    if account_id is None:
+        return RedirectResponse(f"{base}/?saas=hubspot_error")
+    if not code:
+        return RedirectResponse(f"{base}/?saas=hubspot_error")
+    try:
+        tokens = saas_hubspot.exchange_code(code, redirect_uri=redirect_uri)
+    except saas_hubspot.HubSpotSaaSError:
+        return RedirectResponse(f"{base}/?saas=hubspot_error")
+    database.upsert_saas_connection(
+        account_id,
+        "hubspot",
+        provider_account_id=str(tokens.get("hub_id") or ""),
+        access_token=tokens.get("access_token"),
+        refresh_token=tokens.get("refresh_token"),
+        token_type=tokens.get("token_type"),
+        scope=tokens.get("scope"),
+        livemode=False,
+        status="connected",
+    )
+    return RedirectResponse(f"{base}/?saas=hubspot_connected")
+
+
+@app.delete("/saas/hubspot", response_model=SaaSConnection)
+def saas_hubspot_disconnect(request: Request) -> SaaSConnection:
+    """Disconnect HubSpot. Stops webhook apply for this account; tokens wiped."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    row = database.disconnect_saas_connection(account_id, "hubspot")
+    if row is None:
+        raise HTTPException(status_code=404, detail="HubSpot is not connected")
     return SaaSConnection(
         provider=row["provider"],
         status=row["status"],

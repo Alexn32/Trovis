@@ -1,6 +1,6 @@
 """Shared SaaS → Work-event spine.
 
-Many transports (Stripe today; HubSpot later) collapse onto one Work Event.
+Many transports (Stripe, HubSpot) collapse onto one Work Event.
 This module is the only writer of those effects. Adapters verify, map, and
 hand a structured event here. The spine then:
 
@@ -46,6 +46,7 @@ LINK_KEYS = (
 
 PROVIDER_LABELS = {
     "stripe": "Stripe",
+    "hubspot": "HubSpot",
 }
 
 
