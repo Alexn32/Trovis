@@ -149,7 +149,15 @@ function Header({ summary, registration, account, onBack }) {
         {owner && <span>Owner: <span style={{ color: C.body, fontWeight: 500 }}>{owner}</span></span>}
         {summary.platform && (
           <Tag>
-            <QuietBrand texts={[summary.platform, serviceName, name]} size={12} />
+            {/* Brand hints come off the summary — `serviceName` is a prop of
+                AgentDetail, not of this component, and referencing it here
+                threw "serviceName is not defined" for every agent whose
+                telemetry carries a platform (any real OTEL SDK sets
+                telemetry.sdk.language, so: nearly all of them). */}
+            <QuietBrand
+              texts={[summary.platform, summary.service_name, name]}
+              size={12}
+            />
             {summary.platform}
           </Tag>
         )}
