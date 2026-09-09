@@ -4579,6 +4579,8 @@ def dashboard_cost(request: Request) -> CostResponse:
         month_total=month_total,
         month_budget=budget,
         budget_pct=budget_pct,
+        # The full count, not len(agents) — that list is truncated below.
+        agent_count=len(agents),
         agents=cost_agents[:8],
         daily=daily,
     )

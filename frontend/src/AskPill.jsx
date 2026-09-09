@@ -10,7 +10,7 @@ import { FALLBACK_CHIPS } from './askChips.js'
 // POST /dashboard/ask answers from the live work record (waiting / stuck /
 // overview) and from fleet telemetry.
 
-export default function AskPill() {
+export default function AskPill({ hideLauncher = false }) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState([])
   const [pending, setPending] = useState(false)
@@ -75,6 +75,10 @@ export default function AskPill() {
   sendRef.current = send
 
   if (!open) {
+    // Home renders its own Ask field, so it hides this one — but ⌘K and
+    // openAsk() still open the panel there. Hiding the launcher never means
+    // hiding Ask.
+    if (hideLauncher) return null
     return (
       <button type="button" className="dash-ask-pill" onClick={() => setOpen(true)}>
         <span className="dash-sq">

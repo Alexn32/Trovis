@@ -106,20 +106,21 @@ function joinCounts(parts) {
   return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
 }
 
-function plural(n, one, many) {
-  return `${n} ${n === 1 ? one : many}`
-}
-
 /**
  * The briefing's lead sentence — the state of today in one line.
  *
  * Composed from counts rather than written by Claude, so it is always
- * truthful, always plain, and still renders when the Claude call fails. Pass
- * the /work/overview counts when they loaded; they are the same numbers the
- * Work tab prints.
+ * truthful and still renders when the Claude call fails. It states WHICH
+ * conditions hold and prints NONE of the figures: the proof strip owns every
+ * number on Home, and prose repeating one is how the two drift apart.
  *
- * Returns '' when we have no work signal at all — the caller then leans on
- * the narrative line instead of inventing a state.
+ * Every clause is read off a count that is actually > 0 — nothing here is
+ * inferred from the absence of something else. ("Work is moving" used to be
+ * derived from "nothing is stuck", which read as a flat lie on a day with
+ * zero moving work.)
+ *
+ * Returns '' when we have no work signal at all — the caller then says
+ * nothing rather than inventing a state.
  */
 export function briefingLead(counts) {
   if (!counts) return ''
@@ -128,24 +129,49 @@ export function briefingLead(counts) {
   const open = Number(counts.open) || 0
 
   const parts = []
-  if (needsYou > 0) {
-    parts.push(
-      `${plural(needsYou, 'thing', 'things')} ${needsYou === 1 ? 'needs' : 'need'} you`,
-    )
-  }
-  if (attention > 0) {
-    // "need attention", not "are stuck" — the bucket includes work that is
-    // merely waiting too long on a person, which is not the same as stuck.
-    parts.push(`${attention} ${attention === 1 ? 'needs' : 'need'} attention`)
-  }
+  if (needsYou > 0) parts.push('work is waiting on you')
+  // "needs attention", not "is stuck" — the bucket includes work merely
+  // waiting too long on a person, which is not the same as stuck.
+  if (attention > 0) parts.push('some work needs attention')
   if (parts.length > 0) {
-    // "2 things need you and 1 is stuck."
-    return `${joinCounts(parts)}.`
+    const rest = open > needsYou + attention ? '. The rest is in progress.' : '.'
+    return `Today, ${joinCounts(parts)}${rest}`
   }
-  if (open > 0) {
-    return `Nothing needs you. ${plural(open, 'thing', 'things')} in progress.`
-  }
+  if (open > 0) return 'Nothing needs you. Everything open is in progress.'
   return 'Nothing needs you right now.'
+}
+
+// ---------------------------------------------------------------------------
+// Fleet pulse — the highest-level thing Home says about the agents, and the
+// only thing it can say without loading the roster.
+// ---------------------------------------------------------------------------
+
+/**
+ * `count` is how many agents are reporting; `needLook` is the ones already
+ * flagged by /dashboard/attention, which Home fetches anyway.
+ *
+ * Home must NOT load the roster (that request is what made it expensive), so
+ * the count comes from /dashboard/cost's `agent_count` — the honest total,
+ * not `agents.length`, which is a truncated top-spender list.
+ *
+ * Because we never see the roster, we can never say "all healthy": not being
+ * flagged is not the same as being checked. `count` is null until we know it,
+ * and the caller stays silent rather than printing a number it is guessing.
+ */
+export function fleetPulse({ agentCount, attention }) {
+  const seen = new Set()
+  const needLook = []
+  for (const a of attention || []) {
+    if (!a || !a.agent) continue
+    const key = `${a.service_name || a.agent}:${a.agent_id || 'main'}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    needLook.push(a)
+  }
+  const count = Number.isFinite(Number(agentCount)) && agentCount !== null
+    ? Number(agentCount)
+    : null
+  return { count, needLook }
 }
 
 /**
@@ -166,18 +192,21 @@ export function asOfLabel(iso, locale = undefined) {
  * Nothing is connected yet — as opposed to still loading, failing, or simply
  * having a quiet day.
  *
- * `agents` is the agent list /dashboard/cost already returns, so this costs no
- * extra request. It is the honest signal: an account can have agents running
- * and no named work yet, and that is a quiet day, not a first run.
+ * `agentCount` is /dashboard/cost's `agent_count`, which Home fetches for the
+ * strip anyway — no extra request, and honest in a way "no work yet" is not:
+ * an account can have agents running and no named work, and that is a quiet
+ * day, not a first run.
  *
- * Only true when every input came back and came back empty; a failed section
- * returns false so we show its Retry, not an "all set up" story that isn't
- * earned.
+ * Only true when every input came back and came back empty; a section that is
+ * still loading or failed returns false, so we show its Retry rather than an
+ * "all set up" story that isn't earned. `agentCount` null means we do not yet
+ * know, which is not the same as zero.
  */
-export function isFirstRun({ overview, items, agents }) {
-  if (!overview || !items || !agents) return false
+export function isFirstRun({ overview, items, agentCount }) {
+  if (!overview || !items) return false
+  if (agentCount === null || agentCount === undefined) return false
   const noWork = (Number(overview.open) || 0) === 0 && items.length === 0
-  return noWork && agents.length === 0
+  return noWork && Number(agentCount) === 0
 }
 
 // ---------------------------------------------------------------------------
@@ -217,28 +246,28 @@ export function stuckItems(items) {
 }
 
 /**
- * The shape of the day, in one sentence, from counts.
+ * The desk box's own copy when there is nothing on it.
  *
- * TEMPLATE, never a model: it is on the first paint, so it cannot wait on a
- * Claude call, and it must be true before anything else has loaded. It carries
- * NO numbers and NO money on purpose — the proof strip owns every count on
- * Home, and two places printing the same figure is how they end up disagreeing.
+ * This replaced a shape-of-the-day slogan that inferred a second clause from
+ * the absence of the first — "Nothing is waiting on you. Work is moving."
+ * printed on a day with zero moving work, directly contradicting the strip
+ * underneath it. An empty desk is one fact, so it gets one fact: what is not
+ * waiting on you, and nothing about the rest of the day.
  *
- * `hasRecord` is false while we are still reading; the caller renders nothing
- * rather than a sentence it might have to take back.
+ * `connected` false is the genuinely different case: no agents at all, so
+ * "nothing is waiting on you" would understate it.
  */
-export function dayShape({ hasRecord, connected, deskCount, stuckCount }) {
-  if (!hasRecord) return ''
-  if (!connected) return 'Nothing is connected yet.'
-  const stuck = (Number(stuckCount) || 0) > 0
-  if ((Number(deskCount) || 0) === 0) {
-    return stuck
-      ? 'Nothing is waiting on you. Some work is stuck.'
-      : 'Nothing is waiting on you. Work is moving.'
+export function deskEmptyCopy({ connected }) {
+  if (!connected) {
+    return {
+      lead: 'Nothing is connected yet.',
+      sub: 'Connect an agent and the work it hands you shows up here.',
+    }
   }
-  return stuck
-    ? 'You have work waiting. Some work is stuck.'
-    : 'You have work waiting. The rest is moving.'
+  return {
+    lead: 'Nothing is waiting on you.',
+    sub: 'No tasks on your plate.',
+  }
 }
 
 /** Local clock for a recent timestamp: "4pm", "4:30pm". */
@@ -319,18 +348,22 @@ export function stuckNotice(items, nowMs = Date.now(), locale = undefined) {
  * spend blip is not something to act on, and the strip already shows the day's
  * money.
  *
- * Each line carries where it goes, so nothing here is a dead tap.
+ * Every line carries BOTH where it goes and what to do about it. A notice you
+ * cannot act on is just worry, so a row without a target is never emitted —
+ * and the caller renders the action as a real button, not a hover affordance.
  */
 export function noticedLines({ items, attention, nowMs = Date.now(), limit = 3, locale }) {
   const lines = []
   const stuck = stuckItems(items)
   if (stuck.length > 0) {
+    const one = stuck.length === 1
     lines.push({
       key: 'stuck',
       kind: 'stuck',
       text: stuckNotice(items, nowMs, locale),
       // One stuck thing opens itself; several open Work already filtered.
-      target: stuck.length === 1 ? { to: 'work-item', item: stuck[0] } : { to: 'work', filter: 'stuck' },
+      action: one ? 'Open it' : 'See stuck work',
+      target: one ? { to: 'work-item', item: stuck[0] } : { to: 'work', filter: 'stuck' },
     })
   }
   for (const a of attention || []) {
@@ -342,8 +375,61 @@ export function noticedLines({ items, attention, nowMs = Date.now(), limit = 3, 
       key: `agent:${a.service_name || a.agent}:${a.agent_id || 'main'}`,
       kind: a.severity === 'critical' ? 'critical' : 'warning',
       text: `${a.agent} — ${title}`,
+      action: 'Review agent',
       target: { to: 'agent', row: a },
     })
   }
   return lines.slice(0, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Ask presets
+// ---------------------------------------------------------------------------
+
+/**
+ * Chips for the Ask field, built from what is actually on the page right now.
+ *
+ * A chip is only offered when its answer exists: "What's stuck?" on a day with
+ * nothing stuck asks Trovis to describe an empty set, which is a worse first
+ * impression than no chip at all. So every one is gated on its own condition
+ * and the row simply shrinks.
+ *
+ * The cost chip is the one place outside the strip allowed to carry the day's
+ * figure — it is quoting the strip into a question, not stating a second
+ * number, and it is built from the same `cost.today` the strip renders.
+ */
+export function askChips({ desk, counts, attention, costToday, limit = 4 }) {
+  const chips = []
+  const c = counts || {}
+  if ((desk || []).length > 0) {
+    chips.push({ key: 'mine', label: "What's waiting on me?", query: "What's waiting on me?" })
+  }
+  if ((Number(c.waiting) || 0) > 0) {
+    chips.push({
+      key: 'others',
+      label: "What's waiting on someone?",
+      query: "What's waiting on someone else?",
+    })
+  }
+  if ((Number(c.stuck) || 0) > 0) {
+    chips.push({ key: 'stuck', label: "What's stuck?", query: "What's stuck?" })
+  }
+  const flagged = (attention || []).find((a) => a && a.agent)
+  if (flagged) {
+    chips.push({
+      key: 'agent',
+      label: `Why does ${flagged.agent} need a look?`,
+      query: `Why does ${flagged.agent} need a look?`,
+    })
+  }
+  const money = Number(costToday) || 0
+  if (money >= 0.01) {
+    const amount = `$${money.toFixed(2)}`
+    chips.push({
+      key: 'cost',
+      label: `What cost ${amount} today?`,
+      query: `What did we spend ${amount} on today?`,
+    })
+  }
+  return chips.slice(0, limit)
 }

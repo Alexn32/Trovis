@@ -8,9 +8,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
+  askChips,
   clockLabel,
-  dayShape,
+  deskEmptyCopy,
   deskItems,
+  fleetPulse,
   noticedLines,
   proofCounts,
   stuckItems,
@@ -78,38 +80,75 @@ test('an empty desk is empty, not a placeholder row', () => {
   assert.deepEqual(deskItems([item({ status: 'moving' })]), [])
 })
 
-// --- 2. the shape-of-the-day sentence --------------------------------------
+// --- 2. what the desk says when it is clear --------------------------------
 
-test('the sentence is one of the five allowed shapes', () => {
-  const shape = (o) => dayShape({ hasRecord: true, connected: true, ...o })
-  assert.equal(shape({ deskCount: 0, stuckCount: 0 }), 'Nothing is waiting on you. Work is moving.')
-  assert.equal(shape({ deskCount: 0, stuckCount: 2 }), 'Nothing is waiting on you. Some work is stuck.')
-  assert.equal(shape({ deskCount: 3, stuckCount: 0 }), 'You have work waiting. The rest is moving.')
-  assert.equal(shape({ deskCount: 3, stuckCount: 2 }), 'You have work waiting. Some work is stuck.')
-  assert.equal(
-    dayShape({ hasRecord: true, connected: false, deskCount: 0, stuckCount: 0 }),
-    'Nothing is connected yet.',
-  )
+test('a clear desk states one fact and infers nothing about the rest', () => {
+  // The bug this replaced: "Nothing is waiting on you. Work is moving." was
+  // rendered above a strip reading 0 moving. The second clause was derived
+  // from the ABSENCE of stuck work, not from any count of moving work.
+  const clear = deskEmptyCopy({ connected: true })
+  assert.equal(clear.lead, 'Nothing is waiting on you.')
+  assert.equal(clear.sub, 'No tasks on your plate.')
+  for (const s of [clear.lead, clear.sub]) {
+    assert.doesNotMatch(s, /moving|in progress|on track/i, `infers the rest of the day: ${s}`)
+  }
 })
 
-test('the sentence carries no numbers and no money — the strip owns those', () => {
-  // Two places printing the same figure is how they end up disagreeing. This
-  // is the rule that keeps the top of Home from ever contradicting the strip.
-  for (const deskCount of [0, 1, 7]) {
-    for (const stuckCount of [0, 1, 4]) {
-      for (const connected of [true, false]) {
-        const s = dayShape({ hasRecord: true, connected, deskCount, stuckCount })
-        assert.ok(s, 'a sentence is always produced once the record is known')
-        assert.doesNotMatch(s, /\d/, `sentence has a digit: ${s}`)
-        assert.doesNotMatch(s, /[$€£]/, `sentence has money: ${s}`)
-      }
+test('nothing connected is a different fact from a clear desk', () => {
+  const fresh = deskEmptyCopy({ connected: false })
+  assert.match(fresh.lead, /Nothing is connected yet/)
+  assert.notEqual(fresh.lead, deskEmptyCopy({ connected: true }).lead)
+})
+
+test('desk copy carries no digits and no money', () => {
+  // Counts live in the strip, and nowhere else.
+  for (const connected of [true, false]) {
+    const { lead, sub } = deskEmptyCopy({ connected })
+    for (const s of [lead, sub]) {
+      assert.doesNotMatch(s, /\d/, `desk copy has a digit: ${s}`)
+      assert.doesNotMatch(s, /[$€£]/, `desk copy has money: ${s}`)
     }
   }
 })
 
-test('no sentence until we actually know the record', () => {
-  // Better silent than a claim we have to take back a moment later.
-  assert.equal(dayShape({ hasRecord: false, connected: true, deskCount: 0, stuckCount: 0 }), '')
+// --- fleet pulse ------------------------------------------------------------
+
+test('the pulse counts agents from the honest total, and lists only the flagged', () => {
+  const { count, needLook } = fleetPulse({
+    agentCount: 12,
+    attention: [
+      { agent: 'Support Bot', service_name: 'support', severity: 'critical', title: 'x' },
+      { agent: 'Ops Bot', service_name: 'ops', severity: 'warning', title: 'y' },
+    ],
+  })
+  assert.equal(count, 12)
+  assert.deepEqual(needLook.map((a) => a.agent), ['Support Bot', 'Ops Bot'])
+})
+
+test('the pulse says nothing rather than guessing the count', () => {
+  // /dashboard/cost has not landed yet: null is "we do not know", which is
+  // not zero, and the caller renders no number at all.
+  assert.equal(fleetPulse({ agentCount: null, attention: [] }).count, null)
+  assert.equal(fleetPulse({ agentCount: undefined, attention: [] }).count, null)
+})
+
+test('the same agent flagged twice is one entry', () => {
+  const { needLook } = fleetPulse({
+    agentCount: 3,
+    attention: [
+      { agent: 'Support Bot', service_name: 'support', agent_id: 'main', title: 'a' },
+      { agent: 'Support Bot', service_name: 'support', agent_id: 'main', title: 'b' },
+      { agent: 'Support Bot', service_name: 'support', agent_id: 'researcher', title: 'c' },
+    ],
+  })
+  // Same service AND sub-agent collapses; a different sub-agent does not.
+  assert.equal(needLook.length, 2)
+})
+
+test('a clean pulse is a count and nothing else', () => {
+  const { count, needLook } = fleetPulse({ agentCount: 4, attention: [] })
+  assert.equal(count, 4)
+  assert.deepEqual(needLook, [])
 })
 
 // --- 4. Trovis noticed ------------------------------------------------------
@@ -190,6 +229,33 @@ test('agent-health lines ride along, capped, stuck first', () => {
   assert.match(lines[1].text, /^Support Bot — /)
 })
 
+test('every noticed line carries an action, not just a worry', () => {
+  const lines = noticedLines({
+    items: [item({ id: 1, status: 'stuck', updated_at: agoS(3600) })],
+    attention: [{ agent: 'Support Bot', service_name: 'support-agent', severity: 'warning', title: 'Quiet' }],
+    nowMs: NOW,
+  })
+  assert.ok(lines.length >= 2)
+  for (const l of lines) {
+    assert.ok(l.action && l.action.trim(), `no action on: ${l.text}`)
+    assert.ok(l.target && l.target.to, `no target on: ${l.text}`)
+  }
+  assert.equal(lines[0].action, 'Open it')
+  assert.equal(lines[1].action, 'Review agent')
+})
+
+test('several stuck things send you to the filtered list, not one of them', () => {
+  const lines = noticedLines({
+    items: [
+      item({ id: 1, status: 'stuck', updated_at: agoS(3600) }),
+      item({ id: 2, status: 'stuck', updated_at: agoS(60) }),
+    ],
+    attention: [],
+    nowMs: NOW,
+  })
+  assert.equal(lines[0].action, 'See stuck work')
+})
+
 test('every noticed line knows where it goes', () => {
   const lines = noticedLines({
     items: [
@@ -259,13 +325,23 @@ const FORBIDDEN = /\b(loops?|workloops?|possession|segments?|stations?|handoffs?
 
 test('nothing home.js produces can ship Trovis jargon', () => {
   const strings = [
-    dayShape({ hasRecord: true, connected: false, deskCount: 0, stuckCount: 0 }),
-    dayShape({ hasRecord: true, connected: true, deskCount: 0, stuckCount: 0 }),
-    dayShape({ hasRecord: true, connected: true, deskCount: 0, stuckCount: 1 }),
-    dayShape({ hasRecord: true, connected: true, deskCount: 1, stuckCount: 0 }),
-    dayShape({ hasRecord: true, connected: true, deskCount: 1, stuckCount: 1 }),
+    deskEmptyCopy({ connected: true }).lead,
+    deskEmptyCopy({ connected: true }).sub,
+    deskEmptyCopy({ connected: false }).lead,
+    deskEmptyCopy({ connected: false }).sub,
     stuckNotice([item({ status: 'stuck', updated_at: agoS(60) })], NOW),
     stuckSince(agoS(60), NOW),
+    ...noticedLines({
+      items: [item({ status: 'stuck', updated_at: agoS(60) })],
+      attention: [{ agent: 'Bot', service_name: 's', title: 'Quiet' }],
+      nowMs: NOW,
+    }).flatMap((l) => [l.text, l.action]),
+    ...askChips({
+      desk: [item({ status: 'waiting_on_you' })],
+      counts: { waiting: 2, stuck: 1 },
+      attention: [{ agent: 'Bot' }],
+      costToday: 1.5,
+    }).flatMap((c) => [c.label, c.query]),
   ]
   for (const s of strings) {
     assert.ok(!FORBIDDEN.test(s), `home.js ships jargon: ${JSON.stringify(s)}`)
@@ -283,4 +359,54 @@ test('the desk actions never say "handoff" to a person', () => {
   assert.match(actions, /label: 'Done'/)
   assert.match(actions, /label: "I've got this"/)
   assert.match(actions, /label: 'Not mine'/)
+})
+
+// --- Ask presets ------------------------------------------------------------
+
+test('a chip is only offered when its answer exists', () => {
+  // "What's stuck?" on a day with nothing stuck asks Trovis to describe an
+  // empty set — a worse first impression than no chip at all.
+  const none = askChips({ desk: [], counts: { waiting: 0, stuck: 0 }, attention: [], costToday: 0 })
+  assert.deepEqual(none, [])
+})
+
+test('each chip appears exactly when its own condition holds', () => {
+  const keyFor = (o) => askChips(o).map((c) => c.key)
+  assert.deepEqual(keyFor({ desk: [item()], counts: {}, attention: [], costToday: 0 }), ['mine'])
+  assert.deepEqual(keyFor({ desk: [], counts: { waiting: 3 }, attention: [], costToday: 0 }), ['others'])
+  assert.deepEqual(keyFor({ desk: [], counts: { stuck: 1 }, attention: [], costToday: 0 }), ['stuck'])
+  assert.deepEqual(
+    keyFor({ desk: [], counts: {}, attention: [{ agent: 'Support Bot' }], costToday: 0 }),
+    ['agent'],
+  )
+  assert.deepEqual(keyFor({ desk: [], counts: {}, attention: [], costToday: 0.42 }), ['cost'])
+})
+
+test('a sub-cent day gets no cost chip', () => {
+  // "What cost $0.00 today?" is not a question anyone has.
+  assert.deepEqual(askChips({ desk: [], counts: {}, attention: [], costToday: 0.004 }), [])
+  assert.equal(askChips({ desk: [], counts: {}, attention: [], costToday: 0.01 }).length, 1)
+})
+
+test('the cost chip quotes the strip figure rather than inventing one', () => {
+  const [chip] = askChips({ desk: [], counts: {}, attention: [], costToday: 29.815 })
+  assert.match(chip.label, /\$29\.82/)
+})
+
+test('the chip row is capped', () => {
+  const chips = askChips({
+    desk: [item()],
+    counts: { waiting: 2, stuck: 1 },
+    attention: [{ agent: 'Support Bot' }],
+    costToday: 5,
+  })
+  assert.ok(chips.length <= 4, `chip row is ${chips.length} wide`)
+})
+
+test('the agent chip names the agent it is about', () => {
+  const [chip] = askChips({
+    desk: [], counts: {}, attention: [{ agent: 'Billing Bot' }], costToday: 0,
+  })
+  assert.match(chip.label, /Billing Bot/)
+  assert.match(chip.query, /Billing Bot/)
 })
