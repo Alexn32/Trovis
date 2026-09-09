@@ -203,6 +203,26 @@ off = pulse.insight_for(PACKET)
 check("no API key means no sentence and no error", off["insight"] == "")
 check("and the graphic is still chosen from the record", off["graphic"] == "week_finished")
 
+print("\n--- the default budget lets a normal call land on the FIRST load ---")
+# The budget is not a paint deadline (the browser has already drawn the pulse),
+# so it only decides whether the sentence arrives now or next time. A budget
+# under a typical model call costs the feature its first impression.
+pulse._cache.clear(); pulse._inflight.clear()
+os.environ.pop("TROVIS_PULSE_INSIGHT_WAIT_S", None)
+check("the default wait budget is longer than a typical fast-model call",
+      pulse.wait_budget_s() >= 3.0)
+check("...and still under the call's own timeout, so it never outlives it",
+      pulse.wait_budget_s() < pulse.call_timeout_s())
+
+os.environ["ANTHROPIC_API_KEY"] = "test-key-not-used"
+pulse._call_model = lambda _p: (time.sleep(1.5) or {
+    "insight": "18 finished this week, up from 12.", "graphic": "week_finished"})
+t0 = time.time()
+firstload = pulse.insight_for(PACKET)
+check(f"a 1.5s generation lands on the first load ({time.time()-t0:.1f}s)",
+      firstload["insight"].startswith("18 finished"))
+os.environ.pop("ANTHROPIC_API_KEY", None)
+
 print("\n--- the packet is bounded, not trusted ---")
 # It arrives from a browser and is spent on model tokens.
 pulse._cache.clear(); pulse._inflight.clear()
