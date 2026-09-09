@@ -1,28 +1,31 @@
 """HubSpot SaaS adapter — OAuth, webhook verify, deal/ticket → Work map.
 
-Reuses ``saas.apply_work_effect`` and ``saas_connections`` from Stripe PR A.
-Never invents a loop. No CRM / contact / catalog sync. Isolated from
+Reuses ``saas.apply_work_effect`` and ``saas_connections`` from Stripe PR A
+(#143). Never invents a loop. No CRM / contact / catalog sync. Isolated from
 ``/billing/webhook`` and Stripe secrets.
 
-Connect mapping contract (V1):
+Connect mapping contract (V1, folded here — surviving HubSpot PR B):
 
-  Link metadata (require one, first present wins) on the deal or ticket:
+  Link metadata/properties (require one, first present wins) on the deal
+  or ticket:
     trovis_loop_external_id | trovis.loop.external_id |
     trovis_run_id | trovis.run.id
     → open loop on this Trovis account; else no-op. Never invent a loop.
+    No CRM sync.
 
-  Deal ``dealstage`` (default Sales Pipeline ids + label patterns):
-    contractsent / pending / waiting / payment-style → wait
-    closedwon / completed                            → clear
-    closedlost                                       → stuck
+  Events (minimal deal + ticket propertyChange only):
+    dealstage waiting / pending-style  → wait
+    dealstage closed won               → clear
+    dealstage closed lost              → stuck
+    ticket waiting (on contact/us/agent) → wait
+    ticket solved / closed             → clear
+    ticket escalated / failed hold     → stuck
 
-  Ticket ``hs_pipeline_stage`` (default Support Pipeline + labels):
-    waiting on contact / waiting on us / waiting on agent → wait
-    solved / closed                                       → clear
-    escalated / on-hold failure                           → stuck
-
-  Subscriptions (minimal): deal.propertyChange (dealstage) and
-  ticket.propertyChange (hs_pipeline_stage) only.
+  Locks:
+    reuse #143 SaaS spine (saas.py / apply_work_effect / saas_connections);
+    HubSpot brand coming→live only after E2E;
+    no Intercom / Slack / GitHub / Shopify adapters;
+    never touch /billing/webhook or Stripe SaaS secrets.
 
 Env (read live, never cached):
   HUBSPOT_SAAS_CLIENT_ID
@@ -131,10 +134,17 @@ _CLEAR_LABEL_RE = re.compile(
     re.I,
 )
 _STUCK_DEAL_LABEL_RE = re.compile(r"\b(closed\s*lost|lost)\b", re.I)
+# Ticket stuck is escalated / failed hold only — bare on-hold is unmapped.
 _STUCK_TICKET_LABEL_RE = re.compile(
-    r"\b(escalat(?:e|ed|ion)|on[\s-]?hold(?:\s+fail(?:ure|ed)?)?|fail(?:ure|ed))\b",
+    r"\b(escalat(?:e|ed|ion)|"
+    r"(?:on[\s-]?hold|hold)\s+fail(?:ure|ed)?|"
+    r"fail(?:ure|ed)\s+(?:on[\s-]?hold|hold)|"
+    r"failed\s*hold)\b",
     re.I,
 )
+_TICKET_STUCK_IDS = frozenset({
+    "escalated", "escalation", "onholdfailure", "failedhold", "holdfailure",
+})
 
 
 class HubSpotSaaSError(RuntimeError):
@@ -370,7 +380,11 @@ def _is_watched_property(event: dict[str, Any], object_type: str) -> bool:
 
 
 def map_stage(object_type: str, stage_id: Any, stage_label: str | None = None) -> str | None:
-    """Map a dealstage / ticket pipeline stage to wait|clear|stuck or None."""
+    """Map a dealstage / ticket pipeline stage per the folded V1 contract.
+
+    Deals: waiting/pending → wait; closed won → clear; closed lost → stuck.
+    Tickets: waiting → wait; solved/closed → clear; escalated/failed hold → stuck.
+    """
     raw = str(stage_id or "").strip()
     label = str(stage_label or "").strip()
     compact = _compact(raw)
@@ -397,9 +411,7 @@ def map_stage(object_type: str, stage_id: Any, stage_label: str | None = None) -
     if kind == "tickets":
         if label and _STUCK_TICKET_LABEL_RE.search(label):
             return saas.EFFECT_STUCK
-        if compact_label in {"escalated", "escalation", "onhold", "onholdfailure"}:
-            return saas.EFFECT_STUCK
-        if compact in {"escalated", "escalation", "onhold", "onholdfailure"}:
+        if compact_label in _TICKET_STUCK_IDS or compact in _TICKET_STUCK_IDS:
             return saas.EFFECT_STUCK
         if label and re.search(r"\b(solved|closed|completed?)\b", label, re.I):
             return saas.EFFECT_CLEAR

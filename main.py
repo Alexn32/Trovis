@@ -3490,9 +3490,14 @@ def saas_stripe_disconnect(request: Request) -> SaaSConnection:
 # ---------------------------------------------------------------------------
 # SaaS HubSpot — Work-event adapter (NOT CRM sync, NOT billing)
 # ---------------------------------------------------------------------------
+# Connect mapping contract (V1, folded — surviving HubSpot PR B):
+#   Link properties (require one): trovis_loop_external_id |
+#     trovis.loop.external_id | trovis_run_id | trovis.run.id
+#     → open loop this account; else no-op. Never invent. No CRM sync.
+#   dealstage waiting/pending→wait; closed won→clear; closed lost→stuck.
+#   ticket waiting→wait; solved/closed→clear; escalated/failed hold→stuck.
+#   Minimal deal+ticket propertyChange. Reuse #143 spine.
 # Isolated from /billing/webhook. Signature uses HUBSPOT_SAAS_CLIENT_SECRET.
-# Metadata-link only: no trovis_* key on the deal/ticket → no-op. Never invents
-# a Work loop. Never writes a Stripe plan.
 
 
 @app.post("/saas/hubspot/webhook")

@@ -1,19 +1,14 @@
 """SaaS Work-event spine + HubSpot adapter.
 
-Connect mapping contract (HubSpot PR B):
-  Link (require one): trovis_loop_external_id | trovis.loop.external_id |
-    trovis_run_id | trovis.run.id → open loop this account; else no-op.
-  Deals (dealstage):
-    contractsent / pending / waiting / payment-style → wait
-    closedwon / completed → clear
-    closedlost → stuck
-  Tickets (hs_pipeline_stage):
-    waiting on contact / us / agent → wait
-    solved / closed → clear
-    escalated / on-hold failure → stuck
-  Locks: explicit metadata only; never invent a loop; no CRM sync;
-    never touch /billing/webhook; reuse saas.py + saas_connections;
-    HubSpot brand coming→live only after this suite; no Intercom/Slack/GitHub/Shopify.
+Connect mapping contract (folded into HubSpot PR B):
+  Link metadata/properties (require one): trovis_loop_external_id |
+    trovis.loop.external_id | trovis_run_id | trovis.run.id
+    → open loop this account; else no-op. Never invent loops. No CRM sync.
+  Events: deal stage waiting/pending→wait; closed won→clear; closed lost→stuck.
+    Ticket waiting→wait; solved/closed→clear; escalated/failed hold→stuck.
+    Minimal deal+ticket propertyChange webhooks.
+  Locks: reuse #143 SaaS spine; HubSpot brand coming→live only after E2E;
+    no Intercom/Slack/GitHub/Shopify adapters; don't touch Stripe billing webhook.
 
 Run:
   TROVIS_DISABLE_PRICING_SYNC=1 python3 test_saas_hubspot.py
@@ -263,6 +258,10 @@ check("Escalated → stuck",
       saas_hubspot.map_stage("tickets", "99", "Escalated") == "stuck")
 check("On-hold failure → stuck",
       saas_hubspot.map_stage("tickets", "88", "On-hold failure") == "stuck")
+check("failed hold → stuck",
+      saas_hubspot.map_stage("tickets", "87", "failed hold") == "stuck")
+check("bare on-hold is unmapped (stuck only if failed hold)",
+      saas_hubspot.map_stage("tickets", "86", "On-hold") is None)
 check("New (id 1) unmapped",
       saas_hubspot.map_stage("tickets", "1", "New") is None)
 
@@ -295,6 +294,18 @@ m = saas_hubspot.map_event(hs_event(
     property_value="99",
 ), properties={"trovis.run.id": "n1"}, stage_label="Escalated")
 check("ticket escalated → stuck", m and m["effect"] == "stuck")
+m = saas_hubspot.map_event(hs_event(
+    subscription="ticket.propertyChange",
+    property_name="hs_pipeline_stage",
+    property_value="88",
+), properties={"trovis_loop_external_id": "n1"}, stage_label="failed hold")
+check("ticket failed hold → stuck", m and m["effect"] == "stuck")
+check("ticket bare on-hold is unmapped (failed hold only)",
+      saas_hubspot.map_event(hs_event(
+          subscription="ticket.propertyChange",
+          property_name="hs_pipeline_stage",
+          property_value="86",
+      ), properties={"trovis_loop_external_id": "n1"}, stage_label="On-hold") is None)
 check("contact.propertyChange is unmapped (no CRM sync)",
       saas_hubspot.map_event(hs_event(
           subscription="contact.propertyChange",

@@ -35,7 +35,7 @@ EFFECT_STUCK = "stuck"
 EFFECTS = frozenset({EFFECT_WAIT, EFFECT_CLEAR, EFFECT_STUCK})
 
 # Preferred first. Underscore and dotted forms are both accepted because
-# Stripe metadata keys cannot contain dots in some Dashboard UIs, while
+# Stripe metadata and HubSpot properties often forbid dots in UIs, while
 # agents emitting OTEL-shaped keys will send the dotted form.
 LINK_KEYS = (
     "trovis_loop_external_id",
