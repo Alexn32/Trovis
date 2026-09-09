@@ -9,6 +9,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   askChips,
+  pulseGraphic,
+  pulsePacket,
   clockLabel,
   deskEmptyCopy,
   deskItems,
@@ -409,4 +411,109 @@ test('the agent chip names the agent it is about', () => {
   })
   assert.match(chip.label, /Billing Bot/)
   assert.match(chip.query, /Billing Bot/)
+})
+
+// --- the DATA packet --------------------------------------------------------
+//
+// The packet is what the generated sentence is allowed to reason over, so an
+// unproven key in it becomes a false number on screen. Absent must mean
+// unknown; a zero must never stand in for "we couldn't tell".
+
+const OV = { completed_week: 18, completed_prev_week: 12, has_prev_week: true, open: 9 }
+const COST = { today: 3.5, agent_count: 5, daily: Array(30).fill(1) }
+
+test('the packet carries only what Home already fetched', () => {
+  const p = pulsePacket({
+    overview: OV, items: [item({ status: 'moving' })], truncated: false,
+    cost: COST, attention: [], agentCount: 5,
+  })
+  assert.equal(p.agents_count, 5)
+  assert.equal(p.finished_this_week, 18)
+  assert.equal(p.finished_last_week, 12)
+  assert.deepEqual(p.need_a_look, [])
+})
+
+test('last week is omitted when the org is too young to compare', () => {
+  // A four-day-old org with zero finished last week has not DECLINED. Sending
+  // 0 would let the model draw exactly that conclusion.
+  const p = pulsePacket({
+    overview: { ...OV, has_prev_week: false }, items: [], truncated: false,
+    cost: COST, attention: [], agentCount: 5,
+  })
+  assert.ok(!('finished_last_week' in p), 'no last-week key without history')
+  assert.equal(p.finished_this_week, 18)
+})
+
+test('a truncated page contributes no counts at all', () => {
+  // Counts off a truncated page are floors. A floor the model quotes verbatim
+  // is a false number, so the keys are simply absent.
+  const rows = [item({ status: 'moving' }), item({ id: 2, status: 'stuck' })]
+  const full = pulsePacket({ overview: OV, items: rows, truncated: false, cost: COST, attention: [], agentCount: 2 })
+  const cut = pulsePacket({ overview: OV, items: rows, truncated: true, cost: COST, attention: [], agentCount: 2 })
+  assert.equal(full.stuck_now, 1)
+  for (const k of ['waiting_now', 'stuck_now', 'moving_now']) {
+    assert.ok(!(k in cut), `${k} must be absent on a truncated page`)
+  }
+})
+
+test('a sub-cent week carries no cost at all', () => {
+  // An org whose spend is unattributed reads $0.00 on everything. A confident
+  // "$0.00 this week" is a claim about attribution we cannot make.
+  const p = pulsePacket({
+    overview: OV, items: [], truncated: false,
+    cost: { ...COST, daily: Array(30).fill(0) }, attention: [], agentCount: 1,
+  })
+  assert.ok(!('cost_this_week' in p))
+  assert.ok(!('cost_last_week' in p))
+})
+
+test('weekly cost comes from the series Home already has', () => {
+  const p = pulsePacket({
+    overview: OV, items: [], truncated: false,
+    cost: { ...COST, daily: [...Array(7).fill(2), ...Array(7).fill(3)] },
+    attention: [], agentCount: 1,
+  })
+  assert.equal(p.cost_this_week, 21)  // last 7 days
+  assert.equal(p.cost_last_week, 14)  // the 7 before
+})
+
+test('an unknown agent count is absent, not zero', () => {
+  const p = pulsePacket({
+    overview: OV, items: [], truncated: false, cost: null, attention: [], agentCount: null,
+  })
+  assert.ok(!('agents_count' in p), 'null count must not become 0')
+})
+
+test('flagged agents ride in the packet by name', () => {
+  const p = pulsePacket({
+    overview: OV, items: [], truncated: false, cost: COST,
+    attention: [{ agent: 'flaky-agent', service_name: 'flaky', title: 'Elevated error rate' }],
+    agentCount: 5,
+  })
+  assert.deepEqual(p.need_a_look, [{ name: 'flaky-agent' }])
+})
+
+// --- the graphic ------------------------------------------------------------
+
+test('the graphic draws from the packet and captions itself with raw numbers', () => {
+  const g = pulseGraphic('week_finished', { finished_this_week: 18, finished_last_week: 12 })
+  assert.equal(g.caption, '18 finished this week · 12 last week')
+  assert.deepEqual(g.bars.map((b) => b.value), [12, 18])
+  assert.equal(g.filter, 'done')
+})
+
+test('a graphic whose series is missing renders nothing, not an empty frame', () => {
+  assert.equal(pulseGraphic('week_finished', { finished_this_week: 18 }), null)
+  assert.equal(pulseGraphic('week_stuck', {}), null)
+  assert.equal(pulseGraphic('none', { finished_this_week: 1, finished_last_week: 2 }), null)
+  // need_a_look draws no chart — the names are already on the strip.
+  assert.equal(pulseGraphic('need_a_look', { need_a_look: [{ name: 'x' }] }), null)
+})
+
+test('the caption never disagrees with the bars', () => {
+  // Both are read off the same two keys, so a change to one moves the other.
+  const g = pulseGraphic('week_stuck', { stuck_this_week: 4, stuck_last_week: 9 })
+  assert.match(g.caption, /4 stuck this week/)
+  assert.match(g.caption, /9 last week/)
+  assert.deepEqual(g.bars.map((b) => b.value), [9, 4])
 })

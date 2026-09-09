@@ -385,6 +385,16 @@ export const api = {
   // in-flight Claude calls instead of waiting out LLM_TIMEOUT (120s).
   getBriefing: (opts = {}) =>
     request('/dashboard/briefing', { timeoutMs: LLM_TIMEOUT_MS, ...opts }),
+  // Home's fleet-pulse sentence. The packet is assembled client-side from
+  // data already on the page, so this adds no read to the database. The
+  // server waits only a short budget for the model and otherwise answers with
+  // an empty insight, so this never holds up a paint.
+  getPulseInsight: (packet, opts = {}) =>
+    request('/dashboard/pulse-insight', {
+      method: 'POST',
+      body: JSON.stringify({ packet }),
+      ...opts,
+    }),
   getAttention: (opts = {}) => request('/dashboard/attention', opts),
   getCost: (opts = {}) => request('/dashboard/cost', opts),
   getWorkFeed: (opts = {}) => request('/dashboard/work-feed', opts),

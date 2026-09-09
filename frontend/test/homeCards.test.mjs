@@ -101,6 +101,41 @@ test('the desk and the two columns sit side by side', () => {
   assert.ok(desk > -1 && noticed > desk, 'desk leads, noticed sits beside it')
 })
 
+test('the pulse insight never blocks first paint', () => {
+  // Everything on the pulse except one sentence comes from the record. The
+  // sentence arrives afterwards, and its absence is invisible.
+  const fn = code.slice(code.indexOf('function usePulseInsight'), code.indexOf('// --- 1. greeting'))
+  assert.match(fn, /startAbortable/)
+  assert.match(fn, /useState\(\{ insight: '', graphic: 'none' \}\)/)
+  // A failure is silent: no error state, no retry, no empty frame.
+  assert.match(fn, /\.catch\(\(\) => \{\}\)/)
+  // And it does not ask about a packet with nothing proven in it.
+  assert.match(fn, /Object\.keys\(packet\)\.length === 0/)
+})
+
+test('the pulse asks again only when the FACTS change', () => {
+  // Home re-renders on every keystroke in the Ask field. Keying the packet on
+  // its serialised contents is what stops that becoming a request per letter.
+  assert.match(code, /function usePacket\(inputs\)/)
+  assert.match(code, /const key = JSON\.stringify\(built\)/)
+  const hook = code.slice(code.indexOf('function usePulseInsight'))
+  assert.match(hook, /\}, \[key\]\)/)
+})
+
+test('the graphic is drawn in code, never by the model', () => {
+  // The model may only NAME a series; the bars and the caption are computed.
+  const fn = code.slice(code.indexOf('function PulseGraphic'))
+  assert.match(fn, /graphic\.bars\.map/)
+  assert.match(fn, /\{graphic\.caption\}/)
+  // No pie, no gauge, no score.
+  for (const banned of [/pie/i, /gauge/i, /score/i, /donut/i]) {
+    assert.doesNotMatch(fn, banned)
+  }
+  // The graphic comes from pulseGraphic(), which returns null for a series we
+  // do not have — so a missing series renders nothing at all.
+  assert.match(code, /\{graphic && <PulseGraphic/)
+})
+
 test('the fleet pulse never claims health it cannot see', () => {
   // Home does not load the roster, so an agent not being flagged means nobody
   // looked — not that it is fine.
@@ -143,6 +178,7 @@ test('every Home control has a real destination — no dead taps', () => {
     /onClick=\{onGoFleet\}/, // fleet pulse -> Fleet
     /onOpenAgent\(\.\.\.agentRoute\(a\)\)/, // a flagged agent -> that agent
     /openAsk\(c\.query\)/, // an Ask chip -> Ask, with that question
+    /onGoWork\(graphic\.filter\)/, // the pulse graphic -> Work, filtered
     /onGoWork && onGoWork\(c\.filter\)/, // strip count -> Work, filtered
     /onOpen=\{onOpenCost\}/, // strip dollar -> Cost page
     /onClick=\{failed \? onRetry : onOpen\}/, // ...and a failed cell -> retry

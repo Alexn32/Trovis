@@ -158,6 +158,109 @@ export function briefingLead(counts) {
  * flagged is not the same as being checked. `count` is null until we know it,
  * and the caller stays silent rather than printing a number it is guessing.
  */
+/**
+ * The DATA packet the pulse insight is allowed to reason over.
+ *
+ * Assembled from what Home ALREADY fetched — no new request — which is also
+ * what keeps the pulse from contradicting the proof strip: both are rendered
+ * from these same numbers in this same browser.
+ *
+ * A key is present only when it is PROVEN. Absent means unknown, and a zero
+ * is never used to mean "we couldn't tell":
+ *
+ *  - counts off the items page are omitted when the page was truncated, since
+ *    a floor is not a count
+ *  - the previous week is omitted unless the server says we actually have
+ *    that much history, so a four-day-old org is never shown a "decline"
+ *  - weekly cost is omitted below a cent: an org whose spend is unattributed
+ *    reads as $0.00 on everything, and a confident "$0.00 this week" is a
+ *    claim about attribution we cannot make
+ *
+ * Nothing here is a display string. The caption is built from these numbers
+ * separately, so what the model may say and what the graphic shows come from
+ * one source.
+ */
+export function pulsePacket({ overview, items, truncated, cost, attention, agentCount }) {
+  const packet = {}
+  if (Number.isFinite(Number(agentCount)) && agentCount !== null) {
+    packet.agents_count = Number(agentCount)
+  }
+
+  const look = fleetPulse({ agentCount, attention }).needLook
+  packet.need_a_look = look.map((a) => ({ name: String(a.agent) }))
+
+  if (overview) {
+    if (Number.isFinite(Number(overview.completed_week))) {
+      packet.finished_this_week = Number(overview.completed_week)
+    }
+    // Only when the org is old enough for last week to mean something.
+    if (overview.has_prev_week && Number.isFinite(Number(overview.completed_prev_week))) {
+      packet.finished_last_week = Number(overview.completed_prev_week)
+    }
+  }
+
+  // A truncated page gives floors, not counts — and a floor in a packet the
+  // model quotes verbatim becomes a false number on screen.
+  if (Array.isArray(items) && !truncated) {
+    const c = proofCounts(items)
+    packet.waiting_now = c.waiting
+    packet.stuck_now = c.stuck
+    packet.moving_now = c.moving
+  }
+
+  // 7-day windows off the daily series /dashboard/cost already returns.
+  const daily = Array.isArray(cost?.daily) ? cost.daily.map(Number) : []
+  if (daily.length >= 7) {
+    const sum = (xs) => Math.round(xs.reduce((a, b) => a + (Number(b) || 0), 0) * 100) / 100
+    const thisWeek = sum(daily.slice(-7))
+    if (thisWeek >= 0.01) {
+      packet.cost_this_week = thisWeek
+      if (daily.length >= 14) {
+        const lastWeek = sum(daily.slice(-14, -7))
+        if (lastWeek >= 0.01) packet.cost_last_week = lastWeek
+      }
+    }
+  }
+  return packet
+}
+
+/**
+ * What the graphic draws and what its caption says, from the packet alone.
+ *
+ * Returns null when the chosen series is not in the packet — the caller then
+ * renders no graphic rather than an empty frame. The caption quotes the raw
+ * numbers, so the picture and the words cannot drift apart.
+ */
+export function pulseGraphic(kind, packet) {
+  const p = packet || {}
+  if (kind === 'week_finished') {
+    if (!('finished_this_week' in p) || !('finished_last_week' in p)) return null
+    return {
+      kind,
+      bars: [
+        { label: 'last week', value: p.finished_last_week },
+        { label: 'this week', value: p.finished_this_week },
+      ],
+      caption: `${p.finished_this_week} finished this week · ${p.finished_last_week} last week`,
+      filter: 'done',
+    }
+  }
+  if (kind === 'week_stuck') {
+    if (!('stuck_this_week' in p) || !('stuck_last_week' in p)) return null
+    return {
+      kind,
+      bars: [
+        { label: 'last week', value: p.stuck_last_week },
+        { label: 'this week', value: p.stuck_this_week },
+      ],
+      caption: `${p.stuck_this_week} stuck this week · ${p.stuck_last_week} last week`,
+      filter: 'stuck',
+    }
+  }
+  // need_a_look draws no chart — the names are already on the strip.
+  return null
+}
+
 export function fleetPulse({ agentCount, attention }) {
   const seen = new Set()
   const needLook = []

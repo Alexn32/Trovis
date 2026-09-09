@@ -67,7 +67,12 @@ with TestClient(main.app) as c:
     print("\n--- empty account ---")
     ov = overview()
     check("overview keys are the locked contract",
-          set(ov.keys()) == {"needs_you", "needs_attention", "open", "completed_week"})
+          set(ov.keys()) == {
+              "needs_you", "needs_attention", "open", "completed_week",
+              # Home's fleet pulse compares finished work week over week;
+              # has_prev_week says whether that comparison is meaningful.
+              "completed_prev_week", "has_prev_week",
+          })
     check("empty: all zeros",
           ov["needs_you"] == 0 and ov["needs_attention"] == 0
           and ov["open"] == 0 and ov["completed_week"] == 0)
