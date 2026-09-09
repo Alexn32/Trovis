@@ -383,8 +383,21 @@ export const api = {
   // --- dashboard (daily briefing) ---
   // Optional `{ signal }` so Dashboard unmount / tab switch can abort
   // in-flight Claude calls instead of waiting out LLM_TIMEOUT (120s).
-  getBriefing: (opts = {}) =>
-    request('/dashboard/briefing', { timeoutMs: LLM_TIMEOUT_MS, ...opts }),
+  //
+  // `localHour` / `timeZone` are the READER's clock (home.viewerClock). The
+  // model writes this text, and a server-side UTC hour is how an opener ends
+  // up calling someone's late afternoon "a quiet morning". Both optional: a
+  // caller that omits them gets the same briefing as before.
+  getBriefing: ({ localHour, timeZone, ...opts } = {}) => {
+    const qs = new URLSearchParams()
+    if (Number.isInteger(localHour)) qs.set('local_hour', String(localHour))
+    if (timeZone) qs.set('tz', timeZone)
+    const query = qs.toString()
+    return request(`/dashboard/briefing${query ? `?${query}` : ''}`, {
+      timeoutMs: LLM_TIMEOUT_MS,
+      ...opts,
+    })
+  },
   // Home's fleet-pulse sentence. The packet is assembled client-side from
   // data already on the page, so this adds no read to the database. The
   // server waits only a short budget for the model and otherwise answers with

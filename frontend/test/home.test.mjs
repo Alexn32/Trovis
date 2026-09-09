@@ -122,8 +122,14 @@ test('the briefing lead states today in plain words, and prints no figures', () 
   // It says WHICH conditions hold; the proof strip says how many. Prose that
   // repeats a count is how the two drift apart.
   assert.equal(
-    briefingLead({ needs_you: 2, needs_attention: 1, open: 9 }),
+    briefingLead({ needs_you: 2, needs_attention: 1, open: 9 }, { moving: 4 }),
     'Today, work is waiting on you and some work needs attention. The rest is in progress.',
+  )
+  // Same counts, nothing actually moving → the clause is dropped rather than
+  // printed above a strip that reads 0 moving.
+  assert.equal(
+    briefingLead({ needs_you: 2, needs_attention: 1, open: 9 }),
+    'Today, work is waiting on you and some work needs attention.',
   )
   assert.equal(
     briefingLead({ needs_you: 1, needs_attention: 0, open: 1 }),
@@ -135,9 +141,14 @@ test('the briefing lead states today in plain words, and prints no figures', () 
     briefingLead({ needs_you: 0, needs_attention: 3, open: 3 }),
     'Today, some work needs attention.',
   )
-  // Healthy silence, not an alarm.
+  // Healthy silence, not an alarm. "Everything open is in progress" is only
+  // earned when a moving count says so — see homeBriefing.test.mjs.
   assert.equal(
     briefingLead({ needs_you: 0, needs_attention: 0, open: 4 }),
+    'Nothing needs you right now.',
+  )
+  assert.equal(
+    briefingLead({ needs_you: 0, needs_attention: 0, open: 4 }, { moving: 2 }),
     'Nothing needs you. Everything open is in progress.',
   )
   assert.equal(

@@ -31,14 +31,16 @@ test('Home first paint fetches only the lean, allowed endpoints', () => {
   }
 })
 
-test('the briefing is NOT on first paint — it is fetched only when opened', () => {
-  // It is the slowest call Home can make. The disclosure is closed by default
-  // and the hook bails until it is opened.
-  assert.match(code, /function useLazyBriefing\(open, refreshKey\)/)
-  assert.match(code, /if \(!open\) return undefined/)
-  assert.match(code, /useState\(false\)/)
-  // Still aborts like every other Home fetch once it does run.
-  assert.match(code, /getBriefing\(\{\s*signal\s*\}\)/)
+test('the briefing generates on render — no click, and it never blocks paint', () => {
+  // The insight is the reason Home exists; it used to sit behind a "More"
+  // that most people never pressed. It now fetches as soon as Home renders.
+  assert.match(code, /function useBriefing\(refreshKey, active\)/)
+  assert.doesNotMatch(code, /useLazyBriefing/)
+  assert.doesNotMatch(code, /if \(!open\) return undefined/)
+  // Independent and abortable, like every other Home section — the page
+  // paints from the record with the templated lead while this is in flight.
+  assert.match(code, /getBriefing\(\{[^}]*signal[^}]*\}\)/)
+  assert.match(code, /startAbortable/)
 })
 
 test('the cut blocks stay cut', () => {
@@ -70,8 +72,9 @@ test('the blocks render in the order the brief numbers them', () => {
     'DeskSection',
     'NoticedSection',
     'ProofStrip',
-    'AskSection',
+    // The insight, then the way to go deeper. Briefing above Ask.
     'Briefing',
+    'AskSection',
   ]
   // Read the render body only, so the definition order below cannot mask a
   // block rendered out of sequence.
@@ -241,16 +244,17 @@ test('Home has exactly one Ask affordance', () => {
   assert.equal(inputs.length, 1)
 })
 
-test('the briefing is open on first paint, and leads with the template', () => {
+test('the briefing is open, with the generated narrative on screen', () => {
   const fn = code.slice(code.indexOf('function Briefing('))
-  // No closed accordion: the lead renders unconditionally.
+  // The lead renders unconditionally...
   assert.match(fn, /<p className="home-brief-lead">\{lead\}<\/p>/)
   assert.doesNotMatch(fn, /if \(!showMore\) return null/)
-  // Only the GENERATED prose is deferred — it is the one text on Home whose
-  // wording we do not control, so it must not be able to contradict the strip
-  // on the opening screen.
-  assert.match(fn, /showMore && \(/)
-  assert.match(fn, /useLazyBriefing\(showMore, refreshKey\)/)
+  // ...and so does the body holding the generated prose. Nothing to expand.
+  assert.doesNotMatch(fn, /showMore/)
+  assert.doesNotMatch(fn, /aria-expanded/)
+  assert.match(fn, /useBriefing\(refreshKey, active\)/)
+  assert.match(fn, /<div className="home-brief-body">/)
+  assert.match(fn, /briefing\.data\?\.summary \? \(/)
 })
 
 test('a Work filter arriving from Home is visible and clearable', () => {

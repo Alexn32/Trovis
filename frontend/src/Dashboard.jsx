@@ -22,11 +22,12 @@ import {
   proofCounts,
   pulseGraphic,
   pulsePacket,
+  viewerClock,
 } from './home.js'
 // A row's display label is not its route — see agentRoute.js.
 import { agentRoute } from './agentRoute.js'
 import { openAsk } from './askOpen.js'
-import { TrovisMark, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
+import { TrovisMark } from './Icons.jsx'
 
 // ---------------------------------------------------------------------------
 // Home — the worker's opening, across the full width of the screen.
@@ -38,8 +39,10 @@ import { TrovisMark, ChevronDownIcon, ChevronRightIcon } from './Icons.jsx'
 //   2. Fleet pulse   — full width. How many agents, and which need a look.
 //   3. Two columns   — your desk (left) · Trovis noticed (right)
 //   4. Proof strip   — full width. The only place on Home that prints numbers.
-//   5. Ask           — one field, plus chips built from what is on the page.
-//   6. Briefing      — open, leading with a templated line.
+//   5. Briefing      — the insight. Templated lead + the generated narrative,
+//                      both visible. No disclosure: this is what Home is for.
+//   6. Ask           — one field, plus chips built from what is on the page.
+//                      How you go deeper once the briefing has said its piece.
 //
 // Deliberately NOT here: the work feed, a Fleet roster, any chart or
 // kind-of-work grid.
@@ -198,8 +201,12 @@ export default function Dashboard({
             onGoWork={onGoWork}
             onOpenCost={onOpenCost}
           />
+          {/* The insight, then the way to go deeper. Briefing above Ask: it
+              is the thing worth reading on arrival, and burying the only
+              generated paragraph under the input made Home a search box with
+              a summary appended. */}
+          <Briefing work={work} counts={counts} refreshKey={refreshKey} active={active} />
           <AskSection chips={chips} />
-          <Briefing work={work} refreshKey={refreshKey} />
         </>
       )}
 
@@ -313,25 +320,38 @@ function useWork(refreshKey) {
 }
 
 /**
- * The Claude narrative, fetched ONLY once someone asks for it.
+ * The Claude narrative — the insight Home is for. Fetched as soon as Home
+ * renders, never on a click.
  *
- * The briefing section is open by default, but its body leads with the
- * templated line — which is instant and cannot contradict the strip. The
- * generated prose stays behind "More" for two reasons: it is the slowest call
- * Home can make, and it is the one thing on the page whose wording we do not
- * control, so it must not be able to state a number the strip disagrees with
- * on first paint.
+ * It used to sit behind a "More" disclosure and only fetch when opened, which
+ * meant the one genuinely useful paragraph on the page was invisible unless
+ * you went looking for it. It is still the slowest call Home makes, so it
+ * stays an independent section fetch with its own AbortSignal: the page paints
+ * from the record with the templated lead in place, and this fills in
+ * underneath when it lands. A failure keeps the lead and offers Retry.
+ *
+ * The viewer's clock rides along — see api.getBriefing.
  */
-function useLazyBriefing(open, refreshKey) {
+function useBriefing(refreshKey, active) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState(null)
   const [nonce, setNonce] = useState(0)
+  // Latches on the first time Home is on screen and stays latched. The panes
+  // are kept alive behind the other tabs and Work is the landing tab, so
+  // mounting is not the same as being seen — and this is the most expensive
+  // call Home makes. Latching (rather than tracking `active`) is what keeps a
+  // tab switch back to Home from refetching what is already on the page.
+  const [armed, setArmed] = useState(!!active)
+  useEffect(() => {
+    if (active) setArmed(true)
+  }, [active])
 
   useEffect(() => {
-    if (!open) return undefined
+    if (!armed) return undefined
+    const { localHour, timeZone } = viewerClock()
     return startAbortable(({ signal, isAlive }) => {
       api
-        .getBriefing({ signal })
+        .getBriefing({ signal, localHour, timeZone })
         .then((d) => {
           if (!isAlive()) return
           setData(d)
@@ -339,13 +359,13 @@ function useLazyBriefing(open, refreshKey) {
         })
         .catch((e) => isAlive() && setErr(e))
     })
-  }, [open, refreshKey, nonce])
+  }, [armed, refreshKey, nonce])
 
   return {
     data,
     err,
     failed: data === null && !!err,
-    loading: open && data === null && !err,
+    loading: armed && data === null && !err,
     retry: useCallback(() => {
       setErr(null)
       setNonce((n) => n + 1)
@@ -887,19 +907,21 @@ function AskSection({ chips }) {
 // --- 7. daily briefing -----------------------------------------------------
 
 /**
- * Open on first paint, leading with the templated line.
+ * The insight, open. No disclosure, no chevron, nothing to click to read it.
  *
- * The lead is composed from counts and states no figures — always available,
- * always true, and it cannot disagree with the strip. The Claude narrative is
- * the one piece of text on Home whose wording we do not control, so it sits
- * behind "More" and is fetched only when asked for: that keeps the slowest
- * call Home can make off the first paint AND guarantees nothing on the opening
- * screen can contradict the numbers underneath it.
+ * Two layers, both visible: the templated lead (instant, no figures, cannot
+ * disagree with the strip) and the generated narrative underneath it. The
+ * narrative is the reason this section exists — a short read about the work
+ * and the fleet, naming the thing that matters — so it renders on first view
+ * of the section rather than behind a "More" nobody pressed. Ask sits below
+ * as the way to go deeper.
+ *
+ * The lead's job is to hold the shape of the day while the model is in
+ * flight; it also carries the section on its own if the call fails.
  */
-function Briefing({ work, refreshKey }) {
-  const [showMore, setShowMore] = useState(false)
-  const briefing = useLazyBriefing(showMore, refreshKey)
-  const lead = briefingLead(work.overview)
+function Briefing({ work, counts, refreshKey, active }) {
+  const briefing = useBriefing(refreshKey, active)
+  const lead = briefingLead(work.overview, counts)
   const asOf = asOfLabel(briefing.data?.generated_at)
 
   if (!lead && work.overview === null) return null
@@ -914,34 +936,23 @@ function Briefing({ work, refreshKey }) {
       </div>
       <p className="home-brief-lead">{lead}</p>
 
-      <button
-        type="button"
-        className="home-brief-more"
-        onClick={() => setShowMore((o) => !o)}
-        aria-expanded={showMore}
-      >
-        {showMore ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}
-        <span>{showMore ? 'Less' : 'More'}</span>
-      </button>
-
-      {showMore && (
-        <div className="home-brief-body">
-          {briefing.loading ? (
-            <div className="dash-skel">
-              <span style={{ width: '92%' }} />
-              <span style={{ width: '74%' }} />
-            </div>
-          ) : briefing.failed ? (
-            <p className="home-brief-narrative is-muted">
-              Today&apos;s summary didn&apos;t load.{' '}
-              <button type="button" className="dash-link" onClick={briefing.retry}>Retry</button>
-            </p>
-          ) : briefing.data?.summary ? (
-            <p className="home-brief-narrative">{briefing.data.summary}</p>
-          ) : null}
-          {asOf && <div className="home-brief-foot">{asOf}</div>}
-        </div>
-      )}
+      <div className="home-brief-body">
+        {briefing.loading ? (
+          <div className="dash-skel">
+            <span style={{ width: '92%' }} />
+            <span style={{ width: '74%' }} />
+          </div>
+        ) : briefing.failed ? (
+          <p className="home-brief-narrative is-muted">
+            Today&apos;s summary didn&apos;t load.{' '}
+            <button type="button" className="dash-link" onClick={briefing.retry}>Retry</button>
+          </p>
+        ) : briefing.data?.summary ? (
+          <p className="home-brief-narrative">{briefing.data.summary}</p>
+        ) : null}
+        {/* The reader's own clock — never a UTC hour wearing a local label. */}
+        {asOf && <div className="home-brief-foot">{asOf}</div>}
+      </div>
     </section>
   )
 }

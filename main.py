@@ -4148,6 +4148,73 @@ def _briefing_work_context(
     }
 
 
+# The reader's clock, as the briefing prompt sees it.
+#
+# Everything else on this endpoint runs on the server's UTC clock, which is
+# how an opener written for someone in Chicago came out as "a quiet morning"
+# at 5pm their time. The browser sends its own hour and zone (see
+# api.getBriefing); absent them we say nothing about the time of day rather
+# than let the model infer one.
+def _part_of_day(hour: int) -> str:
+    """The same three buckets, on the same cutoffs, as the greeting at the top
+    of Home (Dashboard.jsx `Greeting`: <12 morning, <18 afternoon, else
+    evening). Keep them in step — a page that says "Good afternoon" above a
+    briefing opening "this evening" is arguing with itself."""
+    if hour < 12:
+        return "morning"
+    if hour < 18:
+        return "afternoon"
+    return "evening"
+
+
+def _viewer_clock(local_hour: int | None, tz: str | None) -> dict | None:
+    """{hour_24, part_of_day, timezone} for the prompt, or None when the
+    caller didn't send a clock."""
+    if local_hour is None:
+        return None
+    hour = int(local_hour)
+    if not 0 <= hour <= 23:
+        return None
+    clock: dict[str, Any] = {
+        "hour_24": hour,
+        "part_of_day": _part_of_day(hour),
+    }
+    if tz:
+        clock["timezone"] = tz[:64]
+    return clock
+
+
+def _utc_iso(value: Any) -> str | None:
+    """A timestamp the browser can read as an instant.
+
+    generated_at comes off a TIMESTAMP column: SQLite hands back
+    "2026-09-09 21:47:00" and a naive Postgres datetime isoformats without an
+    offset. Both are UTC and neither says so, and a client parsing that gets
+    its own zone applied to a UTC wall-clock — 9:47 PM where it should read
+    4:47 PM. Stamp the zone here so the wire is unambiguous; home.js pins
+    naive values to UTC as well, for rows written before this.
+    """
+    from datetime import datetime, timezone
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        stamped = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return stamped.astimezone(timezone.utc).isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z") or re.search(r"[+-]\d{2}:?\d{2}$", text):
+        return text
+    return text.replace(" ", "T") + "Z"
+
+
+def _utc_iso_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _briefing_stats(
     agents: list[dict],
     tasks_yesterday: int,
@@ -4319,15 +4386,26 @@ def _work_activity(spans: list[dict]) -> dict:
 
 
 @app.get("/dashboard/briefing", response_model=BriefingResponse)
-def dashboard_briefing(request: Request) -> BriefingResponse:
+def dashboard_briefing(
+    request: Request,
+    local_hour: int | None = Query(default=None, ge=0, le=23),
+    tz: str | None = Query(default=None, max_length=64),
+) -> BriefingResponse:
     """AI daily briefing + task counts. Counts are always fresh; the Claude
     summary is cached for an hour and falls back to a plain line on failure.
+
+    `local_hour` / `tz` are the READER's clock, sent by the browser. The
+    summary is what someone reads first on Home, and this server runs on UTC:
+    without them the model was free to open with "a quiet morning" at 5pm
+    local. Both optional — a caller that omits them gets today's behaviour,
+    minus any claim about the time of day.
 
     Sync `def` so Claude cannot pin the event loop (login / GET /agents
     starved for ~40s when this was `async def`). Cache miss: 3s Claude cap,
     then fail-soft fallback — never wait out a hung Anthropic call.
     """
     account_id = getattr(request.state, "account_id", None)
+    clock = _viewer_clock(local_hour, tz)
     from time import time as _time
 
     now_ns = int(_time() * 1_000_000_000)
@@ -4355,6 +4433,17 @@ def dashboard_briefing(request: Request) -> BriefingResponse:
         kind="briefing",
         max_age_seconds=_DASHBOARD_TTL_SECONDS,
     )
+    # A cached summary written in someone's morning must not be served into
+    # their afternoon — that is the phrase the clock exists to prevent, and an
+    # hour-long TTL is long enough to cross a boundary. Only the part of day
+    # is compared, so the cache still absorbs the traffic within one.
+    if (
+        cached
+        and clock is not None
+        and cached["data"].get("part_of_day") not in (None, clock["part_of_day"])
+    ):
+        cached = None
+
     if cached and cached["data"].get("summary"):
         # Render the prose and the stats from ONE snapshot.
         #
@@ -4373,7 +4462,7 @@ def dashboard_briefing(request: Request) -> BriefingResponse:
             tasks_yesterday=snap.get("tasks_yesterday", tasks_yesterday),
             tasks_last_week=snap.get("tasks_last_week", tasks_last_week),
             tasks_delta=snap.get("tasks_delta", tasks_delta),
-            generated_at=cached["generated_at"],
+            generated_at=_utc_iso(cached["generated_at"]),
         )
 
     agents = database.get_agents(account_id=account_id)
@@ -4387,6 +4476,8 @@ def dashboard_briefing(request: Request) -> BriefingResponse:
     stats = _briefing_stats(
         agents, tasks_yesterday, tasks_last_week, tasks_delta, work=work
     )
+    if clock is not None:
+        stats["viewer_clock"] = clock
     summary = _claude_dash(
         lambda: describer.fleet_briefing(stats).get("summary", "") or "",
         "",
@@ -4407,6 +4498,9 @@ def dashboard_briefing(request: Request) -> BriefingResponse:
                     "tasks_last_week": tasks_last_week,
                     "tasks_delta": tasks_delta,
                 },
+                # Which part of the reader's day this was written for; the
+                # read above refuses it once they've moved past it.
+                **({"part_of_day": clock["part_of_day"]} if clock else {}),
             },
         )
     else:
@@ -4416,6 +4510,10 @@ def dashboard_briefing(request: Request) -> BriefingResponse:
         tasks_yesterday=tasks_yesterday,
         tasks_last_week=tasks_last_week,
         tasks_delta=tasks_delta,
+        # Freshly written, so the footer has a time to show. Previously only
+        # the cache-hit branch carried one, and Home's "As of …" silently
+        # vanished on every regeneration.
+        generated_at=_utc_iso_now(),
     )
 
 
