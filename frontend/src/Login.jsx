@@ -62,7 +62,14 @@ export default function Login({ onAuthed, initialMode = 'choose', inviteToken = 
           <ForgotPanel onBack={() => setMode('login')} />
         )}
         {mode === 'reset' && (
-          <ResetPanel token={resetToken} onSuccess={finish} />
+          <ResetPanel
+            token={resetToken}
+            onSuccess={finish}
+            // A spent or expired link must not dead-end: the panel offers the
+            // login form and a fresh reset link instead.
+            onSignIn={() => setMode('login')}
+            onForgot={() => setMode('forgot')}
+          />
         )}
         {mode === 'signup' && (
           <SignupPanel onSuccess={handleSignup} onBack={() => setMode('choose')} />
@@ -227,11 +234,18 @@ function ForgotPanel({ onBack }) {
 
 // Reached from the emailed link (?reset=<token>). Sets a new password and
 // signs the user in on success.
-function ResetPanel({ token, onSuccess }) {
+//
+// A reset token is single-use, so this panel is also where someone lands who
+// reopened an already-used link. That used to be a dead end — the only
+// control was "Update password", which kept failing — so a spent link now
+// says so and points at the login form (the new password already works
+// there) or at requesting a fresh link.
+function ResetPanel({ token, onSuccess, onSignIn, onForgot }) {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+  const [spent, setSpent] = useState(false)
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -239,14 +253,47 @@ function ResetPanel({ token, onSuccess }) {
       setError('Passwords don’t match.')
       return
     }
+    // Same floor the server enforces — checked here so a too-short password
+    // is a form error, not a 400 that reads like a bad link.
+    if (password.length < 10) {
+      setError('Password must be at least 10 characters.')
+      return
+    }
     setSubmitting(true)
     setError(null)
     try {
       onSuccess(await api.resetPassword(token, password))
     } catch (err) {
+      // The link being used/expired is the one failure retyping can't fix.
+      const msg = String(err?.message || '')
+      if (err?.status === 400 && /reset link/i.test(msg)) setSpent(true)
       setError(authErrorMessage(err))
       setSubmitting(false)
     }
+  }
+
+  if (spent) {
+    return (
+      <div className="login-body">
+        <p className="login-prompt">This reset link has expired.</p>
+        <p className="login-note">
+          Reset links can only be used once. If you already set a new password,
+          sign in with it — otherwise request a fresh link.
+        </p>
+        <div className="login-actions">
+          {onSignIn && (
+            <button type="button" className="btn btn-primary btn-block" onClick={onSignIn}>
+              Sign in
+            </button>
+          )}
+          {onForgot && (
+            <button type="button" className="btn btn-link" onClick={onForgot}>
+              Send a new reset link
+            </button>
+          )}
+        </div>
+      </div>
+    )
   }
 
   return (
