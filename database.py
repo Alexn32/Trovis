@@ -4395,6 +4395,12 @@ def get_work_overview(
     week_ago = (_utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
+    # The week before that, so Home's pulse can say "this week vs last week"
+    # about finished work. Same scan, one more SUM — a trend needs two points
+    # and there is nowhere else to get the second one cheaply.
+    two_weeks_ago = (
+        _utcnow() - timedelta(days=_WORK_COMPLETED_WEEK_DAYS * 2)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     scope, scope_args = _work_named_scope_sql(account_id)
 
     try:
@@ -4406,13 +4412,28 @@ def get_work_overview(
                 "SELECT "
                 "  COALESCE(SUM(CASE WHEN l.closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_n, "
                 "  COALESCE(SUM(CASE WHEN l.closed_at IS NOT NULL "
-                f"              AND l.closed_at >= {PH} THEN 1 ELSE 0 END), 0) AS completed_week "
+                f"              AND l.closed_at >= {PH} THEN 1 ELSE 0 END), 0) AS completed_week, "
+                "  COALESCE(SUM(CASE WHEN l.closed_at IS NOT NULL "
+                f"              AND l.closed_at >= {PH} AND l.closed_at < {PH} "
+                "              THEN 1 ELSE 0 END), 0) AS completed_prev_week, "
+                # Compared in SQL, deliberately. Doing it in Python would mean
+                # comparing a psycopg2 datetime's isoformat() ("...T21:06:00")
+                # against this space-separated cutoff, and 'T' > ' ' — so an
+                # org created earlier on the cutoff day would read as younger
+                # than it is. The database compares timestamps as timestamps.
+                "  COALESCE(SUM(CASE WHEN l.created_at < "
+                f"              {PH} THEN 1 ELSE 0 END), 0) AS older_than_week "
                 f"FROM loops l WHERE {scope}",
-                tuple([week_ago, *scope_args]),
+                tuple([week_ago, two_weeks_ago, week_ago, week_ago, *scope_args]),
             )
             totals = dict(cur.fetchone() or {})
             open_n = int(totals.get("open_n") or 0)
             completed_week = int(totals.get("completed_week") or 0)
+            completed_prev_week = int(totals.get("completed_prev_week") or 0)
+            # A zero prior week means two very different things: a quiet week,
+            # or an org that did not exist yet. Only the first is a comparison
+            # worth drawing, so report whether we actually have that history.
+            has_prev_week = int(totals.get("older_than_week") or 0) > 0
 
             # stuck (engine) + aging awaiting_human. waiting_on_you rows that
             # sit in this set are subtracted below. Named + open first so the
@@ -4441,6 +4462,8 @@ def get_work_overview(
                 "needs_attention": len(attention_ids - needs_you_ids),
                 "open": open_n,
                 "completed_week": completed_week,
+                "completed_prev_week": completed_prev_week,
+                "has_prev_week": has_prev_week,
             }
     except Exception as exc:
         if _is_query_canceled(exc):

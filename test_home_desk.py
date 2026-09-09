@@ -234,5 +234,40 @@ with TestClient(main.app) as c:
     # look like "nothing is connected".
     check("a populated account never reads as a first run", cost["agent_count"] > 0)
 
+    print("\n--- week-over-week finished work, and when NOT to compare it ---")
+    ov = c.get("/work/overview", headers=H).json()
+    check("the overview carries a prior week", "completed_prev_week" in ov)
+    # This account was created moments ago, so there is no week before this
+    # one. Saying "0 finished last week" here would read as a collapse in
+    # throughput rather than an org that did not exist — Home omits the
+    # comparison entirely on this signal.
+    check("a brand-new org reports no comparable history",
+          ov["has_prev_week"] is False)
+    check("...and its prior week is zero, which is exactly why it must not be shown",
+          ov["completed_prev_week"] == 0)
+
+    # Backdate one loop so the org genuinely predates this week, and close
+    # another inside the prior window.
+    import datetime as _dt
+    now = _dt.datetime.utcnow()
+    old = (now - _dt.timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")
+    prev = (now - _dt.timedelta(days=9)).strftime("%Y-%m-%d %H:%M:%S")
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE loops SET created_at = {database.PH} "
+            f"WHERE external_id = {database.PH}", (old, "job-done"))
+        cur.execute(
+            f"UPDATE loops SET closed_at = {database.PH}, cached_state = 'done' "
+            f"WHERE external_id = {database.PH}", (prev, "job-take"))
+    ov2 = c.get("/work/overview", headers=H).json()
+    check("history older than a week flips has_prev_week", ov2["has_prev_week"] is True)
+    check("a close inside the prior window counts there",
+          ov2["completed_prev_week"] == 1)
+    # The windows must not overlap: that close is 9 days old, so this week's
+    # count is untouched by it. (job-take was accepted, never closed, so it
+    # contributed to neither count before the backdate.)
+    check("...and is NOT also counted in this week",
+          ov2["completed_week"] == ov["completed_week"])
+
 print("\n" + (f"FAILURES: {failures}" if failures else "All Home desk checks passed."))
 raise SystemExit(1 if failures else 0)

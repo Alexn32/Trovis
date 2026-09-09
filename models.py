@@ -852,6 +852,33 @@ class BriefingResponse(BaseModel):
     generated_at: str | None = None
 
 
+class PulseInsightRequest(BaseModel):
+    """POST /dashboard/pulse-insight — the DATA packet Home assembled.
+
+    Home builds this from what it ALREADY fetched (work overview + items,
+    cost, attention), so the pulse cannot disagree with the proof strip: both
+    read the same numbers in the same browser. The server does not re-query;
+    it only generates and, crucially, validates.
+    """
+
+    packet: dict[str, Any] = Field(default_factory=dict)
+
+
+class PulseInsightResponse(BaseModel):
+    """The one generated sentence, or none.
+
+    `insight` is empty whenever the model was slow, unavailable, or said
+    something the packet does not entail — an empty string is a normal
+    answer, not an error. `graphic` is always usable: it comes from the
+    deterministic chooser unless the model picked a series we actually have.
+    """
+
+    insight: str = ""
+    graphic: str = "none"
+    used: list[str] = Field(default_factory=list)
+    cached: bool = False
+
+
 class AttentionItem(BaseModel):
     """One needs-attention row. `severity` is 'critical' | 'warning' | 'info'.
 
@@ -1269,6 +1296,12 @@ class WorkOverview(BaseModel):
     needs_attention: int = 0
     open: int = 0
     completed_week: int = 0
+    # The week before, so Home's pulse can compare. `has_prev_week` says
+    # whether that comparison is meaningful at all: a zero prior week in an
+    # org that is four days old is not a decline, and drawing it as one would
+    # be the pulse's first lie.
+    completed_prev_week: int = 0
+    has_prev_week: bool = False
 
 
 class WorkItemHolder(BaseModel):

@@ -17,6 +17,8 @@ import {
   isFirstRun,
   noticedLines,
   proofCounts,
+  pulseGraphic,
+  pulsePacket,
 } from './home.js'
 // A row's display label is not its route — see agentRoute.js.
 import { agentRoute } from './agentRoute.js'
@@ -118,6 +120,19 @@ export default function Dashboard({
   const desk = deskItems(work.items)
   const counts = proofCounts(work.items)
   const pulse = fleetPulse({ agentCount, attention: health.data })
+  // Everything the insight is allowed to reason over, built from what is
+  // already on the page. Memoised on its own contents so a re-render does not
+  // look like a new packet and re-ask.
+  const packet = usePacket({
+    overview: work.overview,
+    items: work.items,
+    truncated: work.truncated,
+    cost: cost.data,
+    attention: health.data,
+    agentCount,
+  })
+  const insight = usePulseInsight(packet)
+  const graphic = pulseGraphic(insight.graphic, packet)
   const chips = askChips({
     desk,
     counts,
@@ -146,8 +161,11 @@ export default function Dashboard({
           <FleetPulse
             pulse={pulse}
             health={health}
+            insight={insight.insight}
+            graphic={graphic}
             onOpenAgent={onOpenAgent}
             onGoFleet={onGoFleet}
+            onGoWork={onGoWork}
           />
 
           <div className="home-cols">
@@ -324,6 +342,58 @@ function useLazyBriefing(open, refreshKey) {
   }
 }
 
+/**
+ * The DATA packet, rebuilt only when its CONTENTS change.
+ *
+ * Home re-renders on every keystroke in the Ask field; a fresh object each
+ * time would look like a fresh packet and re-ask the model on every one of
+ * them. Keying on the serialised packet makes the identity follow the facts.
+ */
+function usePacket(inputs) {
+  const built = pulsePacket(inputs)
+  const key = JSON.stringify(built)
+  const ref = useRef({ key, value: built })
+  if (ref.current.key !== key) ref.current = { key, value: built }
+  return ref.current.value
+}
+
+/**
+ * The generated sentence — strictly after first paint, and never required.
+ *
+ * The pulse renders its workforce, graphic and caption from the record
+ * immediately; this fills in one line if and when a valid one arrives. A
+ * timeout, an outage, a model that says something the packet does not entail
+ * — all land the same way: `insight` stays empty and the pulse is unchanged.
+ * `graphic` always comes back usable because the server falls back to the
+ * deterministic chooser.
+ */
+function usePulseInsight(packet) {
+  const [state, setState] = useState({ insight: '', graphic: 'none' })
+  const key = JSON.stringify(packet)
+
+  useEffect(() => {
+    // Nothing proven yet — do not ask about an empty packet.
+    if (!packet || Object.keys(packet).length === 0) return undefined
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getPulseInsight(packet, { signal })
+        .then((d) => {
+          if (!isAlive()) return
+          setState({
+            insight: String(d?.insight || ''),
+            graphic: String(d?.graphic || 'none'),
+          })
+        })
+        // No insight is a normal outcome, so a failure is silent: the pulse
+        // was already complete without it.
+        .catch(() => {})
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+
+  return state
+}
+
 // --- 1. greeting -----------------------------------------------------------
 
 function Greeting({ userName }) {
@@ -375,63 +445,108 @@ function HomeSection({ title, action, onAction, className = '', children }) {
  * not being flagged means nobody looked — not that it is fine. When nothing
  * is flagged the row states the count and stops.
  */
-function FleetPulse({ pulse, health, onOpenAgent, onGoFleet }) {
+function FleetPulse({ pulse, health, insight, graphic, onOpenAgent, onGoFleet, onGoWork }) {
   const { count, needLook } = pulse
   // Nothing truthful to say yet.
-  if (count === null && needLook.length === 0) return null
+  if (count === null && needLook.length === 0 && !graphic) return null
   const shown = needLook.slice(0, PULSE_PREVIEW)
 
   return (
     <section className="home-pulse" aria-label="Fleet">
-      <button
-        type="button"
-        className="home-pulse-count"
-        onClick={onGoFleet}
-        disabled={!onGoFleet}
-      >
-        <span className="home-pulse-num">{count === null ? '—' : count}</span>
-        <span className="home-pulse-lbl">{count === 1 ? 'agent' : 'agents'}</span>
-      </button>
+      <div className="home-pulse-workforce">
+        <div className="home-pulse-row">
+          {count !== null && (
+            <button
+              type="button"
+              className="home-pulse-count"
+              onClick={onGoFleet}
+              disabled={!onGoFleet}
+            >
+              <span className="home-pulse-num">{count}</span>
+              <span className="home-pulse-lbl">{count === 1 ? 'agent' : 'agents'}</span>
+            </button>
+          )}
 
-      {needLook.length > 0 ? (
-        <div className="home-pulse-look">
-          <button
-            type="button"
-            className="home-pulse-need"
-            onClick={onGoFleet}
-            disabled={!onGoFleet}
-          >
-            {needLook.length} need{needLook.length === 1 ? 's' : ''} a look
-          </button>
-          <ul className="home-pulse-list">
-            {shown.map((a, i) => (
-              <li key={`${a.service_name || a.agent}-${a.agent_id || 'main'}-${i}`}>
-                <button
-                  type="button"
-                  className={`home-pulse-agent sev-${a.severity || 'info'}`}
-                  onClick={() => onOpenAgent && onOpenAgent(...agentRoute(a))}
-                >
-                  <span className="home-pulse-dot" aria-hidden="true" />
-                  {a.agent}
-                </button>
-              </li>
-            ))}
-            {needLook.length > shown.length && (
-              <li>
-                <button type="button" className="dash-link" onClick={onGoFleet}>
-                  {needLook.length - shown.length} more →
-                </button>
-              </li>
-            )}
-          </ul>
+          {needLook.length > 0 ? (
+          <div className="home-pulse-look">
+            <button
+              type="button"
+              className="home-pulse-need"
+              onClick={onGoFleet}
+              disabled={!onGoFleet}
+            >
+              {needLook.length} need{needLook.length === 1 ? 's' : ''} a look
+            </button>
+            <ul className="home-pulse-list">
+              {shown.map((a, i) => (
+                <li key={`${a.service_name || a.agent}-${a.agent_id || 'main'}-${i}`}>
+                  <button
+                    type="button"
+                    className={`home-pulse-agent sev-${a.severity || 'info'}`}
+                    onClick={() => onOpenAgent && onOpenAgent(...agentRoute(a))}
+                  >
+                    <span className="home-pulse-dot" aria-hidden="true" />
+                    {a.agent}
+                  </button>
+                </li>
+              ))}
+              {needLook.length > shown.length && (
+                <li>
+                  <button type="button" className="dash-link" onClick={onGoFleet}>
+                    {needLook.length - shown.length} more →
+                  </button>
+                </li>
+              )}
+            </ul>
+          </div>
+          ) : (
+            // Not "all healthy" — we only know that nothing was flagged.
+            !health.loading && !health.failed && count !== null && (
+              <span className="home-pulse-quiet">Nothing flagged right now.</span>
+            )
+          )}
         </div>
-      ) : (
-        // Not "all healthy" — we only know that nothing was flagged.
-        !health.loading && !health.failed && (
-          <span className="home-pulse-quiet">Nothing flagged right now.</span>
-        )
-      )}
+
+        {/* The generated line, when there is a valid one. It arrives after
+            first paint and its absence is invisible — everything above and
+            beside it came from the record. */}
+        {insight && <p className="home-pulse-insight">{insight}</p>}
+      </div>
+
+      {graphic && <PulseGraphic graphic={graphic} onGoWork={onGoWork} />}
     </section>
+  )
+}
+
+/**
+ * Two bars and a caption, drawn in code from the packet — never by the model.
+ *
+ * The caption quotes the raw numbers, so the picture and the words come from
+ * one source and cannot drift. No pie, no gauge, no health score: this proves
+ * one comparison and says which one it is.
+ */
+function PulseGraphic({ graphic, onGoWork }) {
+  const max = Math.max(1, ...graphic.bars.map((b) => Number(b.value) || 0))
+  return (
+    <button
+      type="button"
+      className="home-pulse-graphic"
+      onClick={() => onGoWork && onGoWork(graphic.filter)}
+      disabled={!onGoWork}
+      aria-label={graphic.caption}
+    >
+      <span className="home-pulse-bars" aria-hidden="true">
+        {graphic.bars.map((b) => (
+          <span key={b.label} className="home-pulse-bar-wrap">
+            <span
+              className={`home-pulse-bar${b.label === 'this week' ? ' is-now' : ''}`}
+              style={{ height: `${Math.round(((Number(b.value) || 0) / max) * 100)}%` }}
+            />
+          </span>
+        ))}
+      </span>
+      <span className="home-pulse-caption">{graphic.caption}</span>
+    </button>
   )
 }
 

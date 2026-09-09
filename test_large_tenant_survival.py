@@ -221,7 +221,13 @@ with TestClient(main.app) as c:
     check("GET /work/overview 200", ovh.status_code == 200)
     body = ovh.json()
     check("overview shape locked",
-          set(body.keys()) == {"needs_you", "needs_attention", "open", "completed_week"})
+          set(body.keys()) == {
+              "needs_you", "needs_attention", "open", "completed_week",
+              # Home's fleet pulse compares finished work week over week.
+              # Both come off the SAME scan as completed_week — no extra
+              # query, which is what this file exists to guard.
+              "completed_prev_week", "has_prev_week",
+          })
     check("GET /work/overview HTTP is fast", ovh_dt < 1.0)
     print(f"    http /agents={http_dt:.3f}s /work/overview={ovh_dt:.3f}s")
 

@@ -45,6 +45,7 @@ import saas_shopify
 import saas_stripe
 import describer
 import email_send
+import pulse
 import loops
 import pricing_sync
 # MCP server for ChatGPT agents. Two transports: Streamable HTTP (/mcp) for
@@ -87,6 +88,8 @@ from models import (
     ActivityItem,
     AttentionItem,
     BriefingResponse,
+    PulseInsightRequest,
+    PulseInsightResponse,
     ClaimRequest,
     ConnectAskResponse,
     Connection,
@@ -4465,6 +4468,34 @@ def _drift_attention_items(agents: list[dict], account_id: int | None) -> list[d
                 }
             )
     return items
+
+
+@app.post("/dashboard/pulse-insight", response_model=PulseInsightResponse)
+def dashboard_pulse_insight(
+    request: Request, body: PulseInsightRequest,
+) -> PulseInsightResponse:
+    """One generated sentence for Home's fleet pulse — or none.
+
+    Home assembles the DATA packet from what it ALREADY fetched (work
+    overview + items, cost, attention) and posts it here. Nothing is
+    re-queried: that is what guarantees the pulse and the proof strip cannot
+    disagree, since both are rendered from the same numbers in the same
+    browser.
+
+    The server's job is generation and, more importantly, REFUSAL. Every
+    sentence is checked for entailment against the packet — numbers must be
+    copied from it, names must appear in it, and a short banned list is
+    rejected outright — and anything that fails comes back as an empty
+    insight. An empty insight is a normal answer, not an error.
+
+    Latency: this waits only a short budget and otherwise returns the graphic
+    with no sentence, while the generation finishes in a worker and fills the
+    cache for the next load. Home never blocks on it either way.
+    """
+    packet = body.packet if isinstance(body.packet, dict) else {}
+    if not packet:
+        return PulseInsightResponse()
+    return PulseInsightResponse(**pulse.insight_for(packet))
 
 
 @app.get("/dashboard/attention", response_model=list[AttentionItem])
