@@ -1268,6 +1268,13 @@ def work_items(
     request: Request,
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
+    # Narrow to one kind of work ("none" = the undeclared ones), and/or to
+    # work that has closed. Both are column predicates on the scan this
+    # endpoint already does — the Work kind page uses them to load a kind's
+    # finished work in one lean request instead of reaching for
+    # GET /work/board, whose whole-fleet fold these endpoints exist to avoid.
+    workflow_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
 ) -> WorkItemsResponse:
     """Paginated named items for the Monday table. Plugin-provided human
     titles only — no untitled OTel flood, no generated/template shells.
@@ -1278,11 +1285,17 @@ def work_items(
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)
     viewer_user_id = user["id"] if user else None
+    # Only `done` is offered: every other status is derived from the event
+    # stream, so a SQL predicate for it would either be wrong or would need
+    # the whole-fleet fold back. An unknown value narrows nothing rather than
+    # 400-ing a client that guessed.
     items, next_cursor = database.get_work_items(
         account_id,
         viewer_user_id=viewer_user_id,
         cursor=cursor,
         limit=limit,
+        workflow_id=workflow_id or None,
+        finished_only=(status == "done"),
     )
     return WorkItemsResponse(
         items=[WorkItem(**it) for it in items],

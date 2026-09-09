@@ -441,10 +441,18 @@ export const api = {
   // Paginated named items for the Monday table. cursor from the previous
   // page's next_cursor. Untitled OTel loops are excluded.
   // `signal` is ours (Home aborts it); the rest of the object is query state.
-  getWorkItems: ({ cursor = null, limit = 50, signal = undefined } = {}) => {
+  // `workflowId` narrows to one kind of work ('none' = the undeclared ones)
+  // and `status: 'done'` to work that has closed. Both are column filters on
+  // the same lean scan — the Work kind page uses them instead of reaching for
+  // the board.
+  getWorkItems: ({
+    cursor = null, limit = 50, workflowId = null, status = null, signal = undefined,
+  } = {}) => {
     const q = new URLSearchParams()
     if (limit) q.set('limit', String(limit))
     if (cursor) q.set('cursor', cursor)
+    if (workflowId !== null && workflowId !== undefined) q.set('workflow_id', String(workflowId))
+    if (status) q.set('status', status)
     const qs = q.toString()
     return request(`/work/items${qs ? `?${qs}` : ''}`, {
       timeoutMs: WORK_TIMEOUT_MS,

@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { startAbortable } from './abortable.js'
 import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
   OTHER_KIND,
   holderLabel,
+  hottestOpen,
+  kindPath,
   kindSegments,
   matchesKind,
+  pastRuns,
   sortWorkItems,
   workItemStatusLabel,
   workKinds,
@@ -296,6 +300,262 @@ function KindsStrip({ kinds, active, onPick }) {
   )
 }
 
+
+// ---------------------------------------------------------------------------
+// Page 2 — one kind of work.
+//
+// Subject: this kind. What the path is, what is live on it, what past runs
+// did, and what is still open. Page 3 is still JobDetail.
+//
+// Everything here is read from the rows this kind already loaded, plus at
+// most ONE extra lean request for finished work. No detail fetch per row, no
+// board, no summary.
+// ---------------------------------------------------------------------------
+
+/**
+ * Band A — the path.
+ *
+ * A spine of the hands this kind's work passes through. The ORDER is
+ * canonical (agent → tool → person → done), not observed: a list row says
+ * where a job sits now, never the sequence it took, and learning the real
+ * sequence means one detail fetch per row. Absent when it cannot be drawn
+ * honestly — see kindPath.
+ */
+function PathBand({ path }) {
+  if (!path) return null
+  return (
+    <section className="kind-band" aria-label="Path">
+      <h2 className="dash-caps">How this work moves</h2>
+      <ol className="kind-path">
+        {path.map((n, i) => (
+          <li key={`${n.kind}-${i}`} className={`kind-node kind-${n.kind}`}>
+            <span className="kind-node-label">{n.label}</span>
+            {/* Exceptions only. A node with nothing waiting and nothing stuck
+                stays quiet. */}
+            {n.stuck > 0 && <span className="kind-node-flag is-stuck">{n.stuck} stuck</span>}
+            {n.waiting > 0 && (
+              <span className="kind-node-flag is-waiting">{n.waiting} waiting on a person</span>
+            )}
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+/** Band B — what is live for this kind, as one block, not one per row. */
+function LiveBand({ kindName, open, hottest, onOpenItem }) {
+  if (open.length === 0) {
+    return (
+      <section className="kind-band" aria-label="Now">
+        <h2 className="dash-caps">Now</h2>
+        <p className="kind-quiet">No {kindName.toLowerCase()} running.</p>
+      </section>
+    )
+  }
+  return (
+    <section className="kind-band" aria-label="Now">
+      <h2 className="dash-caps">Now</h2>
+      <p className="kind-live-lead">
+        {open.length} open
+        {hottest && (
+          <>
+            <span className="dash-dot-sep">·</span>
+            {workItemStatusLabel(hottest.status).toLowerCase()} with{' '}
+            {holderLabel(hottest.holder, hottest.status) || 'an agent'}
+          </>
+        )}
+      </p>
+      {hottest && (
+        <button type="button" className="kind-live-row" onClick={() => onOpenItem(hottest)}>
+          <span className="kind-live-title">{hottest.title}</span>
+          <span className="kind-live-meta">
+            {hottest.whats_next}
+            {hottest.updated_at && (
+              <>
+                <span className="dash-dot-sep">·</span>
+                {workUpdatedLabel(hottest.updated_at)}
+              </>
+            )}
+          </span>
+        </button>
+      )}
+    </section>
+  )
+}
+
+/**
+ * Band C — past runs. The technical door.
+ *
+ * Absent when the record has no finished or stuck work for this kind, rather
+ * than an empty frame. "Sent back" is not offered: it lives in an item's own
+ * history, and naming an outcome we did not observe is worse than naming the
+ * two we did.
+ */
+function PastRunsBand({ runs, loading, onOpenItem }) {
+  if (loading) {
+    return (
+      <section className="kind-band" aria-label="Past runs">
+        <h2 className="dash-caps">Past runs</h2>
+        <div className="dash-skel"><span style={{ width: '60%' }} /></div>
+      </section>
+    )
+  }
+  if (runs.length === 0) return null
+  return (
+    <section className="kind-band" aria-label="Past runs">
+      <h2 className="dash-caps">Past runs</h2>
+      <ul className="kind-runs">
+        {runs.map((r) => (
+          <li key={r.id}>
+            <button type="button" className="kind-run" onClick={() => onOpenItem(r.item)}>
+              <span className="kind-run-when">{r.at ? workUpdatedLabel(r.at) : ''}</span>
+              <span className={`kind-run-result is-${r.status}`}>{r.result}</span>
+              <span className="kind-run-what">{r.title}</span>
+              {r.reason && <span className="kind-run-why">{r.reason}</span>}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+
+/**
+ * The inventory table. Shared by Work home and the Kind page so the two
+ * genuinely are the same table — same columns, same sort, same row-opens-
+ * JobDetail — rather than two that merely look alike and drift.
+ */
+function WorkTable({ rows, onOpen, nextCursor, onLoadMore }) {
+  function onRowKey(e, row) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onOpen(row)
+    }
+  }
+  return (
+    <div className="work-table" role="table" aria-label="Work">
+      <div className="work-table-head" role="row">
+        <span role="columnheader">Task</span>
+        <span role="columnheader">Status</span>
+        <span role="columnheader">Holder</span>
+        <span role="columnheader">What&apos;s next</span>
+        <span role="columnheader">Updated</span>
+      </div>
+      {rows.map((row) => (
+        <div
+          key={row.id}
+          className={rowClass(row.status)}
+          role="button"
+          tabIndex={0}
+          onClick={() => onOpen(row)}
+          onKeyDown={(e) => onRowKey(e, row)}
+          aria-label={row.title}
+        >
+          <span className="work-td-title">{row.title}</span>
+          <span className={`work-status-pill ${row.status || ''}`}>
+            {workItemStatusLabel(row.status)}
+          </span>
+          <span className="work-td-holder">
+            <QuietBrand texts={[row.holder?.name]} size={12} />
+            {holderLabel(row.holder, row.status)}
+          </span>
+          <span className="work-td-next">{row.whats_next || ''}</span>
+          <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
+        </div>
+      ))}
+      {nextCursor && onLoadMore && (
+        <button type="button" className="btn work-more" onClick={onLoadMore}>
+          Load more
+        </button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The Kind page. One subject: this kind of work.
+ *
+ * `items` is the page Work home already loaded, filtered to this kind — no
+ * refetch for the bands. `finished` is the ONE extra lean request: this
+ * kind's closed work, which the main page only carries incidentally.
+ */
+function KindPage({
+  kindName, workflowId, items, finished, finishedLoading,
+  filter, onClearFilter, onBack, onOpenItem, onItemResolved,
+}) {
+  const [open, setOpen] = useState(null)
+  const mine = items.filter((r) => matchesKind(r, kindName))
+  // "Still open" means still open. Finished work is Past runs' subject, and
+  // listing it under both headings would make one of the two a lie.
+  const openRows = mine.filter((r) => r.status !== 'done')
+  const rows = sortWorkItems(
+    filter ? openRows.filter((r) => matchesWorkFilter(r, filter)) : openRows,
+  )
+  const path = kindPath(mine)
+  // Finished work comes from the focused request when it landed, and from
+  // whatever this kind's own page already held otherwise.
+  const runs = pastRuns(finished === null ? mine : [...mine, ...finished])
+  const filteredOut = rows.length === 0 && openRows.length > 0
+
+  return (
+    <div className="view work-kind-page">
+      <header className="work-home-head">
+        <button type="button" className="wf2-back" onClick={onBack}>
+          ← All work
+        </button>
+        <h1>{kindName}</h1>
+        {filter && (
+          <button
+            type="button"
+            className="work-filter-chip"
+            onClick={onClearFilter}
+            aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
+          >
+            {WORK_FILTER_LABELS[filter] || filter}
+            <span aria-hidden="true">×</span>
+          </button>
+        )}
+      </header>
+
+      <PathBand path={path} />
+      <LiveBand
+        kindName={kindName}
+        open={openRows}
+        hottest={hottestOpen(mine)}
+        onOpenItem={setOpen}
+      />
+      <PastRunsBand runs={runs} loading={finishedLoading} onOpenItem={setOpen} />
+
+      <section className="kind-band" aria-label="Open work">
+        <h2 className="dash-caps">Still open</h2>
+        {filteredOut ? (
+          <div className="board-empty">
+            <p className="board-empty-lead">Nothing matches these filters.</p>
+            <p className="board-empty-sub">Clear the filter above to see the rest of this work.</p>
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="kind-quiet">Nothing open here.</p>
+        ) : (
+          <WorkTable rows={rows} onOpen={setOpen} />
+        )}
+      </section>
+
+      {open && (
+        <JobDetail
+          item={open}
+          onClose={() => setOpen(null)}
+          onResolved={() => {
+            setOpen(null)
+            onItemResolved()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
 function WorkHome({
   onConnectAgent,
   overview,
@@ -315,6 +575,7 @@ function WorkHome({
   filter,
   onClearFilter,
   onItemResolved,
+  onOpenKind,
 }) {
   const [open, setOpen] = useState(null)
   // The kind filter is in-page and composes with the one Home arrives with:
@@ -333,13 +594,6 @@ function WorkHome({
   // Filtered down to nothing is a different situation from having no work:
   // the answer is to clear a chip, not to connect an agent.
   const filteredOut = !!items && rows.length === 0 && all.length > 0
-
-  function onRowKey(e, row) {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault()
-      setOpen(row)
-    }
-  }
 
   return (
     <div className="view work-home">
@@ -371,7 +625,13 @@ function WorkHome({
         )}
       </header>
 
-      <KindsStrip kinds={kinds} active={activeKind} onPick={setKind} />
+      {/* A card is a door to that kind's own page now. Holding shift (or
+          the in-page chip below) still narrows the table without leaving. */}
+      <KindsStrip
+        kinds={kinds}
+        active={activeKind}
+        onPick={(name) => (name && onOpenKind ? onOpenKind(name) : setKind(name))}
+      />
       {overview && <OverviewStrip overview={overview} demoted={kinds.length > 1} />}
       {!overview && overviewErr && (
         <div className="work-section-failed">
@@ -417,42 +677,12 @@ function WorkHome({
       )}
 
       {items && !empty && !filteredOut && (
-        <div className="work-table" role="table" aria-label="Work">
-          <div className="work-table-head" role="row">
-            <span role="columnheader">Task</span>
-            <span role="columnheader">Status</span>
-            <span role="columnheader">Holder</span>
-            <span role="columnheader">What&apos;s next</span>
-            <span role="columnheader">Updated</span>
-          </div>
-          {rows.map((row) => (
-            <div
-              key={row.id}
-              className={rowClass(row.status)}
-              role="button"
-              tabIndex={0}
-              onClick={() => setOpen(row)}
-              onKeyDown={(e) => onRowKey(e, row)}
-              aria-label={row.title}
-            >
-              <span className="work-td-title">{row.title}</span>
-              <span className={`work-status-pill ${row.status || ''}`}>
-                {workItemStatusLabel(row.status)}
-              </span>
-              <span className="work-td-holder">
-                <QuietBrand texts={[row.holder?.name]} size={12} />
-                {holderLabel(row.holder, row.status)}
-              </span>
-              <span className="work-td-next">{row.whats_next || ''}</span>
-              <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
-            </div>
-          ))}
-          {nextCursor && (
-            <button type="button" className="btn work-more" onClick={onLoadMore}>
-              Load more
-            </button>
-          )}
-        </div>
+        <WorkTable
+          rows={rows}
+          onOpen={setOpen}
+          nextCursor={nextCursor}
+          onLoadMore={onLoadMore}
+        />
       )}
 
       {open && (
@@ -495,6 +725,17 @@ export default function WorkTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterNonce])
 
+  // Which page of the Work section is on screen. Local view state, not a
+  // route: the app is pane-based and Work is one pane, so a kind is a view
+  // inside it — the same shape the tab switcher already uses.
+  const [kindView, setKindView] = useState(null)
+  // This kind's CLOSED work. The main page carries done rows only
+  // incidentally (it is a mixed page of 50 ordered by recency), so the kind
+  // page asks for them directly. One extra lean request, column-filtered —
+  // never the board.
+  const [finished, setFinished] = useState(null)
+  const [finishedLoading, setFinishedLoading] = useState(false)
+
   const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
@@ -503,6 +744,33 @@ export default function WorkTab({
   const [itemsErr, setItemsErr] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [suggestionNote, setSuggestionNote] = useState(null)
+
+  // Load this kind's finished work when its page opens, and only then.
+  const kindWorkflowId = kindView?.workflowId ?? null
+  const kindOpen = kindView?.name || null
+  useEffect(() => {
+    if (!kindOpen) {
+      setFinished(null)
+      return undefined
+    }
+    setFinishedLoading(true)
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkItems({
+          limit: 50,
+          workflowId: kindWorkflowId === null ? 'none' : kindWorkflowId,
+          status: 'done',
+          signal,
+        })
+        .then((p) => {
+          if (!isAlive()) return
+          setFinished(Array.isArray(p?.items) ? p.items : [])
+          setFinishedLoading(false)
+        })
+        // Past runs is a band, not the page. Its absence is quiet.
+        .catch(() => isAlive() && setFinishedLoading(false))
+    })
+  }, [kindOpen, kindWorkflowId])
 
   const overviewFailSoftRef = useRef(false)
   const itemsFailSoftRef = useRef(false)
@@ -662,6 +930,19 @@ export default function WorkTab({
   }
 
   return (
+    kindView ? (
+      <KindPage
+        kindName={kindView.name}
+        workflowId={kindView.workflowId}
+        items={items || []}
+        finished={finished}
+        finishedLoading={finishedLoading}
+        filter={filter}
+        onClearFilter={() => setFilter(null)}
+        onBack={() => setKindView(null)}
+        onItemResolved={refreshNamedWork}
+      />
+    ) : (
     <WorkHome
       onConnectAgent={connectAgent}
       overview={overview}
@@ -681,6 +962,11 @@ export default function WorkTab({
       filter={filter}
       onClearFilter={() => setFilter(null)}
       onItemResolved={refreshNamedWork}
+      onOpenKind={(name) => {
+        const k = workKinds(items || []).find((x) => x.name === name)
+        setKindView({ name, workflowId: k?.workflowId ?? null })
+      }}
     />
+    )
   )
 }
