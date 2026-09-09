@@ -1325,6 +1325,13 @@ class WorkItem(BaseModel):
     # Free: the list decorator already resolves it while working out who the
     # work is waiting on (database._decorate_work_items).
     awaiting_handoff_event_id: int | None = None
+    # Which KIND of work this is — the declared workflow the matcher claimed
+    # it for. Both None means unmatched, which Work home groups as "Other
+    # work"; it never means the row is hidden. Read straight off the page's
+    # own rows so Work home can group without GET /work/summary, which
+    # reuses the entire loop-scanning board to get at the same two fields.
+    workflow_id: int | None = None
+    workflow_name: str | None = None
 
 
 class WorkItemsResponse(BaseModel):

@@ -4641,6 +4641,11 @@ def _row_to_work_item(
         out["agent_id"] = r.get("agent_id") or "main"
     if include_handoff:
         out["awaiting_handoff_event_id"] = r.get("awaiting_handoff_event_id")
+    # The kind of work. None on both when the matcher has not claimed this
+    # loop for a declared workflow — the client groups those under "Other
+    # work" rather than hiding them.
+    out["workflow_id"] = r.get("workflow_id")
+    out["workflow_name"] = r.get("workflow_name")
     return out
 
 
@@ -4669,8 +4674,18 @@ def get_work_items(
 
     sql = (
         "SELECT l.id, l.title, l.title_source, l.cached_state, l.last_event_unix, "
-        "       l.closed_at, l.created_at, l.service_name, l.agent_id "
+        "       l.closed_at, l.created_at, l.service_name, l.agent_id, "
+        # The kind of work this belongs to. Work home groups the table by it,
+        # and the alternative was GET /work/summary — which reuses the whole
+        # loop-scanning board just to read these two fields off it.
+        #
+        # Cheap here: workflow_id is a column on the page's own rows, and the
+        # join is a primary-key lookup per row for at most one page. It stays
+        # a LEFT join so an unmatched loop keeps its place in the table (it
+        # groups under "Other work") rather than dropping out of the list.
+        "       l.workflow_id, wf.name AS workflow_name "
         "FROM loops l "
+        "LEFT JOIN workflows wf ON wf.id = l.workflow_id "
         f"WHERE {scope} "
         f"AND (l.closed_at IS NULL OR l.closed_at >= {PH}) "
     )

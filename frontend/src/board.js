@@ -235,3 +235,92 @@ export function holderLabel(holder, status) {
   if (!name || (prefix === 'You' && /^you$/i.test(name))) return prefix
   return `${prefix} ${name}`
 }
+
+// ---------------------------------------------------------------------------
+// Work home: kinds of work
+// ---------------------------------------------------------------------------
+
+/** The bucket unmatched work groups under. Never a hidden row. */
+export const OTHER_KIND = 'Other work'
+
+/**
+ * Group the table's own rows into kinds of work.
+ *
+ * The kind is `workflow_name` — the declared workflow the matcher claimed the
+ * loop for, read straight off /work/items. It is NOT guessed from the title:
+ * a regex over titles would invent kinds that nobody declared and that no
+ * other surface agrees with.
+ *
+ * Only showable named items are counted, the same gate the table uses, so a
+ * card's numbers always add up to rows a person can actually see.
+ *
+ * Counts mirror the table's own status vocabulary:
+ *   moving  — in flight, nobody blocked
+ *   waiting — waiting on a PERSON (yours or a teammate's). A wait on a tool
+ *             or another agent is not something a person can unblock, so it
+ *             stays out of the number that carries colour.
+ *   stuck   — cannot move
+ * Done is deliberately absent: a kind card is about what is live.
+ *
+ * Cost is absent too. It is not on the lean payload — the only per-kind cost
+ * in the codebase comes off the board's span aggregate, which is exactly the
+ * scan Work home must not do.
+ *
+ * Ordered by what needs a person first, then size, then name, so the loudest
+ * kind leads and the order is stable between renders.
+ */
+export function workKinds(items) {
+  const byName = new Map()
+  for (const it of items || []) {
+    if (!isNamedWorkTitle(it?.title) || it?.id == null) continue
+    const name = String(it.workflow_name || '').trim() || OTHER_KIND
+    let k = byName.get(name)
+    if (!k) {
+      k = {
+        name,
+        workflowId: it.workflow_id ?? null,
+        isOther: name === OTHER_KIND,
+        moving: 0,
+        waiting: 0,
+        stuck: 0,
+        total: 0,
+      }
+      byName.set(name, k)
+    }
+    k.total += 1
+    if (it.status === 'moving') k.moving += 1
+    else if (it.status === 'waiting_on_you' || it.status === 'waiting_on_other') k.waiting += 1
+    else if (it.status === 'stuck') k.stuck += 1
+  }
+  const kinds = [...byName.values()]
+  kinds.sort((a, b) => {
+    // "Other work" is a catch-all, not a kind anyone declared — it sinks.
+    if (a.isOther !== b.isOther) return a.isOther ? 1 : -1
+    const heat = (k) => k.stuck * 2 + k.waiting
+    if (heat(b) !== heat(a)) return heat(b) - heat(a)
+    if (b.total !== a.total) return b.total - a.total
+    return a.name.localeCompare(b.name)
+  })
+  return kinds
+}
+
+/** True when this row belongs to the named kind. */
+export function matchesKind(row, kindName) {
+  if (!kindName) return true
+  const name = String(row?.workflow_name || '').trim() || OTHER_KIND
+  return name === kindName
+}
+
+/**
+ * A kind card's counts, as display segments — the same shape kindRollup uses
+ * on the legacy board so the two read alike. Colour ONLY where a person is
+ * needed: a quiet kind is a quiet card.
+ */
+export function kindSegments(kind) {
+  const k = kind || {}
+  return [
+    { value: k.moving || 0, label: 'moving', tone: 'muted' },
+    { value: k.waiting || 0, label: 'waiting on a person', tone: k.waiting ? 'warn' : 'muted' },
+    { value: k.stuck || 0, label: 'stuck', tone: k.stuck ? 'stuck' : 'muted' },
+  ]
+}
