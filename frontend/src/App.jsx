@@ -213,9 +213,19 @@ function AppInner() {
   }, [])
 
   function handleAuthed(payload) {
-    // Clear an invite/deep-link URL so a refresh doesn't re-trigger it.
+    // Clear a consumed one-time deep link (invite OR password reset) from the
+    // URL so a refresh doesn't re-trigger it.
+    //
+    // Bug: only the invite token was cleared, so after a password reset the
+    // tab sat on `/?reset=<token>` for good. Both tokens are read at mount,
+    // and a reset token routes straight to "Choose a new password" — so the
+    // next time this tab had no valid session (reload after the session
+    // expired, or simply reopening the emailed link) the user got the reset
+    // form again instead of the login form. The token was already spent, so
+    // every submit failed with "invalid or expired reset link" and there was
+    // no way through to sign in with the password they had just set.
     try {
-      if (inviteToken) window.history.replaceState({}, '', '/')
+      if (inviteToken || resetToken) window.history.replaceState({}, '', '/')
     } catch {
       /* ignore */
     }
