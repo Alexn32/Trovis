@@ -69,6 +69,17 @@ MAX_PACKET_KEYS = 24
 
 # The graphics a caller can actually draw. A model naming anything else is
 # overruled by the deterministic chooser.
+#
+# `week_stuck` is plumbed end to end and tested, but NOTHING FEEDS IT TODAY:
+# stuck is derived live from loops.cached_state, which recompute_loop_state
+# overwrites in place, and the `stall_detected` event type that would record
+# the transition is declared in loops.py but never written by any production
+# path. So a packet never carries stuck_this_week / stuck_last_week and the
+# chooser always falls past this option. Making it real needs a history —
+# most cheaply a daily counts snapshot written by the loop sweep, which would
+# give every strip count a trend rather than only this one. Until then the
+# guard in choose_graphic() is what keeps a model naming it from drawing an
+# empty frame.
 GRAPHICS = ("week_finished", "week_stuck", "need_a_look", "none")
 
 SYSTEM_PROMPT = (

@@ -147,18 +147,6 @@ export function briefingLead(counts) {
 // ---------------------------------------------------------------------------
 
 /**
- * `count` is how many agents are reporting; `needLook` is the ones already
- * flagged by /dashboard/attention, which Home fetches anyway.
- *
- * Home must NOT load the roster (that request is what made it expensive), so
- * the count comes from /dashboard/cost's `agent_count` — the honest total,
- * not `agents.length`, which is a truncated top-spender list.
- *
- * Because we never see the roster, we can never say "all healthy": not being
- * flagged is not the same as being checked. `count` is null until we know it,
- * and the caller stays silent rather than printing a number it is guessing.
- */
-/**
  * The DATA packet the pulse insight is allowed to reason over.
  *
  * Assembled from what Home ALREADY fetched — no new request — which is also
@@ -245,6 +233,8 @@ export function pulseGraphic(kind, packet) {
       filter: 'done',
     }
   }
+  // Reachable and tested, but no packet carries these keys today — see the
+  // GRAPHICS note in pulse.py. It returns null rather than an empty frame.
   if (kind === 'week_stuck') {
     if (!('stuck_this_week' in p) || !('stuck_last_week' in p)) return null
     return {
@@ -261,6 +251,18 @@ export function pulseGraphic(kind, packet) {
   return null
 }
 
+/**
+ * `count` is how many agents are reporting; `needLook` is the ones already
+ * flagged by /dashboard/attention, which Home fetches anyway.
+ *
+ * Home must NOT load the roster (that request is what made it expensive), so
+ * the count comes from /dashboard/cost's `agent_count` — the honest total,
+ * not `agents.length`, which is a truncated top-spender list.
+ *
+ * Because we never see the roster, we can never say "all healthy": not being
+ * flagged is not the same as being checked. `count` is null until we know it,
+ * and the caller stays silent rather than printing a number it is guessing.
+ */
 export function fleetPulse({ agentCount, attention }) {
   const seen = new Set()
   const needLook = []
