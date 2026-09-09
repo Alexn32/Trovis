@@ -11,12 +11,16 @@ fails CLOSED — a sentence we cannot verify is worth less than no sentence,
 because a dashboard that invents one number stops being evidence for any of
 them.
 
-Latency. First paint must never wait on this. The endpoint waits a short
-budget (TROVIS_PULSE_INSIGHT_WAIT_S, default 1.2s) and otherwise returns an
-empty insight — but the generation keeps running in a worker and writes to the
-cache, so the next load of the same packet is an instant hit. Abandoning the
-call outright, as a strict 1s cap would, means the cache never fills and the
-feature never appears at all.
+Latency. First paint must never wait on this, and it does not: the browser
+draws the pulse from the record and fills the sentence in whenever the answer
+lands. Because of that, the request's wait budget
+(TROVIS_PULSE_INSIGHT_WAIT_S) is NOT a paint deadline — it only decides
+whether the sentence arrives on this load or the next. A very short budget
+therefore costs the feature its first impression while buying nothing, so it
+sits just under the model call's own timeout. Anything still running when the
+budget expires keeps going and fills the cache; abandoning the call outright,
+as a strict 1s cap would, means the cache never fills and the feature never
+appears at all.
 """
 from __future__ import annotations
 
@@ -49,8 +53,15 @@ def _f(name: str, default: float) -> float:
 
 
 # How long a request will WAIT. Generation is not cancelled at this point.
+#
+# This does NOT gate the paint. Home renders its workforce, graphic and caption
+# from the record and fills the sentence in whenever the response lands, so a
+# short budget buys nothing — it only guarantees that the FIRST view of any new
+# packet has no sentence, which for someone who looks once is every view. The
+# budget therefore sits just under the call timeout: most generations land
+# inside the same request, and the ones that do not still fill the cache.
 def wait_budget_s() -> float:
-    return _f("TROVIS_PULSE_INSIGHT_WAIT_S", 1.2)
+    return _f("TROVIS_PULSE_INSIGHT_WAIT_S", 6.0)
 
 
 # How long the model call itself may take before we give up on it entirely.
