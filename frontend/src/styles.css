@@ -6459,13 +6459,38 @@ select.wf2-input { cursor: pointer; }
 .jobd-runs-toggle:hover { color: var(--text-primary); }
 .jobd-runs-body { margin-top: 11px; }
 .jobd-run-list { list-style: none; margin: 0; padding: 0; }
+/* A run is now a small stack — name + result, then the facts, then a reason
+   if it failed — rather than one line, so each fact can be absent without
+   leaving a gap where a number used to be. */
 .jobd-run-list > li {
-  display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
-  font-size: 12px;
+  display: flex; flex-direction: column; gap: 3px; padding: 8px 0;
+  font-size: 12px; border-top: 1px solid var(--border-subtle, var(--border-default));
 }
+.jobd-run-list > li:first-child { border-top: none; }
+.jobd-run-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .jobd-run-list > li.is-errored .jobd-run-name { color: var(--error); }
 .jobd-run-name { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11.5px; color: var(--text-secondary); }
-.jobd-run-meta { color: var(--text-muted); white-space: nowrap; }
+.jobd-run-result { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.jobd-run-result.is-errored { color: var(--error); font-weight: 600; }
+/* The facts row: whichever of agent / age / duration / cost we actually have,
+   separated by a dot so a missing one leaves no hole. */
+.jobd-run-meta {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  color: var(--text-muted);
+}
+.jobd-run-meta > * + *::before { content: '·'; margin-right: 8px; color: var(--text-muted); }
+/* The door out to Fleet. A link, not a button — it navigates. */
+.jobd-run-agent {
+  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--text-secondary); text-decoration: underline;
+  text-decoration-color: var(--border-default); text-underline-offset: 2px;
+}
+.jobd-run-agent:hover { color: var(--text-primary); text-decoration-color: currentColor; }
+.jobd-run-agent.is-plain { color: var(--text-muted); text-decoration: none; cursor: default; }
+.jobd-run-why {
+  margin: 1px 0 0; font-size: 11.5px; color: var(--error);
+  overflow-wrap: anywhere;
+}
 .bpanel-head h2 { font-size: 17px; line-height: 1.35; margin: 10px 0 4px; }
 .bpanel-sub { font-size: 12.5px; color: var(--text-muted); margin: 0 0 16px; }
 .bpanel-close {

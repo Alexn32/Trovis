@@ -91,6 +91,70 @@ export function canDecide(detail) {
   return Boolean(detail && detail.status === 'waiting_on_you' && detail.awaiting_handoff_event_id)
 }
 
+// --- the technical fold ----------------------------------------------------
+//
+// The last section of the pane is the door out of Work: someone who needs the
+// machine, not the process, reads these lines and then leaves for the agent's
+// own page. So each line is English, each is optional, and every one of them
+// is dropped when the record does not have it. An absent duration is absent;
+// a $0.00 is not a cost; a failure with no message says only that it failed.
+
+/** "820ms" / "1.4s" / "2m 05s" — null when the run carried no duration. */
+export function runDuration(ms) {
+  // Guard the coercion, not just the result: Number(null) and Number('') are
+  // both 0, so a missing duration would otherwise print as a measured "0ms".
+  if (ms === null || ms === undefined || ms === '') return null
+  const n = Number(ms)
+  if (!Number.isFinite(n) || n <= 0) return null
+  if (n < 1000) return `${Math.round(n)}ms`
+  const s = n / 1000
+  if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)}s`
+  const m = Math.floor(s / 60)
+  return `${m}m ${String(Math.round(s - m * 60)).padStart(2, '0')}s`
+}
+
+/**
+ * "$0.004" / "$1.20" — null when there is nothing to report.
+ *
+ * Zero is null on purpose. A cost column that reads $0.00 on every row looks
+ * like a measured zero when it is really "we were not told", and the two mean
+ * very different things to someone deciding whether an agent is expensive.
+ */
+export function runCost(usd) {
+  const n = Number(usd)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
+}
+
+/**
+ * The one line a failed run gets: "stripe — Card declined".
+ *
+ * Only for runs that actually failed, and only when the run said something.
+ * Returns null otherwise — a failure with no message is reported by the
+ * Error tag alone, because writing a reason we were never given is the
+ * failure mode this whole pane is built to avoid.
+ */
+export function runErrorLine(run) {
+  if (!run || !run.errored) return null
+  const msg = String(run.error || '').trim()
+  if (!msg) return null
+  const tool = String(run.tool || '').trim()
+  return tool ? `${tool} — ${msg}` : msg
+}
+
+/**
+ * Where a run's agent name points, or null when it points nowhere.
+ *
+ * Same rule as everywhere else: `service_name` is the route and `agent`
+ * is the label. Without a route the name stays text — a button that opens
+ * a 404 is worse than a name you cannot click.
+ */
+export function runAgentRoute(run) {
+  const service = String(run?.service_name || '').trim()
+  if (!service) return null
+  return [service, String(run?.agent_id || '').trim() || 'main']
+}
+
 /** The question the Ask pill opens with for this job. */
 export function askPrompt(detail) {
   const title = String(detail?.title || '').trim()

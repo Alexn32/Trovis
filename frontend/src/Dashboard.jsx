@@ -213,6 +213,7 @@ export default function Dashboard({
       {openItem && (
         <JobDetail
           item={openItem}
+          onOpenAgent={onOpenAgent}
           onClose={() => setOpenItem(null)}
           onResolved={() => {
             setOpenItem(null)

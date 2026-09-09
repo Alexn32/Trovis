@@ -1417,12 +1417,29 @@ class WorkItemProvenance(BaseModel):
 
 
 class WorkItemRun(BaseModel):
-    """One underlying agent run behind a work item."""
+    """One underlying agent run behind a work item.
+
+    The technical fold of the job pane: what ran, whose it was, whether it
+    failed and in one line why, how long, how much. No tokens and no span
+    attributes — that depth lives on the agent's own page, and this fold's
+    job is to hand someone off to it, not to reproduce it.
+    """
 
     name: str
+    # Display label. `service_name` + `agent_id` are the ROUTE to that agent's
+    # page; a label has to stay out of URLs (see agentRoute.js).
     agent: str = ""
+    service_name: str = ""
+    agent_id: str | None = None
     at: str | None = None
     errored: bool = False
+    duration_ms: int | None = None
+    # None rather than 0.0 when there is no cost to report: a column of
+    # $0.00 reads as a measurement rather than an absence.
+    cost_usd: float | None = None
+    tool: str | None = None
+    # Only on a failed run, and only when the run actually said something.
+    error: str | None = None
 
 
 class WorkItemDetail(WorkItem):

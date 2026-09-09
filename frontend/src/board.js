@@ -398,11 +398,14 @@ export function kindPath(items) {
  * reads as Stuck. Naming an outcome we did not observe would be worse than
  * naming the two we did.
  *
- * The caller merges two overlapping sources — the rows the section already
- * holds and a focused request for this kind's finished work — so a job is
- * kept once by id. A run listed twice reads as two runs.
+ * Takes CLOSED rows only — the `status=done` payload. Pass it open rows and
+ * it will happily report a live stuck job as a past run, which is the one
+ * thing this band must not do; the caller owns that guarantee because a lean
+ * row carries no "closed" flag to check here. Ids are still de-duplicated:
+ * a run listed twice reads as two runs.
  */
-export function pastRuns(items, limit = 8) {
+export function pastRuns(finishedItems, limit = 8) {
+  const items = finishedItems
   const seen = new Set()
   const rows = (items || [])
     .filter((it) => isNamedWorkTitle(it?.title) && it?.id != null)

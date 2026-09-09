@@ -483,7 +483,7 @@ function WorkTable({ rows, onOpen, nextCursor, onLoadMore }) {
  */
 function KindPage({
   kindName, workflowId, items, finished, finishedLoading,
-  filter, onClearFilter, onBack, onOpenItem, onItemResolved,
+  filter, onClearFilter, onBack, onOpenItem, onItemResolved, onOpenAgent,
 }) {
   const [open, setOpen] = useState(null)
   const mine = items.filter((r) => matchesKind(r, kindName))
@@ -494,9 +494,13 @@ function KindPage({
     filter ? openRows.filter((r) => matchesWorkFilter(r, filter)) : openRows,
   )
   const path = kindPath(mine)
-  // Finished work comes from the focused request when it landed, and from
-  // whatever this kind's own page already held otherwise.
-  const runs = pastRuns(finished === null ? mine : [...mine, ...finished])
+  // Past runs are the CLOSED rows and nothing else — only the focused
+  // request's payload feeds it. A stuck job is live: it belongs on the path
+  // flag, in Now, and in Still open, but listing it under a heading that
+  // means the run ended is the page telling two stories about one job.
+  // While that request is in flight there are no past runs to show yet;
+  // backfilling from open rows would put live work under that heading again.
+  const runs = pastRuns(finished || [])
   const filteredOut = rows.length === 0 && openRows.length > 0
 
   return (
@@ -545,6 +549,7 @@ function KindPage({
       {open && (
         <JobDetail
           item={open}
+          onOpenAgent={onOpenAgent}
           onClose={() => setOpen(null)}
           onResolved={() => {
             setOpen(null)
@@ -576,6 +581,7 @@ function WorkHome({
   onClearFilter,
   onItemResolved,
   onOpenKind,
+  onOpenAgent,
 }) {
   const [open, setOpen] = useState(null)
   // The kind filter is in-page and composes with the one Home arrives with:
@@ -688,6 +694,7 @@ function WorkHome({
       {open && (
         <JobDetail
           item={open}
+          onOpenAgent={onOpenAgent}
           onClose={() => setOpen(null)}
           onResolved={() => {
             setOpen(null)
@@ -708,6 +715,7 @@ function WorkHome({
 export default function WorkTab({
   onConnectAgent,
   onNewWorkflow,
+  onOpenAgent,
   active = true,
   // { value, nonce } from a Home card. The nonce matters: keep-alive means
   // this component is never remounted, so re-clicking the SAME tile after
@@ -941,6 +949,7 @@ export default function WorkTab({
         onClearFilter={() => setFilter(null)}
         onBack={() => setKindView(null)}
         onItemResolved={refreshNamedWork}
+        onOpenAgent={onOpenAgent}
       />
     ) : (
     <WorkHome
@@ -962,6 +971,7 @@ export default function WorkTab({
       filter={filter}
       onClearFilter={() => setFilter(null)}
       onItemResolved={refreshNamedWork}
+      onOpenAgent={onOpenAgent}
       onOpenKind={(name) => {
         const k = workKinds(items || []).find((x) => x.name === name)
         setKindView({ name, workflowId: k?.workflowId ?? null })

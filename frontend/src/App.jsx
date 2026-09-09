@@ -534,6 +534,10 @@ function AppInner() {
           // document.hidden). No new polling is introduced here.
           active={workVisible}
           incomingFilter={workFilter}
+          // The job pane's technical fold names the agent behind each run;
+          // that name is the door out of Work into Fleet, same as Home's
+          // noticed lines.
+          onOpenAgent={openDetail}
           onConnectAgent={openAddAgent}
           onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
           onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
