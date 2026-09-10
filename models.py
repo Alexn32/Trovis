@@ -271,10 +271,16 @@ class TeamMemberCreate(BaseModel):
 
 
 class AgentOwnerSet(BaseModel):
-    """Body for PUT /agents/{service_name}/owner."""
+    """Body for PUT /agents/{service_name}/owner.
+
+    `user_id` is an org member — the way to assign an owner. `team_member_id`
+    addresses the legacy directory and is accepted only so existing callers
+    keep working; exactly one of the two must be set.
+    """
 
     agent_id: str = "main"
-    team_member_id: int
+    user_id: int | None = None
+    team_member_id: int | None = None
 
 
 class WaitlistRequest(BaseModel):

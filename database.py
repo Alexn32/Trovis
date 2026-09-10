@@ -1528,6 +1528,7 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_service_agent ON agent_owners(service_name, agent_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_account_id ON agent_owners(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_owners_team_member ON agent_owners(team_member_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_owners_user ON agent_owners(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_insights_account_id ON agent_insights(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_insights_service_agent_kind ON agent_insights(service_name, agent_id, kind)",
     # Speeds the cost aggregation, which filters to spans with a
@@ -1882,6 +1883,29 @@ def init_db() -> None:
         # created before org_roles, and SQLite's ALTER ADD COLUMN can't
         # enforce one anyway (same reasoning as spans.loop_id).
         _try_add_column(cur, "invites", "role_id", "INTEGER DEFAULT NULL")
+        # Agent ownership moves onto `users`. team_members was a directory of
+        # people with no login, invented before Trovis had real users; the org
+        # chart replaced it, and two tables that both mean "the humans here"
+        # is the split this ship set out to close.
+        #
+        # No FK: agent_owners is created before users in the init order, and
+        # SQLite's ALTER ADD COLUMN can't enforce one anyway (spans.loop_id
+        # precedent). Reads are dual-source until the last legacy row is
+        # matched — see _OWNER_JOIN_SQL.
+        _try_add_column(cur, "agent_owners", "user_id", "INTEGER DEFAULT NULL")
+        # Backfill by email, within the account. A team_members row whose
+        # email matches a login IS that person; one with no email, or no
+        # matching login, keeps pointing at the legacy row and still resolves
+        # through the fallback join. Idempotent — only ever fills a NULL.
+        cur.execute(
+            "UPDATE agent_owners SET user_id = ("
+            "  SELECT u.id FROM users u JOIN team_members m"
+            "    ON LOWER(m.email) = LOWER(u.email) AND m.account_id = u.account_id"
+            "  WHERE m.id = agent_owners.team_member_id"
+            "    AND u.account_id = agent_owners.account_id"
+            "  LIMIT 1"
+            ") WHERE user_id IS NULL AND team_member_id IS NOT NULL"
+        )
         # After loop_id exists: classify leftover titles from before
         # title_source. No-op on a fresh DB (no titled loops yet).
         _backfill_loop_title_source(cur)
@@ -6536,13 +6560,17 @@ def _fleet_sidecar(cur, account_id: int | None) -> dict[str, Any]:
     owner_acct = f"AND o.account_id = {PH}" if account_id is not None else ""
     cur.execute(
         "SELECT o.service_name, COALESCE(o.agent_id, 'main') AS agent_id, "
-        "       o.team_member_id, m.name, m.role "
-        "FROM agent_owners o JOIN team_members m ON m.id = o.team_member_id "
-        f"WHERE 1=1 {owner_acct}",
+        f"       {_OWNER_COLS_SQL} "
+        f"FROM agent_owners o {_OWNER_JOIN_SQL} "
+        # An assignment whose person is gone from both tables resolves to no
+        # name; skip it rather than render a nameless owner.
+        f"WHERE COALESCE(u.id, m.id) IS NOT NULL {owner_acct}",
         args,
     )
+    # dict(), not the raw row: callers use .get() for the owner-absent case,
+    # and sqlite3.Row has no .get.
     owners = {
-        (r["service_name"], r["agent_id"] or "main"): r for r in cur.fetchall()
+        (r["service_name"], r["agent_id"] or "main"): dict(r) for r in cur.fetchall()
     }
     return {
         "descriptions": descriptions,
@@ -6637,9 +6665,12 @@ def get_agents(account_id: int | None = None) -> list[dict[str, Any]]:
                     "has_registration": key in side["registrations"],
                     "description": side["descriptions"].get(key),
                     "display_name": side["display_names"].get(key),
-                    "owner_id": owner.get("team_member_id"),
-                    "owner_name": owner.get("name"),
-                    "owner_role": owner.get("role"),
+                    # owner_id is the org member's user id now. A legacy
+                    # assignment to a directory person with no login has no
+                    # user id — it still shows a name, just nothing to link to.
+                    "owner_id": owner.get("owner_user_id"),
+                    "owner_name": owner.get("owner_name"),
+                    "owner_role": owner.get("owner_role"),
                     "total_tokens": int(row["total_tokens"] or 0),
                     "estimated_cost_usd": round(
                         float(row["estimated_cost_usd"] or 0.0), 6
@@ -7242,14 +7273,14 @@ def get_agent_summary(
         dn_args_list.append(account_id)
     dn_args = tuple(dn_args_list)
 
-    # Owner lookup — joins agent_owners → team_members. Same shape as
-    # get_agent_owner but inlined so we keep this in one round-trip.
+    # Owner lookup — same dual-source resolution as get_agent_owner, inlined
+    # so we keep this in one round-trip.
     owner_sql = f"""
-        SELECT m.id AS team_member_id, m.name AS owner_name, m.role AS owner_role
-        FROM agent_owners o
-        JOIN team_members m ON m.id = o.team_member_id
+        SELECT {_OWNER_COLS_SQL}
+        FROM agent_owners o {_OWNER_JOIN_SQL}
         WHERE o.service_name = {PH}
           AND COALESCE(o.agent_id, 'main') = {PH}
+          AND COALESCE(u.id, m.id) IS NOT NULL
           {f"AND o.account_id = {PH}" if account_id is not None else ""}
         LIMIT 1
     """
@@ -7293,7 +7324,7 @@ def get_agent_summary(
             sample_row["resource_attributes"] if sample_row else None
         ),
         "display_name": dn_row["display_name"] if dn_row else None,
-        "owner_id": owner_row["team_member_id"] if owner_row else None,
+        "owner_id": owner_row["owner_user_id"] if owner_row else None,
         "owner_name": owner_row["owner_name"] if owner_row else None,
         "owner_role": owner_row["owner_role"] if owner_row else None,
         "total_tokens": int(row["total_tokens"] or 0),
@@ -7754,32 +7785,67 @@ def team_member_in_account(account_id: int | None, team_member_id: int | None) -
         return cur.fetchone() is not None
 
 
+# One owner-resolution join, used by every read that shows who owns an agent.
+#
+# Dual-source on purpose, and the order matters: `users` wins, `team_members`
+# is the fallback for a legacy row whose person never had a login (or whose
+# email didn't match one at backfill). Three call sites used to hand-roll this
+# JOIN, which is how the same agent could show an owner on one page and none
+# on another.
+#
+# owner_role is the person's ROLE ON THE CHART, not users.role — the old
+# team_members.role was a free-text job title ("Sales", "Content"), and the
+# chart's role title is the same idea told properly. users.role is
+# owner/member, an account permission, and putting that in this slot would
+# silently change what the label means.
+_OWNER_JOIN_SQL = """
+        LEFT JOIN users u
+          ON u.id = o.user_id AND u.account_id = o.account_id
+        LEFT JOIN org_role_members orm ON orm.user_id = u.id
+        LEFT JOIN org_roles orr ON orr.id = orm.role_id
+        LEFT JOIN team_members m ON m.id = o.team_member_id
+"""
+_OWNER_COLS_SQL = """
+        COALESCE(u.id, o.user_id)            AS owner_user_id,
+        o.team_member_id                     AS owner_team_member_id,
+        COALESCE(u.name, u.email, m.name)    AS owner_name,
+        COALESCE(u.email, m.email)           AS owner_email,
+        COALESCE(orr.title, m.role)          AS owner_role
+"""
+
+
 def set_agent_owner(
     account_id: int | None,
     service_name: str,
     agent_id: str,
-    team_member_id: int,
+    user_id: int | None = None,
+    team_member_id: int | None = None,
 ) -> None:
     """Upsert the owner assignment for one sub-agent. UNIQUE on
-    (account_id, service_name, agent_id) — re-assigning overwrites."""
-    if USE_POSTGRES:
-        sql = """
-            INSERT INTO agent_owners (account_id, service_name, agent_id, team_member_id)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (account_id, service_name, agent_id)
-            DO UPDATE SET team_member_id = EXCLUDED.team_member_id
-        """
-    else:
-        sql = """
-            INSERT INTO agent_owners (account_id, service_name, agent_id, team_member_id)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (account_id, service_name, agent_id)
-            DO UPDATE SET team_member_id = excluded.team_member_id
-        """
+    (account_id, service_name, agent_id) — re-assigning overwrites.
+
+    Prefer `user_id`: owners are org members now. `team_member_id` is still
+    accepted for the legacy directory, and setting one CLEARS the other —
+    a row carrying both would make "who owns this" ambiguous, which is the
+    exact failure this consolidation exists to remove.
+    """
+    if user_id is None and team_member_id is None:
+        raise ValueError("an owner needs a user_id or a team_member_id")
+    if user_id is not None:
+        team_member_id = None
+    cols = "(account_id, service_name, agent_id, user_id, team_member_id)"
+    excluded = "EXCLUDED" if USE_POSTGRES else "excluded"
+    sql = f"""
+        INSERT INTO agent_owners {cols}
+        VALUES ({PH}, {PH}, {PH}, {PH}, {PH})
+        ON CONFLICT (account_id, service_name, agent_id)
+        DO UPDATE SET user_id = {excluded}.user_id,
+                      team_member_id = {excluded}.team_member_id
+    """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             sql,
-            (account_id, service_name, agent_id or "main", team_member_id),
+            (account_id, service_name, agent_id or "main", user_id, team_member_id),
         )
     _invalidate_agents_cache(account_id)
 
@@ -7811,15 +7877,23 @@ def remove_agent_owner(
     return removed
 
 
-def get_agents_for_team_member(
-    account_id: int | None, member_id: int
+def get_agents_for_owner(
+    account_id: int | None,
+    user_id: int | None = None,
+    member_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the list of (service_name, agent_id) assignments for one
-    team member, with the agent's display_name override (if any) and
-    a couple of basic stats — span count and last-seen — folded in
-    via correlated subqueries. Ordering is service_name then agent_id
-    so the list reads predictably across re-renders.
+    """Agents assigned to one person, with the agent's display_name override
+    (if any) and a couple of basic stats — span count and last-seen — folded
+    in via correlated subqueries. Ordering is service_name then agent_id so
+    the list reads predictably across re-renders.
+
+    Pass `user_id` for an org member; `member_id` addresses a legacy
+    team_members directory row. Exactly one.
     """
+    if (user_id is None) == (member_id is None):
+        raise ValueError("pass exactly one of user_id or member_id")
+    owner_col = "o.user_id" if user_id is not None else "o.team_member_id"
+    owner_value = user_id if user_id is not None else member_id
     account_clause = (
         f"AND o.account_id = {PH}"
         if account_id is not None
@@ -7850,15 +7924,15 @@ def get_agents_for_team_member(
           ON dn.service_name = o.service_name
          AND COALESCE(dn.agent_id, 'main') = COALESCE(o.agent_id, 'main')
          {("AND dn.account_id = " + PH) if account_id is not None else "AND dn.account_id IS NULL"}
-        WHERE o.team_member_id = {PH}
+        WHERE {owner_col} = {PH}
           {account_clause}
         ORDER BY o.service_name ASC, COALESCE(o.agent_id, 'main') ASC
     """
-    # Args order: last_seen acct, span_count acct, dn acct, member_id, owners acct.
+    # Args order: last_seen acct, span_count acct, dn acct, owner value, owners acct.
     args_list: list[Any] = []
     if account_id is not None:
         args_list.extend([account_id, account_id, account_id])
-    args_list.append(member_id)
+    args_list.append(owner_value)
     if account_id is not None:
         args_list.append(account_id)
     with _connect() as conn, _cursor(conn) as cur:
@@ -7879,20 +7953,23 @@ def get_agents_for_team_member(
 def get_agent_owner(
     account_id: int | None, service_name: str, agent_id: str
 ) -> dict[str, Any] | None:
-    """Return the team member assigned to a sub-agent, or None when
-    unassigned. Joins through agent_owners so we get the full member
-    record in one round-trip."""
+    """Return the person assigned to a sub-agent, or None when unassigned.
+
+    `user_id` is the org member; `team_member_id` is set instead only for a
+    legacy directory row whose person never had a login. Exactly one of the
+    two is populated — see set_agent_owner.
+    """
     account_clause = (
         f"AND o.account_id = {PH}"
         if account_id is not None
         else "AND o.account_id IS NULL"
     )
     sql = f"""
-        SELECT m.id, m.name, m.email, m.role
-        FROM agent_owners o
-        JOIN team_members m ON m.id = o.team_member_id
+        SELECT {_OWNER_COLS_SQL}
+        FROM agent_owners o {_OWNER_JOIN_SQL}
         WHERE o.service_name = {PH}
           AND COALESCE(o.agent_id, 'main') = {PH}
+          AND COALESCE(u.id, m.id) IS NOT NULL
           {account_clause}
         LIMIT 1
     """
@@ -7905,10 +7982,11 @@ def get_agent_owner(
     if row is None:
         return None
     return {
-        "team_member_id": row["id"],
-        "name": row["name"],
-        "email": row["email"],
-        "role": row["role"],
+        "user_id": row["owner_user_id"],
+        "team_member_id": row["owner_team_member_id"],
+        "name": row["owner_name"],
+        "email": row["owner_email"],
+        "role": row["owner_role"],
     }
 
 
@@ -9388,13 +9466,20 @@ def count_owners(account_id: int) -> int:
 
 
 def delete_user(account_id: int, user_id: int) -> bool:
-    """Remove a user from an org (account-scoped) plus their sessions and
-    their place on the chart. The role itself stays — a person leaving
-    vacates a box, it doesn't delete the box or the team under it."""
+    """Remove a user from an org (account-scoped) plus their sessions, their
+    place on the chart, and any agents assigned to them. The role itself
+    stays — a person leaving vacates a box, it doesn't delete the box or the
+    team under it."""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(f"DELETE FROM sessions WHERE user_id = {PH}", (user_id,))
         cur.execute(
             f"DELETE FROM org_role_members WHERE user_id = {PH} AND account_id = {PH}",
+            (user_id, account_id),
+        )
+        # A departed person cannot own an agent. Leaving the row would show
+        # an owner whose login no longer exists.
+        cur.execute(
+            f"DELETE FROM agent_owners WHERE user_id = {PH} AND account_id = {PH}",
             (user_id, account_id),
         )
         cur.execute(
