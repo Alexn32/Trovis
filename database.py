@@ -708,6 +708,106 @@ CREATE TABLE IF NOT EXISTS invites (
 )
 """
 
+# ---------------------------------------------------------------------------
+# Org chart: scope levels, roles, reporting lines, people-in-roles
+# ---------------------------------------------------------------------------
+#
+# A *seat* is what a person sees and can change. It is never stored on the
+# person: it is composed from fixed atoms, bundled into a named scope level,
+# attached to a ROLE (a box on the chart), and inherited by whoever sits in
+# that role. So the chain is:
+#
+#     scope_levels  →  org_roles.scope_level_id  →  org_role_members.user_id
+#
+# The atoms are fixed on purpose — a custom scope level composes them, it can
+# never invent a new axis:
+#   breadth:  self | subtree | company      (whose work you can see)
+#   depth:    glance | technical            (technical unfolds past-runs /
+#                                            collapsed agent runs → Fleet door)
+#   surfaces: Home | Work | Fleet | Ask | Cost | Connect | Org
+#
+# Reporting lines are the roles' own parent pointers (org_roles.parent_role_id)
+# rather than a separate edge table: the chart is a tree, one parent per box,
+# and a second table would let the two disagree about who reports to whom.
+_SCOPE_LEVELS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS scope_levels (
+    id         SERIAL    PRIMARY KEY,
+    account_id INTEGER   NOT NULL REFERENCES accounts(id),
+    key        TEXT      NOT NULL,
+    name       TEXT      NOT NULL,
+    breadth    TEXT      NOT NULL DEFAULT 'self',
+    depth      TEXT      NOT NULL DEFAULT 'glance',
+    surfaces   TEXT      NOT NULL DEFAULT '[]',
+    is_preset  BOOLEAN   NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, key)
+)
+"""
+
+_SCOPE_LEVELS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS scope_levels (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    key        TEXT    NOT NULL,
+    name       TEXT    NOT NULL,
+    breadth    TEXT    NOT NULL DEFAULT 'self',
+    depth      TEXT    NOT NULL DEFAULT 'glance',
+    surfaces   TEXT    NOT NULL DEFAULT '[]',
+    is_preset  INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, key)
+)
+"""
+
+# A box on the chart. parent_role_id NULL = a root role (the founder's box on
+# Path B). scope_level_id NULL = the role has no seat assigned yet, and whoever
+# sits in it falls back to the account-wide default seat.
+_ORG_ROLES_DDL_PG = """
+CREATE TABLE IF NOT EXISTS org_roles (
+    id             SERIAL    PRIMARY KEY,
+    account_id     INTEGER   NOT NULL REFERENCES accounts(id),
+    title          TEXT      NOT NULL,
+    parent_role_id INTEGER   REFERENCES org_roles(id),
+    scope_level_id INTEGER   REFERENCES scope_levels(id),
+    created_at     TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_ORG_ROLES_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS org_roles (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id),
+    title          TEXT    NOT NULL,
+    parent_role_id INTEGER REFERENCES org_roles(id),
+    scope_level_id INTEGER REFERENCES scope_levels(id),
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+# Person ↔ role. UNIQUE on user_id: one role per person in V1. The table (not
+# a column on users) is what lets that relax later without a users migration.
+_ORG_ROLE_MEMBERS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS org_role_members (
+    id         SERIAL    PRIMARY KEY,
+    account_id INTEGER   NOT NULL REFERENCES accounts(id),
+    role_id    INTEGER   NOT NULL REFERENCES org_roles(id),
+    user_id    INTEGER   NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (user_id)
+)
+"""
+
+_ORG_ROLE_MEMBERS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS org_role_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    role_id    INTEGER NOT NULL REFERENCES org_roles(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id)
+)
+"""
+
 # One-time password-reset tokens. Only the token hash is stored; single-use
 # (used_at) + short expiry enforced on read. Mirrors the invites table.
 _PW_RESET_DDL_PG = """
@@ -1445,6 +1545,11 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_invites_token_hash ON invites(token_hash)",
     "CREATE INDEX IF NOT EXISTS idx_invites_account_id ON invites(account_id)",
     "CREATE INDEX IF NOT EXISTS idx_pw_reset_token_hash ON password_reset_tokens(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_scope_levels_account ON scope_levels(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_org_roles_account ON org_roles(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_org_roles_parent ON org_roles(account_id, parent_role_id)",
+    "CREATE INDEX IF NOT EXISTS idx_org_role_members_account ON org_role_members(account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_org_role_members_role ON org_role_members(role_id)",
     # Trace-grouping for agent-to-agent connection detection.
     "CREATE INDEX IF NOT EXISTS idx_spans_account_trace ON spans(account_id, trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_connections_account_id ON agent_connections(account_id)",
@@ -1524,6 +1629,11 @@ def init_db() -> None:
             _SESSIONS_DDL_PG,
             _INVITES_DDL_PG,
             _PW_RESET_DDL_PG,
+            # Org chart. scope_levels before org_roles (FK), org_roles before
+            # org_role_members (FK), and both after users.
+            _SCOPE_LEVELS_DDL_PG,
+            _ORG_ROLES_DDL_PG,
+            _ORG_ROLE_MEMBERS_DDL_PG,
             _CONNECTIONS_DDL_PG,
             _AGENT_BUDGETS_DDL_PG,
             _ALERT_SETTINGS_DDL_PG,
@@ -1563,6 +1673,9 @@ def init_db() -> None:
             _SESSIONS_DDL_SQLITE,
             _INVITES_DDL_SQLITE,
             _PW_RESET_DDL_SQLITE,
+            _SCOPE_LEVELS_DDL_SQLITE,
+            _ORG_ROLES_DDL_SQLITE,
+            _ORG_ROLE_MEMBERS_DDL_SQLITE,
             _CONNECTIONS_DDL_SQLITE,
             _AGENT_BUDGETS_DDL_SQLITE,
             _ALERT_SETTINGS_DDL_SQLITE,
@@ -1707,6 +1820,18 @@ def init_db() -> None:
         # Shopify OAuth start stores the shop domain so the callback can
         # reject a shop-swap. NULL on Stripe / HubSpot rows.
         _try_add_column(cur, "saas_oauth_states", "payload", "TEXT")
+        # Org builder — the chart-editing ladder, deliberately NOT the same
+        # axis as view breadth. A wide-view Exec sees the whole company and
+        # still cannot re-draw the chart; a middle manager with a narrow seat
+        # can still edit their own report subtree. Stored on the person, not
+        # the role: it is granted to a human by another Org builder.
+        _try_add_column(
+            cur,
+            "users",
+            "org_builder",
+            "BOOLEAN NOT NULL DEFAULT FALSE" if USE_POSTGRES
+            else "INTEGER NOT NULL DEFAULT 0",
+        )
         # After loop_id exists: classify leftover titles from before
         # title_source. No-op on a fresh DB (no titled loops yet).
         _backfill_loop_title_source(cur)
@@ -8366,6 +8491,10 @@ def create_account(
             raise EmailAlreadyExistsError(email) from e
         raise
 
+    # Every org gets the five preset scope levels up front, so the Path B
+    # wizard has something to assign to roles on its first screen.
+    ensure_scope_level_presets(row["id"])
+
     return {
         "id": row["id"],
         "email": row["email"],
@@ -8637,10 +8766,14 @@ def _user_public(row: Any) -> dict[str, Any]:
         "role": row["role"],
         "created_at": _ts_to_str(row["created_at"]),
         "last_login_at": _ts_to_str(row["last_login_at"]),
+        # Chart-editing ladder, not view breadth — see set_org_builder.
+        "org_builder": bool(_row_get(row, "org_builder") or False),
     }
 
 
-_USER_COLS = "id, account_id, email, name, role, created_at, last_login_at"
+_USER_COLS = (
+    "id, account_id, email, name, role, created_at, last_login_at, org_builder"
+)
 
 
 def create_user(
@@ -8649,28 +8782,37 @@ def create_user(
     name: str | None,
     role: str = "member",
     password_hash: str | None = None,
+    org_builder: bool = False,
 ) -> dict[str, Any]:
     """Insert a user (login) into an org. Raises UserEmailExistsError on a
-    duplicate email. Returns the public user shape (no password_hash)."""
+    duplicate email. Returns the public user shape (no password_hash).
+
+    `org_builder` is set by the signup/claim paths for the person who creates
+    the org — someone has to be able to draw the first chart. Everyone else
+    is granted it by an existing builder.
+    """
     email = (email or "").strip().lower()
     if not email:
         raise ValueError("email is required")
     role = role if role in ("owner", "member") else "member"
     name = (name or "").strip() or None
-    cols = "(account_id, email, name, role, password_hash)"
-    vals = (account_id, email, name, role, password_hash)
+    builder = bool(org_builder) if USE_POSTGRES else int(bool(org_builder))
+    cols = "(account_id, email, name, role, password_hash, org_builder)"
+    vals = (account_id, email, name, role, password_hash, builder)
     try:
         with _connect() as conn, _cursor(conn) as cur:
             if USE_POSTGRES:
                 cur.execute(
-                    f"INSERT INTO users {cols} VALUES ({PH}, {PH}, {PH}, {PH}, {PH}) "
+                    f"INSERT INTO users {cols} "
+                    f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}) "
                     f"RETURNING {_USER_COLS}",
                     vals,
                 )
                 row = cur.fetchone()
             else:
                 cur.execute(
-                    f"INSERT INTO users {cols} VALUES ({PH}, {PH}, {PH}, {PH}, {PH})",
+                    f"INSERT INTO users {cols} "
+                    f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
                     vals,
                 )
                 cur.execute(
@@ -9144,6 +9286,517 @@ def accept_invite(
             (inv["id"],),
         )
         return _user_public(urow)
+
+
+# ---------------------------------------------------------------------------
+# Org chart: scope atoms, scope levels, roles, seats
+# ---------------------------------------------------------------------------
+#
+# Everyone in an org queries the same Work truth. A seat does not give a
+# person a private copy of the work — it decides which slice of the one truth
+# they see, and how much of each row unfolds. That is why the atoms are a
+# closed set: a custom scope level composes them, it can never add an axis,
+# because a new axis would be a second definition of what the work is.
+
+# Breadth — whose work is in scope.
+SCOPE_BREADTHS = ("self", "subtree", "company")
+# Depth — how far a row unfolds. 'technical' shows the Kind past-runs fold and
+# the Job collapsed-agent-runs fold (the Fleet door); 'glance' hides both.
+SCOPE_DEPTHS = ("glance", "technical")
+# Product surfaces a seat can reach. Nav hides anything not in the seat.
+SURFACES = ("Home", "Work", "Fleet", "Ask", "Cost", "Connect", "Org")
+
+# Seeded on every account. Presets are ordinary scope_levels rows (is_preset=1)
+# so an org can retire or re-point one without a schema change; the only thing
+# "preset" buys is that we create them and the UI groups them first.
+SCOPE_LEVEL_PRESETS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "exec",
+        "name": "Exec",
+        "breadth": "company",
+        "depth": "glance",
+        "surfaces": ["Home", "Work", "Ask", "Cost", "Org"],
+    },
+    {
+        "key": "vp",
+        "name": "VP",
+        "breadth": "company",
+        "depth": "glance",
+        "surfaces": ["Home", "Work", "Fleet", "Ask", "Cost", "Org"],
+    },
+    {
+        "key": "manager",
+        "name": "Manager",
+        "breadth": "subtree",
+        "depth": "technical",
+        "surfaces": ["Home", "Work", "Fleet", "Ask", "Cost", "Connect", "Org"],
+    },
+    {
+        "key": "middle_manager",
+        "name": "Middle manager",
+        "breadth": "subtree",
+        "depth": "glance",
+        "surfaces": ["Home", "Work", "Ask", "Org"],
+    },
+    {
+        "key": "ic",
+        "name": "IC",
+        "breadth": "self",
+        "depth": "technical",
+        "surfaces": ["Home", "Work", "Fleet", "Ask", "Connect", "Org"],
+    },
+)
+
+# What a person gets when the org has not placed them on a chart yet — every
+# Path A workspace, and every Path B org before roles are drawn. It is
+# deliberately the widest seat: seats only ever *narrow* what an account could
+# already see, so an org that never builds a chart behaves exactly as it did
+# before this shipped.
+_DEFAULT_SEAT_BREADTH = "company"
+_DEFAULT_SEAT_DEPTH = "technical"
+
+
+def normalize_surfaces(surfaces: Any) -> list[str]:
+    """Coerce input to a valid surface list, in canonical order. Unknown
+    names are dropped — customs compose atoms, they never invent them."""
+    if isinstance(surfaces, str):
+        try:
+            surfaces = json.loads(surfaces)
+        except (ValueError, TypeError):
+            surfaces = []
+    if not isinstance(surfaces, list):
+        return []
+    wanted = {str(s).strip() for s in surfaces}
+    return [s for s in SURFACES if s in wanted]
+
+
+def _scope_level_row(r: Any) -> dict[str, Any]:
+    return {
+        "id": r["id"],
+        "account_id": r["account_id"],
+        "key": r["key"],
+        "name": r["name"],
+        "breadth": r["breadth"],
+        "depth": r["depth"],
+        "surfaces": normalize_surfaces(r["surfaces"]),
+        "is_preset": bool(r["is_preset"]),
+        "created_at": _ts_to_str(_row_get(r, "created_at")),
+    }
+
+
+def create_scope_level(
+    account_id: int,
+    key: str,
+    name: str,
+    breadth: str,
+    depth: str,
+    surfaces: Any,
+    is_preset: bool = False,
+) -> dict[str, Any]:
+    """Define a scope level from atoms. Raises ValueError on an atom outside
+    the fixed sets — that check is the whole point of the type."""
+    key = (key or "").strip().lower()
+    name = (name or "").strip()
+    if not key or not name:
+        raise ValueError("scope level needs a key and a name")
+    if breadth not in SCOPE_BREADTHS:
+        raise ValueError(f"invalid breadth: {breadth}")
+    if depth not in SCOPE_DEPTHS:
+        raise ValueError(f"invalid depth: {depth}")
+    surface_json = json.dumps(normalize_surfaces(surfaces))
+    sel = "id, account_id, key, name, breadth, depth, surfaces, is_preset, created_at"
+    cols = "(account_id, key, name, breadth, depth, surfaces, is_preset)"
+    preset_flag = bool(is_preset) if USE_POSTGRES else int(bool(is_preset))
+    vals = (account_id, key, name, breadth, depth, surface_json, preset_flag)
+    with _connect() as conn, _cursor(conn) as cur:
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO scope_levels {cols} "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}) RETURNING {sel}",
+                vals,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                f"INSERT INTO scope_levels {cols} "
+                f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+                vals,
+            )
+            cur.execute(
+                f"SELECT {sel} FROM scope_levels WHERE id = {PH}", (cur.lastrowid,)
+            )
+            row = cur.fetchone()
+    return _scope_level_row(row)
+
+
+def ensure_scope_level_presets(account_id: int) -> None:
+    """Seed the five presets for an account. Idempotent, and safe to call on
+    a read path: existing accounts pick the presets up on their next request
+    rather than needing a backfill migration."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT key FROM scope_levels WHERE account_id = {PH}", (account_id,)
+        )
+        have = {r["key"] for r in cur.fetchall()}
+    for preset in SCOPE_LEVEL_PRESETS:
+        if preset["key"] in have:
+            continue
+        try:
+            create_scope_level(
+                account_id=account_id,
+                key=preset["key"],
+                name=preset["name"],
+                breadth=preset["breadth"],
+                depth=preset["depth"],
+                surfaces=preset["surfaces"],
+                is_preset=True,
+            )
+        except Exception as e:  # concurrent seed lost the UNIQUE race
+            if "unique" not in str(e).lower() and "duplicate" not in str(e).lower():
+                raise
+
+
+_SCOPE_COLS = (
+    "id, account_id, key, name, breadth, depth, surfaces, is_preset, created_at"
+)
+
+
+def get_scope_levels(account_id: int) -> list[dict[str, Any]]:
+    """All scope levels for an org, presets first then customs by name."""
+    ensure_scope_level_presets(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_SCOPE_COLS} FROM scope_levels WHERE account_id = {PH} "
+            "ORDER BY is_preset DESC, name ASC, id ASC",
+            (account_id,),
+        )
+        return [_scope_level_row(r) for r in cur.fetchall()]
+
+
+def get_scope_level(account_id: int, scope_level_id: int) -> dict[str, Any] | None:
+    """Account-scoped read — a scope level id from another org is a miss."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_SCOPE_COLS} FROM scope_levels "
+            f"WHERE id = {PH} AND account_id = {PH}",
+            (scope_level_id, account_id),
+        )
+        row = cur.fetchone()
+    return _scope_level_row(row) if row else None
+
+
+def _role_row(r: Any) -> dict[str, Any]:
+    return {
+        "id": r["id"],
+        "account_id": r["account_id"],
+        "title": r["title"],
+        "parent_role_id": r["parent_role_id"],
+        "scope_level_id": r["scope_level_id"],
+        "created_at": _ts_to_str(_row_get(r, "created_at")),
+    }
+
+
+_ROLE_COLS = "id, account_id, title, parent_role_id, scope_level_id, created_at"
+
+
+def create_role(
+    account_id: int,
+    title: str,
+    parent_role_id: int | None = None,
+    scope_level_id: int | None = None,
+) -> dict[str, Any]:
+    """Add a box to the chart. Both foreign keys are re-checked against this
+    account so a caller can't graft their box onto another org's tree."""
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("role title is required")
+    if parent_role_id is not None and get_role(account_id, parent_role_id) is None:
+        raise ValueError("parent role not found")
+    if scope_level_id is not None and get_scope_level(account_id, scope_level_id) is None:
+        raise ValueError("scope level not found")
+    with _connect() as conn, _cursor(conn) as cur:
+        cols = "(account_id, title, parent_role_id, scope_level_id)"
+        vals = (account_id, title, parent_role_id, scope_level_id)
+        if USE_POSTGRES:
+            cur.execute(
+                f"INSERT INTO org_roles {cols} VALUES ({PH}, {PH}, {PH}, {PH}) "
+                f"RETURNING {_ROLE_COLS}",
+                vals,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                f"INSERT INTO org_roles {cols} VALUES ({PH}, {PH}, {PH}, {PH})", vals
+            )
+            cur.execute(
+                f"SELECT {_ROLE_COLS} FROM org_roles WHERE id = {PH}", (cur.lastrowid,)
+            )
+            row = cur.fetchone()
+    return _role_row(row)
+
+
+def get_role(account_id: int, role_id: int) -> dict[str, Any] | None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_ROLE_COLS} FROM org_roles WHERE id = {PH} AND account_id = {PH}",
+            (role_id, account_id),
+        )
+        row = cur.fetchone()
+    return _role_row(row) if row else None
+
+
+def get_roles(account_id: int) -> list[dict[str, Any]]:
+    """Every role in the org. The chart is small (people, not spans) — one
+    read and the tree is assembled in Python."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_ROLE_COLS} FROM org_roles WHERE account_id = {PH} "
+            "ORDER BY id ASC",
+            (account_id,),
+        )
+        return [_role_row(r) for r in cur.fetchall()]
+
+
+def set_role_scope_level(
+    account_id: int, role_id: int, scope_level_id: int | None
+) -> bool:
+    """Attach (or clear) the seat a role confers. Both ids account-scoped."""
+    if get_role(account_id, role_id) is None:
+        return False
+    if scope_level_id is not None and get_scope_level(account_id, scope_level_id) is None:
+        raise ValueError("scope level not found")
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE org_roles SET scope_level_id = {PH} "
+            f"WHERE id = {PH} AND account_id = {PH}",
+            (scope_level_id, role_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def assign_user_to_role(account_id: int, user_id: int, role_id: int) -> bool:
+    """Seat a person in a role (one role per person in V1 — re-assigning
+    moves them). Both the user and the role must belong to this account."""
+    user = get_user_by_id(user_id)
+    if user is None or user["account_id"] != account_id:
+        raise ValueError("user not found in this organization")
+    if get_role(account_id, role_id) is None:
+        raise ValueError("role not found")
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"DELETE FROM org_role_members WHERE user_id = {PH}", (user_id,))
+        cur.execute(
+            "INSERT INTO org_role_members (account_id, role_id, user_id) "
+            f"VALUES ({PH}, {PH}, {PH})",
+            (account_id, role_id, user_id),
+        )
+        return True
+
+
+def unassign_user(account_id: int, user_id: int) -> bool:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM org_role_members WHERE user_id = {PH} AND account_id = {PH}",
+            (user_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_role_members(account_id: int) -> list[dict[str, Any]]:
+    """(role_id, user_id) pairs for the org — the chart's people layer."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT role_id, user_id FROM org_role_members WHERE account_id = {PH} "
+            "ORDER BY role_id ASC, user_id ASC",
+            (account_id,),
+        )
+        return [{"role_id": r["role_id"], "user_id": r["user_id"]} for r in cur.fetchall()]
+
+
+def get_role_id_for_user(account_id: int, user_id: int) -> int | None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT role_id FROM org_role_members "
+            f"WHERE user_id = {PH} AND account_id = {PH}",
+            (user_id, account_id),
+        )
+        row = cur.fetchone()
+    return row["role_id"] if row else None
+
+
+def _children_map(roles: list[dict[str, Any]]) -> dict[int | None, list[int]]:
+    out: dict[int | None, list[int]] = {}
+    for r in roles:
+        out.setdefault(r["parent_role_id"], []).append(r["id"])
+    return out
+
+
+def role_subtree_ids(
+    account_id: int, role_id: int, *, include_self: bool = True
+) -> list[int]:
+    """Role ids at or below `role_id`. Breadth-first over an in-memory child
+    map, with a visited set so a cycle (which create/move guards against, but
+    a hand-edited DB could still hold) terminates instead of hanging."""
+    roles = get_roles(account_id)
+    if not any(r["id"] == role_id for r in roles):
+        return []
+    children = _children_map(roles)
+    seen: set[int] = set()
+    out: list[int] = []
+    queue = [role_id]
+    while queue:
+        rid = queue.pop(0)
+        if rid in seen:
+            continue
+        seen.add(rid)
+        if rid != role_id or include_self:
+            out.append(rid)
+        queue.extend(children.get(rid, []))
+    return out
+
+
+def role_is_descendant_of(account_id: int, role_id: int, ancestor_id: int) -> bool:
+    """True when role_id sits strictly below ancestor_id on the chart."""
+    if role_id == ancestor_id:
+        return False
+    return role_id in role_subtree_ids(account_id, ancestor_id, include_self=False)
+
+
+def user_ids_in_roles(account_id: int, role_ids: list[int]) -> list[int]:
+    if not role_ids:
+        return []
+    placeholders = ", ".join([PH] * len(role_ids))
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT user_id FROM org_role_members "
+            f"WHERE account_id = {PH} AND role_id IN ({placeholders}) "
+            "ORDER BY user_id ASC",
+            tuple([account_id, *role_ids]),
+        )
+        return [r["user_id"] for r in cur.fetchall()]
+
+
+def visible_user_ids_for_breadth(
+    account_id: int, user_id: int, breadth: str
+) -> list[int] | None:
+    """Which people's work a seat can see.
+
+    Returns None for 'company' — meaning "no person filter at all", which is
+    not the same as "every user id we know about": work can be held by a
+    person who has no login yet, and a list would silently drop those rows.
+    Callers must treat None as "skip the filter", never as "empty".
+
+    'subtree' with no role, or 'self', collapses to just the caller. That is
+    the safe direction: an unplaced person sees their own work, never someone
+    else's.
+    """
+    if breadth == "company":
+        return None
+    if breadth == "subtree":
+        role_id = get_role_id_for_user(account_id, user_id)
+        if role_id is not None:
+            ids = user_ids_in_roles(
+                account_id, role_subtree_ids(account_id, role_id, include_self=True)
+            )
+            if user_id not in ids:
+                ids.append(user_id)
+            return sorted(set(ids))
+    return [user_id]
+
+
+def can_edit_chart(
+    account_id: int, actor_user_id: int, target_role_id: int | None = None
+) -> bool:
+    """The admin ladder, server-side. Never trust the client for this.
+
+    1. An Org builder edits the full chart, anywhere in their own account.
+    2. Anyone else edits only their own report subtree — strictly BELOW their
+       role. Their own box is not theirs to re-draw (that would let a manager
+       re-parent themselves under the CEO, or delete their own manager).
+    3. Wide view breadth grants nothing here: an Exec who sees the whole
+       company is not an Org builder unless a builder made them one.
+
+    `target_role_id=None` asks the weaker question "can this person edit any
+    part of the chart at all" — true for a builder, and for anyone with at
+    least one role below them.
+    """
+    user = get_user_by_id(actor_user_id)
+    if user is None or user["account_id"] != account_id:
+        return False
+    if user.get("org_builder"):
+        return True
+    actor_role_id = get_role_id_for_user(account_id, actor_user_id)
+    if actor_role_id is None:
+        return False
+    if target_role_id is None:
+        return bool(role_subtree_ids(account_id, actor_role_id, include_self=False))
+    if get_role(account_id, target_role_id) is None:
+        return False
+    return role_is_descendant_of(account_id, target_role_id, actor_role_id)
+
+
+def set_org_builder(account_id: int, user_id: int, value: bool) -> bool:
+    """Grant or revoke Org builder. Account-scoped so a builder in one org
+    can't promote a user in another."""
+    flag = bool(value) if USE_POSTGRES else int(bool(value))
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE users SET org_builder = {PH} WHERE id = {PH} AND account_id = {PH}",
+            (flag, user_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
+def resolve_seat(account_id: int, user_id: int) -> dict[str, Any]:
+    """Resolve the seat a person is sitting in, for /auth/me and every
+    server-side list filter.
+
+    scope level → role → person. A person with no role, or a role with no
+    scope level, gets the full default seat: seats narrow an existing account,
+    they never hand out access it didn't already have, so an org that hasn't
+    drawn a chart is unaffected by this feature.
+    """
+    ensure_scope_level_presets(account_id)
+    user = get_user_by_id(user_id)
+    org_builder = bool(user.get("org_builder")) if user else False
+
+    role_id = get_role_id_for_user(account_id, user_id)
+    role = get_role(account_id, role_id) if role_id is not None else None
+    level = None
+    if role and role.get("scope_level_id") is not None:
+        level = get_scope_level(account_id, role["scope_level_id"])
+
+    if level is not None:
+        breadth = level["breadth"]
+        depth = level["depth"]
+        surfaces = level["surfaces"]
+    else:
+        breadth = _DEFAULT_SEAT_BREADTH
+        depth = _DEFAULT_SEAT_DEPTH
+        surfaces = list(SURFACES)
+
+    subtree_role_ids = (
+        role_subtree_ids(account_id, role_id, include_self=False)
+        if role_id is not None
+        else []
+    )
+    subtree_user_ids = user_ids_in_roles(account_id, subtree_role_ids)
+    return {
+        "breadth": breadth,
+        "depth": depth,
+        "surfaces": surfaces,
+        "org_builder": org_builder,
+        "role_id": role_id,
+        "role_title": role["title"] if role else None,
+        "scope_level_id": level["id"] if level else None,
+        "scope_level_name": level["name"] if level else None,
+        # People strictly below this person on the chart. Drives the Whose-work
+        # filter's team/person options — empty means "no reports", and the
+        # control hides those options entirely.
+        "subtree_user_ids": subtree_user_ids,
+        # What the seat may filter lists to. None = company-wide, no filter.
+        "visible_user_ids": visible_user_ids_for_breadth(account_id, user_id, breadth),
+        "can_edit_chart": can_edit_chart(account_id, user_id),
+    }
 
 
 # ---------------------------------------------------------------------------
