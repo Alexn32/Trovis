@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import GraduateCard from './Graduate.jsx'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
 import { ArrowLeftIcon, TrashIcon } from './Icons.jsx'
@@ -53,9 +54,14 @@ export default function Settings({ me, onClose, onUpdated, onUpgrade }) {
         <section className="settings-card">
           <h3 className="settings-card-title">Team members</h3>
           <p className="settings-note">
-            Individual accounts are just you. Upgrade to a Business account to
-            invite teammates with their own logins into the same workspace.
+            This workspace is just you. Turning it into a company lets you
+            invite colleagues with their own logins, map who reports to whom,
+            and decide how much of the work each person sees.
           </p>
+          {/* The second way in, for someone who went looking in Settings
+              rather than reading the banner on Home. Same component, same
+              call — not a second flow. */}
+          <GraduateCard orgName={org?.name || ''} onGraduated={onUpdated} />
         </section>
       )}
     </div>
@@ -438,7 +444,7 @@ function AlertsCard() {
       <h3 className="settings-card-title">Alerts</h3>
       <p className="settings-note">
         Trovis watches your fleet in the background and pushes an alert the
-        moment something trips — so you find out without checking the dashboard.
+        moment something trips — so you find out without checking Home.
       </p>
 
       <h4 className="settings-subtitle">What to alert on</h4>

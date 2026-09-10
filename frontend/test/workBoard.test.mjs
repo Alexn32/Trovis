@@ -47,9 +47,13 @@ test('the three levels are real URLs, and they round-trip', () => {
   assert.deepEqual(parsePath('/work'), { tab: 'work', job: null, run: null })
   assert.deepEqual(parsePath('/work/jobs/12'), { tab: 'work', job: 12, run: null })
   assert.deepEqual(parsePath('/work/runs/4471'), { tab: 'work', job: null, run: 4471 })
-  for (const p of ['/', '/fleet', '/team', '/work', '/work/jobs/12', '/work/runs/4471']) {
+  for (const p of ['/', '/fleet', '/org', '/work', '/work/jobs/12', '/work/runs/4471']) {
     assert.equal(buildPath(parsePath(p)), p, p)
   }
+  // /team was the pane Org replaced. An old bookmark still lands somewhere
+  // real; it just normalises to the URL the tab actually has now.
+  assert.equal(parsePath('/team').tab, 'org')
+  assert.equal(buildPath({ tab: 'org' }), '/org')
 })
 
 test('a junk id is not an id', () => {

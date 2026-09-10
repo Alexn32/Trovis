@@ -546,7 +546,7 @@ function ShowKeyPanel({ email, apiKey, onContinue }) {
       </div>
       <div className="login-actions">
         <button className="btn btn-primary btn-block" onClick={onContinue}>
-          Continue to dashboard →
+          Continue to Home →
         </button>
       </div>
     </div>

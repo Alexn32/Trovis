@@ -17,6 +17,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { ALL_SURFACES, FULL_SEAT, hasReports, hasSurface, seatOf, showsTechnicalFolds } from '../src/seat.js'
 import { resolveTab, visibleTabs } from '../src/tabs.js'
+import { TAB_PATHS, parsePath } from '../src/route.js'
 import {
   buildTree,
   emptyChartCopy,
@@ -28,6 +29,8 @@ import {
 } from '../src/org.js'
 
 const org = readFileSync(new URL('../src/Org.jsx', import.meta.url), 'utf8')
+const graduate = readFileSync(new URL('../src/Graduate.jsx', import.meta.url), 'utf8')
+const settings = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
 const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
 const onboarding = readFileSync(new URL('../src/Onboarding.jsx', import.meta.url), 'utf8')
 
@@ -219,18 +222,22 @@ test('Path B invites carry the role, so the invitee arrives already seated', () 
 })
 
 test('Path A is offered graduation, and it is an invitation rather than a wall', () => {
-  assert.match(org, /account_type === 'individual'/)
-  assert.match(org, /Invite your company/)
-  assert.match(org, /Not now/)
+  assert.match(graduate, /Invite your company/)
+  assert.match(graduate, /Not now/)
   // It must say the work survives — that is the actual worry someone has
   // before clicking, and it is true (account_id never changes).
-  assert.match(org, /agents, work and connections all stay/i)
-  assert.match(org, /api\.graduateOrg/)
+  assert.match(graduate, /agents, work and connections all stay/i)
+  assert.match(graduate, /api\.graduateOrg/)
 })
 
-test('graduation refreshes the shell — account_type and the seat both change', () => {
-  assert.match(app, /onGraduated=/)
-  assert.match(app, /org: updated \|\| prev\.org/)
+test('graduation refreshes the WHOLE identity, not just the org', () => {
+  // account_type, the new root role and the founder's seat all change at
+  // once. Merging only the returned org left nav rendering a stale seat
+  // until the next reload.
+  assert.match(app, /const payload = await api\.validateSession\(\)/)
+  assert.match(app, /onGraduated=\{refreshMe\}/)
+  assert.doesNotMatch(app, /org: updated \|\| prev\.org/)
+  assert.match(graduate, /await onGraduated\(res\)/)
 })
 
 // --- one invite truth ------------------------------------------------------
@@ -255,5 +262,76 @@ test('the Org page speaks Work language, not internal vocabulary', () => {
   ]
   for (const s of strings) {
     assert.doesNotMatch(s, /\bloop\b|\bhandoff\b|\bstation\b|\bsubtree\b|\bbreadth\b/i, `Org shows "${s.trim()}"`)
+  }
+})
+
+// --- the hotfix: graduation has to be REACHABLE ----------------------------
+//
+// The first version put the graduation CTA only on the Org page. That is the
+// one surface a solo user has no reason to open — the whole premise of Path A
+// is that they never built a chart — so the invitation to grow was, in
+// practice, invisible. QA found it on a real Individual workspace. These
+// tests pin the reachability, not the wording.
+
+test('an Individual is offered graduation without going to Org', () => {
+  // On Home, above the day's work.
+  assert.match(app, /showGraduate && \(/)
+  assert.match(app, /<GraduateCard\s+variant="banner"/)
+  // And in Settings, for someone who went looking there instead.
+  assert.match(settings, /<GraduateCard/)
+  assert.match(settings, /!isBusiness && user/)
+})
+
+test('both entry points are the same component calling the same API', () => {
+  // Two CTAs that each did their own thing would be two features to keep in
+  // step, which is how the Org-only version drifted out of reach in the
+  // first place.
+  for (const src of [app, settings, org]) {
+    assert.match(src, /from '\.\/Graduate\.jsx'/)
+  }
+  assert.equal((graduate.match(/api\.graduateOrg/g) || []).length, 1)
+})
+
+test('the offer is only for Individual workspaces, and only for a person', () => {
+  assert.match(app, /me\?\.org\?\.account_type === 'individual'/)
+  // An API-key session has no person to invite anyone.
+  assert.match(app, /Boolean\(me\?\.user\)/)
+})
+
+test('declining sticks — an offer that reappears after "Not now" is a nag', () => {
+  assert.match(app, /trovis_graduate_dismissed/)
+  assert.match(app, /onDismiss=\{dismissGraduate\}/)
+  // localStorage can throw in private mode; dismissing must not crash Home.
+  assert.match(app, /catch \{\s*\/\* private mode/)
+})
+
+test('every tab in the nav has a URL — a tab that rewrites to / is not linkable', () => {
+  // Org was added to the nav but never to route.js, so clicking it pushed
+  // "/" and the address bar disagreed with the screen.
+  for (const [id] of visibleTabs(ALL_SURFACES)) {
+    assert.equal(
+      typeof TAB_PATHS[id],
+      'string',
+      `nav tab "${id}" has no path in route.js`,
+    )
+    assert.equal(parsePath(TAB_PATHS[id]).tab, id, `"${id}" does not round-trip`)
+  }
+})
+
+test('a person reads Home, never Dashboard — on every surface, not just the shell', () => {
+  // The original rule only swept App/Dashboard/CostPage/WorkFeedPage, which
+  // is how "Go to dashboard" and "Continue to dashboard" survived in the two
+  // screens a new user sees first.
+  for (const [name, src] of [
+    ['Onboarding.jsx', onboarding],
+    ['Login.jsx', readFileSync(new URL('../src/Login.jsx', import.meta.url), 'utf8')],
+    ['Settings.jsx', settings],
+    ['Org.jsx', org],
+    ['Graduate.jsx', graduate],
+  ]) {
+    const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    for (const m of stripped.matchAll(/>([^<>{}]+)</g)) {
+      assert.doesNotMatch(m[1], /\bdashboard\b/i, `${name} shows "${m[1].trim()}"`)
+    }
   }
 })

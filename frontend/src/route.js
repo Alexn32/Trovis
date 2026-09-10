@@ -14,8 +14,15 @@
 // Vercel already rewrites /(.*) -> /index.html, so a deep link is served.
 
 /** Tabs, in the order the nav shows them. `dashboard` lives at the root. */
-export const TAB_PATHS = { dashboard: '/', fleet: '/fleet', team: '/team', work: '/work' }
-const PATH_TABS = { '': 'dashboard', fleet: 'fleet', team: 'team', work: 'work' }
+export const TAB_PATHS = {
+  dashboard: '/',
+  fleet: '/fleet',
+  org: '/org',
+  work: '/work',
+}
+// `team` is the pane Org replaced. An old bookmark still resolves — tabs.js
+// maps it on to 'org' — but nothing builds a /team URL any more.
+const PATH_TABS = { '': 'dashboard', fleet: 'fleet', org: 'org', team: 'org', work: 'work' }
 
 /**
  * Read a pathname into view state.
