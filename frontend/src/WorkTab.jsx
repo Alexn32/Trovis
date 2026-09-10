@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
+import {
+  WHOSE_DEFAULT,
+  reconcileWhose,
+  whoseEmptyCopy,
+  whoseOptions,
+  whoseParams,
+} from './whoseWork.js'
 import { startAbortable } from './abortable.js'
 import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
@@ -615,6 +622,9 @@ function WorkHome({
   onClearFilter,
   onOpenItem,
   onOpenJob,
+  whose,
+  onWhoseChange,
+  whoseChoices = [],
 }) {
   const all = sortWorkItems(items || [])
   const rows = all.filter((r) => (filter ? matchesWorkFilter(r, filter) : true))
@@ -643,6 +653,25 @@ function WorkHome({
             {WORK_FILTER_LABELS[filter] || filter}
             <span aria-hidden="true">×</span>
           </button>
+        )}
+        {/* Whose work. Absent entirely for a seat with no reports — "Me" and
+            "Everyone I can see" would be the same list, and a control whose
+            options all do the same thing is worse than no control. */}
+        {whoseChoices.length > 0 && (
+          <label className="work-whose">
+            <span className="work-whose-label">Whose work</span>
+            <select
+              className="work-whose-select"
+              value={whose}
+              onChange={(e) => onWhoseChange(e.target.value)}
+            >
+              {whoseChoices.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
         )}
       </header>
 
@@ -676,7 +705,20 @@ function WorkHome({
         </div>
       )}
 
-      {empty && (
+      {/* Empty because of the Whose-work choice, not because the org has
+          no work. Offering "Connect an agent" here would be answering a
+          question nobody asked — the agents are connected, they just belong
+          to someone else. */}
+      {empty && whoseEmptyCopy(whose) && (
+        <div className="board-empty">
+          <p className="board-empty-lead">{whoseEmptyCopy(whose)}</p>
+          <p className="board-empty-sub">
+            Widen Whose work above to see the rest.
+          </p>
+        </div>
+      )}
+
+      {empty && !whoseEmptyCopy(whose) && (
         <div className="board-empty">
           <p className="board-empty-lead">No named work yet.</p>
           <p className="board-empty-sub">
@@ -728,9 +770,29 @@ export default function WorkTab({
   // this component is never remounted, so re-clicking the SAME tile after
   // clearing the chip has to re-apply — an unchanged `value` alone would not.
   incomingFilter = null,
+  // The resolved seat from /auth/me. Decides the Whose-work options and the
+  // default; the SERVER decides what each one may contain.
+  seat = null,
+  // People this seat may name — the chart members already loaded for Org.
+  // Empty is fine: the control still offers Me / My team.
+  people = [],
 }) {
   const connectAgent = onConnectAgent || onNewWorkflow
   const [filter, setFilter] = useState(null)
+  // Whose work is on screen. Default is the seat's own breadth, so arriving
+  // at Work needs no choice made.
+  const [whose, setWhose] = useState(WHOSE_DEFAULT)
+  // A reorg can move the ground under a selection — a manager who lost their
+  // reports is holding a "My team" the server would now answer differently.
+  const reconciled = reconcileWhose(whose, seat)
+  useEffect(() => {
+    if (reconciled !== whose) setWhose(reconciled)
+  }, [reconciled, whose])
+  // The loaders are stable useCallbacks (they feed the poll and the retry
+  // paths). A ref keeps them reading the live selection without rebuilding
+  // them — and without a stale closure sending last minute's filter.
+  const whoseRef = useRef(whose)
+  whoseRef.current = whose
 
   const filterNonce = incomingFilter?.nonce
   useEffect(() => {
@@ -825,7 +887,7 @@ export default function WorkTab({
 
   const loadOverview = useCallback(async () => {
     try {
-      const ov = await api.getWorkOverview()
+      const ov = await api.getWorkOverview(whoseParams(whoseRef.current))
       setOverview(ov)
       setOverviewErr(null)
     } catch (e) {
@@ -836,7 +898,10 @@ export default function WorkTab({
 
   const loadItems = useCallback(async () => {
     try {
-      const page = await api.getWorkItems({ limit: 50 })
+      const page = await api.getWorkItems({
+        limit: 50,
+        ...whoseParams(whoseRef.current),
+      })
       setItems(Array.isArray(page?.items) ? page.items : [])
       setNextCursor(page?.next_cursor || null)
       setItemsErr(null)
@@ -845,6 +910,19 @@ export default function WorkTab({
       throw e
     }
   }, [])
+
+  // Changing Whose work is a new question for the server, not a client-side
+  // narrowing of rows already fetched: the seat filter runs before the
+  // cursor, so page one for "My team" is a different page one.
+  const firstWhose = useRef(true)
+  useEffect(() => {
+    if (firstWhose.current) {
+      firstWhose.current = false
+      return
+    }
+    loadOverview().catch(() => {})
+    loadItems().catch(() => {})
+  }, [whose, loadOverview, loadItems])
 
   const loadSuggestions = useCallback(() => {
     api
@@ -974,7 +1052,12 @@ export default function WorkTab({
   async function loadMore() {
     if (!nextCursor) return
     try {
-      const page = await api.getWorkItems({ cursor: nextCursor, limit: 50 })
+      const page = await api.getWorkItems({
+        cursor: nextCursor,
+        limit: 50,
+        // The same slice, or page two would be a different question.
+        ...whoseParams(whoseRef.current),
+      })
       setItems((prev) => [...(prev || []), ...(page?.items || [])])
       setNextCursor(page?.next_cursor || null)
     } catch {
@@ -1043,6 +1126,9 @@ export default function WorkTab({
       onClearFilter={() => setFilter(null)}
       onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
       onOpenJob={(id) => onRoute({ job: Number(id), run: null })}
+      whose={whose}
+      onWhoseChange={setWhose}
+      whoseChoices={whoseOptions(seat, people)}
     />
     )
   )

@@ -417,8 +417,19 @@ export const api = {
   getWorkSummary: () => request('/work/summary', { timeoutMs: WORK_TIMEOUT_MS }),
   // Lean Work home. Counts only: needs_you, needs_attention, open, completed_week.
   // Optional `{ signal }` so Home can abort on unmount / tab switch.
-  getWorkOverview: (opts = {}) =>
-    request('/work/overview', { timeoutMs: WORK_TIMEOUT_MS, ...opts }),
+  // `whose` / `personId` are the Whose-work selection. The server resolves
+  // them against the seat and clamps anything wider — the control is a
+  // courtesy, not the enforcement.
+  getWorkOverview: ({ whose = null, personId = null, ...opts } = {}) => {
+    const q = new URLSearchParams()
+    if (whose && whose !== 'everyone') q.set('whose', whose)
+    if (personId) q.set('person_id', String(personId))
+    const qs = q.toString()
+    return request(`/work/overview${qs ? `?${qs}` : ''}`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      ...opts,
+    })
+  },
   // Paginated named items for the Monday table. cursor from the previous
   // page's next_cursor. Untitled OTel loops are excluded.
   // `signal` is ours (Home aborts it); the rest of the object is query state.
@@ -427,13 +438,18 @@ export const api = {
   // the same lean scan — the Work kind page uses them instead of reaching for
   // the board.
   getWorkItems: ({
-    cursor = null, limit = 50, workflowId = null, status = null, signal = undefined,
+    cursor = null, limit = 50, workflowId = null, status = null,
+    whose = null, personId = null, signal = undefined,
   } = {}) => {
     const q = new URLSearchParams()
     if (limit) q.set('limit', String(limit))
     if (cursor) q.set('cursor', cursor)
     if (workflowId !== null && workflowId !== undefined) q.set('workflow_id', String(workflowId))
     if (status) q.set('status', status)
+    // Omitted for the default: the server already applies the seat's own
+    // breadth, so sending "everyone" would only make the URL noisier.
+    if (whose && whose !== 'everyone') q.set('whose', whose)
+    if (personId) q.set('person_id', String(personId))
     const qs = q.toString()
     return request(`/work/items${qs ? `?${qs}` : ''}`, {
       timeoutMs: WORK_TIMEOUT_MS,

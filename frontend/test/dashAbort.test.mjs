@@ -165,7 +165,10 @@ test('Home never first-paints the fleet or the fat work endpoints', () => {
 
 test('work pair forwards an AbortSignal from api.js', () => {
   const api = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
-  assert.match(api, /getWorkOverview:\s*\(opts = \{\}\) =>/)
+  // It peels the Whose-work params off and spreads the rest (signal,
+  // timeoutMs) into request, the same shape getBriefing uses.
+  assert.match(api, /getWorkOverview:\s*\(\{[^}]*\.\.\.opts\s*\}\s*=\s*\{\}\)/s)
+  assert.match(api, /getWorkOverview[\s\S]{0,500}\.\.\.opts,\n\s*\}\)/)
   assert.match(api, /getWorkItems:\s*\(\{[^}]*signal[^}]*\}/s)
 })
 

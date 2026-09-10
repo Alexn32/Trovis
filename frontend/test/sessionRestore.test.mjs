@@ -181,8 +181,8 @@ test('WORK_TIMEOUT_MS is a 10–15s hard cap for /work/summary and /work/board',
 test('getWorkOverview, getWorkItems, getWorkItem, getWorkSuggestions, getWorkBoard, getWorkSummary, and getLoop pass the work timeout', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
-  assert.match(src, /getWorkOverview[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
-  assert.match(src, /getWorkItems[\s\S]{0,400}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /getWorkOverview[\s\S]{0,400}timeoutMs:\s*WORK_TIMEOUT_MS/)
+  assert.match(src, /getWorkItems[\s\S]{0,700}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkItem[\s\S]{0,200}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /getWorkSuggestions[\s\S]{0,160}timeoutMs:\s*WORK_TIMEOUT_MS/)
   assert.match(src, /approveWorkSuggestion[\s\S]{0,280}timeoutMs:\s*WORK_TIMEOUT_MS/)

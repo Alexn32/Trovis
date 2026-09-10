@@ -1252,7 +1252,11 @@ def _row_to_board_card(r: dict, now_ns: int) -> BoardCard:
 
 
 @app.get("/work/overview", response_model=WorkOverview)
-def work_overview(request: Request) -> WorkOverview:
+def work_overview(
+    request: Request,
+    whose: str | None = Query(default=None),
+    person_id: int | None = Query(default=None),
+) -> WorkOverview:
     """Lean Work home counts. Named work only (plugin-provided human titles).
 
     Untitled OTel loops, Trovis-generated labels, and "Task from …" shells
@@ -1268,7 +1272,14 @@ def work_overview(request: Request) -> WorkOverview:
     user = getattr(request.state, "user", None)
     viewer_user_id = user["id"] if user else None
     try:
-        counts = database.get_work_overview(account_id, viewer_user_id=viewer_user_id)
+        counts = database.get_work_overview(
+            account_id,
+            viewer_user_id=viewer_user_id,
+            # Same constraint as the item list, so the strip counts the rows
+            # the table is about to show. needs_you stays the desk's own
+            # count — see get_work_overview.
+            only_user_ids=_resolve_whose_work(request, whose, person_id),
+        )
     except database.QueryTimeout as exc:
         raise HTTPException(status_code=504, detail="work overview timed out") from exc
     return WorkOverview(**counts)
@@ -1286,6 +1297,11 @@ def work_items(
     # GET /work/board, whose whole-fleet fold these endpoints exist to avoid.
     workflow_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    # Whose work: everyone (default, = the seat's breadth) | me | team |
+    # person (+ person_id). Resolved against the seat server-side — the
+    # control is a courtesy, this is the enforcement.
+    whose: str | None = Query(default=None),
+    person_id: int | None = Query(default=None),
 ) -> WorkItemsResponse:
     """Paginated named items for the Monday table. Plugin-provided human
     titles only — no untitled OTel flood, no generated/template shells.
@@ -1307,11 +1323,71 @@ def work_items(
         limit=limit,
         workflow_id=workflow_id or None,
         finished_only=(status == "done"),
+        only_user_ids=_resolve_whose_work(request, whose, person_id),
     )
     return WorkItemsResponse(
         items=[WorkItem(**it) for it in items],
         next_cursor=next_cursor,
     )
+
+
+# Whose-work, resolved server-side.
+#
+# The control on Work home sends a choice; this turns it into the set of
+# people whose work may appear. The seat is the CEILING — a request is
+# intersected with it, never trusted over it, because the query string is
+# the easiest thing in the product to edit.
+_WHOSE_CHOICES = ("everyone", "me", "team", "person")
+
+
+def _resolve_whose_work(
+    request: Request, whose: str | None, person_id: int | None
+) -> list[int] | None:
+    """Return the user ids the list may show, or None for no filter.
+
+    None (company breadth, unfiltered) and [] (nobody) are different answers
+    and both are real: a company seat sees work held by people who have no
+    login at all, which an id list would silently drop.
+    """
+    user = getattr(request.state, "user", None)
+    account_id = getattr(request.state, "account_id", None)
+    if not user or account_id is None:
+        # API-key auth has no person and therefore no seat. It keeps the
+        # account-wide view it has always had; the account scope still binds.
+        return None
+    seat = database.resolve_seat(account_id, user["id"])
+    allowed = seat["visible_user_ids"]  # None = company-wide
+
+    choice = (whose or "").strip().lower() or "everyone"
+    if choice not in _WHOSE_CHOICES:
+        # An unreadable choice narrows nothing rather than 400-ing a client
+        # that guessed — same instinct as the status filter above.
+        choice = "everyone"
+
+    if choice == "everyone":
+        return allowed
+    me = user["id"]
+    if choice == "me":
+        wanted = [me]
+    elif choice == "team":
+        wanted = sorted({me, *seat["subtree_user_ids"]})
+    else:
+        if person_id is None:
+            raise HTTPException(status_code=400, detail="pick a person")
+        # Only someone at or below you. Refusing here rather than silently
+        # returning nothing keeps a real bug visible; it leaks nothing,
+        # because the answer is the same whether or not that id exists.
+        if person_id != me and person_id not in set(seat["subtree_user_ids"]):
+            raise HTTPException(
+                status_code=403, detail="that person is not in your reporting line"
+            )
+        wanted = [person_id]
+
+    if allowed is None:
+        return wanted
+    # Intersect: a narrower choice is honored, a wider one is clamped back to
+    # the seat rather than refused. The seat decides what exists.
+    return sorted(set(wanted) & set(allowed))
 
 
 def _parse_suggestion_id(raw: str) -> int:
