@@ -73,6 +73,12 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   you own, plus work waiting on you. The ownership leg is SQL so it filters BEFORE the cursor;
   the waiting-on leg is a bounded fold injected as an id list. **`needs_you` is never narrowed** —
   that count is the desk, and the desk answers to the session identity, not to a Whose-work choice.
+  **Breadth narrows Work and nothing else** — decided, not overlooked, and pinned by
+  `test_surface_breadth.py`. Agents is shared infrastructure (health and drift are org facts, and
+  a narrowed roster would show an empty Agents tab to anyone who owns nothing); Cost is gated by
+  the *surface atom* instead, so only Exec/VP/Manager see it at all rather than everyone seeing a
+  partial figure that reads like the company's; Ask answers from the same telemetry the roster
+  shows, so it follows the roster. Don't narrow one of the three on its own.
   Chart edits go through `can_edit_chart`: Org builder anywhere, everyone else strictly *below*
   their own role. Org builder is a separate ladder from view breadth — a company-breadth Exec is
   not a builder. Enforce all of it server-side; the client renders the seat, it never asserts one.
