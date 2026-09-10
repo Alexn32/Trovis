@@ -135,6 +135,7 @@ from models import (
     WorkSuggestionPatch,
     WorkSuggestionsResponse,
     MeResponse,
+    Seat,
     WorkflowCreate,
     WorkflowDetail,
     WorkflowDraft,
@@ -2967,6 +2968,10 @@ def signup(body: SignupRequest) -> SignupResponse:
             name=body.name,
             role="owner",
             password_hash=database.hash_password(body.password),
+            # Whoever creates the org is its first Org builder — otherwise
+            # nobody could draw the first chart. Path A gets it too, so
+            # graduating to a company later needs no extra grant.
+            org_builder=True,
         )
     except database.UserEmailExistsError:
         raise HTTPException(status_code=409, detail="email already registered")
@@ -3074,14 +3079,20 @@ def me(request: Request) -> MeResponse:
     state_user = getattr(request.state, "user", None)
     org = database.get_account(account_id) if account_id is not None else None
     user = None
+    seat = None
     if state_user:
         full = database.get_user_by_id(state_user["id"])
         if full:
             user = UserPublic(**full)
+            # A seat belongs to a person. API-key callers (agents) get none —
+            # they ingest, they don't have a view to scope.
+            if account_id is not None:
+                seat = Seat(**database.resolve_seat(account_id, full["id"]))
     return MeResponse(
         user=user,
         org=OrgPublic(**org) if org else None,
         auth=auth,
+        seat=seat,
     )
 
 
@@ -3108,6 +3119,8 @@ def claim_account(body: ClaimRequest) -> LoginResponse:
             name=body.name,
             role="owner",
             password_hash=database.hash_password(body.password),
+            # Claiming a legacy org makes you its first (and only) builder.
+            org_builder=True,
         )
     except database.UserEmailExistsError:
         raise HTTPException(status_code=409, detail="email already registered")

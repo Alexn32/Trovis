@@ -56,6 +56,15 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   add new tables to **both** `ddls` lists (PG + SQLite) in FK order, plus indexes in `_INDEXES`.
 - **Auth.** `accounts` = org/tenant; `users` + `sessions` (opaque token, `Authorization: Bearer`);
   org `api_keys` (machine credential, `X-Trovis-Api-Key`). Agents authenticate with the API key.
+- **Seats.** Everyone in an org queries the *same* Work truth; a seat decides which slice they see
+  and how far each row unfolds. It resolves `scope_levels → org_roles.scope_level_id →
+  org_role_members.user_id` (`database.resolve_seat`, surfaced on `GET /auth/me`). The atoms are a
+  closed set — breadth `self|subtree|company`, depth `glance|technical`, surfaces `Home|Work|Fleet|
+  Ask|Cost|Connect|Org`; a custom scope level composes them and can never add an axis. Filter lists
+  with `visible_user_ids_for_breadth` (**`None` = company-wide, skip the filter** — not "empty").
+  Chart edits go through `can_edit_chart`: Org builder anywhere, everyone else strictly *below*
+  their own role. Org builder is a separate ladder from view breadth — a company-breadth Exec is
+  not a builder. Enforce all of it server-side; the client renders the seat, it never asserts one.
 - **Cost is computed at ingest** (`insert_spans` → `_compute_cost` via the pricing table) and stored
   on the span; aggregates sum the stored value. Re-pricing history needs an explicit recompute.
 

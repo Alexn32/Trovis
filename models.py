@@ -536,6 +536,9 @@ class UserPublic(BaseModel):
     role: str = "member"  # 'owner' | 'member'
     created_at: str | None = None
     last_login_at: str | None = None
+    # Chart-editing ladder — deliberately NOT the same axis as view breadth.
+    # A wide-view Exec is not an Org builder unless a builder made them one.
+    org_builder: bool = False
 
 
 class OrgPublic(BaseModel):
@@ -585,12 +588,52 @@ class LoginResponse(BaseModel):
     org: OrgPublic
 
 
+class ScopeLevelPublic(BaseModel):
+    """A named bundle of scope atoms. Customs compose the fixed atoms; they
+    can never introduce a new one."""
+
+    id: int
+    key: str
+    name: str
+    breadth: str = "self"  # 'self' | 'subtree' | 'company'
+    depth: str = "glance"  # 'glance' | 'technical'
+    surfaces: list[str] = Field(default_factory=list)
+    is_preset: bool = False
+
+
+class Seat(BaseModel):
+    """What a person sees and can change — resolved server-side from
+    scope level → role → person. The client renders from this; it is never
+    the authority for it (every list filter and chart edit is re-checked on
+    the server).
+    """
+
+    breadth: str = "company"
+    depth: str = "technical"
+    surfaces: list[str] = Field(default_factory=list)
+    org_builder: bool = False
+    role_id: int | None = None
+    role_title: str | None = None
+    scope_level_id: int | None = None
+    scope_level_name: str | None = None
+    # People strictly below this person on the chart. Empty = no reports, so
+    # the Whose-work control hides its team/person options.
+    subtree_user_ids: list[int] = Field(default_factory=list)
+    # Which people's work this seat may list. None = company-wide (no filter),
+    # which is not the same as an empty list.
+    visible_user_ids: list[int] | None = None
+    can_edit_chart: bool = False
+
+
 class MeResponse(BaseModel):
     """GET /auth/me. `user` is None for API-key (agent/legacy) auth."""
 
     user: UserPublic | None = None
     org: OrgPublic | None = None
     auth: str = "session"  # 'session' | 'api_key'
+    # None for API-key auth: a seat belongs to a person, not to a machine
+    # credential. Agents ingest; they don't have a view.
+    seat: Seat | None = None
 
 
 class ClaimRequest(BaseModel):
