@@ -6955,13 +6955,22 @@ button.work-td-task:hover {
    metadata, a counts strip, and cards ONLY for runs that need a person. A
    healthy job is one prose line, not an empty four-column grid. */
 .work-board { display: flex; flex-direction: column; gap: 0; }
-.work-board .work-home-head { justify-content: space-between; align-items: flex-start; }
-.jb-new { align-self: flex-start; }
+.work-board .work-home-head {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 14px; margin: 0 0 10px;
+}
+.work-board .work-home-head h1 { margin: 0; }
+.jb-new { flex: none; }
 
 /* Header counts. Every one is derived from the rows below. */
 .jb-totals {
-  display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px;
-  margin: 0 0 14px; font-size: 13px; color: var(--text-secondary);
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0;
+  margin: -6px 0 18px; font-size: 13px; color: var(--text-secondary);
+}
+/* Middle dots between the parts, drawn rather than typed, so the copy stays
+   a list of facts and not a formatted string. */
+.jb-totals > span + span::before {
+  content: '·'; color: var(--text-dim); margin: 0 9px;
 }
 .jb-totals button {
   background: none; border: none; padding: 0; font: inherit; cursor: pointer;
@@ -6969,11 +6978,22 @@ button.work-td-task:hover {
   text-decoration-color: var(--border-default); text-underline-offset: 2px;
 }
 .jb-totals button:hover { color: var(--text-primary); text-decoration-color: currentColor; }
+.jb-totals button.is-on { color: var(--text-primary); text-decoration-color: currentColor; }
 /* Account-wide and a different window from the counts beside it, so it says
    so rather than looking like the same scope. */
 .jb-cost { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
-.jb-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+/* Filters left, scope right: the scope has to be visible because two of the
+   header numbers are server totals and two are counted from these rows. */
+.jb-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 10px; margin: 0 0 20px;
+}
+.jb-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+.jb-scope {
+  margin: 0; display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--text-muted);
+}
 .jb-pill {
   font: inherit; font-size: 12.5px; padding: 5px 12px; cursor: pointer;
   border: 1px solid var(--border-default); border-radius: 999px;
@@ -6984,21 +7004,30 @@ button.work-td-task:hover {
   background: var(--accent-bg); border-color: var(--accent-bg); color: var(--accent-text);
 }
 
-/* The four column headers appear once, above every row. */
+/* One grid shape for the whole board: the job on the left, its four cells
+   beside it. The column headers appear ONCE, above every row, and share the
+   same track sizes so a header sits over the cards it names. */
+:root { --jb-side: 176px; }
 .jb-colheads,
-.jb-counts,
-.jb-grid {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+.jb-rowgrid,
+.jb-flat .jb-grid {
+  display: grid;
+  grid-template-columns: var(--jb-side) repeat(4, minmax(0, 1fr));
+  gap: 12px;
 }
+/* Flat has no job column, so it drops the first track rather than leaving a
+   gutter with nothing in it. */
+.jb-flat .jb-grid,
+.jb-flat .jb-colheads { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .jb-colheads {
-  padding: 0 0 6px; border-bottom: 1px solid var(--border-default);
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
+  padding: 0 0 7px; border-bottom: 1px solid var(--border-default);
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--text-muted);
 }
 
-.jb-row { padding: 14px 0; border-bottom: 1px solid var(--border-default); }
-.jb-row.is-idle { opacity: 0.72; }
-.jb-head { display: flex; align-items: baseline; gap: 10px; }
+.jb-row { padding: 16px 0; border-bottom: 1px solid var(--border-default); }
+.jb-rowgrid { align-items: start; }
+.jb-head { display: flex; flex-direction: column; align-items: flex-start; gap: 0; }
 /* The job name is the biggest thing in the row — it is the subject. */
 .jb-name {
   font-family: "Space Grotesk", "DM Sans", sans-serif;
@@ -7012,12 +7041,13 @@ button.work-td-task:hover {
   font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--text-muted);
 }
-.jb-meta { margin: 3px 0 0; font-size: 12.5px; color: var(--text-muted); }
+.jb-meta { margin: 4px 0 0; font-size: 12.5px; color: var(--text-muted); line-height: 1.45; }
+.jb-meta + .jb-meta { margin-top: 1px; }
 
 /* One badge, always carrying its number. Never a bare tick. */
 .jb-badge {
-  margin-left: auto; font-size: 11.5px; font-weight: 600; white-space: nowrap;
-  padding: 2px 8px; border-radius: 4px;
+  margin: 6px 0 0; font-size: 11px; font-weight: 600;
+  padding: 2px 7px; border-radius: 4px; align-self: flex-start;
 }
 .jb-badge.tone-error { color: var(--error); background: var(--error-faint); }
 .jb-badge.tone-warning { color: var(--warning); background: var(--warning-faint); }
@@ -7035,24 +7065,43 @@ button.work-td-task:hover {
 .jb-count.tone-waiting b { color: var(--warning); }
 
 .jb-quiet { margin: 8px 0 0; font-size: 12.5px; color: var(--text-muted); }
+/* A job with nothing today: one quiet line, sitting across the cells it has
+   nothing to put in. Observed on the left of the dot, declared on the right —
+   never joined into a conclusion. */
+.jb-row.is-idle { color: var(--text-muted); }
+.jb-idle-line {
+  grid-column: 2 / -1; justify-self: end; align-self: center;
+  margin: 0; font-size: 12.5px; color: var(--text-muted);
+}
+.jb-idle-exp { color: var(--text-dim); }
 
-.jb-grid { margin-top: 8px; align-items: start; }
 /* Empty cells keep their height. The SHAPE of a row is the signal — a job
    with nothing working and one card sitting in Waiting reads at a glance. */
 .jb-cell { display: flex; flex-direction: column; gap: 6px; min-height: 46px; }
 .jb-card {
-  display: flex; flex-direction: column; gap: 2px; text-align: left;
-  padding: 7px 9px; font: inherit; cursor: pointer;
+  position: relative; display: flex; flex-direction: column; gap: 3px;
+  text-align: left; padding: 9px 24px 10px 11px; font: inherit; cursor: pointer;
   border: 1px solid var(--border-default); border-left-width: 2px;
-  background: var(--bg-surface);
+  border-radius: 3px; background: var(--bg-surface);
 }
+.jb-card-go {
+  position: absolute; top: 9px; right: 9px; font-size: 11px;
+  color: var(--text-dim); line-height: 1;
+}
+.jb-card:hover .jb-card-go { color: var(--text-secondary); }
 .jb-card:hover { border-color: var(--border-hover); }
-.jb-card.is-stuck { border-left-color: var(--error); background: var(--error-faint); }
-.jb-card.is-waiting_on_you { border-left-color: var(--warning); background: var(--warm-fill); }
+/* State is an EDGE, not a fill. Four tinted cards in a row turn the board
+   into a heat map and stop the eye finding the one that matters; the border
+   carries the same signal at a fraction of the weight. */
+.jb-card.is-stuck { border-left-color: var(--error); }
+.jb-card.is-waiting_on_you { border-left-color: var(--warning); }
 .jb-card.is-waiting_on_other { border-left-color: var(--warning); }
 /* The problem leads; the run identifies it. */
-.jb-card-lead { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.jb-card-lead {
+  font-size: 12.5px; font-weight: 600; color: var(--text-primary); line-height: 1.35;
+}
 .jb-card.is-stuck .jb-card-lead { color: var(--error); }
+.jb-more.is-plain { cursor: default; color: var(--text-dim); }
 .jb-card-sub {
   font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums;
 }

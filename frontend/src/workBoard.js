@@ -1,10 +1,14 @@
-// Job-shaped facts for Work rows.
+// Job-shaped facts for the Work board.
 //
-// These helpers group lean /work/items onto declared jobs and produce a
-// named verdict (health, cadence, expectation). They feed TABLE-ROW
-// enrichment on Work home — a job name and a number under Task — not a
-// kanban landing. The four Working | Waiting | Stuck | Done buckets stay
-// here as data. They must not become the /work home surface.
+// These helpers group lean /work/items onto declared jobs and produce a named
+// verdict (health, cadence, expectation). The board grouped by job IS the
+// Work landing: a manager needs to know whether a business function is
+// operating before inspecting one case, and a flat list of runs can only show
+// instances that exist — never the job that should have run and did not.
+//
+// The endpoint rule is the part that has not moved: /work/board and
+// /work/summary loop-scan and starve the single replica, so the board is
+// assembled here in the browser from /workflows + /work/items.
 //
 // Everything in this file is pure, so the rules can be tested without
 // mounting anything.
@@ -140,19 +144,30 @@ export function groupByJob(jobs, runs, { now = Date.now() } = {}) {
       ? rows.get(String(r.workflow_id))
       : add(UNMATCHED, UNMATCHED, null)
     row.counts[col] += 1
-    if (needsCard(r, { now })) row.columns[col].push(r)
+    row.columns[col].push(r)
   }
 
   for (const row of rows.values()) {
     for (const c of Object.keys(row.columns)) {
-      // Worst first inside a cell: the oldest exception is the one to read.
+      // Oldest first, and that is enough to put the exceptions on top.
+      //
+      // An explicit exception-first key used to sit above this one. It was
+      // dead: needsCard marks every stuck run and every wait past four
+      // hours, so within any single column exception status is either
+      // uniform (stuck, working, done) or exactly age-ordered (waiting).
+      // A mutation test proved no input could tell the two orderings apart.
+      // If needsCard ever gains a rule that is not age-based, this comment
+      // is the note that the key has to come back.
       row.columns[c].sort(
         (a, b) => (Date.parse(a.updated_at || '') || 0) - (Date.parse(b.updated_at || '') || 0),
       )
     }
     row.open = row.counts.working + row.counts.waiting + row.counts.stuck
     row.total = row.open + row.counts.done
-    row.exceptions = Object.values(row.columns).reduce((n, l) => n + l.length, 0)
+    // The count that ranks jobs against each other: how much here actually
+    // needs a person. Not the number of cards, which is now every run.
+    row.exceptions = Object.values(row.columns)
+      .reduce((n, l) => n + l.filter((r) => needsCard(r, { now })).length, 0)
   }
 
   // Jobs with something to look at first; Unmatched always last.
@@ -527,6 +542,167 @@ export function tableJobMeta(jobs, items, visibleRows, { now = Date.now() } = {}
     })
   }
   return map
+}
+
+/**
+ * A card's two lines, per column.
+ *
+ * The lead comes from runCardLead, so an exception leads with its reason and
+ * everything else leads with its own name. The second line is what that
+ * column's reader wants next, which is not the same in all four:
+ *
+ *   working  who has it, and for how long
+ *   waiting  who it is waiting on, and for how long
+ *   stuck    the run's name, and how long it has been stuck
+ *   done     that it closed, and when
+ *
+ * There is no cost on a Done card. The lean item row does not carry one, and
+ * inventing $0.00 for a run nobody priced is the thing this board must not
+ * do — see the endpoint gap noted with the board component.
+ */
+export function cardLines(row, col, { now = Date.now() } = {}) {
+  const { lead, sub } = runCardLead(row, { now })
+  const age = ageLabel(row?.updated_at, now)
+  const who = String(row?.holder?.name || '').trim()
+  const isYou = row?.status === 'waiting_on_you'
+  if (col === 'done') return { lead, sub: ['Closed', age].filter(Boolean).join(' · ') }
+  if (col === 'working' || col === 'waiting') {
+    const name = isYou ? 'You' : who
+    // Only when the reason did not already lead — otherwise the card would
+    // print the same fact twice, once per line.
+    if (lead === row?.title || !who) return { lead, sub: [name, age].filter(Boolean).join(' · ') }
+  }
+  return { lead, sub }
+}
+
+/**
+ * The two cards a cell draws, and how many it did not.
+ *
+ * Two is the limit because a cell that grows with its column stops being a
+ * shape you can read across a row. What it drops is decided by the cell's
+ * own ordering — exceptions first — so the run that needed a person is never
+ * the one that fell off the bottom.
+ */
+export const CELL_CARDS = 2
+
+export function cellCards(row, col, { limit = CELL_CARDS } = {}) {
+  const all = row?.columns?.[col] || []
+  return { cards: all.slice(0, limit), more: Math.max(0, all.length - limit) }
+}
+
+/**
+ * The header line: `4 jobs · 30 runs today · 3 waiting · 2 stuck · $4.12`.
+ *
+ * Every part carries the filter it applies, so the summary is also the
+ * navigation — "2 stuck" is the question and the answer to "where".
+ *
+ * Two of these come from the SERVER and two from the rows on this page, and
+ * that is the whole reason `scope` exists. Jobs and runs-today are complete
+ * counts the server computed; waiting and stuck are counted from the same
+ * rows the grid below draws, so the header and the grid cannot disagree —
+ * but on a truncated page they are a floor, not a total, and say so.
+ *
+ * Cost is a THIRD basis: the job window, not today. It is labelled rather
+ * than quietly placed beside two counts that mean something else.
+ */
+export function boardSummary(rows, jobs, { truncated = false } = {}) {
+  const t = boardTotals(rows)
+  const runsToday = (jobs || []).reduce((n, j) => {
+    const v = numOrNull(j?.loops_today)
+    return v === null ? n : n + v
+  }, 0)
+  const windowCost = (jobs || []).reduce((n, j) => {
+    const v = numOrNull(j?.cost_usd)
+    return v === null ? n : n + v
+  }, 0)
+  const days = numOrNull((jobs || [])[0]?.window_days)
+  const parts = [
+    { key: 'jobs', label: t.jobs === 1 ? 'job' : 'jobs', value: t.jobs, filter: null },
+    { key: 'runs', label: 'runs started today', value: runsToday, filter: null },
+    { key: 'waiting', label: 'waiting', value: t.waiting, filter: 'waiting', floor: truncated },
+    { key: 'stuck', label: 'stuck', value: t.stuck, filter: 'stuck', floor: truncated },
+  ]
+  // Never "$0.00": unpriced work is not free work, and a board that says so
+  // is making a claim about attribution it cannot support.
+  if (windowCost >= 0.01) {
+    parts.push({
+      key: 'cost',
+      label: days ? `last ${days} days` : 'recorded',
+      value: `$${windowCost.toFixed(2)}`,
+      filter: null,
+      isCost: true,
+    })
+  }
+  return parts
+}
+
+/**
+ * Was this run touched today, on the viewer's own calendar day?
+ *
+ * The lean row carries `updated_at` and no created_at, so `Today` can only
+ * mean "touched today" — and the scope line says exactly that rather than
+ * letting the pill imply "started today", which is a different set and the
+ * one the header counts.
+ */
+export function touchedToday(row, now = Date.now()) {
+  const t = Date.parse(row?.updated_at || '')
+  if (!Number.isFinite(t)) return false
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  return t >= start.getTime()
+}
+
+/**
+ * The line under a job's name: `12 started today · Mara · $0.18 / run`.
+ *
+ * Each piece is dropped when the record does not have it, rather than
+ * rendered as a zero or a dash. An undeclared job has no owning worker, and
+ * "unknown owner" is not a fact worth a slot.
+ */
+export function jobSubline(grouped) {
+  const j = grouped?.job || null
+  const parts = []
+  const today = numOrNull(j?.loops_today)
+  // "started today", not "runs today". loops_today counts runs CREATED
+  // today, so a job with nothing new but two runs still open from yesterday
+  // reads "0 runs today" with two cards beside it — true, and impossible to
+  // read correctly. The verb removes the ambiguity in both directions.
+  if (today !== null) parts.push(`${today} started today`)
+  const owner = String(j?.owning_service_name || '').trim()
+  if (owner) parts.push(owner)
+  const per = numOrNull(j?.cost_per_run)
+  const cost = per !== null && per > 0
+    ? `${per < 0.01 ? `$${per.toFixed(4)}` : `$${per.toFixed(2)}`} / run`
+    : null
+  // Two lines, not one run-on: what ran and who owns it, then what it costs.
+  // Cost is its own fact and reads as one.
+  return cost ? [parts.join(' · '), cost].filter(Boolean) : (parts.length ? [parts.join(' · ')] : [])
+}
+
+/**
+ * A job that did nothing today still gets a row, and this is what it says.
+ *
+ * The main reason the board groups at all. Work that quietly stops happening
+ * is invisible on a board of live runs — a flat view can only show instances
+ * that exist, and the whole risk is the instance that does not.
+ *
+ * It states what was observed and, separately, what was declared. It never
+ * concludes that the job failed: "expected 8/day, last ran Monday" is two
+ * facts, and the reader draws the inference.
+ */
+export function idleJobLine(grouped, { now = Date.now() } = {}) {
+  if (!grouped || grouped.isUnmatched) return null
+  if ((grouped.total || 0) > 0) return null
+  const j = grouped.job || null
+  const last = ageLabel(j?.last_run_at, now)
+  const observed = last ? `Last ran ${last} ago` : 'Never run'
+  const min = numOrNull(j?.expected_per_day_min)
+  const max = numOrNull(j?.expected_per_day_max)
+  let expected = null
+  if (min !== null && max !== null) expected = `expected ${min}–${max}/day`
+  else if (min !== null) expected = `expected ${min}+/day`
+  else if (max !== null) expected = `expected under ${max}/day`
+  return { observed, expected }
 }
 
 /** The header's counts, from the same arrays the rows are built from. */

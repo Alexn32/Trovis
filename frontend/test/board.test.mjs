@@ -243,29 +243,31 @@ test('Work home and Ask do not call fat /work/board or /work/summary', () => {
   assert.match(work, /getWorkSuggestions/)
 })
 
-test('Work home is the Monday table — Task column, no Priority, no KindCard landing', () => {
+test('Work home is the job-grouped board, and the fat endpoints stay banned', () => {
+  // The Monday-table lock (#168) is reversed: the board grouped by job is the
+  // landing again. What does NOT change is the endpoint rule — /work/board
+  // and /work/summary loop-scan and starve the single replica, so the board
+  // is assembled from /workflows + /work/items in the browser.
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
-  assert.match(work, />Task</)
-  assert.match(work, /Status/)
-  assert.match(work, /Holder/)
-  assert.match(work, /What&apos;s next/)
-  assert.match(work, /Updated/)
-  assert.doesNotMatch(work, /Priority/)
-  assert.doesNotMatch(work, /KindCard/)
+  assert.doesNotMatch(work, /getWorkBoard|getWorkSummary/)
+  assert.match(work, /jb-colheads/)
+  assert.match(work, /function JobRow/)
+  // The column labels live in COLUMNS, so the board renders the four the
+  // spec names and cannot quietly grow a fifth.
+  const wb = readFileSync(new URL('../src/workBoard.js', import.meta.url), 'utf8')
+  for (const c of ['Working', 'Waiting on a person', 'Stuck', 'Done today']) {
+    assert.ok(wb.includes(`label: '${c}'`), c)
+  }
   assert.match(work, /work-suggestions/)
   assert.match(work, /function WorkHome/)
-  // Clicking a row opens the job detail pane (was TaskPanel, the loop panel).
   assert.match(work, /JobDetail/)
-  assert.match(work, /holderLabel/)
-  assert.doesNotMatch(work, /Other views/)
-  assert.doesNotMatch(work, /Boards & other views/)
-  assert.doesNotMatch(work, /onOpenBoards/)
-  assert.doesNotMatch(work, /setSurface/)
+  assert.doesNotMatch(work, /Priority/)
+  assert.doesNotMatch(work, /KindCard/)
   assert.doesNotMatch(work, /import Board\b/)
-  // The 4-col board is not the landing and is not offered from home.
-  assert.doesNotMatch(work, /function BoardHome/)
-  assert.doesNotMatch(work, /jb-colheads/)
-  assert.doesNotMatch(work, /layout === 'grouped'/)
+  // WorkTable and the overview strip are retained but unrendered, the same
+  // way Board.jsx was kept when this swapped the other direction. Deleting a
+  // view the IA has already flipped twice costs more than leaving it.
+  assert.match(work, /function WorkTable/)
 })
 
 test('Work home never invents a named item from suggestion actions', () => {
