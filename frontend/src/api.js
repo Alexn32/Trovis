@@ -297,7 +297,23 @@ export const api = {
       timeoutMs: LLM_TIMEOUT_MS,
     }),
 
-  // --- agent ownership (legacy `team_members` directory) ---
+  // --- agent ownership ---
+  // Who is responsible for an agent. An org member, by user_id — this is
+  // also one of the two things Whose work attributes a row by (the other
+  // is who the work is waiting on), so an unowned agent's work belongs to
+  // nobody in particular and only a company-breadth seat sees it.
+  setAgentOwner: (serviceName, { agentId = 'main', userId }) =>
+    request(`/agents/${encodeURIComponent(serviceName)}/owner`, {
+      method: 'PUT',
+      body: JSON.stringify({ agent_id: agentId || 'main', user_id: userId }),
+    }),
+  removeAgentOwner: (serviceName, agentId = 'main') =>
+    request(
+      _withAgent(`/agents/${encodeURIComponent(serviceName)}/owner`, agentId || 'main'),
+      { method: 'DELETE' },
+    ),
+
+  // --- the legacy `team_members` directory ---
   // No client calls these any more, so the wrappers are gone. People, roles
   // and invites live on the Org page (/org/*), and nothing in the product
   // creates a team_members row — that parallel directory was the second

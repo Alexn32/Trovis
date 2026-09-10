@@ -123,11 +123,129 @@ function Pill({ color, children }) {
   )
 }
 
+/* ── Owner ──
+ * Who is responsible for this agent, and the only place in the product that
+ * can say so.
+ *
+ * The API has always supported the assignment; nothing ever called it, which
+ * did not matter much while ownership was only a label. It matters now:
+ * Whose work attributes a row to a person two ways — the agent that ran it
+ * is owned by them, or the work is waiting on them — so an agent with no
+ * owner produces work that belongs to nobody, visible only to a
+ * company-breadth seat. A manager's "My team" is empty until someone sets
+ * this.
+ *
+ * Reads as text until clicked. An agent's owner is set once and looked at
+ * often, so the resting state is the answer, not a form.
+ */
+function OwnerControl({ summary, owner, canAssign, onChanged }) {
+  const [editing, setEditing] = useState(false)
+  const [members, setMembers] = useState(null) // null = not loaded yet
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!editing || members !== null) return
+    api
+      .getMembers()
+      .then((m) => setMembers(Array.isArray(m) ? m : []))
+      // Fail soft to an empty list: the picker says so rather than hanging
+      // on a spinner that never resolves.
+      .catch(() => setMembers([]))
+  }, [editing, members])
+
+  async function assign(value) {
+    setBusy(true)
+    setError('')
+    try {
+      if (value === '') {
+        await api.removeAgentOwner(summary.service_name, summary.agent_id)
+      } else {
+        await api.setAgentOwner(summary.service_name, {
+          agentId: summary.agent_id,
+          userId: Number(value),
+        })
+      }
+      setEditing(false)
+      if (onChanged) onChanged()
+    } catch (e) {
+      setError(e?.message || 'Could not change the owner')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // An API-key session has no person and no org member list to pick from.
+  if (!canAssign) {
+    return owner ? (
+      <span>Owner: <span style={{ color: C.body, fontWeight: 500 }}>{owner}</span></span>
+    ) : null
+  }
+
+  if (!editing) {
+    return (
+      <span>
+        Owner:{' '}
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          title="Change who owns this agent"
+          style={{
+            background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+            font: 'inherit', color: owner ? C.body : C.muted,
+            fontWeight: owner ? 500 : 400,
+            textDecoration: 'underline', textDecorationStyle: 'dotted',
+            textUnderlineOffset: 3,
+          }}
+        >
+          {/* "Unassigned" is the honest resting state, and it is a link,
+              because it is the one worth acting on. */}
+          {owner || 'Unassigned'}
+        </button>
+      </span>
+    )
+  }
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      Owner:
+      <select
+        autoFocus
+        disabled={busy || members === null}
+        defaultValue={summary.owner_id ? String(summary.owner_id) : ''}
+        onChange={(e) => assign(e.target.value)}
+        aria-label="Agent owner"
+        style={{ font: 'inherit', padding: '2px 4px' }}
+      >
+        <option value="">Unassigned</option>
+        {(members || []).map((m) => (
+          <option key={m.id} value={m.id}>{m.name || m.email}</option>
+        ))}
+      </select>
+      <button
+        type="button"
+        onClick={() => setEditing(false)}
+        disabled={busy}
+        style={{
+          background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+          font: 'inherit', color: C.muted,
+        }}
+      >
+        Cancel
+      </button>
+      {error && <span style={{ color: C.err }}>{error}</span>}
+    </span>
+  )
+}
+
 /* ── 1. Header ── */
-function Header({ summary, registration, account, onBack }) {
+function Header({ summary, registration, account, onBack, onOwnerChanged }) {
   const [descOpen, setDescOpen] = useState(false)
   const name = summary.display_name || summary.service_name
-  const owner = summary.owner_name || account?.userName
+  // No fallback to the signed-in user. It used to read "Owner: you" for an
+  // agent nobody owned, which was wrong before and is misleading now that
+  // ownership decides whose Work list this agent's runs appear in.
+  const owner = summary.owner_name || null
   const model = registration?.model
   // Absent status is unknown, not healthy.
   const status = summary.status || 'no_data'
@@ -150,7 +268,12 @@ function Header({ summary, registration, account, onBack }) {
         display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap',
         margin: '10px 0 12px', fontSize: 13, color: C.muted, fontFamily: F.body,
       }}>
-        {owner && <span>Owner: <span style={{ color: C.body, fontWeight: 500 }}>{owner}</span></span>}
+        <OwnerControl
+          summary={summary}
+          owner={owner}
+          canAssign={Boolean(account?.userId)}
+          onChanged={onOwnerChanged}
+        />
         {summary.platform && (
           <Tag>
             {/* Brand hints come off the summary — `serviceName` is a prop of
@@ -852,7 +975,13 @@ export default function AgentDetail({ serviceName, agentId, account, onBack, onD
 
   return (
     <Shell>
-      <Header summary={summary} registration={registration} account={account} onBack={onBack} />
+      <Header
+        summary={summary}
+        registration={registration}
+        account={account}
+        onBack={onBack}
+        onOwnerChanged={() => setReloadKey((k) => k + 1)}
+      />
       {summary.locked ? (
         // Locked: header + a single "recording" panel. No Ask/WeekStrip/Identity/
         // Danger — we don't surface this agent's data until the plan covers it.
