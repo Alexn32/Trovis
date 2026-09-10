@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
-import { relativeTime } from './utils.js'
 import { ArrowLeftIcon, TrashIcon } from './Icons.jsx'
 import { BrandMark } from './BrandMarks.jsx'
 
@@ -647,20 +646,19 @@ function ApiKeyCard() {
   )
 }
 
-function MembersCard({ isOwner, currentUserId }) {
+// Members, read-only. Inviting, roles and reporting lines all live on the
+// Org page now — one place, one truth. Two invite forms that each knew about
+// a different half of the org (this one had no idea roles existed) is exactly
+// the split this ship set out to close, so the form here is a link, not a
+// second door.
+function MembersCard({ isOwner, currentUserId, onOpenOrg }) {
   const [members, setMembers] = useState([])
-  const [invites, setInvites] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   async function reload() {
     try {
-      const [m, inv] = await Promise.all([
-        api.getMembers(),
-        isOwner ? api.getInvites() : Promise.resolve([]),
-      ])
-      setMembers(m || [])
-      setInvites(inv || [])
+      setMembers((await api.getMembers()) || [])
     } catch (e) {
       setError(e.message || 'Could not load members')
     } finally {
@@ -679,14 +677,6 @@ function MembersCard({ isOwner, currentUserId }) {
       reload()
     } catch (e) {
       setError(e.message || 'Could not remove member')
-    }
-  }
-  async function revoke(id) {
-    try {
-      await api.revokeInvite(id)
-      reload()
-    } catch (e) {
-      setError(e.message || 'Could not revoke invite')
     }
   }
 
@@ -722,98 +712,20 @@ function MembersCard({ isOwner, currentUserId }) {
               </li>
             ))}
           </ul>
-
-          {isOwner && <InviteForm onInvited={reload} />}
-
-          {isOwner && invites.length > 0 && (
-            <div className="invite-pending">
-              <h4 className="settings-subtitle">Pending invites</h4>
-              <ul className="member-list">
-                {invites.map((i) => (
-                  <li key={i.id} className="member-row">
-                    <span className="member-main">
-                      <span className="member-name">{i.email}</span>
-                      <span className="member-email">
-                        invited {relativeTime(i.created_at)} · {i.role}
-                      </span>
-                    </span>
-                    <button type="button" className="btn btn-link btn-sm" onClick={() => revoke(i.id)}>
-                      Revoke
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <p className="settings-note">
+            Invites, roles and reporting lines live on the{' '}
+            {onOpenOrg ? (
+              <button type="button" className="btn btn-link btn-sm" onClick={onOpenOrg}>
+                Org page
+              </button>
+            ) : (
+              'Org page'
+            )}
+            .
+          </p>
         </>
       )}
     </section>
   )
 }
 
-function InviteForm({ onInvited }) {
-  const [email, setEmail] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState(null)
-  const [link, setLink] = useState(null)
-  const [copied, setCopied] = useState(false)
-
-  async function submit(e) {
-    e.preventDefault()
-    if (!email.trim()) return
-    setSubmitting(true)
-    setError(null)
-    setLink(null)
-    try {
-      const res = await api.createInvite({ email: email.trim(), role: 'member' })
-      setLink(res.invite_url)
-      setEmail('')
-      onInvited?.()
-    } catch (err) {
-      setError(err.message || 'Could not create invite')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(link)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      /* clipboard unavailable */
-    }
-  }
-
-  return (
-    <div className="invite-form-wrap">
-      <form className="invite-form" onSubmit={submit}>
-        <input
-          className="text-input"
-          type="email"
-          placeholder="teammate@company.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-        <button type="submit" className="btn btn-secondary btn-sm" disabled={submitting || !email.trim()}>
-          {submitting ? <><Spinner /> …</> : 'Invite'}
-        </button>
-      </form>
-      {error && <p className="form-error">{error}</p>}
-      {link && (
-        <div className="invite-link-out">
-          <p className="settings-note">
-            Share this one-time link with your teammate — it expires in 7 days:
-          </p>
-          <div className="key-display">
-            <code className="key-text">{link}</code>
-            <button type="button" className="copy-btn-inline" onClick={copy}>
-              {copied ? '✓ Copied' : 'Copy'}
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}

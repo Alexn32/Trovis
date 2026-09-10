@@ -1,0 +1,259 @@
+// The Org surface, and the seat that decides who is offered it.
+//
+// The rule that needs a test rather than a habit: the client is NOT an
+// authority on permissions. Every affordance on this page comes from a flag
+// the server put on the role (can_edit / can_add_child), and the API refuses
+// anything that slips through anyway. So the tests below assert two opposite
+// things and both matter —
+//
+//   * the page hides what the seat says no to (a manager sees no Rename on
+//     their own box), and
+//   * when the seat is missing or broken the page WIDENS rather than blanks,
+//     because a seat arrives late, can fail, and is absent for API-key
+//     sessions. Failing closed there would make a working product look
+//     broken, and it would buy nothing: the server still refuses.
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { ALL_SURFACES, FULL_SEAT, hasReports, hasSurface, seatOf, showsTechnicalFolds } from '../src/seat.js'
+import { resolveTab, visibleTabs } from '../src/tabs.js'
+import {
+  buildTree,
+  emptyChartCopy,
+  peopleInRole,
+  personLabel,
+  roleActions,
+  scopeSummary,
+  unplacedMembers,
+} from '../src/org.js'
+
+const org = readFileSync(new URL('../src/Org.jsx', import.meta.url), 'utf8')
+const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+const onboarding = readFileSync(new URL('../src/Onboarding.jsx', import.meta.url), 'utf8')
+
+// --- the seat --------------------------------------------------------------
+
+test('a missing or broken seat widens to the full product, never blanks it', () => {
+  // No /auth/me yet, an API-key session, a malformed payload: all the same.
+  assert.deepEqual(seatOf(undefined).surfaces, ALL_SURFACES)
+  assert.deepEqual(seatOf({}).surfaces, ALL_SURFACES)
+  assert.deepEqual(seatOf({ seat: null }).surfaces, ALL_SURFACES)
+  assert.deepEqual(seatOf({ seat: 'nonsense' }).surfaces, ALL_SURFACES)
+  // An empty surface list is a person with no product — treat it as noise.
+  assert.deepEqual(seatOf({ seat: { surfaces: [] } }).surfaces, ALL_SURFACES)
+  assert.equal(seatOf(undefined).breadth, 'company')
+  assert.equal(seatOf(undefined).depth, 'technical')
+})
+
+test('a real seat is used as given', () => {
+  const seat = seatOf({ seat: { breadth: 'self', depth: 'glance', surfaces: ['Home', 'Work'] } })
+  assert.deepEqual(seat.surfaces, ['Home', 'Work'])
+  assert.equal(seat.breadth, 'self')
+  assert.equal(hasSurface(seat, 'Work'), true)
+  assert.equal(hasSurface(seat, 'Fleet'), false)
+  assert.equal(showsTechnicalFolds(seat), false)
+  assert.equal(showsTechnicalFolds(FULL_SEAT), true)
+})
+
+test('the Whose-work options only exist when there are reports to list', () => {
+  assert.equal(hasReports({ subtree_user_ids: [] }), false)
+  assert.equal(hasReports({ subtree_user_ids: [7] }), true)
+})
+
+// --- nav from surfaces -----------------------------------------------------
+
+test('nav shows exactly the surfaces in the seat', () => {
+  const ids = (s) => visibleTabs(s).map(([id]) => id)
+  assert.deepEqual(ids(ALL_SURFACES), ['dashboard', 'fleet', 'work', 'org'])
+  // A glance-only manager: no Fleet door.
+  assert.deepEqual(ids(['Home', 'Work', 'Org']), ['dashboard', 'work', 'org'])
+  // Ask and Connect are not tabs, so a seat naming them adds nothing.
+  assert.deepEqual(ids(['Work', 'Ask', 'Connect']), ['work'])
+})
+
+test('Org is a nav item now, and Team is gone', () => {
+  assert.ok(visibleTabs(ALL_SURFACES).some(([, label]) => label === 'Org'))
+  assert.ok(!visibleTabs(ALL_SURFACES).some(([, label]) => label === 'Team'))
+  // Nav is built from the seat, not from the account type — a Business flag
+  // decided this before, and that is the thing this ship replaced.
+  assert.match(app, /visibleTabs\(seatOf\(me\)\.surfaces\)/)
+  assert.doesNotMatch(app, /isBusiness/)
+})
+
+test('a seat that names nothing still leaves a way to navigate', () => {
+  assert.deepEqual(visibleTabs([]).map(([id]) => id), ['dashboard', 'fleet', 'work', 'org'])
+  assert.ok(visibleTabs(['Nonsense']).length >= 1)
+  assert.equal(resolveTab('anything', { surfaces: ['Nonsense'] }), 'work')
+})
+
+// --- the chart -------------------------------------------------------------
+
+const ROLES = [
+  { id: 1, title: 'CEO', parent_role_id: null, user_ids: [10], can_edit: false, can_add_child: false },
+  { id: 2, title: 'Support Manager', parent_role_id: 1, user_ids: [11], can_edit: false, can_add_child: true },
+  { id: 3, title: 'Support IC', parent_role_id: 2, user_ids: [12], can_edit: true, can_add_child: true },
+]
+const MEMBERS = [
+  { id: 10, name: 'Ada', email: 'ada@acme.test' },
+  { id: 11, name: 'Bo', email: 'bo@acme.test' },
+  { id: 12, name: null, email: 'cy@acme.test' },
+  { id: 13, name: 'Dee', email: 'dee@acme.test' },
+]
+
+test('the tree renders parents above their reports', () => {
+  assert.deepEqual(
+    buildTree(ROLES).map(({ role, depth }) => [role.title, depth]),
+    [['CEO', 0], ['Support Manager', 1], ['Support IC', 2]],
+  )
+})
+
+test('a role whose parent is not visible still renders, at the top', () => {
+  // An IC sees their box and the chain above it; a manager sees their
+  // subtree. Neither necessarily sees a role's parent — and a role that
+  // silently vanished because its parent was filtered out would be worse
+  // than one shown at the wrong indent.
+  const subtreeOnly = ROLES.slice(1) // Support Manager's parent (CEO) missing
+  assert.deepEqual(
+    buildTree(subtreeOnly).map(({ role, depth }) => [role.title, depth]),
+    [['Support Manager', 0], ['Support IC', 1]],
+  )
+})
+
+test('a cycle in the data does not hang the page', () => {
+  const cyclic = [
+    { id: 1, title: 'A', parent_role_id: 2, user_ids: [] },
+    { id: 2, title: 'B', parent_role_id: 1, user_ids: [] },
+  ]
+  const out = buildTree(cyclic)
+  assert.ok(out.length <= 2)
+})
+
+test('empty and unknown inputs render nothing rather than throwing', () => {
+  assert.deepEqual(buildTree(undefined), [])
+  assert.deepEqual(buildTree([]), [])
+  assert.deepEqual(peopleInRole(null, MEMBERS), [])
+  // An id with no member row is dropped, not drawn as a blank chip.
+  assert.deepEqual(
+    peopleInRole({ user_ids: [10, 999] }, MEMBERS).map((m) => m.id),
+    [10],
+  )
+  assert.equal(personLabel(MEMBERS[2]), 'cy@acme.test') // falls back to email
+  assert.equal(personLabel(null), '')
+})
+
+test('people not on the chart are surfaced — they are the ones seeing everything', () => {
+  assert.deepEqual(unplacedMembers(ROLES, MEMBERS).map((m) => m.id), [13])
+  assert.deepEqual(unplacedMembers([], MEMBERS).length, 4)
+  // And the page says so, because an unplaced person falls back to the full
+  // seat: that is a fact about access, not a cosmetic gap.
+  assert.match(org, /not\s*\n?\s*on the chart yet, so they see everything/)
+})
+
+test('a role with no scope level says it grants full access, not "none"', () => {
+  assert.match(scopeSummary(null), /full access/i)
+  assert.equal(scopeSummary({ breadth: 'subtree', depth: 'technical' }), 'Their team · technical detail')
+  assert.equal(scopeSummary({ breadth: 'self', depth: 'glance' }), 'Own work · at a glance')
+  assert.equal(scopeSummary({ breadth: 'company', depth: 'glance' }), 'Whole company · at a glance')
+})
+
+// --- affordances follow the server's two rungs -----------------------------
+
+test('edit and add-child are separate rungs — a manager adds under a box they cannot edit', () => {
+  // This is the whole reason roleActions exists. Collapsing the two flags
+  // into one would either hide the Add button a manager needs on their own
+  // box, or show a Rename that 403s.
+  const ownBox = roleActions(ROLES[1]) // can_edit false, can_add_child true
+  assert.equal(ownBox.canRename, false)
+  assert.equal(ownBox.canDelete, false)
+  assert.equal(ownBox.canSetScope, false)
+  assert.equal(ownBox.canInvite, false)
+  assert.equal(ownBox.canAddChild, true)
+
+  const below = roleActions(ROLES[2])
+  assert.equal(below.canRename, true)
+  assert.equal(below.canAssignPeople, true)
+  assert.equal(below.canInvite, true)
+})
+
+test('an IC is offered nothing on a chart they can only read', () => {
+  const readOnly = roleActions({ id: 9, title: 'X' })
+  assert.deepEqual(Object.values(readOnly), [false, false, false, false, false, false])
+})
+
+test('the empty chart tells a non-builder the truth instead of a dead button', () => {
+  assert.match(emptyChartCopy(true).body, /Add the first role/)
+  assert.match(emptyChartCopy(false).body, /org builder can set it up/)
+})
+
+test('Org never computes permissions itself — it renders what the server said', () => {
+  // roleActions reads can_edit / can_add_child and nothing else. If this
+  // page ever starts deriving rights from breadth, role titles or the member
+  // list, the client becomes a second authority and the two will drift.
+  const orgLogic = readFileSync(new URL('../src/org.js', import.meta.url), 'utf8')
+  assert.match(orgLogic, /can_edit/)
+  assert.match(orgLogic, /can_add_child/)
+  assert.doesNotMatch(orgLogic, /org_builder\s*(&&|\|\||\?)/)
+  // The builder-only control on the page is gated by the server's own flag
+  // from /org/chart, not by anything inferred here.
+  assert.match(org, /orgBuilder && \(/)
+})
+
+// --- Path A vs Path B ------------------------------------------------------
+
+test('Path A gets no chart step; Path B gets one', () => {
+  assert.match(
+    onboarding,
+    /isBusiness\s*\n?\s*\?\s*\['name', 'chart', 'connect', 'invite', 'done'\]\s*\n?\s*:\s*\['name', 'connect', 'done'\]/,
+  )
+})
+
+test('every onboarding step can be skipped — a wizard must not trap anyone', () => {
+  // Including the new chart step: an org that skips it lands with no roles,
+  // which is the same state every existing org is in.
+  assert.match(onboarding, /Skip — I’ll map it later/)
+  assert.match(onboarding, /Skip setup/)
+})
+
+test('Path B invites carry the role, so the invitee arrives already seated', () => {
+  assert.match(onboarding, /role_id: inviteRole === '' \? null : Number\(inviteRole\)/)
+})
+
+test('Path A is offered graduation, and it is an invitation rather than a wall', () => {
+  assert.match(org, /account_type === 'individual'/)
+  assert.match(org, /Invite your company/)
+  assert.match(org, /Not now/)
+  // It must say the work survives — that is the actual worry someone has
+  // before clicking, and it is true (account_id never changes).
+  assert.match(org, /agents, work and connections all stay/i)
+  assert.match(org, /api\.graduateOrg/)
+})
+
+test('graduation refreshes the shell — account_type and the seat both change', () => {
+  assert.match(app, /onGraduated=/)
+  assert.match(app, /org: updated \|\| prev\.org/)
+})
+
+// --- one invite truth ------------------------------------------------------
+
+test('there is exactly one place to invite someone into this company', () => {
+  const settings = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
+  // Settings used to carry its own invite form that knew nothing about roles.
+  assert.doesNotMatch(settings, /api\.createInvite/)
+  assert.doesNotMatch(settings, /InviteForm/)
+  assert.match(settings, /Org page/)
+  // And nothing in the product creates the old parallel directory rows.
+  for (const f of ['Org.jsx', 'Onboarding.jsx', 'Settings.jsx', 'App.jsx']) {
+    const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
+    assert.doesNotMatch(src, /createTeamMember/, `${f} still writes team_members`)
+  }
+})
+
+test('the Org page speaks Work language, not internal vocabulary', () => {
+  const strings = [
+    ...[...org.matchAll(/>([^<>{}]+)</g)].map((m) => m[1]),
+    ...[...org.matchAll(/(?:aria-label|title|placeholder)=["']([^"']+)["']/g)].map((m) => m[1]),
+  ]
+  for (const s of strings) {
+    assert.doesNotMatch(s, /\bloop\b|\bhandoff\b|\bstation\b|\bsubtree\b|\bbreadth\b/i, `Org shows "${s.trim()}"`)
+  }
+})

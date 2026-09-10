@@ -83,6 +83,22 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 - `api.js` `request()` attaches `Authorization: Bearer` and/or `X-Trovis-Api-Key` headers
   (never cookies). It returns parsed JSON.
 - View switching is `useState` tab state in `App.jsx` (no router); overlays via `setOverlay`.
+- **Seat in the chrome.** Nav comes from `visibleTabs(seatOf(me).surfaces)` (`tabs.js` + `seat.js`),
+  never from `account_type`. `seat.js` is the only place the client reads a seat, and its rule is
+  **widen on doubt**: a missing, empty or malformed seat falls back to every surface. A seat
+  arrives late, can fail, and is absent for API-key sessions — failing closed would blank a working
+  product and buy nothing, because the server re-checks every request anyway.
+- **Org is the one place people live.** `Org.jsx` (chart, roles, people, invites, scope-on-role,
+  Path A→B graduation); `org.js` holds its pure logic. Affordances come from the server's
+  per-role `can_edit` / `can_add_child` — the client never derives permissions. Settings shows
+  members read-only and links to Org; there is deliberately no second invite form.
+- **Agent ownership is a `users` assignment.** `agent_owners.user_id`, and the label beside the
+  name is their **chart role title** (`org_roles.title`) — never `users.role`, which is an account
+  permission. Every owner read goes through the one shared resolver (`_OWNER_JOIN_SQL` /
+  `_OWNER_COLS_SQL`), which prefers `users` and falls back to `team_members` for legacy rows;
+  don't hand-roll that join again. `team_members` survives for one reason only: it is how a
+  handoff target with **no login** gets a name (`_resolve_human_name`) — an unresolved email must
+  stay nameless, or any address an agent emits would render as a colleague.
 
 ## Running locally
 
