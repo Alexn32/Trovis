@@ -2408,16 +2408,30 @@ def set_owner(
     request: Request,
     body: AgentOwnerSet,
 ) -> None:
-    """Assign a team member as the human owner of one sub-agent.
-    Re-assigns when an owner already exists. 204 No Content on success."""
+    """Assign a person as the human owner of one sub-agent. Re-assigns when
+    an owner already exists. 204 No Content on success.
+
+    Pass `user_id` — owners are org members. `team_member_id` still works for
+    the legacy directory. Both ids are checked against the caller's account
+    before being stored: a cross-tenant id would leak that person's
+    name/email/role back out through the owner joins.
+    """
     account_id = getattr(request.state, "account_id", None)
-    # Reject a team_member_id from another tenant (would leak their PII via joins).
-    if not database.team_member_in_account(account_id, body.team_member_id):
+    if (body.user_id is None) == (body.team_member_id is None):
+        raise HTTPException(
+            status_code=400, detail="pass exactly one of user_id or team_member_id"
+        )
+    if body.user_id is not None:
+        target = database.get_user_by_id(body.user_id)
+        if target is None or target["account_id"] != account_id:
+            raise HTTPException(status_code=400, detail="unknown member")
+    elif not database.team_member_in_account(account_id, body.team_member_id):
         raise HTTPException(status_code=400, detail="unknown team member")
     database.set_agent_owner(
         account_id=account_id,
         service_name=service_name,
         agent_id=body.agent_id or "main",
+        user_id=body.user_id,
         team_member_id=body.team_member_id,
     )
 
@@ -2452,10 +2466,23 @@ def list_team(request: Request) -> list[TeamMember]:
     ]
 
 
-@app.post("/team", response_model=TeamMember, status_code=201)
-def add_team_member(
-    request: Request, body: TeamMemberCreate
-) -> TeamMember:
+@app.post("/team", response_model=TeamMember, status_code=201, deprecated=True)
+def add_team_member(request: Request, body: TeamMemberCreate) -> TeamMember:
+    """Deprecated: add a person to the legacy directory.
+
+    People in Trovis are org members now — invite them (POST /org/invites),
+    put them in a role, and assign agents with
+    PUT /agents/{service}/owner {"user_id": …}. Nothing in the product calls
+    this any more, and the Org page is the only place people are managed, so
+    the competing *invite* path is gone.
+
+    The endpoint itself stays open on purpose, and it is worth being precise
+    about why: `team_members` is also how a handoff target who has NO Trovis
+    login gets a name. An agent can hand work to sarah@company.com whether or
+    not she ever signs in, and _resolve_human_name falls back to this table
+    to render her name instead of "a human". Closing this would quietly
+    degrade that, which is a worse outcome than one deprecated writer.
+    """
     account_id = getattr(request.state, "account_id", None)
     try:
         m = database.create_team_member(
@@ -2523,16 +2550,28 @@ def remove_team_member(member_id: int, request: Request) -> None:
     database.delete_team_member(account_id=account_id, member_id=member_id)
 
 
-@app.get("/team/{member_id}/agents", response_model=list[OwnedAgent])
-def get_team_member_agents(
-    member_id: int, request: Request
-) -> list[OwnedAgent]:
-    """Return the agents owned by this team member, with display name
-    and basic stats. Empty list when the member has no assignments."""
+@app.get("/org/members/{user_id}/agents", response_model=list[OwnedAgent])
+def get_member_agents(user_id: int, request: Request) -> list[OwnedAgent]:
+    """Agents owned by this org member, with display name and basic stats.
+    Empty list when they own none."""
+    account_id, _ = _require_session_account(request)
+    target = database.get_user_by_id(user_id)
+    if target is None or target["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="member not found")
+    return [
+        OwnedAgent(**a)
+        for a in database.get_agents_for_owner(account_id=account_id, user_id=user_id)
+    ]
+
+
+@app.get("/team/{member_id}/agents", response_model=list[OwnedAgent], deprecated=True)
+def get_team_member_agents(member_id: int, request: Request) -> list[OwnedAgent]:
+    """Legacy: agents owned by a directory person with no login. Kept so
+    existing assignments stay inspectable; use /org/members/{id}/agents."""
     account_id = getattr(request.state, "account_id", None)
     return [
         OwnedAgent(**a)
-        for a in database.get_agents_for_team_member(
+        for a in database.get_agents_for_owner(
             account_id=account_id, member_id=member_id
         )
     ]
