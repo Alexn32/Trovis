@@ -172,9 +172,11 @@ test('no cost anywhere on the page', () => {
 // --- routing ----------------------------------------------------------------
 
 test('a job name opens that job page, by id, at its own URL', () => {
-  // Table rows stay runs. The job under Task is the door to /work/jobs/:id —
-  // no name lookup, no local view state to fall out of step with the URL.
+  // Home's primary row click is the job. The name under Task stays a job
+  // door too, so /work/jobs/:id cannot become undiscoverable. Kind-page
+  // rows stay runs — that page is already the job.
   assert.match(code, /onOpenJob=\{\(id\) => onRoute\(\{ job: Number\(id\), run: null \}\)\}/)
+  assert.match(code, /if \(row\.workflow_id != null\) onOpenJob\(row\.workflow_id\)/)
   assert.match(code, /const kindWorkflowId = route\.job \?\? null/)
   const rows = [item({ id: 1, workflow_name: 'Refunds' }), item({ id: 2, workflow_name: null })]
   assert.deepEqual(rows.filter((r) => matchesKind(r, OTHER_KIND)).map((r) => r.id), [2])
