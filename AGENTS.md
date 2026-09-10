@@ -83,6 +83,15 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 - `api.js` `request()` attaches `Authorization: Bearer` and/or `X-Trovis-Api-Key` headers
   (never cookies). It returns parsed JSON.
 - View switching is `useState` tab state in `App.jsx` (no router); overlays via `setOverlay`.
+- **Seat in the chrome.** Nav comes from `visibleTabs(seatOf(me).surfaces)` (`tabs.js` + `seat.js`),
+  never from `account_type`. `seat.js` is the only place the client reads a seat, and its rule is
+  **widen on doubt**: a missing, empty or malformed seat falls back to every surface. A seat
+  arrives late, can fail, and is absent for API-key sessions — failing closed would blank a working
+  product and buy nothing, because the server re-checks every request anyway.
+- **Org is the one place people live.** `Org.jsx` (chart, roles, people, invites, scope-on-role,
+  Path A→B graduation); `org.js` holds its pure logic. Affordances come from the server's
+  per-role `can_edit` / `can_add_child` — the client never derives permissions. Settings shows
+  members read-only and links to Org; there is deliberately no second invite form.
 
 ## Running locally
 

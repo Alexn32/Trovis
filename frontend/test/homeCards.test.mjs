@@ -293,6 +293,8 @@ test('a person never reads the word Dashboard', () => {
       assert.doesNotMatch(m[1], /Dashboard/, `${f} labels something "Dashboard"`)
     }
   }
-  // And the nav tab itself.
-  assert.match(app, /\['dashboard', 'Home'\]/)
+  // And the nav tab itself, wherever the label list lives. It moved from
+  // App.jsx into tabs.js when nav became seat-driven; the rule did not move.
+  const tabs = readFileSync(new URL('../src/tabs.js', import.meta.url), 'utf8')
+  assert.match(tabs, /\['dashboard', 'Home'\]/)
 })
