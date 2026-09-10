@@ -16,7 +16,32 @@ never a default baseline, never a verdict nobody asked for.
 Run:
   OVERSEE_DISABLE_PRICING_SYNC=1 python3 test_work_jobs_schema.py
 """
-import os, tempfile, time
+import contextlib, logging, os, tempfile, time
+
+
+@contextlib.contextmanager
+def _capture_logs(name):
+    """Collect formatted records from one logger for the duration of a block.
+
+    A log line is a product surface here — it is the escape hatch's live
+    signal — so it gets asserted like one rather than trusted to exist.
+    """
+    out = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            out.append(record.getMessage())
+
+    lg = logging.getLogger(name)
+    sink = _Sink()
+    prev = lg.level
+    lg.setLevel(logging.INFO)
+    lg.addHandler(sink)
+    try:
+        yield out
+    finally:
+        lg.removeHandler(sink)
+        lg.setLevel(prev)
 
 os.environ.update({"OVERSEE_DISABLE_PRICING_SYNC": "1", "TROVIS_DISABLE_ALERTS": "1",
                    "TROVIS_DISABLE_LOOP_SWEEP": "1", "TROVIS_LOOP_TITLES": "off"})
@@ -243,6 +268,23 @@ with TestClient(main.app) as c:
     check("it KEPT the job rather than being detached",
           any(i["title"] == "Onboard Acme"
               for i in c.get(f"/workflows/{solo['id']}/loops", headers=H).json()))
+
+    # Amendment 2's log line. match-health answers the same question, but
+    # only when somebody asks it — and the signal worth having is the RATE,
+    # which an on-demand snapshot structurally cannot show. A cluster right
+    # after a hint edit is the edit being wrong; a trickle is drift.
+    print("\n--- ...and the retention is LOGGED, not only queryable ---")
+    with _capture_logs("trovis.database") as seen:
+        post("sales-agent", [sp("message_received", 15,
+                                {"trovis.loop.external_id": "s1"})])
+        time.sleep(1.0)
+    stale_lines = [m for m in seen if "workflow_match_stale" in m]
+    check("keeping a link no hint set would produce emits a log line",
+          len(stale_lines) >= 1)
+    check("...naming the run, the job it kept, and the service, so the line "
+          "is actionable without a second query",
+          all(("loop_id=" in m and "workflow_id=" in m and "service=" in m)
+              for m in stale_lines))
 
     health = c.get("/workflows/match-health", headers=H).json()
     check("stale links are reported, not hidden", health["count"] >= 1)

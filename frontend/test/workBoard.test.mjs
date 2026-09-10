@@ -11,10 +11,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   COLUMNS, UNMATCHED, ageLabel, boardTotals, columnOf, durationLabel,
-  firstOverCeiling, groupByJob, healthBadge, needsCard, observedPerDay,
+  firstOverCeiling, groupByJob, healthBadge, needsCard, observedPerDay, positive,
   pinLoudVerdict, quietLine, rowJobLine, runCardLead, tableJobMeta,
 } from '../src/workBoard.js'
 import { buildPath, parsePath } from '../src/route.js'
+import { errorRatePercent } from '../src/utils.js'
 
 const NOW = Date.parse('2026-03-10T12:00:00Z')
 const ago = (s) => new Date(NOW - s * 1000).toISOString()
@@ -464,6 +465,61 @@ test('home row click opens the job; the run is a nested title click', () => {
   // Nested task title is the run.
   assert.match(table, /onOpenRun\(row\)/)
   assert.match(home, /onOpenJob=\{onOpenJob\}/)
+})
+
+test('RULE 6 — positive() refuses a value that is not a finite measurement', () => {
+  // This is the one behaviour that separates it from `Number(x) || 0 > 0`,
+  // which the two agree on for every ordinary input. A corrupt payload
+  // carrying Infinity is not "some", it is nonsense, and coercion waves it
+  // through as a positive count.
+  assert.equal(positive(Infinity), false, 'Infinity is not a count')
+  assert.equal(positive('Infinity'), false)
+  assert.equal(positive(NaN), false)
+  assert.equal(positive(null), false)
+  assert.equal(positive(undefined), false)
+  assert.equal(positive(''), false)
+  assert.equal(positive(0), false, 'a measured zero is not positive')
+  assert.equal(positive(-3), false)
+  assert.equal(positive(1), true)
+  assert.equal(positive('4'), true, 'a numeric string from the wire still counts')
+})
+
+test('RULE 6 — an agent with no spans has no error rate', () => {
+  // Returning 0 reported a perfect record for an agent that has never run:
+  // a pass derived from absence, the same shape as the never-run job that
+  // badged Healthy. Callers render `No data`.
+  assert.equal(errorRatePercent({ span_count: 0, error_count: 0 }), null)
+  assert.equal(errorRatePercent({ span_count: null, error_count: 0 }), null)
+  assert.equal(errorRatePercent({}), null)
+  assert.equal(errorRatePercent(null), null)
+  assert.equal(errorRatePercent({ span_count: 10, error_count: null }), null,
+               'spans without an error count is still not a rate')
+  // Non-finite is not a denominator. `Number(x) || 0` waves Infinity through
+  // and divides by it, producing a serene 0% from a corrupt payload.
+  assert.equal(errorRatePercent({ span_count: Infinity, error_count: 3 }), null)
+  assert.equal(errorRatePercent({ span_count: 10, error_count: Infinity }), null)
+  // A real zero is a real measurement and must survive.
+  assert.equal(errorRatePercent({ span_count: 10, error_count: 0 }), 0)
+  assert.equal(errorRatePercent({ span_count: 10, error_count: 2 }), 20)
+})
+
+test('RULE 5 — every overview pill states what it counts', () => {
+  // The pills and the table under them are different cuts of the same work,
+  // and on the dev account `Needs attention` reads 3 beside two Stuck rows:
+  // the third is a human wait that has aged past the stall threshold, which
+  // the table labels "Waiting on someone". Nothing is wrong with either
+  // number — what was wrong is that neither said what it was counting, so
+  // the screen read as the product contradicting itself.
+  const src = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  const strip = src.slice(src.indexOf('const OVERVIEW_PILLS'), src.indexOf('const WORK_FILTER_LABELS'))
+  for (const key of ['needs_you', 'needs_attention', 'open', 'completed_week']) {
+    const row = strip.slice(strip.indexOf(`key: '${key}'`))
+    assert.match(row.slice(0, 220), /sub: '[^']+'/, `${key} must say what it counts`)
+  }
+  // The one that was actually misleading names BOTH halves of its cut.
+  assert.match(strip, /sub: 'stuck, or waiting too long'/)
+  // ...and the sub-line is rendered, not just declared.
+  assert.match(src, /<span className="work-pill-sub">\{p\.sub\}<\/span>/)
 })
 
 test('filtered to nothing is not the same as having no work', () => {

@@ -2019,7 +2019,12 @@ def _detail_status(stats: dict) -> tuple[str, str]:
         return "error", f"Last run failed — {op} errored {rel} ago"
     if last_ns is None:
         # Connected (maybe a registration span) but no real interaction yet.
-        return "healthy", "Connected — waiting for its first run"
+        #
+        # Honesty rule 6: this is not "healthy". Nothing has been observed, so
+        # there is no evidence of health to report — a green dot here is a
+        # pass derived from absence, the same shape as the never-run job that
+        # badged Healthy. `no_data` renders muted and states the fact.
+        return "no_data", "Connected — no runs recorded yet"
     age_s = _time() - last_ns / 1_000_000_000
     cadence_s = stats.get("cadence_seconds")
     # Quiet beyond ~2× the usual interval, floored so a fast agent's trivial

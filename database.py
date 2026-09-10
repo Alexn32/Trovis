@@ -6371,6 +6371,19 @@ def _apply_workflow_match(cur, loop_row: dict[str, Any], hint_sets: list) -> boo
     lp = _loops_mod()
     m = lp.match_workflow(loop_row, hint_sets)
     if m is None and loop_row.get("workflow_id") is not None:
+        # The moment the link goes stale, said once, where it happens.
+        #
+        # stale_workflow_links() answers the same question on demand, but only
+        # if somebody asks — and the interesting signal is the RATE, which an
+        # on-demand snapshot cannot show. This is the event: a run kept a job
+        # that no current hint set would give it. A cluster of these right
+        # after a hint edit is the edit being wrong; a slow trickle is drift.
+        logger.info(
+            "workflow_match_stale loop_id=%s workflow_id=%s service=%s",
+            loop_row.get("id"),
+            loop_row.get("workflow_id"),
+            loop_row.get("service_name"),
+        )
         return False
     new_id, new_version, new_conf = m if m else (None, None, None)
     if (

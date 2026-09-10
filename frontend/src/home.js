@@ -11,6 +11,7 @@
 // and plain sentences only.
 
 import { isNamedWorkTitle } from './board.js'
+import { numOrNull, positive } from './workBoard.js'
 
 /**
  * How old a "waiting on someone else" item must be before it counts as
@@ -95,7 +96,9 @@ export function workSplit(items, overview) {
       counts.waiting += 1
     } else if (it.status === 'stuck') counts.stuck += 1
   }
-  counts.done = Number(overview?.completed_week) || 0
+  // null, not 0: an overview we could not read has not told us that nothing
+  // finished. The caller renders the count only when it is a number.
+  counts.done = numOrNull(overview?.completed_week)
   return counts
 }
 
@@ -124,26 +127,32 @@ function joinCounts(parts) {
  */
 export function briefingLead(counts, proof = null) {
   if (!counts) return ''
-  const needsYou = Number(counts.needs_you) || 0
-  const attention = Number(counts.needs_attention) || 0
-  const open = Number(counts.open) || 0
+  const needsYou = numOrNull(counts.needs_you)
+  const attention = numOrNull(counts.needs_attention)
+  const open = numOrNull(counts.open)
+  // Rule 6. With no readable count there is no state to describe, and
+  // "Nothing needs you right now" is a confident claim to make from a
+  // payload we could not read.
+  if (needsYou === null && attention === null && open === null) return ''
   // Progress is only claimed off a moving count we actually read. Without it
   // (or with it at zero) the lead says nothing about progress: "Everything
   // open is in progress" printed above a strip reading 0 moving / 3 waiting
   // is the same class of lie as the old shape-of-the-day line.
-  const moving = Number(proof?.moving) || 0
+  const moving = numOrNull(proof?.moving)
 
   const parts = []
-  if (needsYou > 0) parts.push('work is waiting on you')
+  if (positive(needsYou)) parts.push('work is waiting on you')
   // "needs attention", not "is stuck" — the bucket includes work merely
   // waiting too long on a person, which is not the same as stuck.
-  if (attention > 0) parts.push('some work needs attention')
+  if (positive(attention)) parts.push('some work needs attention')
   if (parts.length > 0) {
     const rest =
-      moving > 0 && open > needsYou + attention ? '. The rest is in progress.' : '.'
+      positive(moving) && open !== null && open > (needsYou || 0) + (attention || 0)
+        ? '. The rest is in progress.'
+        : '.'
     return `Today, ${joinCounts(parts)}${rest}`
   }
-  if (open > 0 && moving > 0) return 'Nothing needs you. Everything open is in progress.'
+  if (positive(open) && positive(moving)) return 'Nothing needs you. Everything open is in progress.'
   return 'Nothing needs you right now.'
 }
 
@@ -205,6 +214,12 @@ export function pulsePacket({ overview, items, truncated, cost, attention, agent
   // 7-day windows off the daily series /dashboard/cost already returns.
   const daily = Array.isArray(cost?.daily) ? cost.daily.map(Number) : []
   if (daily.length >= 7) {
+    // `cost.daily` is a zero-FILLED series from the server (_daily_series):
+    // every day in the window is present, and a day with no spend genuinely
+    // is 0. This is the one place absent-as-zero is the true reading rather
+    // than the trap, which is why it carries a disable and a reason instead
+    // of numOrNull.
+    // eslint-disable-next-line no-restricted-syntax
     const sum = (xs) => Math.round(xs.reduce((a, b) => a + (Number(b) || 0), 0) * 100) / 100
     const thisWeek = sum(daily.slice(-7))
     if (thisWeek >= 0.01) {
@@ -251,13 +266,13 @@ export function fallbackInsight(packet) {
   }
   if (Number.isFinite(tw) && tw > 0) return `${tw} finished this week`
 
-  const stuck = Number(p.stuck_now) || 0
-  if (stuck > 0) return `${stuck} stuck right now`
-  const waiting = Number(p.waiting_now) || 0
-  if (waiting > 0) return `${waiting} waiting right now`
+  const stuck = numOrNull(p.stuck_now)
+  if (positive(stuck)) return `${stuck} stuck right now`
+  const waiting = numOrNull(p.waiting_now)
+  if (positive(waiting)) return `${waiting} waiting right now`
 
-  const agents = Number(p.agents_count) || 0
-  if (agents > 0) return `${agents} agent${agents === 1 ? '' : 's'} connected`
+  const agents = numOrNull(p.agents_count)
+  if (positive(agents)) return `${agents} agent${agents === 1 ? '' : 's'} connected`
   return ''
 }
 
@@ -453,8 +468,13 @@ export function viewerClock(now = new Date()) {
 export function isFirstRun({ overview, items, agentCount }) {
   if (!overview || !items) return false
   if (agentCount === null || agentCount === undefined) return false
-  const noWork = (Number(overview.open) || 0) === 0 && items.length === 0
-  return noWork && Number(agentCount) === 0
+  // Rule 6, and the sharpest case of it on Home: this decides whether to
+  // render "No work yet — nothing is connected", which is an assertion about
+  // the account. An unreadable `open` coerced to 0 made that assertion from
+  // no evidence at all. An unknown count is not zero work.
+  const open = numOrNull(overview.open)
+  if (open === null) return false
+  return open === 0 && items.length === 0 && numOrNull(agentCount) === 0
 }
 
 // ---------------------------------------------------------------------------
@@ -652,14 +672,14 @@ export function askChips({ desk, counts, attention, costToday, limit = 4 }) {
   if ((desk || []).length > 0) {
     chips.push({ key: 'mine', label: "What's waiting on me?", query: "What's waiting on me?" })
   }
-  if ((Number(c.waiting) || 0) > 0) {
+  if (positive(c.waiting)) {
     chips.push({
       key: 'others',
       label: "What's waiting on someone?",
       query: "What's waiting on someone else?",
     })
   }
-  if ((Number(c.stuck) || 0) > 0) {
+  if (positive(c.stuck)) {
     chips.push({ key: 'stuck', label: "What's stuck?", query: "What's stuck?" })
   }
   const flagged = (attention || []).find((a) => a && a.agent)
@@ -670,8 +690,8 @@ export function askChips({ desk, counts, attention, costToday, limit = 4 }) {
       query: `Why does ${flagged.agent} need a look?`,
     })
   }
-  const money = Number(costToday) || 0
-  if (money >= 0.01) {
+  const money = numOrNull(costToday)
+  if (money !== null && money >= 0.01) {
     const amount = `$${money.toFixed(2)}`
     chips.push({
       key: 'cost',

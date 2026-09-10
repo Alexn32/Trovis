@@ -9,6 +9,8 @@
 // They are deliberately different cuts. Printing the event list twice under
 // two headings would be a table pretending to be a process.
 
+import { numOrNull } from './workBoard.js'
+
 /** Human-readable label for an actor kind. `tool` covers SaaS destinations
  *  (Stripe, HubSpot) — the wire has no `saas` kind and this PR does not add one. */
 export const ACTOR_LABEL = { human: 'Person', agent: 'Agent', tool: 'Tool' }
@@ -247,4 +249,40 @@ export function askPrompt(detail) {
   if (!title) return "What's waiting on me?"
   if (detail?.status === 'stuck') return `Why is "${title}" stuck?`
   return `What do I need to know about "${title}"?`
+}
+
+/**
+ * What the whole job took, for the page header. One entry per fact we
+ * actually have — an empty array when the record has neither, so the header
+ * simply does not carry the line rather than carrying a zero.
+ */
+export function jobTotals(runs) {
+  const rows = runs || []
+  const out = []
+  // Rule 6, at the aggregate. `Number(x) || 0` inside a sum is the quiet
+  // version of the trap: a run the record never priced contributes zero, and
+  // the total then presents itself as covering every run when it covers only
+  // the priced ones. Sum what exists, count what contributed, and say so
+  // when that is not all of them — a partial total labelled as partial is
+  // useful, a partial total labelled as complete is wrong.
+  const sum = (field) => {
+    let total = 0
+    let seen = 0
+    for (const r of rows) {
+      const v = numOrNull(r?.[field])
+      if (v === null) continue
+      total += v
+      seen += 1
+    }
+    return seen ? { total, seen } : null
+  }
+  const coverage = (seen) => (seen < rows.length ? ` (${seen} of ${rows.length} runs)` : '')
+
+  const dur = sum('duration_ms')
+  const durLabel = dur && runDuration(dur.total)
+  if (durLabel) out.push(`${durLabel}${coverage(dur.seen)}`)
+  const price = sum('cost_usd')
+  const costLabel = price && runCost(price.total)
+  if (costLabel) out.push(`${costLabel}${coverage(price.seen)}`)
+  return out
 }

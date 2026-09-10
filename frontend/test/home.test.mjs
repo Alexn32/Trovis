@@ -114,8 +114,12 @@ test('Work counts ignore shell titles and survive missing data', () => {
     null,
   )
   assert.equal(c.moving, 1, 'id-shaped titles are not counted')
-  assert.equal(c.done, 0, 'no overview yet -> zero, never NaN')
-  assert.deepEqual(workSplit(null, null), { moving: 0, waiting: 0, stuck: 0, done: 0 })
+  // Rule 6. `done` is read off the overview payload, so no overview means we
+  // were not told how much finished — not that nothing did. It was 0 here,
+  // which is a count nobody counted. The item-derived tallies stay 0: those
+  // come from a list that WAS supplied, and an empty list really is none.
+  assert.equal(c.done, null, 'no overview yet -> unknown, never a zero')
+  assert.deepEqual(workSplit(null, null), { moving: 0, waiting: 0, stuck: 0, done: null })
 })
 
 test('the briefing lead states today in plain words, and prints no figures', () => {
@@ -157,6 +161,33 @@ test('the briefing lead states today in plain words, and prints no figures', () 
   )
   // No counts (the work call failed) → no invented state.
   assert.equal(briefingLead(null), '')
+})
+
+test('RULE 6 — a lead is never spoken from counts that were not read', () => {
+  // Found by the lint rule, not the browser. `Number(null) || 0` made a
+  // payload with unreadable counts indistinguishable from a genuinely calm
+  // account, and the lead said "Nothing needs you right now" — a confident
+  // claim about the account, from nothing.
+  assert.equal(briefingLead({ needs_you: null, needs_attention: null, open: null }), '')
+  assert.equal(briefingLead({}), '')
+  // One readable count is enough to speak about, and the others stay silent
+  // rather than being read as zero.
+  assert.equal(briefingLead({ needs_you: 2, needs_attention: null, open: null }),
+               'Today, work is waiting on you.')
+  // A real zero still speaks — that is the distinction the rule turns on.
+  assert.equal(briefingLead({ needs_you: 0, needs_attention: 0, open: 0 }),
+               'Nothing needs you right now.')
+})
+
+test('RULE 6 — "nothing is connected" is never claimed from an unread count', () => {
+  // The sharpest case on Home: this gates the first-run empty state, which
+  // asserts something about the whole account. An unreadable `open` coerced
+  // to 0 produced that assertion from no evidence.
+  const empty = { overview: { open: 0 }, items: [], agentCount: 0 }
+  assert.equal(isFirstRun(empty), true, 'a genuine empty account still shows it')
+  assert.equal(isFirstRun({ ...empty, overview: { open: null } }), false)
+  assert.equal(isFirstRun({ ...empty, overview: {} }), false)
+  assert.equal(isFirstRun({ ...empty, overview: { open: '' } }), false)
 })
 
 test('the briefing lead never claims a state it did not read', () => {

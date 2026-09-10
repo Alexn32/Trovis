@@ -152,6 +152,25 @@ with TestClient(main.app) as c:
           s.get("description") == "Writes marketing content."
           and "brand voice" in (s.get("description_long") or ""))
 
+    print("-- RULE 6: an agent with nothing recorded is not 'healthy' --")
+    # A green dot here was a pass derived from absence of evidence — the same
+    # shape as the never-run job that badged Healthy on the work board. There
+    # is no health to report about an agent that has not run; saying so is
+    # the only honest render.
+    st, reason = main._detail_status({"last_record_ns": None})
+    check("no records → no_data, never healthy", st == "no_data")
+    check("...and the reason states the absence rather than implying activity",
+          "no runs recorded" in reason.lower())
+    # The measured cases must keep working, or the rule is just a way of
+    # never saying anything.
+    now_ns = time.time_ns()
+    ok_st, _ = main._detail_status({"last_record_ns": now_ns, "cadence_seconds": 60})
+    check("a recently active agent is still healthy", ok_st == "healthy")
+    old_st, _ = main._detail_status({
+        "last_record_ns": now_ns - 10 * 86400 * 10**9, "cadence_seconds": 60})
+    check("a long-quiet agent is still attention, not no_data — silence past "
+          "its own cadence IS the measurement", old_st == "attention")
+
 print()
 if failures:
     print(f"FAILED: {len(failures)}")

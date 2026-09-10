@@ -10,7 +10,7 @@
 // Pure, so the rules are testable without mounting anything.
 
 import { kindPath, pathBasis } from './board.js'
-import { ageLabel, durationLabel, numOrNull, observedPerDay } from './workBoard.js'
+import { NO_DATA, ageLabel, durationLabel, numOrNull, observedPerDay } from './workBoard.js'
 
 /** "$4.12" / "$0.0042" — null when there is nothing real to show. */
 export function costLabel(v) {
@@ -112,13 +112,20 @@ const METRICS = [
 /**
  * The health section: four rows, each naming the number it is derived from.
  *
- * `{ key, label, observed, expected, over }`. `expected` is null when nothing
- * was declared — the row still shows what the record observed, with the
- * comparison column simply empty. That is the whole rule: a verdict needs a
- * declared number, an observation does not, and the page never turns the
+ * `{ key, label, observed, expected, over, noData }`. `expected` is null when
+ * nothing was declared — the row still shows what the record observed, with
+ * the comparison column simply empty. That is the whole rule: a verdict needs
+ * a declared number, an observation does not, and the page never turns the
  * second into the first.
  *
  * `over` marks a breach, and is only ever true when BOTH numbers exist.
+ *
+ * `noData` is rule 6: the observation is missing. It renders as the words
+ * `No data`, not an em dash — a dash is punctuation the reader has to
+ * interpret, and next to three rows carrying numbers it reads as a small
+ * value rather than as no value. It is set whether or not an expectation was
+ * declared, but it MATTERS most where one was: that row is a check that did
+ * not run, and the badge refuses to call the job healthy while it stands.
  */
 export function healthRows(job) {
   const perDay = observedPerDay(job)
@@ -156,7 +163,15 @@ export function healthRows(job) {
       over: fail !== null && maxFail !== null && fail > maxFail,
     },
   }
-  return METRICS.map((m) => ({ ...m, ...rows[m.key] }))
+  return METRICS.map((m) => {
+    const r = rows[m.key]
+    return {
+      ...m,
+      ...r,
+      observed: r.observed === null ? NO_DATA : r.observed,
+      noData: r.observed === null,
+    }
+  })
 }
 
 /**

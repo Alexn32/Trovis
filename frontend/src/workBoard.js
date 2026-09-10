@@ -164,6 +164,53 @@ export function groupByJob(jobs, runs, { now = Date.now() } = {}) {
 }
 
 /**
+ * HONESTY RULE 6 — a verdict requires a measurement.
+ *
+ * Where the observed value is null, the render is `No data`: never a pass,
+ * never a default, never a zero standing in for a value nobody measured.
+ * This is the general form of the bug the browser caught on a never-run job,
+ * which reached `Healthy` because every observed number was null, so no
+ * ceiling could be exceeded and it fell through to the green branch — a
+ * verdict arrived at by absence of evidence.
+ *
+ * It recurs anywhere a comparison is written `observed > expected`, because
+ * that expression is false both when the job is fine and when nothing was
+ * measured, and those are opposite facts.
+ */
+export const NO_DATA = 'No data'
+
+/**
+ * The declared expectations this job has NO observation to check against.
+ *
+ * A declaration the record cannot evaluate is not a passed check — it is a
+ * check that did not run. Returns display labels, so the badge can name what
+ * is missing rather than saying only that something is.
+ *
+ * A measured ZERO is not missing: a job that has never run observed zero runs
+ * per day, and zero against a declared floor is a real breach, not a gap.
+ * Only null — nothing closed yet, the window empty, the query returning no
+ * rows — lands here.
+ */
+export function unmeasuredExpectations(job) {
+  const out = []
+  const add = (label) => { if (!out.includes(label)) out.push(label) }
+  const declaredCadence =
+    numOrNull(job?.expected_per_day_min) !== null
+    || numOrNull(job?.expected_per_day_max) !== null
+  if (declaredCadence && observedPerDay(job) === null) add('cadence')
+  const pairs = [
+    ['expected_close_s', 'median_close_s', 'close time'],
+    ['expected_intervention_pct', 'intervention_pct', 'intervention'],
+    ['expected_failure_pct', 'failure_pct', 'failure rate'],
+  ]
+  for (const [exp, obs, label] of pairs) {
+    if (numOrNull(job?.[exp]) === null) continue
+    if (numOrNull(job?.[obs]) === null) add(label)
+  }
+  return out
+}
+
+/**
  * ONE badge per job, highest severity wins, and it always names its number.
  *
  * A job can be several things at once, and a row that carries three badges
@@ -171,14 +218,24 @@ export function groupByJob(jobs, runs, { now = Date.now() } = {}) {
  *
  *   1. stuck runs                      Failing 2 of 12
  *   2. a wait past the threshold       1 waiting 31h
- *   3. quiet past the expected cadence Quiet 3 days
- *   4. a metric past its ceiling       Intervention 18%, expected under 10%
- *   5. nothing wrong                   Healthy
+ *   3. never ran, against a floor      Never run, expected 8/day
+ *   4. quiet past the expected cadence Quiet 3 days
+ *   5. under the declared floor        0.5/day, expected 8–12
+ *   6. a metric past its ceiling       Intervention 18%, expected under 10%
+ *   7. a declared check with no data   No data for close time
+ *   8. no expectation, but observed    9/day, no expectation set
+ *   9. no expectation and no data      No data, no expectation set
+ *  10. every declared check measured
+ *      and none breached               Healthy
  *
- * Levels 3 and 4 need a DECLARED expectation and simply cannot fire without
- * one: with nothing to compare against there is no such thing as too quiet.
- * A job with no expectation reports its observed numbers and no verdict —
+ * Levels 3–6 need a DECLARED expectation and simply cannot fire without one:
+ * with nothing to compare against there is no such thing as too quiet. A job
+ * with no expectation reports its observed numbers and no verdict —
  * `tone: 'none'` — because a verdict with no number behind it is an adjective.
+ *
+ * A breach outranks a gap (6 before 7) deliberately: a known failure is worth
+ * more of the reader's attention than an unknown. But `Healthy` sits below
+ * BOTH, and is reachable only when every declared check actually ran.
  */
 export function healthBadge(row, { now = Date.now(), waitAfterS = WAIT_ATTENTION_S } = {}) {
   const job = row?.job || null
@@ -234,11 +291,26 @@ export function healthBadge(row, { now = Date.now(), waitAfterS = WAIT_ATTENTION
 
   if (!declared) {
     // Observed, no verdict. The number is real; the judgement is not ours to
-    // make without a declared ceiling.
+    // make without a declared ceiling. With no number either, say BOTH are
+    // missing — "No expectation set" alone would imply the observation was
+    // the part we had.
     const n = perDay
     return {
       tone: 'none',
-      label: n === null ? 'No expectation set' : `${n}/day, no expectation set`,
+      label: n === null ? `${NO_DATA}, no expectation set` : `${n}/day, no expectation set`,
+    }
+  }
+  // Rule 6. Everything above this line fired on a number; below it there is
+  // nothing left that could have. A declared check with no observation did
+  // not pass — it did not run — so it must not fall through to the green
+  // branch, which is exactly how the never-run job earned a tick.
+  const gaps = unmeasuredExpectations(job)
+  if (gaps.length) {
+    return {
+      tone: 'none',
+      label: gaps.length === 1
+        ? `${NO_DATA} for ${gaps[0]}`
+        : `${NO_DATA} for ${gaps.length} checks`,
     }
   }
   return { tone: 'ok', label: 'Healthy' }
@@ -277,16 +349,20 @@ export function firstOverCeiling(job) {
     ['intervention_pct', 'expected_intervention_pct', 'Intervention', '%'],
     ['failure_pct', 'expected_failure_pct', 'Failure rate', '%'],
   ]
+  // Every side of every comparison goes through numOrNull first. `!= null`
+  // lets '' and a stray string through to `>`, which compares them by
+  // coercion — and rule 6 is that a comparison must be between two
+  // measurements or not happen at all.
   for (const [obs, exp, label, unit] of checks) {
-    const o = job?.[obs]
-    const e = job?.[exp]
-    if (o != null && e != null && o > e) {
+    const o = numOrNull(job?.[obs])
+    const e = numOrNull(job?.[exp])
+    if (o !== null && e !== null && o > e) {
       return `${label} ${o}${unit}, expected under ${e}${unit}`
     }
   }
-  const close = job?.median_close_s
-  const closeMax = job?.expected_close_s
-  if (close != null && closeMax != null && close > closeMax) {
+  const close = numOrNull(job?.median_close_s)
+  const closeMax = numOrNull(job?.expected_close_s)
+  if (close !== null && closeMax !== null && close > closeMax) {
     return `Close time ${durationLabel(close)}, expected under ${durationLabel(closeMax)}`
   }
   return null
@@ -305,6 +381,23 @@ export function numOrNull(v) {
   if (v === null || v === undefined || v === '') return null
   const n = Number(v)
   return Number.isFinite(n) ? n : null
+}
+
+/**
+ * True only when the record supplies a number AND it is above zero.
+ *
+ * The companion to numOrNull for the commonest shape in this codebase: a
+ * `> 0` gate that decides whether to make a claim at all. Written as
+ * `Number(x) || 0 > 0` it is safe only by accident — absence and zero both
+ * produce silence, which happens to be right — and the accident ends the
+ * moment someone inverts the test to `=== 0` and starts rendering the other
+ * branch. Then absence becomes a confident "nothing here".
+ *
+ * Saying it once, by name, is what stops that edit from being wrong.
+ */
+export function positive(v) {
+  const n = numOrNull(v)
+  return n !== null && n > 0
 }
 
 /** "4m 18s" / "1h 06m" / "45s" — for a duration in whole seconds. */
