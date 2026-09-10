@@ -1,10 +1,10 @@
-// The board, grouped by job.
+// Job-shaped facts for Work rows.
 //
-// The object this page is about is the JOB — a pattern that runs many times —
-// not the individual run. The previous board gave every run a card, which
-// reads as a wall of equally-important things and makes the one job that
-// stopped running today completely invisible. Here a job is a row, and runs
-// only earn a card when they need a person.
+// These helpers group lean /work/items onto declared jobs and produce a
+// named verdict (health, cadence, expectation). They feed TABLE-ROW
+// enrichment on Work home — a job name and a number under Task — not a
+// kanban landing. The four Working | Waiting | Stuck | Done buckets stay
+// here as data. They must not become the /work home surface.
 //
 // Everything in this file is pure, so the rules can be tested without
 // mounting anything.
@@ -352,6 +352,21 @@ export function applyScope(rows, scope, { now = Date.now() } = {}) {
     })
   }
   return rows || []
+}
+
+/**
+ * What a Monday-table Task cell may show under the title: the job's name,
+ * and a verdict only when it names a problem.
+ *
+ * Calm jobs stay a name. "Healthy" and "no expectation set" are real
+ * readings, but repeating them on every row is a fourth column of noise.
+ * Stuck / quiet / off-expectation keep their number.
+ */
+export function rowJobLine(grouped, { now = Date.now() } = {}) {
+  if (!grouped || grouped.isUnmatched) return null
+  const badge = healthBadge(grouped, { now })
+  const loud = badge && (badge.tone === 'error' || badge.tone === 'warning')
+  return { name: grouped.name, badge: loud ? badge : null }
 }
 
 /** The header's counts, from the same arrays the rows are built from. */

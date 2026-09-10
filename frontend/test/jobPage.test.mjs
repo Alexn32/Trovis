@@ -39,9 +39,8 @@ test('a run is a page at its own URL, not an overlay', () => {
 })
 
 test('every way into a run goes through the route', () => {
-  // A board card, a table row and a past run are three doors to one
-  // destination, and none of them may open a run any other way.
-  assert.match(work, /onOpenRun=\{\(it\) => onRoute\(\{ job: route\.job, run: it\.id \}\)\}/)
+  // A table row and a past run are doors to one destination, and none of
+  // them may open a run any other way.
   assert.match(work, /onOpenItem=\{\(it\) => onRoute\(\{ job: route\.job, run: it\.id \}\)\}/)
   assert.doesNotMatch(work, /setJobView\(/)
 })

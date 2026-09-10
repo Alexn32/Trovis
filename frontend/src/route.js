@@ -30,7 +30,7 @@ export function parsePath(pathname) {
   const tab = PATH_TABS[parts[0] || ''] || 'dashboard'
   if (tab !== 'work') return { tab, job: null, run: null }
   // /work/jobs/:id and /work/runs/:id. An id that is not a positive integer
-  // is not an id — fall back to the board rather than fetching nonsense.
+  // is not an id — fall back to Work home rather than fetching nonsense.
   const [, kind, raw] = parts
   const id = /^\d+$/.test(String(raw || '')) ? Number(raw) : null
   if (kind === 'jobs' && id) return { tab: 'work', job: id, run: null }

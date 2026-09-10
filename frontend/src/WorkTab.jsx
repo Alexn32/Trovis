@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { startAbortable } from './abortable.js'
 import JobDetail from './JobDetail.jsx'
@@ -14,20 +14,17 @@ import {
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
-import {
-  COLUMNS, applyScope, boardTotals, ageLabel, groupByJob,
-  healthBadge, observedPerDay, quietLine, runCardLead,
-} from './workBoard.js'
+import { groupByJob, rowJobLine } from './workBoard.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
-// Work — three levels: the board (grouped by job), a job page, a run page.
-//
-// The board's counts are DERIVED from the run rows it draws, not fetched
-// separately: two numbers on one screen disagreeing is the failure this
-// product sells against, and /work/overview was a second source for the same
-// facts. It is no longer called from here.
+// Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
+// Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
 // Must NOT call /work/summary or /work/board on this path (those starve
 // the replica). Board.jsx stays in the repo unused until F4 reopens it.
+//
+// Job-shaped facts (name, expectation, a numbered verdict) may sit under
+// Task as a subline. They must not become Working | Waiting | Stuck | Done
+// columns on this page.
 //
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
@@ -38,6 +35,13 @@ import { QuietBrand } from './BrandMarks.jsx'
 
 const POLL_START_MS = 30000
 const POLL_MAX_MS = 120000
+
+const OVERVIEW_PILLS = [
+  { key: 'needs_you', label: 'Needs you', tone: 'waiting' },
+  { key: 'needs_attention', label: 'Needs attention', tone: 'stuck' },
+  { key: 'open', label: 'Open', tone: null },
+  { key: 'completed_week', label: 'Done this week', tone: 'quiet' },
+]
 
 // Filters Home's cards navigate in with. Kept in the same vocabulary the Home
 // tiles use; 'attention' mirrors home.js's rule (stuck + aging waits) so the
@@ -83,6 +87,27 @@ function rowClass(status) {
 
 // Render the contract as the API sent it. Do not re-filter rows to "fix"
 // overview totals if /work/items still includes flood until a hotfix.
+
+function OverviewStrip({ overview }) {
+  // Counts are the server contract. Do not recompute or clamp them here.
+  return (
+    <div className="work-overview" aria-label="Work overview">
+      {OVERVIEW_PILLS.map((p) => {
+        const n = overview[p.key] || 0
+        const tone = p.tone && n ? p.tone : p.tone === 'quiet' ? 'quiet' : null
+        return (
+          <div
+            key={p.key}
+            className={`work-pill${tone ? ` is-${tone}` : ''}`}
+          >
+            <span className="work-pill-label">{p.label}</span>
+            <span className="work-pill-value">{n}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function suggestionWhy(s) {
   const who = s.draft_holder?.name
@@ -196,6 +221,28 @@ function SuggestionsStrip({ suggestions, busyId, note, onApprove, onDecline, onE
       </ul>
       {note ? <p className="work-sug-note">{note}</p> : null}
     </section>
+  )
+}
+
+function OverviewSkeleton() {
+  return (
+    <div className="work-overview" aria-busy="true" aria-label="Loading overview">
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+      <span className="work-skel-pill" />
+    </div>
+  )
+}
+
+function TableSkeleton() {
+  return (
+    <div className="work-skel-table" aria-busy="true" aria-label="Loading work">
+      <span />
+      <span />
+      <span />
+      <span />
+    </div>
   )
 }
 
@@ -313,8 +360,12 @@ function PastRunsBand({ runs, loading, onOpenItem }) {
  * The inventory table. Shared by Work home and the Kind page so the two
  * genuinely are the same table — same columns, same sort, same row-opens-
  * JobDetail — rather than two that merely look alike and drift.
+ *
+ * Home may pass `jobMeta` / `onOpenJob` so a row can name its job and a
+ * numbered verdict under Task. Those are sublines, not extra columns, and
+ * they never rearrange the page into Working | Waiting | Stuck | Done.
  */
-function WorkTable({ rows, onOpen, nextCursor, onLoadMore }) {
+function WorkTable({ rows, onOpen, onOpenJob, jobMeta, nextCursor, onLoadMore }) {
   function onRowKey(e, row) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
@@ -330,28 +381,55 @@ function WorkTable({ rows, onOpen, nextCursor, onLoadMore }) {
         <span role="columnheader">What&apos;s next</span>
         <span role="columnheader">Updated</span>
       </div>
-      {rows.map((row) => (
-        <div
-          key={row.id}
-          className={rowClass(row.status)}
-          role="button"
-          tabIndex={0}
-          onClick={() => onOpen(row)}
-          onKeyDown={(e) => onRowKey(e, row)}
-          aria-label={row.title}
-        >
-          <span className="work-td-title">{row.title}</span>
-          <span className={`work-status-pill ${row.status || ''}`}>
-            {workItemStatusLabel(row.status)}
-          </span>
-          <span className="work-td-holder">
-            <QuietBrand texts={[row.holder?.name]} size={12} />
-            {holderLabel(row.holder, row.status)}
-          </span>
-          <span className="work-td-next">{row.whats_next || ''}</span>
-          <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
-        </div>
-      ))}
+      {rows.map((row) => {
+        const meta = jobMeta?.get(String(row.workflow_id))
+          || (row.workflow_name ? { name: row.workflow_name, badge: null } : null)
+        return (
+          <div
+            key={row.id}
+            className={rowClass(row.status)}
+            role="row"
+            tabIndex={0}
+            onClick={() => onOpen(row)}
+            onKeyDown={(e) => onRowKey(e, row)}
+            aria-label={row.title}
+          >
+            <span className="work-td-title">
+              <span className="work-td-task">{row.title}</span>
+              {meta?.name && (
+                <span className="work-td-job">
+                  {onOpenJob && row.workflow_id != null ? (
+                    <button
+                      type="button"
+                      className="work-td-job-name"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onOpenJob(row.workflow_id)
+                      }}
+                    >
+                      {meta.name}
+                    </button>
+                  ) : (
+                    <span className="work-td-job-name is-plain">{meta.name}</span>
+                  )}
+                  {meta.badge && (
+                    <span className={`jb-badge tone-${meta.badge.tone}`}>{meta.badge.label}</span>
+                  )}
+                </span>
+              )}
+            </span>
+            <span className={`work-status-pill ${row.status || ''}`}>
+              {workItemStatusLabel(row.status)}
+            </span>
+            <span className="work-td-holder">
+              <QuietBrand texts={[row.holder?.name]} size={12} />
+              {holderLabel(row.holder, row.status)}
+            </span>
+            <span className="work-td-next">{row.whats_next || ''}</span>
+            <span className="work-td-updated">{workUpdatedLabel(row.updated_at)}</span>
+          </div>
+        )
+      })}
       {nextCursor && onLoadMore && (
         <button type="button" className="btn work-more" onClick={onLoadMore}>
           Load more
@@ -436,219 +514,71 @@ function KindPage({
   )
 }
 
-// --- the board, grouped by job -------------------------------------------
-//
-// The job is the object. A run only earns a card when it needs a person;
-// everything else is a count, because a wall of equal cards buries the two
-// rows that matter and hides the job that stopped running entirely.
-
-function HealthBadge({ badge }) {
-  return <span className={`jb-badge tone-${badge.tone}`}>{badge.label}</span>
-}
-
-function RunCard({ row, onOpen, now }) {
-  const { lead, sub } = runCardLead(row, { now })
-  return (
-    <button
-      type="button"
-      className={`jb-card is-${row.status}`}
-      onClick={() => onOpen(row)}
-      title={row.title || undefined}
-    >
-      <span className="jb-card-lead">{lead}</span>
-      {sub && <span className="jb-card-sub">{sub}</span>}
-    </button>
-  )
-}
-
-/** The counts strip, aligned to the four columns. Every run is in here. */
-function CountStrip({ counts }) {
-  return (
-    <div className="jb-counts" aria-label="Runs by state">
-      {COLUMNS.map((c) => (
-        <span key={c.key} className={`jb-count tone-${c.key}`}>
-          <b>{counts[c.key]}</b> {c.label.toLowerCase()}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-function JobRow({ row, onOpenJob, onOpenRun, now }) {
-  const badge = healthBadge(row, { now })
-  const job = row.job
-  const perDay = observedPerDay(job)
-  // Cadence sits here only when there is an expectation to read it against.
-  // Without one the badge already carries the bare observed number, and the
-  // same figure twice on one row is noise.
-  const cadence =
-    perDay !== null && job?.expected_per_day_min != null
-      ? `${perDay}/day, expected ${
-          job.expected_per_day_max != null
-            ? `${job.expected_per_day_min}–${job.expected_per_day_max}`
-            : `${job.expected_per_day_min}+`
-        }`
-      : null
-  const meta = [
-    job?.owning_service_name || null,
-    cadence,
-    // Only a real cost. A per-run figure of $0.00 on a job whose spans
-    // carried no cost reads as a measurement of zero.
-    job?.cost_per_run != null ? `${fmtCost(job.cost_per_run)}/run` : null,
-  ].filter(Boolean)
-
-  // A job that ran nothing at all collapses to its header plus when it last
-  // ran. This is the row a flat board of live runs cannot draw.
-  const idle = row.total === 0
-  const lastRan = ageLabel(job?.last_run_at, now)
-
-  return (
-    <section className={`jb-row${idle ? ' is-idle' : ''}`} aria-label={row.name}>
-      <header className="jb-head">
-        {row.isUnmatched ? (
-          <span className="jb-name is-unmatched">{row.name}</span>
-        ) : (
-          <button type="button" className="jb-name" onClick={() => onOpenJob(row)}>
-            {row.name}
-          </button>
-        )}
-        {job?.workflow_archived_at && <span className="jb-archived">archived</span>}
-        {!row.isUnmatched && <HealthBadge badge={badge} />}
-      </header>
-      {row.isUnmatched ? (
-        <p className="jb-meta">
-          {row.total} {row.total === 1 ? 'run' : 'runs'} matched to no job
-        </p>
-      ) : (
-        meta.length > 0 && <p className="jb-meta">{meta.join(' \u00b7 ')}</p>
-      )}
-
-      {idle ? (
-        <p className="jb-quiet">{lastRan ? `Last ran ${lastRan} ago.` : 'Never run.'}</p>
-      ) : (
-        <>
-          <CountStrip counts={row.counts} />
-          {row.exceptions === 0 ? (
-            <p className="jb-quiet">{quietLine(row)}</p>
-          ) : (
-            <div className="jb-grid">
-              {COLUMNS.map((c) => (
-                <div key={c.key} className="jb-cell">
-                  {row.columns[c.key].slice(0, 2).map((r) => (
-                    <RunCard key={r.id} row={r} onOpen={onOpenRun} now={now} />
-                  ))}
-                  {row.columns[c.key].length > 2 && !row.isUnmatched && (
-                    <button
-                      type="button"
-                      className="jb-more"
-                      onClick={() => onOpenJob(row, c.key)}
-                    >
-                      {row.columns[c.key].length - 2} more \u2192
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </section>
-  )
-}
-
-/** "$4.12" / "$0.0042" — null when there is nothing real to show. */
-function fmtCost(v) {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n <= 0) return null
-  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
-}
-
-function BoardHome({
-  jobs, items, itemsErr, onRetryItems, costToday, layout, onLayout,
-  scope, onScope, filter, onClearFilter, onOpenJob, onOpenRun, onNewJob,
-  suggestions, busyId, suggestionNote,
-  onApproveSuggestion, onDeclineSuggestion, onEditSuggestion,
-  nextCursor, onLoadMore,
+function WorkHome({
+  onConnectAgent,
+  overview,
+  overviewErr,
+  onRetryOverview,
+  items,
+  itemsErr,
+  onRetryItems,
+  jobs,
+  suggestions,
+  nextCursor,
+  onLoadMore,
+  busyId,
+  suggestionNote,
+  onApproveSuggestion,
+  onDeclineSuggestion,
+  onEditSuggestion,
+  filter,
+  onClearFilter,
+  onOpenItem,
+  onOpenJob,
 }) {
-  const now = Date.now()
-  const all = applyScope(items || [], scope, { now })
-  const shown = filter ? all.filter((r) => matchesWorkFilter(r, filter)) : all
-  const rows = groupByJob(jobs || [], shown, { now })
-  const totals = boardTotals(rows)
-  const cost = fmtCost(costToday)
-
-  if (itemsErr && !items) {
-    return (
-      <div className="view work-home">
-        <WorkLoadFailed lead="Can\'t load work" onRetry={onRetryItems} />
-      </div>
-    )
-  }
+  const all = sortWorkItems(items || [])
+  const rows = all.filter((r) => (filter ? matchesWorkFilter(r, filter) : true))
+  const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
+  // Filtered down to nothing is a different situation from having no work:
+  // the answer is to clear a chip, not to connect an agent.
+  const filteredOut = !!items && rows.length === 0 && all.length > 0
+  const jobMeta = useMemo(() => {
+    const now = Date.now()
+    const grouped = groupByJob(jobs || [], items || [], { now })
+    const map = new Map()
+    for (const g of grouped) {
+      const line = rowJobLine(g, { now })
+      if (line) map.set(g.key, line)
+    }
+    return map
+  }, [jobs, items])
 
   return (
-    <div className="view work-home work-board">
+    <div className="view work-home">
       <header className="work-home-head">
         <h1>Work</h1>
-        <button type="button" className="btn btn-primary jb-new" onClick={onNewJob}>
-          New job
-        </button>
-      </header>
-
-      {/* Every number here is derived from the rows below, never queried
-          separately — two counts on one screen disagreeing is the failure
-          this product sells against. The cost is the exception and says so:
-          it is account-wide and includes spend no job can claim. */}
-      <p className="jb-totals">
-        <span>{totals.jobs} {totals.jobs === 1 ? 'job' : 'jobs'}</span>
-        <button type="button" onClick={() => onScope(scope === 'today' ? null : 'today')}>
-          {totals.done} done today
-        </button>
-        <button type="button" onClick={() => onClearFilter('waiting')}>
-          {totals.waiting} waiting
-        </button>
-        <button type="button" onClick={() => onClearFilter('stuck')}>
-          {totals.stuck} stuck
-        </button>
-        {cost && <span className="jb-cost">{cost} in 24h</span>}
-      </p>
-
-      <div className="jb-filters" role="group" aria-label="Board view">
-        <button
-          type="button"
-          className={`jb-pill${layout === 'grouped' ? ' is-on' : ''}`}
-          onClick={() => onLayout('grouped')}
-        >
-          By job
-        </button>
-        <button
-          type="button"
-          className={`jb-pill${layout === 'flat' ? ' is-on' : ''}`}
-          onClick={() => onLayout('flat')}
-        >
-          Flat
-        </button>
-        <button
-          type="button"
-          className={`jb-pill${scope === 'mine' ? ' is-on' : ''}`}
-          onClick={() => onScope(scope === 'mine' ? null : 'mine')}
-        >
-          Mine
-        </button>
-        <button
-          type="button"
-          className={`jb-pill${scope === 'today' ? ' is-on' : ''}`}
-          onClick={() => onScope(scope === 'today' ? null : 'today')}
-        >
-          Today
-        </button>
+        {/* Arriving from a Home card. Always dismissible — a filter you cannot
+            see or clear is just a table that looks broken. */}
         {filter && (
-          <button type="button" className="work-filter-chip" onClick={() => onClearFilter(null)}>
+          <button
+            type="button"
+            className="work-filter-chip"
+            onClick={onClearFilter}
+            aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
+          >
             {WORK_FILTER_LABELS[filter] || filter}
-            <span aria-hidden="true">\u00d7</span>
+            <span aria-hidden="true">×</span>
           </button>
         )}
-      </div>
+      </header>
 
+      {overview && <OverviewStrip overview={overview} />}
+      {!overview && overviewErr && (
+        <div className="work-section-failed">
+          <WorkLoadFailed lead="Can't load these counts" onRetry={onRetryOverview} />
+        </div>
+      )}
+      {!overview && !overviewErr && <OverviewSkeleton />}
       <SuggestionsStrip
         suggestions={suggestions}
         busyId={busyId}
@@ -658,23 +588,45 @@ function BoardHome({
         onEdit={onEditSuggestion}
       />
 
-      {layout === 'flat' ? (
-        <WorkTable rows={sortWorkItems(shown)} onOpen={onOpenRun}
-                   nextCursor={nextCursor} onLoadMore={onLoadMore} />
-      ) : rows.length === 0 ? (
-        <p className="jb-quiet">No work on the record yet.</p>
-      ) : (
-        <>
-          {/* The column headers appear ONCE, not per job. */}
-          <div className="jb-colheads" aria-hidden="true">
-            {COLUMNS.map((c) => <span key={c.key}>{c.label}</span>)}
-          </div>
-          {rows.map((r) => (
-            <JobRow key={r.key} row={r} now={now}
-                    onOpenJob={onOpenJob} onOpenRun={onOpenRun} />
-          ))}
-        </>
+      {itemsErr && !items && (
+        <div className="work-section-failed">
+          <WorkLoadFailed lead="Can't load this work" onRetry={onRetryItems} />
+        </div>
       )}
+      {!items && !itemsErr && <TableSkeleton />}
+
+      {filteredOut && !empty && (
+        <div className="board-empty">
+          <p className="board-empty-lead">Nothing matches these filters.</p>
+          <p className="board-empty-sub">Clear a filter above to see the rest of the work.</p>
+        </div>
+      )}
+
+      {empty && (
+        <div className="board-empty">
+          <p className="board-empty-lead">No named work yet.</p>
+          <p className="board-empty-sub">
+            Connect an agent and titled tasks show up here on their own. You will not have to enter any of it.
+          </p>
+          {onConnectAgent && (
+            <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
+              Connect an agent
+            </button>
+          )}
+        </div>
+      )}
+
+      {items && !empty && !filteredOut && (
+        <WorkTable
+          rows={rows}
+          onOpen={onOpenItem}
+          onOpenJob={onOpenJob}
+          jobMeta={jobMeta}
+          nextCursor={nextCursor}
+          onLoadMore={onLoadMore}
+        />
+      )}
+
     </div>
   )
 }
@@ -717,19 +669,16 @@ export default function WorkTab({
   const [finished, setFinished] = useState(null)
   const [finishedLoading, setFinishedLoading] = useState(false)
 
-  // The declared jobs. Needed even when a job has no runs today — a job that
-  // STOPPED running is exactly what a board of live runs cannot show, and it
-  // is the main reason this page groups.
+  // Declared jobs, for table-row enrichment (name + numbered verdict).
+  // Not a second count source — overview pills stay authoritative.
   const [jobs, setJobs] = useState(null)
-  const [costToday, setCostToday] = useState(null)
-  // Bumped when a write should re-read the declarations (a new job, a
-  // resolved handoff). Not a poll.
   const [refreshKeyForJobs, setRefreshKeyForJobs] = useState(0)
-  const [layout, setLayout] = useState('grouped')  // 'grouped' | 'flat'
-  const [scope, setScope] = useState(null)         // null | 'mine' | 'today'
+
+  const [overview, setOverview] = useState(null)
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
   const [nextCursor, setNextCursor] = useState(null)
+  const [overviewErr, setOverviewErr] = useState(null)
   const [itemsErr, setItemsErr] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [suggestionNote, setSuggestionNote] = useState(null)
@@ -761,14 +710,27 @@ export default function WorkTab({
     })
   }, [kindOpen, kindWorkflowId])
 
+  const overviewFailSoftRef = useRef(false)
   const itemsFailSoftRef = useRef(false)
   const failSoftRef = useRef(false)
   // Read by the poll timer, which is scheduled once — a ref so a tab switch
   // doesn't tear down and restart the interval.
   const activeRef = useRef(active)
   activeRef.current = active
+  overviewFailSoftRef.current = !overview && !!overviewErr
   itemsFailSoftRef.current = !items && !!itemsErr
-  failSoftRef.current = itemsFailSoftRef.current
+  failSoftRef.current = overviewFailSoftRef.current && itemsFailSoftRef.current
+
+  const loadOverview = useCallback(async () => {
+    try {
+      const ov = await api.getWorkOverview()
+      setOverview(ov)
+      setOverviewErr(null)
+    } catch (e) {
+      setOverviewErr(e?.message || "Can't load these counts")
+      throw e
+    }
+  }, [])
 
   const loadItems = useCallback(async () => {
     try {
@@ -791,13 +753,19 @@ export default function WorkTab({
 
   const load = useCallback(async () => {
     const tasks = []
+    if (!overviewFailSoftRef.current) tasks.push(loadOverview())
     if (!itemsFailSoftRef.current) tasks.push(loadItems())
     loadSuggestions()
     const results = await Promise.allSettled(tasks)
     if (results.some((r) => r.status === 'rejected')) {
       throw new Error('section failed')
     }
-  }, [loadItems, loadSuggestions])
+  }, [loadOverview, loadItems, loadSuggestions])
+
+  function retryOverview() {
+    setOverviewErr(null)
+    loadOverview().catch(() => {})
+  }
 
   function retryItems() {
     setItemsErr(null)
@@ -805,7 +773,7 @@ export default function WorkTab({
   }
 
   async function refreshNamedWork() {
-    await Promise.allSettled([loadItems()])
+    await Promise.allSettled([loadOverview(), loadItems()])
     setRefreshKeyForJobs((n) => n + 1)
   }
 
@@ -865,19 +833,14 @@ export default function WorkTab({
     }
   }
 
-  // Jobs and today's spend, alongside the runs. Two more lean reads, both
-  // already in use elsewhere; no new polling — these ride the same effect and
-  // simply do not refetch on the interval, because a declaration and a daily
-  // total do not change between ticks the way live runs do.
+  // Declarations only — not polled. A job name and its expectation do not
+  // change between ticks the way live runs do.
   useEffect(
     () =>
       startAbortable(({ signal, isAlive }) => {
         api.getWorkflows({ signal })
           .then((r) => isAlive() && setJobs(Array.isArray(r) ? r : []))
           .catch(() => isAlive() && setJobs([]))
-        api.getCost({ signal })
-          .then((r) => isAlive() && setCostToday(Number(r?.today) || 0))
-          .catch(() => isAlive() && setCostToday(null))
       }),
     [refreshKeyForJobs],
   )
@@ -920,6 +883,9 @@ export default function WorkTab({
   // WHICH PAGE is the URL's job now, not local state. Back, Forward and a
   // pasted link all go through the same path, so they cannot diverge.
   const openJob = route.job ? (jobs || []).find((j) => j.id === route.job) || null : null
+  const kindName = openJob?.name
+    || (items || []).find((r) => r.workflow_id === route.job)?.workflow_name
+    || ''
 
   if (route.run) {
     return (
@@ -942,7 +908,7 @@ export default function WorkTab({
   return (
     route.job ? (
       <KindPage
-        kindName={openJob?.name || ''}
+        kindName={kindName}
         workflowId={route.job}
         items={items || []}
         finished={finished}
@@ -954,29 +920,27 @@ export default function WorkTab({
         onOpenAgent={onOpenAgent}
       />
     ) : (
-    <BoardHome
-      jobs={jobs}
+    <WorkHome
+      onConnectAgent={connectAgent}
+      overview={overview}
+      overviewErr={overviewErr}
+      onRetryOverview={retryOverview}
       items={items}
       itemsErr={itemsErr}
       onRetryItems={retryItems}
-      costToday={costToday}
-      layout={layout}
-      onLayout={setLayout}
-      scope={scope}
-      onScope={setScope}
-      filter={filter}
-      onClearFilter={setFilter}
+      jobs={jobs}
       suggestions={suggestions}
+      nextCursor={nextCursor}
+      onLoadMore={loadMore}
       busyId={busyId}
       suggestionNote={suggestionNote}
       onApproveSuggestion={approveSuggestion}
       onDeclineSuggestion={declineSuggestion}
       onEditSuggestion={editSuggestion}
-      nextCursor={nextCursor}
-      onLoadMore={loadMore}
-      onNewJob={onNewWorkflow || connectAgent}
-      onOpenRun={(it) => onRoute({ job: route.job, run: it.id })}
-      onOpenJob={(row) => onRoute({ job: Number(row.key), run: null })}
+      filter={filter}
+      onClearFilter={() => setFilter(null)}
+      onOpenItem={(it) => onRoute({ job: route.job, run: it.id })}
+      onOpenJob={(id) => onRoute({ job: Number(id), run: null })}
     />
     )
   )
