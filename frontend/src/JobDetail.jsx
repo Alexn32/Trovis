@@ -5,8 +5,8 @@ import { WorkLoadFailed } from './ui.jsx'
 import { workItemStatusLabel, workUpdatedLabel } from './board.js'
 import { openAsk } from './askOpen.js'
 import {
-  ACTOR_LABEL, askPrompt, canDecide, processSteps, runAgentRoute, runCost,
-  runDuration, runErrorLine, shortHistory,
+  ACTOR_LABEL, askPrompt, canDecide, jobActions, processSteps, runAgentRoute,
+  runCost, runDuration, runErrorLine, shortHistory,
 } from './jobDetail.js'
 
 // ---------------------------------------------------------------------------
@@ -23,9 +23,25 @@ import {
 // only when someone expands the runs section. Never the fat board, never a
 // span dump: the point of this screen is the process, and the raw runs are the
 // one thing deliberately folded away.
+//
+// Two shapes, one component:
+//
+//   variant="panel"  a slide-over. Home's desk uses it — you act on a row and
+//                    you are done, and losing your place on Home to do that
+//                    would be the wrong trade.
+//   variant="page"   a full page inside the Work pane. Work is where you go
+//                    to look INTO a job, so the job gets the screen, keeps a
+//                    back link to exactly where you came from, and shows the
+//                    action list rather than folding the runs away.
+//
+// On the page the action list IS the runs, so there is no separate raw fold
+// under it: the same eight rows twice is not more depth. The panel keeps the
+// fold, because the panel has no action list.
 // ---------------------------------------------------------------------------
 
-export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
+export default function JobDetail({
+  item, onClose, onResolved, onOpenAgent, variant = 'panel', backLabel = '← Back',
+}) {
   const [detail, setDetail] = useState(null)
   const [err, setErr] = useState(null)
   const [reload, setReload] = useState(0)
@@ -63,6 +79,32 @@ export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
   })
   const history = shortHistory(detail?.timeline)
   const decidable = canDecide({ ...view, ...(detail || {}) })
+  const isPage = variant === 'page'
+
+  // The page's action list is the runs, so the page loads them on enter —
+  // ONE request for the whole list, never one per action. The panel does not
+  // (its fold still fetches lazily on open), so a Home desk row costs exactly
+  // what it did before.
+  const [runs, setRuns] = useState(null)
+  const [runsErr, setRunsErr] = useState(null)
+  const [runsReload, setRunsReload] = useState(0)
+  useEffect(() => {
+    if (!isPage) return undefined
+    setRunsErr(null)
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkItem(item.id, { include: 'runs', signal })
+        .then((d) => isAlive() && setRuns(Array.isArray(d?.runs) ? d.runs : []))
+        .catch((e) => isAlive() && setRunsErr(e))
+    })
+  }, [isPage, item.id, runsReload])
+  const retryRuns = useCallback(() => {
+    setRuns(null)
+    setRunsErr(null)
+    setRunsReload((n) => n + 1)
+  }, [])
+  const runsLoading = isPage && runs === null && !runsErr
+  const actions = jobActions(runs, { status: view.status })
 
   async function resolve(kind) {
     const handoffId = detail?.awaiting_handoff_event_id
@@ -79,13 +121,11 @@ export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
     }
   }
 
-  return (
+  const body = (
     <>
-      <div className="bpanel-scrim" onClick={onClose} />
-      <aside className="jobd" role="dialog" aria-label={view.title}>
         <header className="jobd-head">
           <button type="button" className="jobd-close" onClick={onClose}>
-            ← Back
+            {isPage ? backLabel : '← Back'}
           </button>
           <h2 className="jobd-title">{view.title}</h2>
           <div className="jobd-status">
@@ -96,6 +136,11 @@ export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
             {view.updated_at && (
               <span className="jobd-age">{workUpdatedLabel(view.updated_at)}</span>
             )}
+            {/* Totals for the whole job, and only when the record has them.
+                Same rule as a run's own line: $0.00 is not a cost. */}
+            {isPage && jobTotals(runs).map((t) => (
+              <span key={t} className="jobd-total">{t}</span>
+            ))}
           </div>
         </header>
 
@@ -119,6 +164,18 @@ export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
               onAsk={() => openAsk(askPrompt(view))}
             />
 
+            {isPage ? (
+              <ActionList
+                actions={actions}
+                loading={runsLoading}
+                failed={Boolean(runsErr)}
+                onRetry={retryRuns}
+                steps={steps}
+                hidden={hidden}
+                detail={detail}
+                onOpenAgent={onOpenAgent}
+              />
+            ) : (
             <section className="jobd-section" aria-label="Steps">
               <h3 className="dash-caps">How this job runs</h3>
               {!detail ? (
@@ -162,14 +219,20 @@ export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
                 </>
               )}
             </section>
+            )}
 
             {history.length > 0 && (
-              <section className="jobd-section" aria-label="History">
-                <h3 className="dash-caps">Recent handoffs</h3>
+              <section className="jobd-section" aria-label="Recent passes">
+                <h3 className="dash-caps">Recent passes</h3>
                 <ul className="jobd-history">
                   {history.map((h, i) => (
                     <li key={i}>
                       <span className="jobd-hist-text">{h.text}</span>
+                      {/* Repeats are collapsed, and the count says so rather
+                          than the row quietly standing for five. */}
+                      {h.count > 1 && (
+                        <span className="jobd-hist-count">×{h.count}</span>
+                      )}
                       {h.at && (
                         <span className="jobd-hist-at">{workUpdatedLabel(h.at)} ago</span>
                       )}
@@ -179,11 +242,163 @@ export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
               </section>
             )}
 
-            <AgentRuns itemId={item.id} onOpenAgent={onOpenAgent} />
+            {/* The page's action list already IS these runs, so folding the
+                same rows underneath it would be depth in name only. */}
+            {!isPage && <AgentRuns itemId={item.id} onOpenAgent={onOpenAgent} />}
           </>
         )}
+    </>
+  )
+
+  if (isPage) {
+    return (
+      <div className="view job-page" aria-label={view.title}>
+        {body}
+      </div>
+    )
+  }
+  return (
+    <>
+      <div className="bpanel-scrim" onClick={onClose} />
+      <aside className="jobd" role="dialog" aria-label={view.title}>
+        {body}
       </aside>
     </>
+  )
+}
+
+/**
+ * What the whole job took, for the page header. One entry per fact we
+ * actually have — an empty array when the record has neither, so the header
+ * simply does not carry the line rather than carrying a zero.
+ */
+function jobTotals(runs) {
+  const rows = runs || []
+  const out = []
+  const ms = rows.reduce((n, r) => n + (Number(r?.duration_ms) || 0), 0)
+  const total = runDuration(ms)
+  if (total) out.push(total)
+  const cost = runCost(rows.reduce((n, r) => n + (Number(r?.cost_usd) || 0), 0))
+  if (cost) out.push(cost)
+  return out
+}
+
+/**
+ * How this job ran: one row per MOVE, oldest first.
+ *
+ * A different cut from both neighbours, which is why it earns its own list.
+ * The kind page's path is coarse hands (Agent → Tool → Person) and says
+ * nothing about how many times each acted; Recent passes is who was holding
+ * the job. Two tool calls are two moves here, one Tool node there, and no
+ * pass at all.
+ *
+ * When the record has no action-shaped rows we fall back to the old spine
+ * rather than drawing an empty frame — the process is still true even when
+ * the moves behind it were never exported.
+ */
+function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, onOpenAgent }) {
+  if (loading) {
+    return (
+      <section className="jobd-section" aria-label="How this job ran">
+        <h3 className="dash-caps">How this job ran</h3>
+        <div className="dash-skel">
+          <span style={{ width: '70%' }} />
+          <span style={{ width: '50%' }} />
+        </div>
+      </section>
+    )
+  }
+
+  if (actions.length === 0) {
+    return (
+      <section className="jobd-section" aria-label="How this job ran">
+        <h3 className="dash-caps">How this job ran</h3>
+        {failed && (
+          <p className="dash-empty" role="alert">
+            Couldn&apos;t load what this job did.{' '}
+            <button type="button" className="dash-link" onClick={onRetry}>
+              Retry
+            </button>
+          </p>
+        )}
+        {/* No moves on the record — show the route it took instead of an
+            empty frame. Absent beats invented. */}
+        {!detail ? null : steps.length === 0 ? (
+          <p className="dash-empty">No steps recorded yet.</p>
+        ) : (
+          <>
+            {hidden > 0 && (
+              <p className="jobd-truncated">
+                {hidden} earlier {hidden === 1 ? 'step' : 'steps'} not shown
+              </p>
+            )}
+            <ol className="jobd-steps">
+              {steps.map((s, i) => (
+                <li
+                  key={`${s.actor.kind}-${s.actor.name}-${i}`}
+                  className={`jobd-step kind-${s.actor.kind}${s.isCurrent ? ' is-current' : ''}`}
+                >
+                  <span className="jobd-step-dot" aria-hidden="true" />
+                  <span className="jobd-step-who">
+                    <span className="jobd-step-kind">
+                      {s.isYou ? 'You' : ACTOR_LABEL[s.actor.kind]}
+                    </span>
+                    {s.actor.name && !s.isYou && (
+                      <span className="jobd-step-name">{s.actor.name}</span>
+                    )}
+                  </span>
+                  {s.text && !s.isCurrent && (
+                    <span className="jobd-step-text">{s.text}</span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </>
+        )}
+      </section>
+    )
+  }
+
+  return (
+    <section className="jobd-section" aria-label="How this job ran">
+      <h3 className="dash-caps">How this job ran</h3>
+      <ol className="jobd-acts">
+        {actions.map((a, i) => (
+          <li
+            key={i}
+            className={`jobd-act${a.errored ? ' is-errored' : ''}${a.isCurrent ? ' is-current' : ''}`}
+          >
+            <span className="jobd-act-dot" aria-hidden="true" />
+            <div className="jobd-act-main">
+              <span className="jobd-act-what">{a.what}</span>
+              <span className={`jobd-act-result${a.errored ? ' is-errored' : ''}`}>
+                {a.result}
+              </span>
+            </div>
+            <div className="jobd-act-meta">
+              {a.who.name &&
+                (onOpenAgent && a.route ? (
+                  <button
+                    type="button"
+                    className="jobd-run-agent"
+                    onClick={() => onOpenAgent(a.route[0], a.route[1])}
+                  >
+                    {a.who.name}
+                  </button>
+                ) : (
+                  <span className="jobd-run-agent is-plain">{a.who.name}</span>
+                ))}
+              {a.system && <span className="jobd-act-system">{a.system}</span>}
+              {a.at && <span>{workUpdatedLabel(a.at)} ago</span>}
+              {a.duration && <span>{a.duration}</span>}
+              {a.cost && <span>{a.cost}</span>}
+              {a.isCurrent && <span className="jobd-act-now">now</span>}
+            </div>
+            {a.reason && <p className="jobd-run-why">{a.reason}</p>}
+          </li>
+        ))}
+      </ol>
+    </section>
   )
 }
 

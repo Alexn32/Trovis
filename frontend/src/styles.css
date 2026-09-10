@@ -6448,6 +6448,75 @@ select.wf2-input { cursor: pointer; }
 .jobd-history > li:last-child { border-bottom: none; }
 .jobd-hist-text { color: var(--text-secondary); }
 .jobd-hist-at { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Collapsed repeats. Quiet, but present — the row stands for more than one
+   pass and should say so rather than looking like a single event. */
+.jobd-hist-count {
+  margin-left: auto; margin-right: 10px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; font-size: 11.5px;
+}
+
+/* --- Job as a full page inside the Work pane ---------------------------- */
+/* Same subject-gets-the-screen shape as the kind page: a back link to
+   exactly where you came from, then the job. No scrim, nothing dimmed —
+   you entered the task, you did not peek at it. */
+/* A centred column, the width the agent page already uses for one subject.
+   The list pages either side of this one are full-bleed on purpose — a table
+   wants the room — but a single job is something you read, and capping the
+   whole page (not just its sections) keeps the header and the body on the
+   same edge. */
+.job-page {
+  display: flex; flex-direction: column; gap: 20px;
+  max-width: 980px; margin: 0 auto; width: 100%;
+}
+.job-page .jobd-head { gap: 8px; }
+.job-page .jobd-title {
+  font-size: 30px; letter-spacing: -0.03em; line-height: 1.2;
+}
+.job-page .jobd-status { font-size: 13px; }
+.job-page .jobd-section { gap: 10px; }
+.jobd-total { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* --- How this job ran: one row per move --------------------------------- */
+.jobd-acts { list-style: none; margin: 0; padding: 0; }
+.jobd-act {
+  position: relative; padding: 9px 0 9px 20px;
+  border-top: 1px solid var(--border-subtle, var(--border-default));
+  display: flex; flex-direction: column; gap: 3px; font-size: 12.5px;
+}
+.jobd-act:first-child { border-top: none; }
+/* The spine: these are moves in sequence, so they get a thread rather than
+   sitting as unrelated rows. */
+.jobd-act::before {
+  content: ''; position: absolute; left: 3px; top: 0; bottom: 0;
+  width: 1px; background: var(--border-default);
+}
+.jobd-act:first-child::before { top: 16px; }
+.jobd-act:last-child::before { bottom: calc(100% - 16px); }
+.jobd-act-dot {
+  position: absolute; left: 0; top: 13px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--border-default);
+}
+.jobd-act.is-errored .jobd-act-dot { background: var(--error); }
+.jobd-act.is-current .jobd-act-dot {
+  background: var(--warning); box-shadow: 0 0 0 3px var(--warm-fill);
+}
+.jobd-act-main { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.jobd-act-what { color: var(--text-primary); font-weight: 600; }
+.jobd-act.is-errored .jobd-act-what { color: var(--error); }
+.jobd-act-result { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.jobd-act-result.is-errored { color: var(--error); font-weight: 600; }
+.jobd-act-meta {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  color: var(--text-muted); font-size: 12px;
+}
+.jobd-act-meta > * + *::before { content: '·'; margin-right: 8px; color: var(--text-muted); }
+/* The system the move reached for — named, because "Stripe" says more than
+   "a tool". */
+.jobd-act-system { color: var(--text-secondary); }
+.jobd-act-now {
+  color: var(--warning); font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; font-size: 10.5px;
+}
 
 /* Runs: folded away. This screen exists to spare you them. */
 .jobd-runs { border-top: 1px solid var(--border-default); padding-top: 14px; }

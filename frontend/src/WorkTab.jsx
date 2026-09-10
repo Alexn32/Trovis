@@ -483,9 +483,8 @@ function WorkTable({ rows, onOpen, nextCursor, onLoadMore }) {
  */
 function KindPage({
   kindName, workflowId, items, finished, finishedLoading,
-  filter, onClearFilter, onBack, onOpenItem, onItemResolved, onOpenAgent,
+  filter, onClearFilter, onBack, onOpenItem, onOpenAgent,
 }) {
-  const [open, setOpen] = useState(null)
   const mine = items.filter((r) => matchesKind(r, kindName))
   // "Still open" means still open. Finished work is Past runs' subject, and
   // listing it under both headings would make one of the two a lie.
@@ -528,9 +527,9 @@ function KindPage({
         kindName={kindName}
         open={openRows}
         hottest={hottestOpen(mine)}
-        onOpenItem={setOpen}
+        onOpenItem={onOpenItem}
       />
-      <PastRunsBand runs={runs} loading={finishedLoading} onOpenItem={setOpen} />
+      <PastRunsBand runs={runs} loading={finishedLoading} onOpenItem={onOpenItem} />
 
       <section className="kind-band" aria-label="Open work">
         <h2 className="dash-caps">Still open</h2>
@@ -542,21 +541,10 @@ function KindPage({
         ) : rows.length === 0 ? (
           <p className="kind-quiet">Nothing open here.</p>
         ) : (
-          <WorkTable rows={rows} onOpen={setOpen} />
+          <WorkTable rows={rows} onOpen={onOpenItem} />
         )}
       </section>
 
-      {open && (
-        <JobDetail
-          item={open}
-          onOpenAgent={onOpenAgent}
-          onClose={() => setOpen(null)}
-          onResolved={() => {
-            setOpen(null)
-            onItemResolved()
-          }}
-        />
-      )}
     </div>
   )
 }
@@ -579,11 +567,11 @@ function WorkHome({
   onEditSuggestion,
   filter,
   onClearFilter,
-  onItemResolved,
+  onOpenItem,
   onOpenKind,
   onOpenAgent,
 }) {
-  const [open, setOpen] = useState(null)
+
   // The kind filter is in-page and composes with the one Home arrives with:
   // "Stuck" from Home plus "Refunds" here is a legitimate question, and both
   // chips stay visible and dismissible so the table never looks broken.
@@ -685,24 +673,12 @@ function WorkHome({
       {items && !empty && !filteredOut && (
         <WorkTable
           rows={rows}
-          onOpen={setOpen}
+          onOpen={onOpenItem}
           nextCursor={nextCursor}
           onLoadMore={onLoadMore}
         />
       )}
 
-      {open && (
-        <JobDetail
-          item={open}
-          onOpenAgent={onOpenAgent}
-          onClose={() => setOpen(null)}
-          onResolved={() => {
-            setOpen(null)
-            // A resolved handoff changes the table underneath it.
-            if (onItemResolved) onItemResolved()
-          }}
-        />
-      )}
     </div>
   )
 }
@@ -737,6 +713,11 @@ export default function WorkTab({
   // route: the app is pane-based and Work is one pane, so a kind is a view
   // inside it — the same shape the tab switcher already uses.
   const [kindView, setKindView] = useState(null)
+  // A job is a third view in the same pane, on top of whichever page opened
+  // it. Storing it BESIDE kindView rather than replacing it is what makes
+  // Back exact: clearing jobView reveals the kind (and its filters) exactly
+  // as it was, because that state was never torn down.
+  const [jobView, setJobView] = useState(null)
   // This kind's CLOSED work. The main page carries done rows only
   // incidentally (it is a mixed page of 50 ordered by recency), so the kind
   // page asks for them directly. One extra lean request, column-filtered —
@@ -937,6 +918,24 @@ export default function WorkTab({
     }
   }
 
+  // A job sits on top of whichever page opened it; the page underneath keeps
+  // its state, so Back is a single setJobView(null).
+  if (jobView) {
+    return (
+      <JobDetail
+        variant="page"
+        item={jobView.item}
+        backLabel={kindView ? `← ${kindView.name}` : '← All work'}
+        onOpenAgent={onOpenAgent}
+        onClose={() => setJobView(null)}
+        onResolved={() => {
+          setJobView(null)
+          refreshNamedWork()
+        }}
+      />
+    )
+  }
+
   return (
     kindView ? (
       <KindPage
@@ -948,7 +947,7 @@ export default function WorkTab({
         filter={filter}
         onClearFilter={() => setFilter(null)}
         onBack={() => setKindView(null)}
-        onItemResolved={refreshNamedWork}
+        onOpenItem={(it) => setJobView({ item: it })}
         onOpenAgent={onOpenAgent}
       />
     ) : (
@@ -970,7 +969,7 @@ export default function WorkTab({
       onEditSuggestion={editSuggestion}
       filter={filter}
       onClearFilter={() => setFilter(null)}
-      onItemResolved={refreshNamedWork}
+      onOpenItem={(it) => setJobView({ item: it })}
       onOpenAgent={onOpenAgent}
       onOpenKind={(name) => {
         const k = workKinds(items || []).find((x) => x.name === name)
