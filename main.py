@@ -136,6 +136,15 @@ from models import (
     WorkSuggestionsResponse,
     MeResponse,
     Seat,
+    ScopeLevelPublic,
+    ScopeLevelCreate,
+    RolePublic,
+    RoleCreate,
+    RoleMemberAdd,
+    OrgChart,
+    OrgBuilderUpdate,
+    GraduateRequest,
+    GraduateResponse,
     WorkflowCreate,
     WorkflowDetail,
     WorkflowDraft,
@@ -3822,20 +3831,414 @@ def list_members(request: Request) -> list[UserPublic]:
     return [UserPublic(**u) for u in database.get_org_users(account_id)]
 
 
+# ---------------------------------------------------------------------------
+# Org chart — roles, reporting lines, people, scope levels
+# ---------------------------------------------------------------------------
+#
+# Every write below re-derives the caller's rung from the database. The client
+# is told what it may do (RolePublic.can_edit / can_add_child) purely so it can
+# grey out a button; it is never believed.
+#
+# Two rungs, and they are not the same shape:
+#   can_edit_chart(role)      — change or remove an EXISTING box. Builders
+#                               anywhere; everyone else strictly BELOW their
+#                               own box, never their own.
+#   can_add_child_role(parent)— hang a NEW box under a parent. Builders
+#                               anywhere; everyone else under their own box or
+#                               below it. Growing your own team is the ordinary
+#                               case; re-parenting yourself is not.
+
+
+def _require_session_account(request: Request) -> tuple[int, dict]:
+    """Account + user for a session-authenticated caller. The chart is a
+    human structure — an API key is a machine credential and has no rung on
+    the ladder, so it can't read or edit it."""
+    user = getattr(request.state, "user", None)
+    account_id = getattr(request.state, "account_id", None)
+    if not user or account_id is None:
+        raise HTTPException(status_code=401, detail="sign in to view your organization")
+    return account_id, user
+
+
+def _require_org_builder(request: Request) -> tuple[int, dict]:
+    account_id, user = _require_session_account(request)
+    full = database.get_user_by_id(user["id"])
+    if not full or not full.get("org_builder"):
+        raise HTTPException(status_code=403, detail="org builder required")
+    return account_id, full
+
+
+def _role_or_404(account_id: int, role_id: int) -> dict:
+    """A role id from another account is a 404, not a 403 — a 403 would
+    confirm the id exists somewhere, which is the IDOR leak itself."""
+    role = database.get_role(account_id, role_id)
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    return role
+
+
+def _role_public(
+    role: dict,
+    *,
+    account_id: int,
+    actor_id: int,
+    members_by_role: dict[int, list[int]],
+    level_names: dict[int, str],
+) -> RolePublic:
+    return RolePublic(
+        id=role["id"],
+        title=role["title"],
+        parent_role_id=role["parent_role_id"],
+        scope_level_id=role["scope_level_id"],
+        scope_level_name=level_names.get(role["scope_level_id"]),
+        user_ids=members_by_role.get(role["id"], []),
+        can_edit=database.can_edit_chart(account_id, actor_id, role["id"]),
+        can_add_child=database.can_add_child_role(account_id, actor_id, role["id"]),
+    )
+
+
+@app.get("/org/chart", response_model=OrgChart)
+def get_org_chart(request: Request) -> OrgChart:
+    """The slice of the chart this caller may see: an Org builder or a
+    company-breadth seat gets all of it; everyone else gets their own box,
+    the managers above it, and their own subtree. Filtering happens here —
+    the response never carries boxes the caller isn't allowed to see."""
+    account_id, user = _require_session_account(request)
+    actor_id = user["id"]
+    visible = database.visible_role_ids_for_actor(account_id, actor_id)
+    roles = database.get_roles(account_id)
+    if visible is not None:
+        allowed = set(visible)
+        roles = [r for r in roles if r["id"] in allowed]
+
+    members_by_role: dict[int, list[int]] = {}
+    for m in database.get_role_members(account_id):
+        members_by_role.setdefault(m["role_id"], []).append(m["user_id"])
+    levels = database.get_scope_levels(account_id)
+    level_names = {l["id"]: l["name"] for l in levels}
+
+    shown = [
+        _role_public(
+            r,
+            account_id=account_id,
+            actor_id=actor_id,
+            members_by_role=members_by_role,
+            level_names=level_names,
+        )
+        for r in roles
+    ]
+    # Only the people standing in a visible box, plus the caller — the chart
+    # is not a back door onto the full member directory.
+    visible_user_ids = {actor_id}
+    for r in shown:
+        visible_user_ids.update(r.user_ids)
+    members = [
+        UserPublic(**u)
+        for u in database.get_org_users(account_id)
+        if u["id"] in visible_user_ids
+    ]
+    full = database.get_user_by_id(actor_id) or {}
+    return OrgChart(
+        roles=shown,
+        members=members,
+        scope_levels=[ScopeLevelPublic(**l) for l in levels],
+        can_edit_chart=database.can_edit_chart(account_id, actor_id),
+        org_builder=bool(full.get("org_builder")),
+    )
+
+
+@app.get("/org/scope-levels", response_model=list[ScopeLevelPublic])
+def list_scope_levels(request: Request) -> list[ScopeLevelPublic]:
+    """Presets + this org's customs. Readable by anyone signed in — knowing
+    what the levels mean is not the same as being able to assign one."""
+    account_id, _ = _require_session_account(request)
+    return [ScopeLevelPublic(**l) for l in database.get_scope_levels(account_id)]
+
+
+@app.post("/org/scope-levels", response_model=ScopeLevelPublic, status_code=201)
+def create_scope_level(request: Request, body: ScopeLevelCreate) -> ScopeLevelPublic:
+    """Define a custom level. Org-builder only: a scope level is an org-wide
+    definition, not a local edit to one team.
+
+    Composition only — an unknown breadth or depth is rejected outright and
+    an unknown surface is dropped. There is no way through this endpoint to
+    add an axis the product doesn't have.
+    """
+    account_id, _ = _require_org_builder(request)
+    key = (body.key or body.name or "").strip().lower()
+    key = re.sub(r"[^a-z0-9]+", "_", key).strip("_")
+    if not key:
+        raise HTTPException(status_code=400, detail="scope level needs a name")
+    try:
+        level = database.create_scope_level(
+            account_id=account_id,
+            key=key,
+            name=body.name,
+            breadth=body.breadth,
+            depth=body.depth,
+            surfaces=body.surfaces,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            raise HTTPException(
+                status_code=409, detail="a scope level with that name already exists"
+            )
+        raise
+    return ScopeLevelPublic(**level)
+
+
+@app.post("/org/roles", response_model=RolePublic, status_code=201)
+def create_org_role(request: Request, body: RoleCreate) -> RolePublic:
+    """Add a box. Authorized against the PARENT: you may grow your own team
+    (or any team below it); only a builder may add a root."""
+    account_id, user = _require_session_account(request)
+    if body.parent_role_id is not None:
+        _role_or_404(account_id, body.parent_role_id)
+    if not database.can_add_child_role(account_id, user["id"], body.parent_role_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "org builder required to add a top-level role"
+                if body.parent_role_id is None
+                else "you can only add roles inside your own reporting line"
+            ),
+        )
+    try:
+        role = database.create_role(
+            account_id,
+            body.title,
+            parent_role_id=body.parent_role_id,
+            scope_level_id=body.scope_level_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _role_public(
+        role,
+        account_id=account_id,
+        actor_id=user["id"],
+        members_by_role={},
+        level_names={},
+    )
+
+
+@app.patch("/org/roles/{role_id}", response_model=RolePublic)
+async def update_org_role(role_id: int, request: Request) -> RolePublic:
+    """Rename, reparent, or re-seat a box.
+
+    Reads the raw body rather than a Pydantic model so an explicit
+    `{"scope_level_id": null}` (detach the seat) is distinguishable from the
+    field being absent (leave it alone) — with a plain model both arrive as
+    None and a rename would silently strip the role's seat.
+    """
+    account_id, user = _require_session_account(request)
+    _role_or_404(account_id, role_id)
+    if not database.can_edit_chart(account_id, user["id"], role_id):
+        raise HTTPException(
+            status_code=403, detail="you can only edit roles below your own"
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid body")
+    fields: dict[str, Any] = {}
+    for key in ("title", "parent_role_id", "scope_level_id"):
+        if key in body:
+            fields[key] = body[key]
+    # Moving a box needs rights on BOTH ends: the box itself (checked above)
+    # and the parent it is landing under. Otherwise a manager could push one
+    # of their own reports into somebody else's team.
+    if "parent_role_id" in fields and fields["parent_role_id"] is not None:
+        _role_or_404(account_id, fields["parent_role_id"])
+        if not database.can_add_child_role(
+            account_id, user["id"], fields["parent_role_id"]
+        ):
+            raise HTTPException(
+                status_code=403, detail="you cannot move a role under that parent"
+            )
+    if "parent_role_id" in fields and fields["parent_role_id"] is None:
+        # Detaching to the root changes the shape of the whole org.
+        full = database.get_user_by_id(user["id"]) or {}
+        if not full.get("org_builder"):
+            raise HTTPException(
+                status_code=403, detail="org builder required to make a role top-level"
+            )
+    try:
+        role = database.update_role(account_id, role_id, **fields)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    members_by_role: dict[int, list[int]] = {}
+    for m in database.get_role_members(account_id):
+        members_by_role.setdefault(m["role_id"], []).append(m["user_id"])
+    level_names = {l["id"]: l["name"] for l in database.get_scope_levels(account_id)}
+    return _role_public(
+        role,
+        account_id=account_id,
+        actor_id=user["id"],
+        members_by_role=members_by_role,
+        level_names=level_names,
+    )
+
+
+@app.delete("/org/roles/{role_id}", status_code=204)
+def delete_org_role(role_id: int, request: Request) -> None:
+    """Remove a box. Its reports move up to its parent; it refuses while
+    someone is still standing in it."""
+    account_id, user = _require_session_account(request)
+    _role_or_404(account_id, role_id)
+    if not database.can_edit_chart(account_id, user["id"], role_id):
+        raise HTTPException(
+            status_code=403, detail="you can only remove roles below your own"
+        )
+    try:
+        database.delete_role(account_id, role_id)
+    except database.RoleOccupiedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/org/roles/{role_id}/members", status_code=204)
+def add_role_member(role_id: int, request: Request, body: RoleMemberAdd) -> None:
+    """Seat a person in a role. One role per person — this moves them."""
+    account_id, user = _require_session_account(request)
+    _role_or_404(account_id, role_id)
+    if not database.can_edit_chart(account_id, user["id"], role_id):
+        raise HTTPException(
+            status_code=403, detail="you can only place people in roles below your own"
+        )
+    target = database.get_user_by_id(body.user_id)
+    if target is None or target["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="member not found")
+    try:
+        database.assign_user_to_role(account_id, body.user_id, role_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/org/roles/{role_id}/members/{user_id}", status_code=204)
+def remove_role_member(role_id: int, user_id: int, request: Request) -> None:
+    """Take a person out of a role. They keep their login; they lose their
+    place on the chart (and fall back to the default seat)."""
+    account_id, user = _require_session_account(request)
+    _role_or_404(account_id, role_id)
+    if not database.can_edit_chart(account_id, user["id"], role_id):
+        raise HTTPException(
+            status_code=403, detail="you can only change roles below your own"
+        )
+    if database.get_role_id_for_user(account_id, user_id) != role_id:
+        raise HTTPException(status_code=404, detail="that person is not in this role")
+    database.unassign_user(account_id, user_id)
+
+
+@app.put("/org/members/{user_id}/org-builder", response_model=UserPublic)
+def set_member_org_builder(
+    user_id: int, request: Request, body: OrgBuilderUpdate
+) -> UserPublic:
+    """Grant or revoke Org builder. Builders only — this is the rung that
+    grants the rung, so nothing below it may reach it.
+
+    Revoking the last builder is refused: an org with no builder can never
+    edit its own top-level chart again, and no support path exists to undo
+    it from inside the product.
+    """
+    account_id, actor = _require_org_builder(request)
+    target = database.get_user_by_id(user_id)
+    if target is None or target["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="member not found")
+    if not body.org_builder and database.count_org_builders(account_id) <= 1:
+        raise HTTPException(
+            status_code=409, detail="cannot remove the last org builder"
+        )
+    database.set_org_builder(account_id, user_id, body.org_builder)
+    updated = database.get_user_by_id(user_id)
+    return UserPublic(**updated)
+
+
+@app.post("/org/graduate", response_model=GraduateResponse)
+def graduate_org(request: Request, body: GraduateRequest) -> GraduateResponse:
+    """Path A → Path B: turn a one-seat workspace into a company.
+
+    Only touches the org layer — agents, jobs, spans, API keys and Connect
+    links all hang off account_id, which doesn't change. Idempotent: run it
+    twice and the second call finds the root role and the founder already
+    in place.
+    """
+    account_id, user = _require_session_account(request)
+    full = database.get_user_by_id(user["id"]) or {}
+    if not full.get("org_builder") and full.get("role") != "owner":
+        raise HTTPException(
+            status_code=403, detail="only the owner or an org builder can do this"
+        )
+    result = database.graduate_account_to_company(
+        account_id,
+        user["id"],
+        org_name=body.org_name,
+        root_role_title=body.root_role_title,
+    )
+    root = result["root_role"]
+    return GraduateResponse(
+        org=OrgPublic(**result["account"]),
+        root_role=_role_public(
+            root,
+            account_id=account_id,
+            actor_id=user["id"],
+            members_by_role={root["id"]: database.user_ids_in_roles(account_id, [root["id"]])},
+            level_names={},
+        )
+        if root
+        else None,
+        created_root_role=result["created_root_role"],
+        placed_founder=result["placed_founder"],
+        granted_org_builder=result["granted_org_builder"],
+    )
+
+
 @app.post("/org/invites", response_model=InviteCreateResponse, status_code=201)
 def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
-    """Owner-only: mint a one-time invite link for a Business org."""
-    account_id = _require_owner(request)
+    """Mint a one-time invite link.
+
+    Who may invite follows the chart ladder, not the login role: an Org
+    builder invites anywhere in the org; anyone else may only invite into a
+    role they could already place someone in — i.e. below their own box. An
+    invite with no role_id places nobody, so it stays owner-only: it is the
+    pre-chart path, and letting a subtree manager mint unplaced logins would
+    route around the ladder entirely (an unplaced user gets the full seat).
+    """
+    account_id, user = _require_session_account(request)
     org = database.get_account(account_id)
     if not org or org.get("account_type") != "business":
         raise HTTPException(
             status_code=400, detail="only Business organizations can add members"
         )
+    full = database.get_user_by_id(user["id"]) or {}
+    if body.role_id is not None:
+        _role_or_404(account_id, body.role_id)
+        if not database.can_edit_chart(account_id, user["id"], body.role_id):
+            raise HTTPException(
+                status_code=403,
+                detail="you can only invite people into roles below your own",
+            )
+    elif not (full.get("org_builder") or full.get("role") == "owner"):
+        raise HTTPException(
+            status_code=403,
+            detail="pick a role to invite this person into",
+        )
     role = body.role if body.role in ("owner", "member") else "member"
     inviter = getattr(request.state, "user", None)
-    inv = database.create_invite(
-        account_id, body.email, role, inviter["id"] if inviter else None
-    )
+    try:
+        inv = database.create_invite(
+            account_id,
+            body.email,
+            role,
+            inviter["id"] if inviter else None,
+            role_id=body.role_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     base = (database.env("APP_URL") or str(request.base_url)).rstrip("/")
     invite_url = f"{base}/accept-invite?token={inv['token']}"
     # Email the invite too (fail-soft); the copyable link is still returned so
@@ -3853,20 +4256,41 @@ def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
         invite_url=invite_url,
         email=inv["email"],
         role=inv["role"],
+        role_id=inv.get("role_id"),
         expires_at=inv["expires_at"],
     )
 
 
+def _invites_visible_to(account_id: int, actor_id: int) -> list[dict]:
+    """Pending invites this caller may see: all of them for a builder or an
+    owner, otherwise only the ones aimed at a role they could edit."""
+    invites = database.list_invites(account_id)
+    full = database.get_user_by_id(actor_id) or {}
+    if full.get("org_builder") or full.get("role") == "owner":
+        return invites
+    return [
+        i
+        for i in invites
+        if i.get("role_id") is not None
+        and database.can_edit_chart(account_id, actor_id, i["role_id"])
+    ]
+
+
 @app.get("/org/invites", response_model=list[InvitePublic])
 def list_org_invites(request: Request) -> list[InvitePublic]:
-    """Owner-only: pending invites for the org."""
-    account_id = _require_owner(request)
-    return [InvitePublic(**i) for i in database.list_invites(account_id)]
+    """Pending invites, scoped the same way minting one is."""
+    account_id, user = _require_session_account(request)
+    return [InvitePublic(**i) for i in _invites_visible_to(account_id, user["id"])]
 
 
 @app.delete("/org/invites/{invite_id}", status_code=204)
 def revoke_org_invite(invite_id: int, request: Request) -> None:
-    account_id = _require_owner(request)
+    """Revoke a pending invite. You can only revoke one you could have
+    minted — an invite you can't see is a 404, not a 403."""
+    account_id, user = _require_session_account(request)
+    visible = {i["id"] for i in _invites_visible_to(account_id, user["id"])}
+    if invite_id not in visible:
+        raise HTTPException(status_code=404, detail="invite not found")
     if not database.revoke_invite(account_id, invite_id):
         raise HTTPException(status_code=404, detail="invite not found")
 

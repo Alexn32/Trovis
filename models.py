@@ -625,6 +625,79 @@ class Seat(BaseModel):
     can_edit_chart: bool = False
 
 
+class ScopeLevelCreate(BaseModel):
+    """Body for POST /org/scope-levels. Composes fixed atoms — an unknown
+    breadth or depth is a 400, an unknown surface is dropped."""
+
+    name: str
+    breadth: str = "self"
+    depth: str = "glance"
+    surfaces: list[str] = Field(default_factory=list)
+    key: str | None = None  # slug; derived from name when omitted
+
+
+class RolePublic(BaseModel):
+    """A box on the chart, as this caller may see it."""
+
+    id: int
+    title: str
+    parent_role_id: int | None = None
+    scope_level_id: int | None = None
+    scope_level_name: str | None = None
+    user_ids: list[int] = Field(default_factory=list)
+    # Resolved server-side for THIS caller. The client uses it to grey out
+    # controls; the server re-checks every write regardless.
+    can_edit: bool = False
+    can_add_child: bool = False
+
+
+class RoleCreate(BaseModel):
+    title: str
+    parent_role_id: int | None = None
+    scope_level_id: int | None = None
+
+
+# No RoleUpdate model: PATCH /org/roles/{id} reads the raw body so an
+# explicit `{"parent_role_id": null}` (detach) stays distinguishable from the
+# field being absent (leave alone). A Pydantic model collapses both to None.
+
+
+class RoleMemberAdd(BaseModel):
+    user_id: int
+
+
+class OrgChart(BaseModel):
+    """GET /org/chart — the slice of the chart this caller may see, plus the
+    people in it. `roles` is already filtered; it is not a full chart with a
+    client-side mask over it."""
+
+    roles: list[RolePublic] = Field(default_factory=list)
+    members: list[UserPublic] = Field(default_factory=list)
+    scope_levels: list[ScopeLevelPublic] = Field(default_factory=list)
+    can_edit_chart: bool = False
+    org_builder: bool = False
+
+
+class OrgBuilderUpdate(BaseModel):
+    org_builder: bool
+
+
+class GraduateRequest(BaseModel):
+    """Path A → Path B. Both fields optional: a workspace that already has a
+    name and a chart just needs the account flipped."""
+
+    org_name: str | None = None
+    root_role_title: str | None = None
+
+
+class GraduateResponse(BaseModel):
+    org: OrgPublic
+    root_role: RolePublic | None = None
+    created_root_role: bool = False
+    placed_founder: bool = False
+    granted_org_builder: bool = False
+
+
 class MeResponse(BaseModel):
     """GET /auth/me. `user` is None for API-key (agent/legacy) auth."""
 
@@ -662,13 +735,17 @@ class ResetPasswordRequest(BaseModel):
 
 class InviteCreate(BaseModel):
     email: str
-    role: str = "member"
+    role: str = "member"  # login role: 'owner' | 'member'
+    # The chart box the invitee lands in. Optional — an org that hasn't drawn
+    # a chart still invites people the way it always did.
+    role_id: int | None = None
 
 
 class InviteCreateResponse(BaseModel):
     invite_url: str
     email: str
     role: str
+    role_id: int | None = None
     expires_at: str | None = None
 
 
@@ -676,6 +753,7 @@ class InvitePublic(BaseModel):
     id: int
     email: str
     role: str
+    role_id: int | None = None
     created_at: str | None = None
     expires_at: str | None = None
 

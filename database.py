@@ -1832,6 +1832,25 @@ def init_db() -> None:
             "BOOLEAN NOT NULL DEFAULT FALSE" if USE_POSTGRES
             else "INTEGER NOT NULL DEFAULT 0",
         )
+        # An org must never be left with nobody who can draw its chart. Any
+        # account with zero builders gets its owners promoted — which covers
+        # the orgs that existed before org_builder was a column, and is
+        # self-healing if a grant is ever lost. It cannot fight a deliberate
+        # revoke: revoke_org_builder refuses to remove the last one, so an
+        # account that still has a builder is never touched here.
+        cur.execute(
+            "UPDATE users SET org_builder = "
+            + ("TRUE" if USE_POSTGRES else "1")
+            + " WHERE role = 'owner' AND account_id IN ("
+            "  SELECT account_id FROM users GROUP BY account_id"
+            "  HAVING SUM(CASE WHEN org_builder THEN 1 ELSE 0 END) = 0)"
+        )
+        # Invites carry the chart box the invitee lands in. Nullable: an
+        # invite minted before the chart existed (or by an org that never
+        # drew one) still works and simply places nobody. No FK — invites is
+        # created before org_roles, and SQLite's ALTER ADD COLUMN can't
+        # enforce one anyway (same reasoning as spans.loop_id).
+        _try_add_column(cur, "invites", "role_id", "INTEGER DEFAULT NULL")
         # After loop_id exists: classify leftover titles from before
         # title_source. No-op on a fresh DB (no titled loops yet).
         _backfill_loop_title_source(cur)
@@ -9001,9 +9020,15 @@ def count_owners(account_id: int) -> int:
 
 
 def delete_user(account_id: int, user_id: int) -> bool:
-    """Remove a user from an org (account-scoped) plus their sessions."""
+    """Remove a user from an org (account-scoped) plus their sessions and
+    their place on the chart. The role itself stays — a person leaving
+    vacates a box, it doesn't delete the box or the team under it."""
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(f"DELETE FROM sessions WHERE user_id = {PH}", (user_id,))
+        cur.execute(
+            f"DELETE FROM org_role_members WHERE user_id = {PH} AND account_id = {PH}",
+            (user_id, account_id),
+        )
         cur.execute(
             f"DELETE FROM users WHERE id = {PH} AND account_id = {PH}",
             (user_id, account_id),
@@ -9185,21 +9210,35 @@ def create_invite(
     role: str,
     invited_by_user_id: int | None,
     ttl_seconds: int = _INVITE_TTL_SECONDS,
+    role_id: int | None = None,
 ) -> dict[str, Any]:
-    """Create a one-time invite. Returns {token (raw), email, role,
-    expires_at} — the raw token is shown once (in the invite link)."""
+    """Create a one-time invite. Returns {token (raw), email, role, role_id,
+    expires_at} — the raw token is shown once (in the invite link).
+
+    `role` is the login role ('owner' | 'member'); `role_id` is the box on
+    the chart the invitee lands in, and is what gives them a seat. The two
+    are different things and both are optional to change.
+    """
     email = (email or "").strip().lower()
     role = role if role in ("owner", "member") else "member"
+    if role_id is not None and get_role(account_id, role_id) is None:
+        raise ValueError("role not found")
     raw, token_hash = _new_token()
     expires_at = (_utcnow() + timedelta(seconds=ttl_seconds)).isoformat()
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             "INSERT INTO invites (token_hash, account_id, email, role, "
-            "invited_by_user_id, expires_at) "
-            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-            (token_hash, account_id, email, role, invited_by_user_id, expires_at),
+            "invited_by_user_id, expires_at, role_id) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (token_hash, account_id, email, role, invited_by_user_id, expires_at, role_id),
         )
-    return {"token": raw, "email": email, "role": role, "expires_at": expires_at}
+    return {
+        "token": raw,
+        "email": email,
+        "role": role,
+        "role_id": role_id,
+        "expires_at": expires_at,
+    }
 
 
 def list_invites(account_id: int) -> list[dict[str, Any]]:
@@ -9208,7 +9247,7 @@ def list_invites(account_id: int) -> list[dict[str, Any]]:
     now_iso = _utcnow().isoformat()
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, email, role, created_at, expires_at FROM invites "
+            "SELECT id, email, role, role_id, created_at, expires_at FROM invites "
             f"WHERE account_id = {PH} AND accepted_at IS NULL AND expires_at > {PH} "
             "ORDER BY created_at DESC, id DESC",
             (account_id, now_iso),
@@ -9218,6 +9257,7 @@ def list_invites(account_id: int) -> list[dict[str, Any]]:
                 "id": r["id"],
                 "email": r["email"],
                 "role": r["role"],
+                "role_id": _row_get(r, "role_id"),
                 "created_at": _ts_to_str(r["created_at"]),
                 "expires_at": _ts_to_str(r["expires_at"]),
             }
@@ -9246,7 +9286,7 @@ def accept_invite(
     name = (name or "").strip() or None
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, account_id, email, role FROM invites "
+            "SELECT id, account_id, email, role, role_id FROM invites "
             f"WHERE token_hash = {PH} AND accepted_at IS NULL AND expires_at > {PH}",
             (token_hash, now_iso),
         )
@@ -9254,6 +9294,7 @@ def accept_invite(
         if inv is None:
             raise LookupError("invite invalid, expired, or already used")
         account_id = inv["account_id"]
+        invited_role_id = _row_get(inv, "role_id")
         email = inv["email"]
         role = inv["role"] if inv["role"] in ("owner", "member") else "member"
         cols = "(account_id, email, name, role, password_hash)"
@@ -9280,6 +9321,26 @@ def accept_invite(
             if "unique" in msg or "duplicate" in msg:
                 raise UserEmailExistsError(email) from e
             raise
+        # The invite named a box on the chart — seat the new user in it, in
+        # the SAME transaction that created them. Splitting it would leave a
+        # window where an accepted invite exists as an unplaced user, and an
+        # unplaced user falls back to the full seat: a failure here would
+        # hand the invitee more access than they were invited to, not less.
+        if invited_role_id is not None:
+            cur.execute(
+                f"SELECT id FROM org_roles WHERE id = {PH} AND account_id = {PH}",
+                (invited_role_id, account_id),
+            )
+            if cur.fetchone() is not None:
+                cur.execute(
+                    f"DELETE FROM org_role_members WHERE user_id = {PH}",
+                    (urow["id"],),
+                )
+                cur.execute(
+                    "INSERT INTO org_role_members (account_id, role_id, user_id) "
+                    f"VALUES ({PH}, {PH}, {PH})",
+                    (account_id, invited_role_id, urow["id"]),
+                )
         now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
         cur.execute(
             f"UPDATE invites SET accepted_at = {now_sql} WHERE id = {PH}",
@@ -9557,6 +9618,96 @@ def get_roles(account_id: int) -> list[dict[str, Any]]:
         return [_role_row(r) for r in cur.fetchall()]
 
 
+_UNSET = object()
+
+
+def update_role(
+    account_id: int,
+    role_id: int,
+    *,
+    title: Any = _UNSET,
+    parent_role_id: Any = _UNSET,
+    scope_level_id: Any = _UNSET,
+) -> dict[str, Any] | None:
+    """Edit a box: rename, reparent, or re-seat it. Only the fields passed
+    are touched (None is a real value for the two nullable columns, hence the
+    _UNSET sentinel rather than a None default).
+
+    Reparenting is where a tree stops being a tree, so it is checked here and
+    not left to the caller: a role may not become its own parent, nor be
+    moved underneath one of its own descendants. Either would orphan the
+    branch from the root and make every subtree walk meaningless.
+    """
+    if get_role(account_id, role_id) is None:
+        return None
+    sets: list[str] = []
+    args: list[Any] = []
+    if title is not _UNSET:
+        clean = (title or "").strip()
+        if not clean:
+            raise ValueError("role title is required")
+        sets.append(f"title = {PH}")
+        args.append(clean)
+    if parent_role_id is not _UNSET:
+        if parent_role_id is not None:
+            if parent_role_id == role_id:
+                raise ValueError("a role cannot report to itself")
+            if get_role(account_id, parent_role_id) is None:
+                raise ValueError("parent role not found")
+            if parent_role_id in role_subtree_ids(account_id, role_id, include_self=False):
+                raise ValueError("a role cannot report to one of its own reports")
+        sets.append(f"parent_role_id = {PH}")
+        args.append(parent_role_id)
+    if scope_level_id is not _UNSET:
+        if scope_level_id is not None and get_scope_level(account_id, scope_level_id) is None:
+            raise ValueError("scope level not found")
+        sets.append(f"scope_level_id = {PH}")
+        args.append(scope_level_id)
+    if not sets:
+        return get_role(account_id, role_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE org_roles SET {', '.join(sets)} "
+            f"WHERE id = {PH} AND account_id = {PH}",
+            tuple([*args, role_id, account_id]),
+        )
+    return get_role(account_id, role_id)
+
+
+class RoleOccupiedError(Exception):
+    """Raised when deleting a role that still has a person in it."""
+
+
+def delete_role(account_id: int, role_id: int) -> bool:
+    """Remove a box. Its children are re-parented to its own parent rather
+    than deleted — a reorg removes a layer, it does not fire the layer below,
+    and detaching the branch would silently drop everyone under it out of
+    every manager's subtree.
+
+    Refuses while someone is still in the role: moving that person out is a
+    decision for whoever is editing, not a side effect of a delete. (An
+    unplaced person falls back to the full seat, so a silent unassign would
+    quietly WIDEN their access — exactly the wrong direction to do by
+    accident.)
+    """
+    role = get_role(account_id, role_id)
+    if role is None:
+        return False
+    if user_ids_in_roles(account_id, [role_id]):
+        raise RoleOccupiedError("move the people in this role out first")
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE org_roles SET parent_role_id = {PH} "
+            f"WHERE parent_role_id = {PH} AND account_id = {PH}",
+            (role["parent_role_id"], role_id, account_id),
+        )
+        cur.execute(
+            f"DELETE FROM org_roles WHERE id = {PH} AND account_id = {PH}",
+            (role_id, account_id),
+        )
+        return cur.rowcount > 0
+
+
 def set_role_scope_level(
     account_id: int, role_id: int, scope_level_id: int | None
 ) -> bool:
@@ -9654,6 +9805,74 @@ def role_subtree_ids(
     return out
 
 
+def role_ancestor_ids(account_id: int, role_id: int) -> list[int]:
+    """Role ids on the path from `role_id` up to the root, nearest first.
+    This is the "manager context" an IC is shown: they see their own box and
+    the chain above it, so their place on the chart means something, without
+    seeing sideways into other people's teams."""
+    by_id = {r["id"]: r for r in get_roles(account_id)}
+    out: list[int] = []
+    seen: set[int] = {role_id}
+    cur_id = by_id.get(role_id, {}).get("parent_role_id")
+    while cur_id is not None and cur_id not in seen:
+        seen.add(cur_id)
+        out.append(cur_id)
+        cur_id = by_id.get(cur_id, {}).get("parent_role_id")
+    return out
+
+
+def visible_role_ids_for_actor(account_id: int, user_id: int) -> list[int] | None:
+    """Which boxes a person may see on the chart.
+
+    None = the whole chart (Org builders, and anyone with company breadth).
+    Otherwise: their own box, the chain of managers above it, and everything
+    below it. Never a sibling's team.
+    """
+    user = get_user_by_id(user_id)
+    if user is None or user["account_id"] != account_id:
+        return []
+    if user.get("org_builder"):
+        return None
+    seat = resolve_seat(account_id, user_id)
+    if seat["breadth"] == "company":
+        return None
+    role_id = seat["role_id"]
+    if role_id is None:
+        return []
+    ids = {role_id, *role_ancestor_ids(account_id, role_id)}
+    if seat["breadth"] == "subtree":
+        ids.update(role_subtree_ids(account_id, role_id, include_self=True))
+    return sorted(ids)
+
+
+def can_add_child_role(
+    account_id: int, actor_user_id: int, parent_role_id: int | None
+) -> bool:
+    """Whether a person may hang a NEW box under `parent_role_id`.
+
+    Distinct from can_edit_chart on purpose. A manager may not edit their own
+    box — that would let them re-parent themselves under the CEO — but adding
+    a report *under* themselves is the ordinary case of growing their own
+    subtree, and refusing it would make the subtree rung useless. A root role
+    (parent None) is the shape of the whole org, so builders only.
+    """
+    user = get_user_by_id(actor_user_id)
+    if user is None or user["account_id"] != account_id:
+        return False
+    if user.get("org_builder"):
+        return True
+    if parent_role_id is None:
+        return False
+    if get_role(account_id, parent_role_id) is None:
+        return False
+    actor_role_id = get_role_id_for_user(account_id, actor_user_id)
+    if actor_role_id is None:
+        return False
+    return parent_role_id == actor_role_id or role_is_descendant_of(
+        account_id, parent_role_id, actor_role_id
+    )
+
+
 def role_is_descendant_of(account_id: int, role_id: int, ancestor_id: int) -> bool:
     """True when role_id sits strictly below ancestor_id on the chart."""
     if role_id == ancestor_id:
@@ -9744,6 +9963,72 @@ def set_org_builder(account_id: int, user_id: int, value: bool) -> bool:
             (flag, user_id, account_id),
         )
         return cur.rowcount > 0
+
+
+def count_org_builders(account_id: int) -> int:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM users WHERE account_id = {PH} AND org_builder",
+            (account_id,),
+        )
+        return int(cur.fetchone()["n"])
+
+
+def graduate_account_to_company(
+    account_id: int,
+    user_id: int,
+    org_name: str | None = None,
+    root_role_title: str | None = None,
+) -> dict[str, Any]:
+    """Path A → Path B. A one-seat workspace becomes a company: the account
+    flips to 'business', a root role appears if there isn't one, the founder
+    is placed in it, and they are made an Org builder so they can invite and
+    draw the rest of the chart.
+
+    Nothing is created or moved outside the org layer — agents, jobs, spans,
+    API keys and Connect links all hang off account_id, which does not
+    change. Graduation is a layer added on top, never a migration of the
+    work itself.
+
+    Idempotent: called twice, the second call finds the root role and the
+    founder already in it and changes nothing.
+    """
+    ensure_scope_level_presets(account_id)
+    if org_name is not None and org_name.strip():
+        update_account_profile(account_id, org_name.strip())
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE accounts SET account_type = 'business' WHERE id = {PH}",
+            (account_id,),
+        )
+
+    roles = get_roles(account_id)
+    root = next((r for r in roles if r["parent_role_id"] is None), None)
+    created_root = False
+    if root is None:
+        root = create_role(account_id, (root_role_title or "").strip() or "Founder")
+        created_root = True
+
+    # Place the founder only if the chart hasn't already placed them
+    # somewhere — re-seating a person who has since moved down the chart
+    # would be a silent promotion.
+    placed = False
+    if get_role_id_for_user(account_id, user_id) is None:
+        assign_user_to_role(account_id, user_id, root["id"])
+        placed = True
+
+    granted = False
+    user = get_user_by_id(user_id)
+    if user and not user.get("org_builder"):
+        granted = set_org_builder(account_id, user_id, True)
+
+    return {
+        "account": get_account(account_id),
+        "root_role": get_role(account_id, root["id"]),
+        "created_root_role": created_root,
+        "placed_founder": placed,
+        "granted_org_builder": granted,
+    }
 
 
 def resolve_seat(account_id: int, user_id: int) -> dict[str, Any]:

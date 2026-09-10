@@ -65,6 +65,13 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   Chart edits go through `can_edit_chart`: Org builder anywhere, everyone else strictly *below*
   their own role. Org builder is a separate ladder from view breadth — a company-breadth Exec is
   not a builder. Enforce all of it server-side; the client renders the seat, it never asserts one.
+- **Org API.** `GET /org/chart` (already filtered to what the caller may see — never a full chart
+  with a client-side mask), roles CRUD at `/org/roles`, people at `/org/roles/{id}/members`,
+  `/org/scope-levels`, `PUT /org/members/{id}/org-builder`, `POST /org/graduate` (Path A→B).
+  Two distinct rungs: `can_edit_chart(role)` for changing an existing box (strictly *below* you),
+  `can_add_child_role(parent)` for hanging a new one (your own box or below). Invites carry
+  `role_id` and are minted under the same ladder; accept seats the user in the same transaction
+  that creates them. Cross-account ids are **404, never 403** — a 403 confirms the id exists.
 - **Cost is computed at ingest** (`insert_spans` → `_compute_cost` via the pricing table) and stored
   on the span; aggregates sum the stored value. Re-pricing history needs an explicit recompute.
 
