@@ -232,15 +232,15 @@ test('no Trovis jargon in the standing-work copy', () => {
 test('Work home and Ask do not call fat /work/board or /work/summary', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   const ask = readFileSync(new URL('../src/AskPill.jsx', import.meta.url), 'utf8')
-  // Board load path: items + suggestions + the declared jobs. getWorkBoard
-  // lives in Board.jsx and must not be invoked from WorkTab's load().
+  // Home load path: overview + items + suggestions. getWorkBoard lives in
+  // Board.jsx and must not be invoked from WorkTab's load().
   assert.doesNotMatch(work, /getWorkSummary/)
   assert.doesNotMatch(work, /getWorkBoard/)
   assert.doesNotMatch(ask, /getWorkBoard/, 'Ask must not prefetch the fat board')
   assert.doesNotMatch(ask, /getWorkSummary/, 'Ask must not prefetch the fat summary')
+  assert.match(work, /getWorkOverview/)
   assert.match(work, /getWorkItems/)
   assert.match(work, /getWorkSuggestions/)
-  assert.match(work, /getWorkflows/)
 })
 
 test('Work home is the Monday table — Task column, no Priority, no KindCard landing', () => {
@@ -253,6 +253,7 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /Priority/)
   assert.doesNotMatch(work, /KindCard/)
   assert.match(work, /work-suggestions/)
+  assert.match(work, /function WorkHome/)
   // Clicking a row opens the job detail pane (was TaskPanel, the loop panel).
   assert.match(work, /JobDetail/)
   assert.match(work, /holderLabel/)
@@ -261,6 +262,10 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /onOpenBoards/)
   assert.doesNotMatch(work, /setSurface/)
   assert.doesNotMatch(work, /import Board\b/)
+  // The 4-col board is not the landing and is not offered from home.
+  assert.doesNotMatch(work, /function BoardHome/)
+  assert.doesNotMatch(work, /jb-colheads/)
+  assert.doesNotMatch(work, /layout === 'grouped'/)
 })
 
 test('Work home never invents a named item from suggestion actions', () => {
@@ -271,7 +276,7 @@ test('Work home never invents a named item from suggestion actions', () => {
   assert.match(work, /editWorkSuggestion/)
   assert.match(work, /declineWorkSuggestion/)
   assert.match(work, /never invent a named item/)
-  const load = work.match(/const load = useCallback\(async \(\) => \{[\s\S]*?\}, \[loadItems/)
+  const load = work.match(/const load = useCallback\(async \(\) => \{[\s\S]*?\}, \[loadOverview/)
   assert.ok(load, 'home load() is a useCallback')
   assert.doesNotMatch(load[0], /approveWorkSuggestion|declineWorkSuggestion|editWorkSuggestion/)
 })
@@ -294,23 +299,21 @@ test('sortWorkItems is Needs you → Stuck → waiting on someone → Moving →
   ])
 })
 
-test('the board does not re-filter the rows the server sent', () => {
+test('Work home does not client-filter items to fix overview totals', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /isNamedWorkTitle/)
   assert.doesNotMatch(work, /looksInternal/)
   assert.match(work, /sortWorkItems/)
+  assert.match(work, /Do not recompute or clamp/)
 })
 
-test('the board has ONE source for its counts', () => {
-  // /work/overview returned the same facts the run rows carry. Two sources
-  // for one number is how a header ends up disagreeing with the column under
-  // it, so the board derives its totals from the rows it draws and the
-  // second query is gone.
+test('Work home loads overview and items independently', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
-  assert.doesNotMatch(work, /getWorkOverview/)
-  assert.match(work, /boardTotals\(rows\)/)
+  assert.match(work, /loadOverview/)
   assert.match(work, /loadItems/)
   assert.match(work, /Promise\.allSettled/)
+  assert.match(work, /Can't load these counts/)
+  assert.match(work, /onConnectAgent \|\| onNewWorkflow/)
 })
 
 test('holderLabel prefixes kind when lean fields have it, else name-only', async () => {

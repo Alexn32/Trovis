@@ -37,6 +37,7 @@ function importedFrom(code, module) {
 const PAIRS = [
   ['Dashboard.jsx', './home.js', 'home.js'],
   ['WorkTab.jsx', './home.js', 'home.js'],
+  ['WorkTab.jsx', './workBoard.js', 'workBoard.js'],
   ['Dashboard.jsx', './board.js', 'board.js'],
   ['JobDetail.jsx', './jobDetail.js', 'jobDetail.js'],
 ]

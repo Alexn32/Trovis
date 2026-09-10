@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 import {
   COLUMNS, UNMATCHED, ageLabel, boardTotals, columnOf, durationLabel,
   firstOverCeiling, groupByJob, healthBadge, needsCard, observedPerDay,
-  quietLine, runCardLead,
+  quietLine, rowJobLine, runCardLead,
 } from '../src/workBoard.js'
 import { buildPath, parsePath } from '../src/route.js'
 
@@ -349,13 +349,33 @@ test('durations and ages read the way a person says them', () => {
 
 // --- what the board must not do (ported from the kind-map suite it replaced)
 
-test('the board still uses only the lean pair, plus the declared jobs', () => {
+test('a loud job verdict rides under the Task title, not as its own column', () => {
+  const stuck = groupByJob([job({ id: 1 })], [
+    run({ id: 1, status: 'stuck' }), run({ id: 2, status: 'moving' }),
+  ], { now: NOW })[0]
+  assert.deepEqual(rowJobLine(stuck, { now: NOW }), {
+    name: 'Refunds',
+    badge: { tone: 'error', label: 'Failing 1 of 2' },
+  })
+  const calm = groupByJob([job({
+    id: 1, has_expectation: true, closed_runs: 140, window_days: 14,
+    expected_per_day_min: 8, last_run_at: ago(600),
+  })], [run({ id: 1, status: 'moving' })], { now: NOW })[0]
+  assert.deepEqual(rowJobLine(calm, { now: NOW }), { name: 'Refunds', badge: null })
+  assert.equal(rowJobLine(null), null)
+})
+
+test('Work home stays on the lean trio; jobs enrich rows, they do not land a board', () => {
   // Grouping by job is what made the fat board tempting. It stays banned:
-  // /workflows is a declaration list and /work/items is one indexed scan.
+  // /work/overview + /work/items + suggestions are the home reads.
+  // /workflows is a declaration list used only to name a row's job.
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /getWorkBoard|getWorkSummary/)
-  assert.match(work, /api\.getWorkflows\(/)
+  assert.match(work, /getWorkOverview/)
   assert.match(work, /api\.getWorkItems\(/)
+  assert.match(work, /function WorkHome/)
+  assert.doesNotMatch(work, /function BoardHome/)
+  assert.doesNotMatch(work, /jb-colheads/)
 })
 
 test('filtered to nothing is not the same as having no work', () => {
@@ -369,13 +389,13 @@ test('filtered to nothing is not the same as having no work', () => {
   assert.equal(filteredOut[0].total, 0)
 })
 
-test('no jargon on the board', () => {
+test('no jargon on Work home', () => {
   const FORBIDDEN = /\b(loops?|workloops?|possession|segments?|stations?|handoffs?)\b/i
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  const board = work.slice(work.indexOf('function HealthBadge'), work.indexOf('export default function'))
-  for (const m of board.matchAll(/>([^<>{}]{3,})</g)) {
-    assert.ok(!FORBIDDEN.test(m[1]), `board ships jargon: ${JSON.stringify(m[1])}`)
+  const home = work.slice(work.indexOf('function WorkHome'), work.indexOf('export default function'))
+  for (const m of home.matchAll(/>([^<>{}]{3,})</g)) {
+    assert.ok(!FORBIDDEN.test(m[1]), `Work home ships jargon: ${JSON.stringify(m[1])}`)
   }
   for (const c of COLUMNS) assert.ok(!FORBIDDEN.test(c.label), c.label)
   assert.ok(!FORBIDDEN.test(UNMATCHED))
