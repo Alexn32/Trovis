@@ -1781,6 +1781,37 @@ def init_db() -> None:
         _try_add_column(cur, "loops", "workflow_id", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "loops", "workflow_version", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "loops", "workflow_confidence", "REAL DEFAULT NULL")
+        # THE DECLARED EXPECTATION. Until now a workflow declared how to
+        # RECOGNISE its runs (match_hints) and what shape they take
+        # (stations), but nothing about what "working" means — so a job page
+        # could only ever report observed numbers with nothing to compare
+        # them against, and a health badge would have been an adjective with
+        # no number behind it.
+        #
+        # These live on workflow_versions, not workflows: an expectation is
+        # part of the definition, so changing it is a new version with the
+        # old one preserved. Every column is nullable and NULL means NOT
+        # DECLARED — never zero, never a default baseline. A job with no
+        # expectation reports its observed numbers and says "no expectation
+        # set"; it never earns a verdict.
+        _try_add_column(cur, "workflow_versions", "definition", "TEXT")
+        _try_add_column(cur, "workflow_versions", "expected_per_day_min", "INTEGER")
+        _try_add_column(cur, "workflow_versions", "expected_per_day_max", "INTEGER")
+        # Close-time ceiling, in seconds.
+        _try_add_column(cur, "workflow_versions", "expected_close_s", "INTEGER")
+        # Share of CLOSED runs whose possession chain contains at least one
+        # HUMAN holder. Not "runs with a handoff" — agent-to-agent does not
+        # count. This is the number no competitor's schema can produce: it
+        # needs a possession chain that crosses a person.
+        _try_add_column(cur, "workflow_versions", "expected_intervention_pct", "REAL")
+        _try_add_column(cur, "workflow_versions", "expected_failure_pct", "REAL")
+        # Who owns the job. service_name + agent_id is the ROUTE to Fleet;
+        # a display label is never a route (see agentRoute.js).
+        _try_add_column(cur, "workflow_versions", "owning_service_name", "TEXT")
+        _try_add_column(cur, "workflow_versions", "owning_agent_id", "TEXT")
+        _try_add_column(cur, "workflow_versions", "approval_routing", "TEXT")
+        # Per-job stall override. NULL = the global STALL_THRESHOLD_S.
+        _try_add_column(cur, "workflow_versions", "stall_threshold_s", "INTEGER")
         # Grown vocabularies: cached_state gained 'awaiting_system' and
         # participant_type gained 'tool'. Inline CHECKs can't be widened in
         # place, so both moved to code enforcement (loops.STATES /
@@ -3599,6 +3630,7 @@ SELECT l.id, l.account_id, l.external_id, l.service_name, l.agent_id, l.title,
        l.created_at, l.closed_at,
        l.workflow_id, l.workflow_version,
        wf.name AS workflow_name,
+       wf.archived_at AS workflow_archived_at,
        COALESCE(p.c, 0) AS participant_count,
        COALESCE(e.c, 0) AS loop_event_count,
        COALESCE(sp.c, 0) AS span_count,
@@ -3607,6 +3639,13 @@ FROM loops l
 -- Safe join: l.workflow_id is only ever written by the matcher, whose scan
 -- is restricted to versioned workflows — a legacy graph row can never be
 -- referenced, so workflow_name never resolves to one.
+--
+-- An ARCHIVED workflow still resolves here, on purpose. Matching is sticky,
+-- so a run matched before its job was archived keeps that job: the run really
+-- did belong to it, and dropping the name would leave the run looking
+-- unmatched while its workflow_id still points somewhere. workflow_archived_at
+-- is carried so every surface can mark it archived instead of pretending it
+-- is current.
 LEFT JOIN workflows wf ON wf.id = l.workflow_id
 LEFT JOIN (SELECT loop_id, COUNT(*) AS c
            FROM loop_participants GROUP BY loop_id) p ON p.loop_id = l.id
@@ -3637,6 +3676,10 @@ def _loop_row(r: dict[str, Any]) -> dict[str, Any]:
         "closed_at": _ts_to_str(d.get("closed_at")),
         "workflow_id": d.get("workflow_id"),
         "workflow_name": d.get("workflow_name"),
+        # Set when the job has been archived. Matching is sticky, so a run
+        # can outlive its job's retirement — the surface says "archived"
+        # rather than pretending the job is current or dropping the name.
+        "workflow_archived_at": _ts_to_str(d.get("workflow_archived_at")),
         "workflow_version": d.get("workflow_version"),
         "participant_count": int(d.get("participant_count") or 0),
         "span_count": span_count,
@@ -5612,6 +5655,62 @@ def _parse_json_list(raw) -> list:
         return []
 
 
+# THE DECLARED EXPECTATION, named once.
+#
+# Every one of these is optional and NULL means NOT DECLARED — never zero and
+# never a default baseline. A job with no expectation reports what was observed
+# and says so; it never earns a verdict. Listed here rather than spelled out at
+# each of the five call sites (create, new version, two reads, the API model)
+# because five hand-maintained copies is how a column quietly stops being
+# written on one path.
+EXPECTATION_FIELDS = (
+    "definition",
+    "expected_per_day_min",
+    "expected_per_day_max",
+    "expected_close_s",
+    "expected_intervention_pct",
+    "expected_failure_pct",
+    "owning_service_name",
+    "owning_agent_id",
+    "approval_routing",
+    "stall_threshold_s",
+)
+_EXPECTATION_SELECT = ", ".join(f"v.{c}" for c in EXPECTATION_FIELDS)
+EXPECTATION_COLS = ", ".join(EXPECTATION_FIELDS)
+EXPECTATION_PH = ", ".join([PH] * len(EXPECTATION_FIELDS))
+
+
+def _expectation_values(src: dict[str, Any] | None) -> list[Any]:
+    """The expectation columns in EXPECTATION_FIELDS order, for an INSERT.
+    Anything absent or empty is NULL — an empty string is not a declaration."""
+    src = src or {}
+    out: list[Any] = []
+    for c in EXPECTATION_FIELDS:
+        v = src.get(c)
+        if isinstance(v, str):
+            v = v.strip() or None
+        out.append(v)
+    return out
+
+
+def _expectation_read(r) -> dict[str, Any]:
+    """The expectation as read back, plus whether one was declared at all.
+
+    `has_expectation` is what the job page gates its verdicts on: it is False
+    unless at least one measurable ceiling was set, so a job carrying only a
+    description still reports observed numbers without a health claim.
+    """
+    out = {c: r[c] for c in EXPECTATION_FIELDS}
+    out["has_expectation"] = any(
+        out[c] is not None
+        for c in (
+            "expected_per_day_min", "expected_per_day_max", "expected_close_s",
+            "expected_intervention_pct", "expected_failure_pct",
+        )
+    )
+    return out
+
+
 def create_workflow(
     account_id: int | None,
     name: str,
@@ -5619,6 +5718,7 @@ def create_workflow(
     match_hints: list | None = None,
     note: str | None = None,
     created_by: str = "",
+    expectation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Declare a workflow: the parent row + version 1, one transaction."""
     lp = _loops_mod()
@@ -5638,10 +5738,11 @@ def create_workflow(
         )
         cur.execute(
             "INSERT INTO workflow_versions "
-            "(workflow_id, version, stations, match_hints, note, created_by) "
-            f"VALUES ({PH}, 1, {PH}, {PH}, {PH}, {PH})",
+            "(workflow_id, version, stations, match_hints, note, created_by, "
+            f"{EXPECTATION_COLS}) "
+            f"VALUES ({PH}, 1, {PH}, {PH}, {PH}, {PH}, {EXPECTATION_PH})",
             (workflow_id, json.dumps(stations), json.dumps(match_hints),
-             note, created_by or ""),
+             note, created_by or "", *_expectation_values(expectation)),
         )
     return get_workflow(workflow_id, account_id)
 
@@ -5653,6 +5754,7 @@ def create_workflow_version(
     match_hints: list | None = None,
     note: str | None = None,
     created_by: str = "",
+    expectation: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Append a new FULL definition (not a diff) and bump current_version —
     one of the two allowed writes on the workflows row. Prior versions are
@@ -5681,10 +5783,12 @@ def create_workflow_version(
         next_version = int(row["current_version"] or 1) + 1
         cur.execute(
             "INSERT INTO workflow_versions "
-            "(workflow_id, version, stations, match_hints, note, created_by) "
-            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            "(workflow_id, version, stations, match_hints, note, created_by, "
+            f"{EXPECTATION_COLS}) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {EXPECTATION_PH})",
             (workflow_id, next_version, json.dumps(stations),
-             json.dumps(match_hints), note, created_by or ""),
+             json.dumps(match_hints), note, created_by or "",
+             *_expectation_values(expectation)),
         )
         # ALLOWED WRITE 1 of 2 on workflows: the current_version bump.
         cur.execute(
@@ -5771,8 +5875,176 @@ def _workflow_loop_aggregates(
     return by_state, today, needs_age
 
 
+# How far back the job page's computed numbers look. Stated on the page
+# itself ("Computed from N runs, last 14 days") — a computed number that does
+# not say what it was computed from is an assertion, not evidence.
+WORKFLOW_WINDOW_DAYS = 14
+
+
+def _workflow_outcome_aggregates(
+    cur, account_id: int | None, workflow_id: int | None = None,
+    window_days: int = WORKFLOW_WINDOW_DAYS,
+) -> dict[int, dict[str, Any]]:
+    """Per-workflow outcomes over the window, keyed by workflow_id.
+
+    ONE query per fact, all index-backed GROUP BYs over `loops` — the same
+    shape as _workflow_loop_aggregates, never the loop-scanning fold.
+
+    Every number here is computed exactly once and read by both the job
+    page's health section and its path diagram. The divergence the diagram
+    draws IS the intervention rate the health section reports; computing it
+    twice is how a page ends up disagreeing with itself.
+
+    `intervention` = closed runs whose possession chain crossed a PERSON.
+    The chain itself comes from loops.compute_loop_segments, far too
+    expensive to run per row here, so this asks the events the chain is built
+    from: a `handoff_initiated` carrying direction `to_human` is exactly what
+    opens a human segment. An agent-to-agent handoff carries `to_system` and
+    does not count — that distinction is the whole point of the metric.
+
+    A person who was handed the work counts whether or not they accepted it:
+    compute_loop_segments opens their segment at handoff_initiated, so
+    "waiting on Alex" already IS Alex in the chain.
+
+    (loop_participants would be the cheaper join, but the OTLP ingest path
+    never writes a human participant row — only the API handoff path does —
+    so it would silently miss every run that came from telemetry, which is
+    all of them.)
+    """
+    scope = ""
+    scope_args: list[Any] = []
+    if account_id is not None:
+        scope += f" AND l.account_id = {PH}"
+        scope_args.append(account_id)
+    if workflow_id is not None:
+        scope += f" AND l.workflow_id = {PH}"
+        scope_args.append(workflow_id)
+    since = (_utcnow() - timedelta(days=int(window_days))).strftime("%Y-%m-%d %H:%M:%S")
+
+    out: dict[int, dict[str, Any]] = {}
+
+    def bucket(wid: int) -> dict[str, Any]:
+        return out.setdefault(wid, {
+            "closed_runs": 0, "intervention_runs": 0, "failed_runs": 0,
+            "cost_usd": 0.0, "cost_runs": 0, "close_times_s": [],
+        })
+
+    # Closed runs in the window, whether a person was in the chain, and
+    # whether it ended badly. `abandoned` is the failure the record can see:
+    # a run nobody ever closed.
+    # LIKE pattern bound as a parameter, never inline: psycopg2 treats a
+    # literal % in the SQL as a placeholder whenever params are passed.
+    to_human = '%"direction": "to_human"%'
+    cur.execute(
+        "SELECT l.workflow_id AS wid, l.cached_state AS state, "
+        "  EXISTS (SELECT 1 FROM loop_events e WHERE e.loop_id = l.id "
+        "          AND e.type = 'handoff_initiated' "
+        f"          AND e.payload LIKE {PH}) AS human, "
+        "  COUNT(*) AS c "
+        "FROM loops l "
+        f"WHERE l.workflow_id IS NOT NULL AND l.closed_at IS NOT NULL "
+        f"AND l.closed_at >= {PH} {scope} "
+        "GROUP BY l.workflow_id, l.cached_state, human",
+        tuple([to_human, since, *scope_args]),
+    )
+    for r in cur.fetchall():
+        b = bucket(r["wid"])
+        n = int(r["c"])
+        b["closed_runs"] += n
+        if r["human"]:
+            b["intervention_runs"] += n
+        if r["state"] == "abandoned":
+            b["failed_runs"] += n
+
+    # Cost of the runs in the window. Spans carry the cost; a span with no
+    # loop_id belongs to no run and so to no job — see cost_note below.
+    cur.execute(
+        "SELECT l.workflow_id AS wid, COUNT(DISTINCT l.id) AS runs, "
+        "  COALESCE(SUM(s.estimated_cost_usd), 0) AS cost "
+        "FROM loops l JOIN spans s ON s.loop_id = l.id "
+        f"WHERE l.workflow_id IS NOT NULL AND l.created_at >= {PH} {scope} "
+        "GROUP BY l.workflow_id",
+        tuple([since, *scope_args]),
+    )
+    for r in cur.fetchall():
+        b = bucket(r["wid"])
+        b["cost_usd"] = float(r["cost"] or 0.0)
+        b["cost_runs"] = int(r["runs"] or 0)
+
+    # Close times, for the median.
+    #
+    # Measured on the AGENT's clock (loop_events.event_time_unix), not on
+    # loops.created_at/closed_at, which are database write times. A batch of
+    # backdated telemetry arriving at once has created_at == closed_at and
+    # would report every run as closing instantly — the number would be a
+    # property of the exporter, not of the work.
+    #
+    # Bounded by the window and a hard row cap; the median is taken in Python
+    # because SQLite has no percentile function and a portable SQL median is
+    # worse than a short list.
+    cur.execute(
+        "SELECT l.workflow_id AS wid, MIN(e.event_time_unix) AS opened_ns, "
+        "  MAX(e.event_time_unix) AS closed_ns "
+        "FROM loops l JOIN loop_events e ON e.loop_id = l.id "
+        f"WHERE l.workflow_id IS NOT NULL AND l.closed_at IS NOT NULL "
+        f"AND l.closed_at >= {PH} {scope} "
+        f"GROUP BY l.id, l.workflow_id ORDER BY MAX(e.event_time_unix) DESC LIMIT {PH}",
+        tuple([since, *scope_args, 2000]),
+    )
+    for r in cur.fetchall():
+        a, z = r["opened_ns"], r["closed_ns"]
+        if a is not None and z is not None and int(z) >= int(a):
+            bucket(r["wid"])["close_times_s"].append(int((int(z) - int(a)) // _NS_PER_S))
+
+    for b in out.values():
+        times = sorted(b.pop("close_times_s"))
+        b["median_close_s"] = times[len(times) // 2] if times else None
+        # None, not 0.0, when nothing was priced. Runs whose spans carried no
+        # cost mean "we were not told", which is a different claim from "it
+        # was free" — and a board column of $0.00 makes the first look like
+        # the second. Same rule the run rows already follow (runCost).
+        b["cost_per_run"] = (
+            round(b["cost_usd"] / b["cost_runs"], 6)
+            if b["cost_runs"] and b["cost_usd"] > 0
+            else None
+        )
+        closed = b["closed_runs"]
+        # Rates are None, not 0, when there is nothing to divide: "no closed
+        # runs yet" and "nothing needed a person" are different facts.
+        b["intervention_pct"] = (
+            round(b["intervention_runs"] * 100.0 / closed, 1) if closed else None
+        )
+        b["failure_pct"] = (
+            round(b["failed_runs"] * 100.0 / closed, 1) if closed else None
+        )
+        b["window_days"] = int(window_days)
+    return out
+
+
+def unattributed_span_count(account_id: int | None, window_days: int = WORKFLOW_WINDOW_DAYS) -> int:
+    """Spans in the window that belong to no run, and so to no job.
+
+    Per-job cost sums spans joined through loop_id. Three writers insert
+    spans with loop_id NULL deliberately (MCP / connector synthetic spans),
+    and historical spans are never backfilled — so this number is the part of
+    spend that job-level cost structurally cannot see. Zero means job cost is
+    the whole picture; anything else has to be said out loud rather than
+    quietly rounded into the per-run figure.
+    """
+    since_ns = int((_utcnow() - timedelta(days=int(window_days))).timestamp() * 1e9)
+    acct_sql, acct_args = _loop_account_clause(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM spans "
+            f"WHERE loop_id IS NULL AND start_time_unix >= {PH} {acct_sql}",
+            tuple([since_ns, *acct_args]),
+        )
+        row = cur.fetchone()
+        return int((row["c"] if row else 0) or 0)
+
+
 def _workflow_summary_row(
-    r, by_state: dict, today: dict, needs_age: dict,
+    r, by_state: dict, today: dict, needs_age: dict, outcomes: dict | None = None,
 ) -> dict[str, Any]:
     return {
         "id": r["id"],
@@ -5785,6 +6057,16 @@ def _workflow_summary_row(
         "loops_today": today.get(r["id"], 0),
         "stations": _parse_json_list(r["stations"]),
         "needs_you_for_s": needs_age.get(r["id"]),
+        **_expectation_read(r),
+        # Observed, over WORKFLOW_WINDOW_DAYS. Read by the board row and by
+        # the job page's health section and path diagram — one computation,
+        # so the three can never disagree.
+        **((outcomes or {}).get(r["id"]) or {
+            "closed_runs": 0, "intervention_runs": 0, "failed_runs": 0,
+            "cost_usd": 0.0, "cost_runs": 0, "median_close_s": None,
+            "cost_per_run": None, "intervention_pct": None,
+            "failure_pct": None, "window_days": WORKFLOW_WINDOW_DAYS,
+        }),
     }
 
 
@@ -5793,7 +6075,7 @@ def get_workflows(
 ) -> list[dict[str, Any]]:
     sql = (
         "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
-        "w.current_version, v.stations FROM workflows w "
+        f"w.current_version, v.stations, {_EXPECTATION_SELECT} FROM workflows w "
         "JOIN workflow_versions v ON v.workflow_id = w.id "
         "AND v.version = w.current_version WHERE 1=1"
     )
@@ -5808,7 +6090,11 @@ def get_workflows(
         cur.execute(sql, tuple(args))
         rows = cur.fetchall()
         by_state, today, needs_age = _workflow_loop_aggregates(cur, account_id)
-        return [_workflow_summary_row(r, by_state, today, needs_age) for r in rows]
+        outcomes = _workflow_outcome_aggregates(cur, account_id)
+        return [
+            _workflow_summary_row(r, by_state, today, needs_age, outcomes)
+            for r in rows
+        ]
 
 
 def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | None:
@@ -5816,8 +6102,8 @@ def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | N
     for legacy graph rows (no version row → excluded by the join)."""
     sql = (
         "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
-        "w.current_version, v.stations, v.match_hints, v.note "
-        "FROM workflows w "
+        f"w.current_version, v.stations, v.match_hints, v.note, "
+        f"{_EXPECTATION_SELECT} FROM workflows w "
         "JOIN workflow_versions v ON v.workflow_id = w.id "
         "AND v.version = w.current_version "
         f"WHERE w.id = {PH}"
@@ -5834,7 +6120,8 @@ def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | N
         by_state, today, needs_age = _workflow_loop_aggregates(
             cur, account_id, workflow_id,
         )
-        out = _workflow_summary_row(row, by_state, today, needs_age)
+        outcomes = _workflow_outcome_aggregates(cur, account_id, workflow_id)
+        out = _workflow_summary_row(row, by_state, today, needs_age, outcomes)
         out["match_hints"] = _parse_json_list(row["match_hints"])
         cur.execute(
             "SELECT version, note, created_by, created_at FROM workflow_versions "
@@ -5986,9 +6273,20 @@ def _apply_workflow_match(cur, loop_row: dict[str, Any], hint_sets: list) -> boo
     """Recompute the loop's workflow match and write the cache columns when
     changed. Cache semantics mirror cached_state: mutation allowed while
     the loop is open, FROZEN at terminal — every caller guarantees the
-    loop is open. Returns True when the columns changed."""
+    loop is open. Returns True when the columns changed.
+
+    STICKY: a loop that already belongs to a job never loses that job just
+    because it stopped matching. A *different* match still wins — re-matching
+    is the point — but "no hint set matches any more" is not evidence the run
+    was never part of the job. It usually means someone edited the hints or
+    archived the workflow, and silently detaching that run makes it vanish
+    from the job board it belongs on. Kept links are reported by
+    stale_workflow_links() so a wrong one is findable rather than permanent.
+    """
     lp = _loops_mod()
     m = lp.match_workflow(loop_row, hint_sets)
+    if m is None and loop_row.get("workflow_id") is not None:
+        return False
     new_id, new_version, new_conf = m if m else (None, None, None)
     if (
         loop_row.get("workflow_id") == new_id
@@ -6001,6 +6299,76 @@ def _apply_workflow_match(cur, loop_row: dict[str, Any], hint_sets: list) -> boo
         (new_id, new_version, new_conf, loop_row["id"]),
     )
     return True
+
+
+def unlink_loop_workflow(loop_id: int, account_id: int | None) -> bool:
+    """The escape hatch for sticky matching: detach one OPEN loop from its
+    job, explicitly.
+
+    Sticky matching means a mis-linked run can no longer be corrected by
+    editing hints — if the hints were edited *because* the match was wrong,
+    no better match is coming. This is the deliberate correction. Terminal
+    loops are frozen and refuse, same as every other cache write.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        sql = "SELECT id, closed_at, cached_state FROM loops WHERE id = " + PH
+        args: list[Any] = [loop_id]
+        if account_id is not None:
+            sql += f" AND account_id = {PH}"
+            args.append(account_id)
+        cur.execute(sql, tuple(args))
+        row = cur.fetchone()
+        if row is None:
+            return False
+        if row["closed_at"] is not None or row["cached_state"] in ("done", "abandoned"):
+            return False
+        cur.execute(
+            "UPDATE loops SET workflow_id = NULL, workflow_version = NULL, "
+            f"workflow_confidence = NULL WHERE id = {PH}",
+            (loop_id,),
+        )
+        return True
+
+
+def stale_workflow_links(account_id: int | None, limit: int = 50) -> list[dict[str, Any]]:
+    """Open loops holding a workflow_id that no current hint set would
+    produce — the cost of sticky matching, made visible.
+
+    Every row here is one of: a run whose job changed its hints, a run whose
+    job was archived, or a genuine mis-link. Which of those it is cannot be
+    decided from the data, so this reports rather than acts. The COUNT is
+    also a matcher-health signal in its own right: a number that climbs
+    means the hints have drifted away from the work.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        hint_sets = _current_workflow_hints(cur, account_id)
+        acct_sql, acct_args = _loop_account_clause(account_id)
+        cur.execute(
+            "SELECT l.id, l.service_name, l.agent_id, l.title, l.workflow_id, "
+            "l.workflow_version, wf.name AS workflow_name, wf.archived_at "
+            "FROM loops l LEFT JOIN workflows wf ON wf.id = l.workflow_id "
+            "WHERE l.workflow_id IS NOT NULL AND l.closed_at IS NULL "
+            f"AND l.cached_state NOT IN ('done', 'abandoned') {acct_sql.replace('account_id', 'l.account_id')} "
+            f"ORDER BY l.id DESC LIMIT {PH}",
+            tuple([*acct_args, int(limit)]),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    lp = _loops_mod()
+    out = []
+    for r in rows:
+        m = lp.match_workflow(r, hint_sets)
+        if m is not None and m[0] == r["workflow_id"]:
+            continue
+        out.append({
+            "loop_id": r["id"],
+            "workflow_id": r["workflow_id"],
+            "workflow_name": r["workflow_name"],
+            "title": r["title"],
+            # Why it no longer matches, as far as the record can say.
+            "reason": "workflow archived" if r["archived_at"] else "hints no longer match",
+        })
+    return out
 
 
 def rematch_open_loop(

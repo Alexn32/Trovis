@@ -141,6 +141,7 @@ from models import (
     WorkflowDraft,
     WorkflowDraftRequest,
     WorkflowMap,
+    WorkflowMatchHealth,
     WorkflowSummary,
     WorkflowVersionCreate,
     NewKeyResponse,
@@ -1765,6 +1766,7 @@ def declare_workflow(request: Request, body: WorkflowCreate) -> WorkflowDetail:
             match_hints=body.match_hints,
             note=body.note,
             created_by=str(user["id"]),
+            expectation=body.expectation.model_dump() if body.expectation else None,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1812,6 +1814,43 @@ def list_workflows(
     account_id = getattr(request.state, "account_id", None)
     rows = database.get_workflows(account_id, include_archived=include_archived)
     return [WorkflowSummary(**r) for r in rows]
+
+
+@app.get("/workflows/match-health", response_model=WorkflowMatchHealth)
+def workflow_match_health(request: Request) -> WorkflowMatchHealth:
+    """Open runs holding a job that no current hint set would produce.
+
+    Declared BEFORE /workflows/{workflow_id} so the literal path wins the
+    match rather than failing int parsing.
+
+    Matching is sticky — a run never loses its job just because the hints
+    changed — which trades silent detachment for silent staleness. This is
+    the second half of that trade: every kept-but-no-longer-matching link,
+    listed. The count alone is a matcher-health signal; a number that climbs
+    means the hints have drifted away from the work.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    rows = database.stale_workflow_links(account_id)
+    return WorkflowMatchHealth(count=len(rows), links=rows)
+
+
+@app.post("/loops/{loop_id}/unlink-workflow", status_code=204)
+def unlink_loop_workflow(loop_id: int, request: Request) -> None:
+    """Detach one OPEN run from its job, explicitly.
+
+    The escape hatch for sticky matching: once a run keeps its job through
+    hint changes, a MIS-matched run can no longer be corrected by editing
+    hints, because the whole point is that no better match will dislodge it.
+    Terminal runs are frozen and refuse — a closed run permanently records
+    what it matched when it closed.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    _require_session_user(request)
+    if not database.unlink_loop_workflow(loop_id, account_id):
+        raise HTTPException(
+            status_code=404,
+            detail="run not found, or already closed (a closed run's job is frozen)",
+        )
 
 
 @app.get("/workflows/{workflow_id}", response_model=WorkflowDetail)
@@ -1877,6 +1916,9 @@ def add_workflow_version(
             match_hints=body.match_hints,
             note=body.note,
             created_by=str(user["id"]),
+            # A version carries a FULL definition: an omitted expectation
+            # clears it, exactly as omitted stations clear those.
+            expectation=body.expectation.model_dump() if body.expectation else None,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
