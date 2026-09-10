@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
 import { PlusIcon, TrashIcon, UserIcon } from './Icons.jsx'
+import GraduateCard from './Graduate.jsx'
 import {
   buildTree,
   emptyChartCopy,
@@ -133,15 +134,10 @@ export default function Org({ seat, org, onGraduated }) {
       {org?.account_type === 'individual' && (
         <GraduateCard
           orgName={org?.name || ''}
-          onGraduate={async (payload) => {
-            const ok = await act(
-              async () => {
-                const res = await api.graduateOrg(payload)
-                if (onGraduated) onGraduated(res?.org)
-              },
-              'Your workspace is a company now. Invite people into roles below.',
-            )
-            return ok
+          onGraduated={async (res) => {
+            if (onGraduated) await onGraduated(res)
+            await load()
+            setNotice('Your workspace is a company now. Invite people into roles below.')
           }}
         />
       )}
@@ -248,78 +244,6 @@ export default function Org({ seat, org, onGraduated }) {
         </section>
       )}
     </div>
-  )
-}
-
-// Path A → Path B, in the one place it makes sense to offer it. A one-seat
-// workspace keeps everything it already has — agents, jobs, API keys and
-// Connect all hang off the account, which graduation doesn't touch — so this
-// is an invitation, not a migration, and it is never forced: an individual
-// who ignores it keeps the full product.
-function GraduateCard({ orgName, onGraduate }) {
-  const [open, setOpen] = useState(false)
-  const [name, setName] = useState(orgName)
-  const [rootTitle, setRootTitle] = useState('Founder')
-  const [busy, setBusy] = useState(false)
-
-  if (!open) {
-    return (
-      <div className="org-graduate">
-        <div className="org-graduate-main">
-          <h3 className="org-graduate-title">Working with other people?</h3>
-          <p className="org-graduate-sub">
-            Turn this workspace into a company: invite colleagues, map who
-            reports to whom, and decide how much of the work each person sees.
-            Your agents, work and connections all stay exactly as they are.
-          </p>
-        </div>
-        <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
-          Invite your company
-        </button>
-      </div>
-    )
-  }
-
-  return (
-    <form
-      className="org-graduate is-open"
-      onSubmit={async (e) => {
-        e.preventDefault()
-        if (busy) return
-        setBusy(true)
-        await onGraduate({
-          org_name: name.trim() || null,
-          root_role_title: rootTitle.trim() || null,
-        })
-        setBusy(false)
-      }}
-    >
-      <h3 className="org-graduate-title">Set up your company</h3>
-      <div className="org-inline-form">
-        <input
-          className="text-input"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Company name"
-          aria-label="Company name"
-          disabled={busy}
-        />
-        <input
-          className="text-input"
-          value={rootTitle}
-          onChange={(e) => setRootTitle(e.target.value)}
-          placeholder="Your role"
-          aria-label="Your role"
-          disabled={busy}
-        />
-        <button type="submit" className="btn btn-primary" disabled={busy}>
-          {busy ? 'Setting up…' : 'Continue'}
-        </button>
-        <button type="button" className="btn" onClick={() => setOpen(false)} disabled={busy}>
-          Not now
-        </button>
-      </div>
-    </form>
   )
 }
 

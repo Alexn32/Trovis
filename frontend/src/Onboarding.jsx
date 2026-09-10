@@ -13,7 +13,9 @@ import { WorksWithStrip } from './BrandMarks.jsx'
 //   Path A (Individual) — name → connect → done. No chart, ever. A one-seat
 //     workspace does not need an org structure to be useful, and demanding
 //     one before the product does anything would be a tax on the person
-//     least able to pay it. They graduate later from the Org page.
+//     least able to pay it. They graduate later, from the soft banner on
+//     Home or from Settings — never from Org, which is the one surface a
+//     solo user has no reason to open.
 //
 //   Path B (Company) — name → chart → connect → invite → done. The chart step
 //     is deliberately minimal: one root role and one report is a usable
@@ -408,11 +410,11 @@ export default function Onboarding({ me, onDone }) {
             <div className="onboard-mark"><CheckCircleIcon size={22} /></div>
             <h1 className="onboard-title">You’re all set.</h1>
             <p className="onboard-sub">
-              Your dashboard fills in automatically as your agents send telemetry.
+              Home fills in automatically as your agents send telemetry.
               Trovis tracks costs for you — set a budget limit anytime in Settings.
             </p>
             <button type="button" className="btn btn-primary onboard-done-btn" onClick={finish} disabled={finishing}>
-              {finishing ? 'Finishing…' : 'Go to dashboard'}
+              {finishing ? 'Finishing…' : 'Go to Home'}
             </button>
           </div>
         )}

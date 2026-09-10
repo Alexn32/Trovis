@@ -7015,6 +7015,21 @@ select.wf2-input { cursor: pointer; }
 .org-graduate.is-open {
   display: block;
 }
+.org-graduate-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* On Home it sits above the day's work, so it stays quieter than the panel
+   version: no filled card, just a hairline and a little air. */
+.org-graduate-banner {
+  background: none;
+  border-color: var(--border-default);
+  margin-bottom: 16px;
+}
+.settings-card .org-graduate {
+  margin: 12px 0 0;
+}
 .org-graduate-title {
   font-size: 14px;
   color: var(--text-primary);
