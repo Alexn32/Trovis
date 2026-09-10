@@ -7360,3 +7360,39 @@ button.work-td-task:hover {
   min-width: 0;
 
 }
+
+/* Whose work — the Work home header control. Quiet: it sits beside the page
+   title and must not compete with it. */
+.work-whose {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.work-whose-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.work-whose-select {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+}
+.work-whose-select:hover {
+  border-color: var(--border-hover);
+}
+@media (max-width: 640px) {
+  .work-whose {
+    margin-left: 0;
+    width: 100%;
+  }
+  .work-whose-select {
+    flex: 1;
+  }
+}
