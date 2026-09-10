@@ -297,33 +297,14 @@ export const api = {
       timeoutMs: LLM_TIMEOUT_MS,
     }),
 
-  // --- team + ownership ---
-  getTeamMembers: () => request('/team'),
-  createTeamMember: (data) =>
-    request('/team', { method: 'POST', body: JSON.stringify(data) }),
-  deleteTeamMember: (id) =>
-    request(`/team/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  // Agents owned by one team member. Returns [] when none assigned.
-  getTeamMemberAgents: (id) =>
-    request(`/team/${encodeURIComponent(id)}/agents`),
-  // Assign a team member as the human owner of one sub-agent. The data
-  // payload is `{ agent_id, team_member_id }`. Returns null (204).
-  setAgentOwner: (serviceName, data) =>
-    request(`/agents/${encodeURIComponent(serviceName)}/owner`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        agent_id: data.agent_id || 'main',
-        team_member_id: data.team_member_id,
-      }),
-    }),
-  removeAgentOwner: (serviceName, agentId) =>
-    request(
-      _withAgent(
-        `/agents/${encodeURIComponent(serviceName)}/owner`,
-        agentId || 'main',
-      ),
-      { method: 'DELETE' },
-    ),
+  // --- agent ownership (legacy `team_members` directory) ---
+  // No client calls these any more, so the wrappers are gone. People, roles
+  // and invites live on the Org page (/org/*), and nothing in the product
+  // creates a team_members row — that parallel directory was the second
+  // source of truth this ship closed. The SERVER still reads it:
+  // agent_owners.team_member_id, and the name shown on a handoff to a human,
+  // both resolve through it. Re-pointing those at `users` is a backend
+  // migration, not a UI change, so the endpoints stay and these do not.
 
   // --- ask ---
   // messages is the full chat thread; backend is stateless. Returns
@@ -585,6 +566,38 @@ export const api = {
   getInvites: () => request('/org/invites'),
   revokeInvite: (id) => request(`/org/invites/${id}`, { method: 'DELETE' }),
   deleteMember: (id) => request(`/org/members/${id}`, { method: 'DELETE' }),
+
+  // --- org chart (roles, reporting lines, seats) ---
+  // The chart comes back already filtered to what this caller may see, and
+  // each role carries can_edit / can_add_child. Those flags are for greying
+  // out controls only — every write is re-authorized server-side.
+  getOrgChart: () => request('/org/chart'),
+  getScopeLevels: () => request('/org/scope-levels'),
+  createScopeLevel: (data) =>
+    request('/org/scope-levels', { method: 'POST', body: JSON.stringify(data) }),
+  createRole: (data) =>
+    request('/org/roles', { method: 'POST', body: JSON.stringify(data) }),
+  // Only the keys present in `data` are changed; pass an explicit null to
+  // detach a parent or a scope level.
+  updateRole: (id, data) =>
+    request(`/org/roles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteRole: (id) => request(`/org/roles/${id}`, { method: 'DELETE' }),
+  addRoleMember: (roleId, userId) =>
+    request(`/org/roles/${roleId}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    }),
+  removeRoleMember: (roleId, userId) =>
+    request(`/org/roles/${roleId}/members/${userId}`, { method: 'DELETE' }),
+  setOrgBuilder: (userId, orgBuilder) =>
+    request(`/org/members/${userId}/org-builder`, {
+      method: 'PUT',
+      body: JSON.stringify({ org_builder: orgBuilder }),
+    }),
+  // Path A → Path B: a one-seat workspace becomes a company. Keeps agents,
+  // jobs and API keys; idempotent.
+  graduateOrg: (data = {}) =>
+    request('/org/graduate', { method: 'POST', body: JSON.stringify(data) }),
   // Re-show the org's API key(s) — owner only, requires the caller's password.
   // No-password key fetch (user is already authenticated).
   getApiKeys: () => request('/org/api-keys'),

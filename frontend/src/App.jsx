@@ -14,7 +14,7 @@ import Login from './Login.jsx'
 import TrovisLanding from './TrovisLanding.jsx'
 import TrovisLegal from './TrovisLegal.jsx'
 import UpgradeModal from './UpgradeModal.jsx'
-import Team from './Team.jsx'
+import Org from './Org.jsx'
 import Settings from './Settings.jsx'
 import Onboarding from './Onboarding.jsx'
 // A render crash used to blank the whole app; each pane and the overlay now
@@ -29,7 +29,8 @@ import {
 } from './api.js'
 import { restoreSession } from './sessionRestore.js'
 import { performLogout } from './sessionLogout.js'
-import { isPaneVisible, nextRosterEpoch } from './tabs.js'
+import { isPaneVisible, nextRosterEpoch, visibleTabs } from './tabs.js'
+import { seatOf } from './seat.js'
 import {
   MonitorIcon,
   MoonIcon,
@@ -377,9 +378,10 @@ function AppInner() {
     )
   }
 
-  // Individual accounts have no team to manage — agents are implicitly the
-  // user's. Business accounts get the Team tab + per-agent owner assignment.
-  const isBusiness = me?.org?.account_type === 'business'
+  // The seat decides which surfaces this person is offered. It is resolved
+  // server-side and arrives on /auth/me; seatOf falls back to the full set
+  // when it is missing, so a slow or failed fetch never blanks the shell.
+  const seat = seatOf(me)
   const account = {
     type: me?.org?.account_type,
     userName: me?.user?.name || me?.user?.email || null,
@@ -475,7 +477,7 @@ function AppInner() {
   // more often than before.
   //
   // If you add a tab, render its pane here too — never behind `tab === …`.
-  const paneState = { tab, isBusiness, overlayOpen }
+  const paneState = { tab, surfaces: seat.surfaces, overlayOpen }
   const dashboardVisible = isPaneVisible('dashboard', paneState)
   const fleetVisible = isPaneVisible('fleet', paneState)
   const workVisible = isPaneVisible('work', paneState)
@@ -521,11 +523,17 @@ function AppInner() {
           onUpgrade={openUpgrade}
         />
       </TabPane>
-      {isBusiness && (
-        <TabPane id="team" visible={isPaneVisible('team', paneState)}>
-          <Team onSelectAgent={openDetail} />
-        </TabPane>
-      )}
+      <TabPane id="org" visible={isPaneVisible('org', paneState)}>
+        <Org
+          seat={seat}
+          org={me?.org}
+          // Graduation flips account_type and hands the founder a role, so
+          // the shell's copy of `me` is stale the moment it returns.
+          onGraduated={(updated) =>
+            setMe((prev) => (prev ? { ...prev, org: updated || prev.org } : prev))
+          }
+        />
+      </TabPane>
       <TabPane id="work" visible={workVisible}>
         <WorkTab
           // Hidden panes stay mounted, so tell Work when it is off screen:
@@ -597,7 +605,7 @@ function AppInner() {
 // of the tab order — a hidden pane must not be focusable. `inert` isn't a
 // supported JSX attribute on React 18, so it's set on the node directly.
 // What each pane calls itself when it has to apologise.
-const PANE_LABELS = { dashboard: 'Home', fleet: 'Fleet', team: 'Team', work: 'Work' }
+const PANE_LABELS = { dashboard: 'Home', fleet: 'Fleet', org: 'Org', work: 'Work' }
 
 function TabPane({ id, visible, children }) {
   const ref = useRef(null)
@@ -658,20 +666,11 @@ function TextureOverlay() {
 }
 
 function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) {
-  // The Team tab manages multi-person ownership — only meaningful for
-  // Business orgs. Individual accounts own all their agents implicitly.
-  const isBusiness = me?.org?.account_type === 'business'
   // No Ask tab — the global AskPill (⌘K) covers asking from every page.
-  const tabs = [
-    // The pane id stays 'dashboard' (routes, session-restore, TabPane ids);
-    // what a person reads is Home, everywhere, always.
-    ['dashboard', 'Home'],
-    ['fleet', 'Fleet'],
-    ...(isBusiness ? [['team', 'Team']] : []),
-    // Everything the agents are doing: loops, the by-workflow rollup, and
-    // the Stuck filter — one tab, three zoom levels.
-    ['work', 'Work'],
-  ]
+  // Which of the rest are offered comes from the seat's surfaces, resolved
+  // server-side. Hiding a tab is a courtesy: every endpoint behind it
+  // re-checks the seat, so a stale one costs a visible tab, never access.
+  const tabs = visibleTabs(seatOf(me).surfaces)
   return (
     <header className="app-header">
       <div className="app-header-left">

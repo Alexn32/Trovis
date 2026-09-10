@@ -4,29 +4,32 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { isPaneVisible, nextRosterEpoch, resolveTab, TAB_IDS } from '../src/tabs.js'
+import { ALL_SURFACES } from '../src/seat.js'
 
 const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
 
 test('exactly one pane is visible per tab, and the others only hide', () => {
-  const state = { isBusiness: true, overlayOpen: false }
+  const state = { surfaces: ALL_SURFACES, overlayOpen: false }
   for (const tab of TAB_IDS) {
     const visible = TAB_IDS.filter((id) => isPaneVisible(id, { ...state, tab }))
     assert.deepEqual(visible, [tab], `tab ${tab} shows only its own pane`)
   }
 })
 
-test('stale or unavailable tabs fall back to Fleet, as the old if/else did', () => {
-  assert.equal(resolveTab('workflows'), 'fleet') // pre-consolidation persisted value
-  assert.equal(resolveTab(undefined), 'fleet')
-  // Individual accounts have no Team tab.
-  assert.equal(resolveTab('team', { isBusiness: false }), 'fleet')
-  assert.equal(resolveTab('team', { isBusiness: true }), 'team')
+test('a stale persisted tab lands somewhere real, never on a blank screen', () => {
+  assert.equal(resolveTab('workflows'), 'work') // pre-consolidation persisted value
+  assert.equal(resolveTab(undefined), 'work')
+  // 'team' was the old business-only directory; people live on Org now.
+  assert.equal(resolveTab('team'), 'org')
+  // A tab the seat doesn't include falls back rather than showing nothing.
+  assert.equal(resolveTab('fleet', { surfaces: ['Home', 'Work'] }), 'work')
+  assert.equal(resolveTab('org', { surfaces: ['Fleet'] }), 'fleet')
 })
 
 test('an open overlay hides every pane (overlays still cover main content)', () => {
   for (const tab of TAB_IDS) {
     for (const id of TAB_IDS) {
-      assert.equal(isPaneVisible(id, { tab, isBusiness: true, overlayOpen: true }), false)
+      assert.equal(isPaneVisible(id, { tab, surfaces: ALL_SURFACES, overlayOpen: true }), false)
     }
   }
 })
