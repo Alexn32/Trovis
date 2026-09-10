@@ -17,7 +17,10 @@ import {
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
-import { tableJobMeta } from './workBoard.js'
+import {
+  COLUMNS, boardSummary, cardLines, cellCards, columnOf, groupByJob, healthBadge,
+  idleJobLine, jobSubline, numOrNull, touchedToday,
+} from './workBoard.js'
 import {
   computedFrom, healthRows, jobPath, jobStats, recentRuns, settingsRows,
 } from './jobPage.js'
@@ -601,87 +604,294 @@ function JobPage({
   )
 }
 
+// --- the Work board: the company's situation, grouped by job ---------------
+//
+// The home page for all active and recurring work. Its job is a calm,
+// immediate read of what is operating, what is waiting, what is stuck, and
+// what it costs — a live reflection of what Trovis OBSERVED, never a task
+// board somebody drags cards around on. Nothing here can be moved to Done by
+// hand; Done means a close was recorded.
+
+/** The summary line, where every number is also the way to that number. */
+function BoardHeader({ parts, filter, onFilter }) {
+  return (
+    <p className="jb-totals">
+      {parts.map((p) => (
+        <span key={p.key} className={p.isCost ? 'jb-cost' : undefined}>
+          {p.filter ? (
+            <button
+              type="button"
+              className={filter === p.filter ? 'is-on' : undefined}
+              onClick={() => onFilter(filter === p.filter ? null : p.filter)}
+            >
+              {p.value} {p.label}
+              {/* A truncated page can only report a floor, and says so
+                  rather than presenting a partial count as a total. */}
+              {p.floor ? '+' : ''}
+            </button>
+          ) : (
+            <>{p.value} {p.label}</>
+          )}
+        </span>
+      ))}
+    </p>
+  )
+}
+
+/** One run, as the exception it is. Opens the run record. */
+function RunCard({ row, col, now, onOpen }) {
+  const { lead, sub } = cardLines(row, col, { now })
+  return (
+    <button
+      type="button"
+      className={`jb-card is-${row.status || ''}`}
+      onClick={() => onOpen(row)}
+    >
+      <span className="jb-card-lead">{lead}</span>
+      {sub && <span className="jb-card-sub">{sub}</span>}
+      <span className="jb-card-go" aria-hidden="true">↗</span>
+    </button>
+  )
+}
+
+/**
+ * One job: the row IS the job, and the four cells are its shape.
+ *
+ * Empty cells keep their height on purpose. The emptiness is the signal —
+ * nothing in Stuck is a fact worth seeing at a glance, and filling it with
+ * "No items" would spend a line saying nothing.
+ */
+function JobRow({ grouped, now, onOpenJob, onOpenItem }) {
+  const idle = idleJobLine(grouped, { now })
+  const sub = jobSubline(grouped)
+  const badge = grouped.isUnmatched ? null : healthBadge(grouped, { now })
+  const openable = !grouped.isUnmatched && grouped.job?.id != null
+  const name = openable ? (
+    <button type="button" className="jb-name" onClick={() => onOpenJob(grouped.job.id)}>
+      {grouped.name}
+    </button>
+  ) : (
+    <span className="jb-name is-unmatched">{grouped.name}</span>
+  )
+
+  if (idle) {
+    // A job that did nothing today collapses to one line. It still gets a
+    // row: work that quietly stopped is the thing a board of live runs
+    // structurally cannot show, and it is the main reason this page groups.
+    //
+    // Two facts, never a conclusion. "Last ran 4d ago · expected 8+/day" is
+    // what was observed and what was declared; the reader draws the
+    // inference, because the record cannot tell a stopped job from a job
+    // whose telemetry stopped.
+    return (
+      <div className="jb-row is-idle">
+        <div className="jb-rowgrid">
+          <div className="jb-head">
+            {name}
+            {sub.map((line) => <p key={line} className="jb-meta">{line}</p>)}
+          </div>
+          <p className="jb-idle-line">
+            {idle.observed}
+            {idle.expected ? <span className="jb-idle-exp"> · {idle.expected}</span> : null}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="jb-row">
+      <div className="jb-rowgrid">
+        <div className="jb-head">
+          {name}
+          {sub.map((line) => <p key={line} className="jb-meta">{line}</p>)}
+          {/* One badge, and it always carries the number behind it. Quiet
+              verdicts stay off the board — the job page explains in full. */}
+          {badge && (badge.tone === 'error' || badge.tone === 'warning') && (
+            <p className={`jb-badge tone-${badge.tone}`}>{badge.label}</p>
+          )}
+        </div>
+        {COLUMNS.map((c) => {
+          const { cards, more } = cellCards(grouped, c.key)
+          return (
+            <div key={c.key} className="jb-cell">
+              {cards.map((r) => (
+                <RunCard key={r.id} row={r} col={c.key} now={now} onOpen={onOpenItem} />
+              ))}
+              {/* Unmatched has no job page, so its overflow is a count and
+                  not a button — a control that goes nowhere is worse than
+                  the plain fact it was hiding. */}
+              {more > 0 && (openable ? (
+                <button
+                  type="button"
+                  className="jb-more"
+                  onClick={() => onOpenJob(grouped.job.id)}
+                >
+                  {more} more →
+                </button>
+              ) : (
+                <span className="jb-more is-plain">{more} more</span>
+              ))}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+const BOARD_VIEWS = [
+  { key: 'job', label: 'By job' },
+  { key: 'flat', label: 'Flat' },
+  { key: 'mine', label: 'Mine' },
+  { key: 'today', label: 'Today' },
+]
+
+/** Flat: the same runs, four shared columns, no job grouping. Triage. */
+function FlatBoard({ rows, now, onOpenItem }) {
+  const buckets = { working: [], waiting: [], stuck: [], done: [] }
+  for (const r of rows) {
+    const c = columnOf(r.status)
+    if (c) buckets[c].push(r)
+  }
+  // Oldest first, same as a job cell: age already orders the exceptions to
+  // the top within a column (see groupByJob).
+  for (const c of Object.keys(buckets)) {
+    buckets[c].sort(
+      (a, b) => (Date.parse(a.updated_at || '') || 0) - (Date.parse(b.updated_at || '') || 0),
+    )
+  }
+  return (
+    <div className="jb-flat">
+      <div className="jb-colheads">
+        {COLUMNS.map((c) => <span key={c.key}>{c.label}</span>)}
+      </div>
+      <div className="jb-grid">
+        {COLUMNS.map((c) => (
+          <div key={c.key} className="jb-cell">
+            {buckets[c.key].map((r) => (
+              <RunCard key={r.id} row={r} col={c.key} now={now} onOpen={onOpenItem} />
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function WorkHome({
   onConnectAgent,
   overview,
-  overviewErr,
-  onRetryOverview,
   items,
   itemsErr,
   onRetryItems,
   jobs,
   suggestions,
   nextCursor,
-  onLoadMore,
   busyId,
   suggestionNote,
   onApproveSuggestion,
   onDeclineSuggestion,
   onEditSuggestion,
   filter,
+  onFilter,
   onClearFilter,
   onOpenItem,
   onOpenJob,
+  onNewJob,
   whose,
   onWhoseChange,
   whoseChoices = [],
 }) {
+  const now = Date.now()
+  const [view, setView] = useState('job')
   const all = sortWorkItems(items || [])
-  const rows = all.filter((r) => (filter ? matchesWorkFilter(r, filter) : true))
-  const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
-  // Filtered down to nothing is a different situation from having no work:
-  // the answer is to clear a chip, not to connect an agent.
-  const filteredOut = !!items && rows.length === 0 && all.length > 0
-  const jobMeta = useMemo(
-    () => tableJobMeta(jobs || [], items || [], rows),
-    [jobs, items, rows],
+  // `Mine` is server-resolved: waiting_on_you is decided by the API, never
+  // guessed here from who happens to be signed in.
+  const scoped = view === 'mine' ? all.filter((r) => r.status === 'waiting_on_you')
+    : view === 'today' ? all.filter((r) => touchedToday(r, now))
+      : all
+  const rows = scoped.filter((r) => (filter ? matchesWorkFilter(r, filter) : true))
+  const grouped = useMemo(
+    () => groupByJob(jobs || [], rows, { now }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [jobs, rows],
   )
+  const summary = useMemo(
+    () => boardSummary(grouped, jobs, { truncated: Boolean(nextCursor) }),
+    [grouped, jobs, nextCursor],
+  )
+  // Rule 6: an overview we could not read has not told us the account is
+  // empty. `(overview.open || 0) === 0` made an unreadable count say so.
+  const openCount = numOrNull(overview?.open)
+  const empty = !!items && all.length === 0 && openCount === 0
+  const filteredOut = !!items && rows.length === 0 && all.length > 0
 
   return (
-    <div className="view work-home">
+    <div className="view work-home work-board">
       <header className="work-home-head">
         <h1>Work</h1>
-        {/* Arriving from a Home card. Always dismissible — a filter you cannot
-            see or clear is just a table that looks broken. */}
-        {filter && (
-          <button
-            type="button"
-            className="work-filter-chip"
-            onClick={onClearFilter}
-            aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
-          >
-            {WORK_FILTER_LABELS[filter] || filter}
-            <span aria-hidden="true">×</span>
+        {onNewJob && (
+          <button type="button" className="btn btn-primary jb-new" onClick={onNewJob}>
+            New job
           </button>
-        )}
-        {/* Whose work. Absent entirely for a seat with no reports — "Me" and
-            "Everyone I can see" would be the same list, and a control whose
-            options all do the same thing is worse than no control. */}
-        {whoseChoices.length > 0 && (
-          <label className="work-whose">
-            <span className="work-whose-label">Whose work</span>
-            <select
-              className="work-whose-select"
-              value={whose}
-              onChange={(e) => onWhoseChange(e.target.value)}
-            >
-              {whoseChoices.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
         )}
       </header>
 
-      {overview && <OverviewStrip overview={overview} />}
-      {!overview && overviewErr && (
-        <div className="work-section-failed">
-          <WorkLoadFailed lead="Can't load these counts" onRetry={onRetryOverview} />
+      {items && <BoardHeader parts={summary} filter={filter} onFilter={onFilter} />}
+
+      <div className="jb-bar">
+        <div className="jb-filters">
+          {BOARD_VIEWS.map((v) => (
+            <button
+              key={v.key}
+              type="button"
+              className={`jb-pill${view === v.key ? ' is-on' : ''}`}
+              onClick={() => setView(v.key)}
+            >
+              {v.label}
+            </button>
+          ))}
+          {filter && (
+            <button
+              type="button"
+              className="work-filter-chip"
+              onClick={onClearFilter}
+              aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
+            >
+              {WORK_FILTER_LABELS[filter] || filter}
+              <span aria-hidden="true">×</span>
+            </button>
+          )}
         </div>
-      )}
-      {!overview && !overviewErr && <OverviewSkeleton />}
+        {/* The scope, stated. Two of the header numbers are server totals and
+            two are counted from these rows, so what "these rows" means has to
+            be visible rather than assumed. */}
+        <p className="jb-scope">
+          {whoseChoices.length > 0 ? (
+            <label className="work-whose">
+              <span className="work-whose-label">Whose work</span>
+              <select
+                className="work-whose-select"
+                value={whose}
+                onChange={(e) => onWhoseChange(e.target.value)}
+              >
+                {whoseChoices.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span>All workers</span>
+          )}
+          <span className="dash-dot-sep">·</span>
+          {/* Named for what it actually selects. The lean row has no
+              created_at, so Today can only mean touched today — which is a
+              different set from the header's "started today". */}
+          <span>{view === 'today' ? 'Touched today' : 'All open work'}</span>
+        </p>
+      </div>
+
       <SuggestionsStrip
         suggestions={suggestions}
         busyId={busyId}
@@ -705,16 +915,10 @@ function WorkHome({
         </div>
       )}
 
-      {/* Empty because of the Whose-work choice, not because the org has
-          no work. Offering "Connect an agent" here would be answering a
-          question nobody asked — the agents are connected, they just belong
-          to someone else. */}
       {empty && whoseEmptyCopy(whose) && (
         <div className="board-empty">
           <p className="board-empty-lead">{whoseEmptyCopy(whose)}</p>
-          <p className="board-empty-sub">
-            Widen Whose work above to see the rest.
-          </p>
+          <p className="board-empty-sub">Widen Whose work above to see the rest.</p>
         </div>
       )}
 
@@ -722,7 +926,7 @@ function WorkHome({
         <div className="board-empty">
           <p className="board-empty-lead">No named work yet.</p>
           <p className="board-empty-sub">
-            Connect an agent and titled tasks show up here on their own. You will not have to enter any of it.
+            Connect an agent and its work shows up here on its own. You will not have to enter any of it.
           </p>
           {onConnectAgent && (
             <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
@@ -733,20 +937,28 @@ function WorkHome({
       )}
 
       {items && !empty && !filteredOut && (
-        <WorkTable
-          rows={rows}
-          onOpen={(row) => {
-            if (row.workflow_id != null) onOpenJob(row.workflow_id)
-            else onOpenItem(row)
-          }}
-          onOpenRun={onOpenItem}
-          onOpenJob={onOpenJob}
-          jobMeta={jobMeta}
-          nextCursor={nextCursor}
-          onLoadMore={onLoadMore}
-        />
+        view === 'flat' ? (
+          <FlatBoard rows={rows} now={now} onOpenItem={onOpenItem} />
+        ) : (
+          <>
+            {/* Once, above every row. Four headers per job would be four
+                times the chrome and no more information. */}
+            <div className="jb-colheads">
+              <span />
+              {COLUMNS.map((c) => <span key={c.key}>{c.label}</span>)}
+            </div>
+            {grouped.map((g) => (
+              <JobRow
+                key={g.key}
+                grouped={g}
+                now={now}
+                onOpenJob={onOpenJob}
+                onOpenItem={onOpenItem}
+              />
+            ))}
+          </>
+        )
       )}
-
     </div>
   )
 }
@@ -1108,24 +1320,23 @@ export default function WorkTab({
     <WorkHome
       onConnectAgent={connectAgent}
       overview={overview}
-      overviewErr={overviewErr}
-      onRetryOverview={retryOverview}
       items={items}
       itemsErr={itemsErr}
       onRetryItems={retryItems}
       jobs={jobs}
       suggestions={suggestions}
       nextCursor={nextCursor}
-      onLoadMore={loadMore}
       busyId={busyId}
       suggestionNote={suggestionNote}
       onApproveSuggestion={approveSuggestion}
       onDeclineSuggestion={declineSuggestion}
       onEditSuggestion={editSuggestion}
       filter={filter}
+      onFilter={setFilter}
       onClearFilter={() => setFilter(null)}
       onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
       onOpenJob={(id) => onRoute({ job: Number(id), run: null })}
+      onNewJob={onNewWorkflow}
       whose={whose}
       onWhoseChange={setWhose}
       whoseChoices={whoseOptions(seat, people)}
