@@ -6,7 +6,7 @@ import { workItemStatusLabel, workUpdatedLabel } from './board.js'
 import { openAsk } from './askOpen.js'
 import {
   ACTOR_LABEL, askPrompt, canDecide, jobActions, processSteps, runAgentRoute,
-  runCost, runDuration, runErrorLine, shortHistory,
+  jobTotals, runCost, runDuration, runErrorLine, shortHistory,
 } from './jobDetail.js'
 
 // ---------------------------------------------------------------------------
@@ -265,22 +265,6 @@ export default function JobDetail({
       </aside>
     </>
   )
-}
-
-/**
- * What the whole job took, for the page header. One entry per fact we
- * actually have — an empty array when the record has neither, so the header
- * simply does not carry the line rather than carrying a zero.
- */
-function jobTotals(runs) {
-  const rows = runs || []
-  const out = []
-  const ms = rows.reduce((n, r) => n + (Number(r?.duration_ms) || 0), 0)
-  const total = runDuration(ms)
-  if (total) out.push(total)
-  const cost = runCost(rows.reduce((n, r) => n + (Number(r?.cost_usd) || 0), 0))
-  if (cost) out.push(cost)
-  return out
 }
 
 /**

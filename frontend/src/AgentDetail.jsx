@@ -24,7 +24,10 @@ const F = {
 }
 
 // status → dot color. Only these three states; never a dot without a reason.
-const STATUS_COLOR = { healthy: C.ok, attention: C.warn, error: C.err }
+// Rule 6: `no_data` is its own colour, and the FALLBACK is muted rather than
+// green — an unrecognised status is an unknown one, and defaulting an unknown
+// to a pass is the whole bug this rule exists for.
+const STATUS_COLOR = { healthy: C.ok, attention: C.warn, error: C.err, no_data: C.muted }
 
 /* ── formatters (match the prototype's look) ── */
 function fmtRel(iso) {
@@ -126,8 +129,9 @@ function Header({ summary, registration, account, onBack }) {
   const name = summary.display_name || summary.service_name
   const owner = summary.owner_name || account?.userName
   const model = registration?.model
-  const status = summary.status || 'healthy'
-  const reason = summary.status_reason || 'Active'
+  // Absent status is unknown, not healthy.
+  const status = summary.status || 'no_data'
+  const reason = summary.status_reason || 'No status recorded'
   return (
     <div>
       <button onClick={onBack} style={{
@@ -139,7 +143,7 @@ function Header({ summary, registration, account, onBack }) {
         <h1 style={{ fontFamily: F.mono, fontWeight: 500, fontSize: 26, margin: 0, color: C.ink, letterSpacing: '-0.01em' }}>
           {name}
         </h1>
-        <Pill color={STATUS_COLOR[status] || C.ok}>{reason}</Pill>
+        <Pill color={STATUS_COLOR[status] || C.muted}>{reason}</Pill>
       </div>
 
       <div style={{

@@ -414,12 +414,14 @@ function FleetCard({
         </div>
         <div className="agent-stat">
           <span className="agent-stat-label">Error rate</span>
+          {/* Rule 6: no spans, no rate. Never "0.0%", which reads as a
+              perfect record rather than as an agent that has not run. */}
           <span
             className={`agent-stat-value ${
-              errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''
+              errRate === null ? 'quiet' : errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''
             }`}
           >
-            {errRate.toFixed(1)}%
+            {errRate === null ? 'No data' : `${errRate.toFixed(1)}%`}
           </span>
         </div>
         <div className="agent-stat">
@@ -619,8 +621,8 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
           )}
           <span className="instance-band-stats">
             <span>{(group.total_spans || 0).toLocaleString()} spans</span>
-            <span className={errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''}>
-              {errRate.toFixed(1)}% err
+            <span className={errRate === null ? '' : errRate > 20 ? 'error' : errRate > 5 ? 'warn' : ''}>
+              {errRate === null ? 'no error data' : `${errRate.toFixed(1)}% err`}
             </span>
             {costLabel && <span>{costLabel}</span>}
             <span>{relativeTime(group.last_seen)}</span>
@@ -746,7 +748,9 @@ function synthesizeFeed(groups) {
   for (const g of groups) {
     const compat = groupForStatus(g)
     const rate = errorRatePercent(compat)
-    if (rate > 20) {
+    // An unmeasurable rate raises nothing. `null > 20` is already false, but
+    // saying so keeps the next edit from turning it into `(rate ?? 0) > 20`.
+    if (rate !== null && rate > 20) {
       events.push({
         type: 'alert',
         agent: g.service_name,

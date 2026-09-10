@@ -11,6 +11,7 @@ import {
   computedFrom, costLabel, healthRows, jobPath, jobStats, recentRuns, settingsRows,
 } from '../src/jobPage.js'
 import { kindPath } from '../src/board.js'
+import { groupByJob, healthBadge, unmeasuredExpectations } from '../src/workBoard.js'
 
 const NOW = Date.parse('2026-03-10T12:00:00Z')
 const ago = (s) => new Date(NOW - s * 1000).toISOString()
@@ -37,6 +38,11 @@ function run(o = {}) {
     holder: o.holder ?? { kind: 'agent', name: 'refunds-agent' },
     ...o,
   }
+}
+
+/** One job's board row, so badge tests read against the real shape. */
+function grouped(j, runs = []) {
+  return groupByJob([j], runs, { now: NOW })[0]
 }
 
 // --- the provenance line ----------------------------------------------------
@@ -221,9 +227,107 @@ test('an undeclared metric shows the observation with an EMPTY comparison', () =
 test('a metric with no observation and no ceiling claims nothing at all', () => {
   const rows = healthRows(job({ started_runs: 0, closed_runs: 0 }))
   const iv = rows.find((r) => r.key === 'intervention')
-  assert.equal(iv.observed, null)
+  // Rule 6: the words, not a dash, and never a verdict either way.
+  assert.equal(iv.observed, 'No data')
+  assert.equal(iv.noData, true)
   assert.equal(iv.expected, null)
   assert.equal(iv.over, false)
+})
+
+test('RULE 6 — a missing observation reads as No data, on every metric', () => {
+  // Nothing has closed, so three of the four metrics have no number. Each
+  // says so in words. An em dash next to three rows of real numbers reads as
+  // a small value, which is the opposite of what it means.
+  const rows = healthRows(job({ started_runs: 4, closed_runs: 0, window_days: 14 }))
+  const by = Object.fromEntries(rows.map((r) => [r.key, r]))
+  assert.equal(by.volume.observed, '0.3/day', 'runs STARTED is measurable without a close')
+  assert.equal(by.volume.noData, false)
+  for (const k of ['close', 'intervention', 'failure']) {
+    assert.equal(by[k].observed, 'No data', k)
+    assert.equal(by[k].noData, true, k)
+    assert.equal(by[k].over, false, `${k} cannot breach a ceiling it never measured`)
+  }
+})
+
+test('RULE 6 — a declared check with no observation is NOT a pass', () => {
+  // The never-run bug, in its general form. A job declaring only a close
+  // ceiling, with nothing closed: the cadence branches cannot fire (no floor
+  // declared), firstOverCeiling finds nothing to exceed, and the badge used
+  // to fall straight through to the green branch.
+  const row = grouped(job({
+    has_expectation: true, expected_close_s: 360,
+    started_runs: 4, closed_runs: 0, median_close_s: null,
+    last_run_at: ago(3600),
+  }))
+  const badge = healthBadge(row, { now: NOW })
+  assert.notEqual(badge.label, 'Healthy', 'a check that did not run did not pass')
+  assert.equal(badge.tone, 'none', 'and it is not a warning either — it is unknown')
+  assert.equal(badge.label, 'No data for close time', 'and it names WHICH check')
+})
+
+test('RULE 6 — the badge names how many checks it could not run', () => {
+  const row = grouped(job({
+    has_expectation: true,
+    expected_close_s: 360, expected_intervention_pct: 10, expected_failure_pct: 2,
+    started_runs: 4, closed_runs: 0, last_run_at: ago(3600),
+  }))
+  assert.equal(healthBadge(row, { now: NOW }).label, 'No data for 3 checks')
+})
+
+test('RULE 6 — Healthy is reachable only when every declared check ran', () => {
+  // The positive case has to keep working, or the rule is just a way of
+  // never saying anything.
+  const row = grouped(job({
+    has_expectation: true, expected_close_s: 3600,
+    expected_intervention_pct: 50, expected_failure_pct: 50,
+    expected_per_day_min: 1,
+    started_runs: 140, closed_runs: 28, window_days: 14,
+    median_close_s: 258, intervention_pct: 4, failure_pct: 0,
+    last_run_at: ago(600),
+  }))
+  assert.deepEqual(healthBadge(row, { now: NOW }), { tone: 'ok', label: 'Healthy' })
+})
+
+test('RULE 6 — a measured ZERO is a measurement, not a gap', () => {
+  // The distinction the whole rule rests on. Zero runs observed against a
+  // declared floor is a real breach and must stay a warning; only null is
+  // absence. Conflating them would turn every genuinely failing job into a
+  // shrug.
+  assert.deepEqual(unmeasuredExpectations(job({
+    expected_per_day_min: 8, started_runs: 0, window_days: 14,
+  })), [], 'zero runs per day IS the cadence measurement')
+  assert.deepEqual(unmeasuredExpectations(job({
+    expected_intervention_pct: 10, intervention_pct: 0,
+  })), [], 'nothing needed a person is a finding')
+  // ...and null on either side is.
+  assert.deepEqual(unmeasuredExpectations(job({
+    expected_per_day_min: 8, started_runs: null,
+  })), ['cadence'])
+  assert.deepEqual(unmeasuredExpectations(job({
+    expected_close_s: 360, median_close_s: null,
+  })), ['close time'])
+  // An undeclared metric is not a gap — there was no check to run.
+  assert.deepEqual(unmeasuredExpectations(job({ median_close_s: null })), [])
+  assert.deepEqual(unmeasuredExpectations(null), [])
+})
+
+test('RULE 6 — a breach outranks a gap, and both outrank green', () => {
+  // A known failure is worth more of the reader's attention than an unknown,
+  // but neither may be reported as fine.
+  const row = grouped(job({
+    has_expectation: true,
+    expected_failure_pct: 2, failure_pct: 40,   // measured, breached
+    expected_close_s: 360, median_close_s: null, // declared, unmeasurable
+    started_runs: 4, closed_runs: 1, last_run_at: ago(600),
+  }))
+  const badge = healthBadge(row, { now: NOW })
+  assert.equal(badge.tone, 'warning')
+  assert.match(badge.label, /^Failure rate 40%/)
+})
+
+test('RULE 6 — with neither an expectation nor an observation, say both', () => {
+  const row = grouped(job({ has_expectation: false, started_runs: null }))
+  assert.equal(healthBadge(row, { now: NOW }).label, 'No data, no expectation set')
 })
 
 test('volume breaches in BOTH directions', () => {

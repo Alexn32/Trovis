@@ -46,11 +46,28 @@ import { QuietBrand } from './BrandMarks.jsx'
 const POLL_START_MS = 30000
 const POLL_MAX_MS = 120000
 
+// Honesty rule 5: the numbers agree or they are labelled.
+//
+// These pills and the table under them are DIFFERENT CUTS, and the difference
+// is invisible without saying so. `needs_attention` is the sharp case: it
+// counts engine-stalled runs PLUS human waits that have aged past the stall
+// threshold, while the table labels that second group "Waiting on someone" —
+// so the pill reads 3 beside two Stuck rows and the product looks like it is
+// contradicting itself on one screen. It is not; it is answering a wider
+// question, and the sub-line is what makes that legible.
+//
+// The counts are also account-wide while the table is one page of rows, which
+// is the second reason each pill has to say what it is counting.
 const OVERVIEW_PILLS = [
-  { key: 'needs_you', label: 'Needs you', tone: 'waiting' },
-  { key: 'needs_attention', label: 'Needs attention', tone: 'stuck' },
-  { key: 'open', label: 'Open', tone: null },
-  { key: 'completed_week', label: 'Done this week', tone: 'quiet' },
+  { key: 'needs_you', label: 'Needs you', sub: 'assigned to you', tone: 'waiting' },
+  {
+    key: 'needs_attention',
+    label: 'Needs attention',
+    sub: 'stuck, or waiting too long',
+    tone: 'stuck',
+  },
+  { key: 'open', label: 'Open', sub: 'all unfinished work', tone: null },
+  { key: 'completed_week', label: 'Done this week', sub: 'last 7 days', tone: 'quiet' },
 ]
 
 // Filters Home's cards navigate in with. Kept in the same vocabulary the Home
@@ -112,6 +129,9 @@ function OverviewStrip({ overview }) {
           >
             <span className="work-pill-label">{p.label}</span>
             <span className="work-pill-value">{n}</span>
+            {/* What this number counts. Without it the pill and the table
+                below read as the same cut, and disagree. */}
+            <span className="work-pill-sub">{p.sub}</span>
           </div>
         )
       })}
@@ -410,11 +430,18 @@ function HealthBand({ rows, declared }) {
       )}
       <dl className="jobp-health">
         {rows.map((r) => (
-          <div key={r.key} className={`jobp-metric${r.over ? ' is-over' : ''}`}>
+          <div
+            key={r.key}
+            className={`jobp-metric${r.over ? ' is-over' : ''}${r.noData ? ' is-nodata' : ''}`}
+          >
             <dt>{r.label}</dt>
-            <dd className="jobp-observed">{r.observed ?? '\u2014'}</dd>
+            {/* Rule 6: the words, not a dash. A dash beside three rows of
+                numbers reads as a small value rather than as no value. */}
+            <dd className="jobp-observed">{r.observed}</dd>
             {/* Empty, not a dash pretending to be a verdict. */}
-            <dd className="jobp-expected">{r.expected || ''}</dd>
+            <dd className="jobp-expected">
+              {r.noData && r.expected ? `${r.expected} \u00b7 not checked` : r.expected || ''}
+            </dd>
           </div>
         ))}
       </dl>
@@ -539,9 +566,12 @@ function JobPage({
 
       <div className="jobp-stats">
         {stats.map((st) => (
-          <div key={st.key} className="jobp-stat">
+          <div key={st.key} className={`jobp-stat${st.value === null ? ' is-nodata' : ''}`}>
             <span className="jobp-stat-label">{st.label}</span>
-            <span className="jobp-stat-value">{st.value ?? '\u2014'}</span>
+            {/* Rule 6, said the same way the health section says it. An em
+                dash here beside "No data" two inches below was the same fact
+                rendered two ways on one screen \u2014 browser-caught. */}
+            <span className="jobp-stat-value">{st.value ?? 'No data'}</span>
           </div>
         ))}
       </div>

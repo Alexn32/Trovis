@@ -9,7 +9,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { jobActions, shortHistory, shortenOperation } from '../src/jobDetail.js'
+import { jobActions, jobTotals, shortHistory, shortenOperation } from '../src/jobDetail.js'
 
 const src = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
 const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
@@ -138,7 +138,7 @@ test('no runs means no invented list', () => {
 })
 
 test('the runs load once on enter, not once per action', () => {
-  const fn = job.slice(job.indexOf('export default function JobDetail'), job.indexOf('function jobTotals'))
+  const fn = job.slice(job.indexOf('export default function JobDetail'), job.indexOf('function CurrentHandoff'))
   assert.match(fn, /if \(!isPage\) return undefined/)
   assert.match(fn, /include: 'runs'/)
   // One fetch effect for the page, keyed on the item — not on the actions.
@@ -224,10 +224,29 @@ test('cost still only when there is one, on a move as on a run', () => {
   assert.equal(jobActions([run({ cost_usd: 0 })])[0].cost, null)
   assert.equal(jobActions([run({ cost_usd: null })])[0].cost, null)
   assert.equal(jobActions([run({ cost_usd: 0.0042 })])[0].cost, '$0.0042')
-  // ...and the header total obeys the same rule.
-  const fn = job.slice(job.indexOf('function jobTotals'), job.indexOf('function ActionList'))
-  assert.match(fn, /const cost = runCost\(/)
-  assert.match(fn, /if \(cost\) out\.push\(cost\)/)
+  // ...and the header total obeys the same rule, asserted on the function
+  // rather than on its source text — this used to be a regex against the
+  // implementation, which pinned the shape and said nothing about behaviour.
+  assert.deepEqual(jobTotals([run({ cost_usd: 0, duration_ms: null })]), [])
+  assert.deepEqual(jobTotals([]), [])
+  assert.deepEqual(jobTotals(null), [])
+})
+
+test('a total never counts a run the record never priced as free', () => {
+  // Rule 6 at the aggregate. `Number(x) || 0` inside the sum made every
+  // unpriced run contribute zero, so a total over two priced runs presented
+  // itself as covering all five.
+  const rows = [
+    run({ cost_usd: 0.01, duration_ms: 1000 }),
+    run({ cost_usd: 0.02, duration_ms: 1000 }),
+    run({ cost_usd: null, duration_ms: null }),
+  ]
+  const [dur, cost] = jobTotals(rows)
+  assert.match(cost, /^\$0\.03 \(2 of 3 runs\)$/, 'the sum is of what exists, and says so')
+  assert.match(dur, /\(2 of 3 runs\)$/)
+  // Full coverage carries no qualifier — the label is for the exception.
+  const full = jobTotals([run({ cost_usd: 0.01, duration_ms: 1000 })])
+  assert.ok(full.every((t) => !/of \d+ runs/.test(t)), `unqualified when complete: ${full}`)
 })
 
 test('a failure with no message still gets no invented reason', () => {

@@ -1,4 +1,5 @@
 import { looksInternal } from './askChips.js'
+import { numOrNull } from './workBoard.js'
 
 // Work board presentation logic — pure functions, no React, no DOM, so
 // node --test can cover the copy without a component framework.
@@ -25,8 +26,8 @@ export function boardAge(seconds) {
 /** Cost, only when there is one. A card should not carry "$0.00" — that is
  * noise pretending to be information. */
 export function boardCostLabel(usd) {
-  const n = Number(usd) || 0
-  if (n < 0.01) return ''
+  const n = numOrNull(usd)
+  if (n === null || n < 0.01) return ''
   return `$${n.toFixed(2)}`
 }
 

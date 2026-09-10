@@ -30,4 +30,37 @@ export default [
       'no-undef': 'error',
     },
   },
+  // The second crash class, and the one that keeps coming back: a missing
+  // value coerced into a measured zero. `Number(null)` and `Number('')` are
+  // both 0, so `Number(x) || 0` turns "we were not told" into "it was free"
+  // — which is how $0.00 reached an unpriced run (#160), $0.00/run reached a
+  // job (#164), and 0s/0% reached a job that had never run (#167).
+  //
+  // Three occurrences means the fourth is already being typed. `numOrNull`
+  // (workBoard.js) rejects absent BEFORE the cast; use it.
+  //
+  // Scoped to the Work surface, where honesty rules 1-6 apply and where all
+  // three occurrences happened. Cost, Fleet and Dashboard still hold ~11 of
+  // these; some are legitimate (a zero-filled cost series, a bar height) and
+  // some are the same bug. Widening the scope means auditing each, which is
+  // its own change, not a rider on this one.
+  {
+    files: [
+      'src/workBoard.js', 'src/jobPage.js', 'src/board.js', 'src/jobDetail.js',
+      'src/home.js', 'src/WorkTab.jsx', 'src/JobDetail.jsx',
+    ],
+    rules: {
+      'no-restricted-syntax': ['error', {
+        selector: 'LogicalExpression[operator="||"] > CallExpression.left[callee.name="Number"]',
+        message:
+          'Number(x) || 0 turns a missing value into a measured zero. Use '
+          + 'numOrNull(x) from workBoard.js and handle null explicitly.',
+      }, {
+        selector: 'LogicalExpression[operator="??"] > CallExpression.left[callee.name="Number"]',
+        message:
+          'Number(x) ?? fallback never fires — Number(null) is 0, not '
+          + 'nullish. Use numOrNull(x) from workBoard.js.',
+      }],
+    },
+  },
 ]

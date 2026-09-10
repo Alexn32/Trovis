@@ -29,9 +29,26 @@ export function statusFor(agent) {
   return STATUS_DOT[agent?.status] || 'gray'
 }
 
+// Honesty rule 6: null, not 0, when there is nothing to divide.
+//
+// An agent with no spans has NO error rate. Returning 0 reported a perfect
+// record for an agent that has never run — a pass derived from absence of
+// evidence, and the same shape as the never-run job that badged Healthy.
+// Callers render `No data`; nothing may print "0.0%" here.
 export function errorRatePercent(agent) {
-  if (!agent.span_count) return 0
-  return (agent.error_count / agent.span_count) * 100
+  // Absent is rejected BEFORE the cast, on both sides. Written as
+  // `Number.isFinite(Number(x))` this function still had the very trap it
+  // was written to remove: Number(null) is 0, which is finite, so a missing
+  // error_count produced a confident 0% rate. Its own test caught it.
+  const num = (v) => {
+    if (v === null || v === undefined || v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  const spans = num(agent?.span_count)
+  const errors = num(agent?.error_count)
+  if (spans === null || spans <= 0 || errors === null) return null
+  return (errors / spans) * 100
 }
 
 export function formatDuration(ms) {
