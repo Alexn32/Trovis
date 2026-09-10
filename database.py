@@ -5968,9 +5968,9 @@ def _workflow_outcome_aggregates(
 
     def bucket(wid: int) -> dict[str, Any]:
         return out.setdefault(wid, {
-            "closed_runs": 0, "intervention_runs": 0, "failed_runs": 0,
-            "cost_usd": 0.0, "cost_runs": 0, "close_times_s": [],
-            "last_run_at": None,
+            "started_runs": 0, "closed_runs": 0, "intervention_runs": 0,
+            "failed_runs": 0, "cost_usd": 0.0, "cost_runs": 0,
+            "close_times_s": [], "last_run_at": None,
         })
 
     # Closed runs in the window, whether a person was in the chain, and
@@ -5999,6 +5999,28 @@ def _workflow_outcome_aggregates(
             b["intervention_runs"] += n
         if r["state"] == "abandoned":
             b["failed_runs"] += n
+
+    # How many runs STARTED in the window. This is the cadence number, and it
+    # has to be this one: a declared `expected_per_day` is a statement about
+    # how often the job runs, so grading it against CLOSED runs reports a job
+    # that ran seven times and finished two as running at a fifth of its rate.
+    # That is not a slow job, it is a different question being answered.
+    #
+    # `created_at` rather than the agent clock, deliberately and unlike the
+    # close-time query below: that one measures a DURATION, where a batch of
+    # backdated telemetry collapses created_at and closed_at together and
+    # reports every run closing instantly. This one only decides window
+    # MEMBERSHIP, where the write clock is off by the ingest lag and no more —
+    # and it is the same basis the cost aggregate already uses, so "runs in
+    # the window" means one population on this page, not two.
+    cur.execute(
+        "SELECT l.workflow_id AS wid, COUNT(*) AS c FROM loops l "
+        f"WHERE l.workflow_id IS NOT NULL AND l.created_at >= {PH} {scope} "
+        "GROUP BY l.workflow_id",
+        tuple([since, *scope_args]),
+    )
+    for r in cur.fetchall():
+        bucket(r["wid"])["started_runs"] = int(r["c"] or 0)
 
     # Cost of the runs in the window. Spans carry the cost; a span with no
     # loop_id belongs to no run and so to no job — see cost_note below.

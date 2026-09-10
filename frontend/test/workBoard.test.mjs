@@ -33,7 +33,7 @@ function run(o = {}) {
 function job(o = {}) {
   return {
     id: o.id ?? 1, name: o.name ?? 'Refunds',
-    has_expectation: false, closed_runs: 0, window_days: 14,
+    has_expectation: false, started_runs: 0, closed_runs: 0, window_days: 14,
     intervention_pct: null, failure_pct: null, median_close_s: null,
     expected_per_day_min: null, expected_intervention_pct: null,
     expected_failure_pct: null, expected_close_s: null, last_run_at: null,
@@ -235,7 +235,7 @@ test('an old wait is named with its age', () => {
 test('no declared expectation means NO verdict, only the observed number', () => {
   // This is the rule the whole page rests on. Without a ceiling there is no
   // such thing as too quiet or too expensive.
-  const rows = groupByJob([job({ id: 1, closed_runs: 28, window_days: 14 })],
+  const rows = groupByJob([job({ id: 1, started_runs: 28, window_days: 14 })],
                           [run({ id: 1, status: 'moving' })], { now: NOW })
   const badge = healthBadge(rows[0], { now: NOW })
   assert.equal(badge.tone, 'none')
@@ -245,7 +245,7 @@ test('no declared expectation means NO verdict, only the observed number', () =>
 
 test('a job with an expectation and nothing wrong is Healthy', () => {
   const rows = groupByJob([job({
-    id: 1, has_expectation: true, closed_runs: 140, window_days: 14,
+    id: 1, has_expectation: true, started_runs: 140, window_days: 14,
     expected_per_day_min: 8, expected_per_day_max: 12,
     intervention_pct: 4, expected_intervention_pct: 10,
     last_run_at: ago(600),
@@ -268,7 +268,7 @@ test('below the declared floor is a finding even when it ran a minute ago', () =
   // "It ran recently" does not answer "it is running at a tenth of the rate
   // you asked for".
   const rows = groupByJob([job({
-    id: 1, has_expectation: true, closed_runs: 2, window_days: 14,
+    id: 1, has_expectation: true, started_runs: 2, window_days: 14,
     expected_per_day_min: 8, expected_per_day_max: 12, last_run_at: ago(600),
   })], [run({ id: 1, status: 'moving' })], { now: NOW })
   assert.deepEqual(healthBadge(rows[0], { now: NOW }),
@@ -277,7 +277,7 @@ test('below the declared floor is a finding even when it ran a minute ago', () =
 
 test('quiet only fires against a declared cadence', () => {
   const base = {
-    id: 1, closed_runs: 2, window_days: 14, last_run_at: ago(3 * 86400),
+    id: 1, started_runs: 2, window_days: 14, last_run_at: ago(3 * 86400),
   }
   const undeclared = groupByJob([job(base)], [], { now: NOW })[0]
   assert.equal(healthBadge(undeclared, { now: NOW }).tone, 'none',
@@ -290,7 +290,7 @@ test('quiet only fires against a declared cadence', () => {
 
 test('an off-expectation metric names both numbers', () => {
   const rows = groupByJob([job({
-    id: 1, has_expectation: true, closed_runs: 140, window_days: 14,
+    id: 1, has_expectation: true, started_runs: 140, window_days: 14,
     intervention_pct: 18, expected_intervention_pct: 10, last_run_at: ago(60),
   })], [run({ id: 1, status: 'moving' })], { now: NOW })
   assert.deepEqual(healthBadge(rows[0], { now: NOW }),
@@ -329,9 +329,17 @@ test('a job with nothing at all says so plainly', () => {
 // --- shared formatting ------------------------------------------------------
 
 test('observed per day is null when there is nothing to divide', () => {
-  assert.equal(observedPerDay(job({ closed_runs: 0, window_days: 14 })), 0)
-  assert.equal(observedPerDay(job({ closed_runs: null, window_days: 14 })), null)
-  assert.equal(observedPerDay(job({ closed_runs: 5, window_days: 0 })), null)
+  assert.equal(observedPerDay(job({ started_runs: 0, window_days: 14 })), 0)
+  assert.equal(observedPerDay(job({ started_runs: null, window_days: 14 })), null)
+  assert.equal(observedPerDay(job({ started_runs: 5, window_days: 0 })), null)
+})
+
+test('cadence is runs STARTED — a job mid-flight is not a job standing still', () => {
+  // Reading closed runs here graded a job that ran 140 times and finished 28
+  // as running at a fifth of its declared rate. The two counts have to be
+  // able to disagree without the rate following the wrong one.
+  assert.equal(observedPerDay(job({ started_runs: 140, closed_runs: 28, window_days: 14 })), 10)
+  assert.equal(observedPerDay(job({ started_runs: 28, closed_runs: 0, window_days: 14 })), 2)
 })
 
 test('durations and ages read the way a person says them', () => {
@@ -358,7 +366,7 @@ test('a loud job verdict rides under the Task title, not as its own column', () 
     badge: { tone: 'error', label: 'Failing 1 of 2' },
   })
   const calm = groupByJob([job({
-    id: 1, has_expectation: true, closed_runs: 140, window_days: 14,
+    id: 1, has_expectation: true, started_runs: 140, window_days: 14,
     expected_per_day_min: 8, last_run_at: ago(600),
   })], [run({ id: 1, status: 'moving' })], { now: NOW })[0]
   assert.deepEqual(rowJobLine(calm, { now: NOW }), { name: 'Refunds', badge: null })

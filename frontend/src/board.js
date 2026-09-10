@@ -253,6 +253,21 @@ const PATH_ORDER = ['agent', 'tool', 'human']
 const PATH_LABEL = { agent: 'Agent', tool: 'Tool', human: 'Person' }
 
 /**
+ * How many rows a path would actually be drawn from.
+ *
+ * Exported so a provenance line cannot claim a basis the diagram does not
+ * have: this IS kindPath's admission test, not a second guess at it.
+ */
+export function pathBasis(items) {
+  let n = 0
+  for (const it of items || []) {
+    if (!isNamedWorkTitle(it?.title) || it?.id == null) continue
+    if (it.status === 'done' || PATH_ORDER.includes(it?.holder?.kind)) n += 1
+  }
+  return n
+}
+
+/**
  * The spine for one kind of work, inferred from the rows already loaded.
  *
  * Each node is a kind of holder actually seen, plus the exceptions sitting on
@@ -296,60 +311,4 @@ export function kindPath(items) {
   if (path.length < 2) return null
   if (doneCount > 0) path.push({ kind: 'done', label: 'Done', waiting: 0, stuck: 0 })
   return path
-}
-
-/**
- * Finished and stuck work for this kind, newest first — the technical band.
- *
- * `Sent back` is not inferable from a list row (it lives in the item's own
- * history), so a closed job reads as Done and an open one that cannot move
- * reads as Stuck. Naming an outcome we did not observe would be worse than
- * naming the two we did.
- *
- * Takes CLOSED rows only — the `status=done` payload. Pass it open rows and
- * it will happily report a live stuck job as a past run, which is the one
- * thing this band must not do; the caller owns that guarantee because a lean
- * row carries no "closed" flag to check here. Ids are still de-duplicated:
- * a run listed twice reads as two runs.
- */
-export function pastRuns(finishedItems, limit = 8) {
-  const items = finishedItems
-  const seen = new Set()
-  const rows = (items || [])
-    .filter((it) => isNamedWorkTitle(it?.title) && it?.id != null)
-    .filter((it) => it.status === 'done' || it.status === 'stuck')
-    .filter((it) => {
-      if (seen.has(it.id)) return false
-      seen.add(it.id)
-      return true
-    })
-    .map((it) => ({
-      id: it.id,
-      title: it.title,
-      result: it.status === 'done' ? 'Done' : 'Stuck',
-      status: it.status,
-      at: it.updated_at || null,
-      // Work language, already on the row. Never a stack trace.
-      reason: it.status === 'stuck' ? String(it.whats_next || '').trim() : '',
-      item: it,
-    }))
-  rows.sort((a, b) => (Date.parse(b.at || '') || 0) - (Date.parse(a.at || '') || 0))
-  return rows.slice(0, limit)
-}
-
-/** The one live thing worth naming on a kind page: what needs a person most. */
-export function hottestOpen(items) {
-  const open = (items || []).filter(
-    (it) => isNamedWorkTitle(it?.title) && it?.id != null && it.status !== 'done',
-  )
-  if (open.length === 0) return null
-  const rank = { stuck: 0, waiting_on_you: 1, waiting_on_other: 2, moving: 3 }
-  const sorted = [...open].sort((a, b) => {
-    const ra = rank[a.status] ?? 9
-    const rb = rank[b.status] ?? 9
-    if (ra !== rb) return ra - rb
-    // Oldest first inside a bucket: age is the urgency signal.
-    return (Date.parse(a.updated_at || '') || 0) - (Date.parse(b.updated_at || '') || 0)
-  })
-  return sorted[0]
 }
