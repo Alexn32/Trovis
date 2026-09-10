@@ -5234,11 +5234,39 @@ def _timeline_actor(
 _WORK_ITEM_RUNS_LIMIT = 8
 
 
+# A failure message is written by the agent being observed, so it can be a
+# stack trace, a JSON blob, or a novel. The pane shows ONE line, so take the
+# first and bound it here rather than shipping the rest for the browser to
+# hide.
+_RUN_ERROR_MAX = 160
+
+
+def _run_error_line(status_message: Any) -> str | None:
+    """The first line of a failure message, bounded. None when the run carried
+    no message: a run that failed without saying why says exactly that, and
+    inventing a reason for it would be worse than the silence."""
+    text = str(status_message or "").strip()
+    if not text:
+        return None
+    first = text.splitlines()[0].strip()
+    if not first:
+        return None
+    return first[: _RUN_ERROR_MAX - 1] + "…" if len(first) > _RUN_ERROR_MAX else first
+
+
 def get_work_item_runs(
     account_id: int | None, item_id: int, limit: int = _WORK_ITEM_RUNS_LIMIT
 ) -> list[dict[str, Any]]:
     """The agent runs behind a work item, newest first. Never called unless the
-    caller asks for ?include=runs — the spine must not pay for it."""
+    caller asks for ?include=runs — the spine must not pay for it.
+
+    Carries what the technical fold shows and nothing more: what ran, which
+    agent (as a ROUTE — service_name + agent_id — not just the display label,
+    so the fold can open Fleet on the right agent), whether it failed and in
+    one line why, how long it took, and what it cost. Deliberately NOT here:
+    tokens, attributes, the span waterfall. Someone who needs those is on the
+    agent's own page, which is where this fold sends them.
+    """
     limit = max(1, min(int(limit or _WORK_ITEM_RUNS_LIMIT), 25))
     acct_sql = f" AND s.account_id = {PH}" if account_id is not None else ""
     args: list[Any] = [item_id]
@@ -5248,21 +5276,53 @@ def get_work_item_runs(
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             "SELECT s.span_name, s.service_name, s.agent_id, s.status_code, "
-            "       s.start_time_unix "
+            "       s.status_message, s.start_time_unix, s.end_time_unix, "
+            "       s.estimated_cost_usd, s.attributes "
             f"FROM spans s WHERE s.loop_id = {PH}{acct_sql} "
             f"ORDER BY s.start_time_unix DESC LIMIT {PH}",
             tuple(args),
         )
         rows = [dict(r) for r in cur.fetchall()]
-    return [
-        {
+
+    lp = _loops_mod()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        errored = int(r.get("status_code") or 0) == _OTLP_STATUS_ERROR
+        start, end = r.get("start_time_unix"), r.get("end_time_unix")
+        ms: int | None = None
+        if start is not None and end is not None and int(end) > int(start):
+            ms = int((int(end) - int(start)) // 1_000_000)
+        cost = r.get("estimated_cost_usd")
+        try:
+            cost = float(cost) if cost is not None else None
+        except (TypeError, ValueError):
+            cost = None
+        try:
+            attrs = json.loads(r.get("attributes") or "{}")
+        except (TypeError, ValueError):
+            attrs = {}
+        if not isinstance(attrs, dict):
+            attrs = {}
+        out.append({
             "name": r.get("span_name") or "run",
+            # Label for reading; service_name + agent_id for routing. Keeping
+            # the two apart is what stops a display name from being used as a
+            # URL (see agentRoute.js).
             "agent": r.get("service_name") or "",
-            "at": _ns_to_iso(r.get("start_time_unix")),
-            "errored": int(r.get("status_code") or 0) == _OTLP_STATUS_ERROR,
-        }
-        for r in rows
-    ]
+            "service_name": r.get("service_name") or "",
+            "agent_id": r.get("agent_id") or None,
+            "at": _ns_to_iso(start),
+            "errored": errored,
+            "duration_ms": ms,
+            # Only a real, positive cost. A $0.00 on every row is noise that
+            # reads as a measurement.
+            "cost_usd": cost if (cost is not None and cost > 0) else None,
+            "tool": lp.span_tool(r.get("span_name"), attr(attrs, "tool.name")),
+            # Only on failures: a message on a run that succeeded is not a
+            # reason for anything.
+            "error": _run_error_line(r.get("status_message")) if errored else None,
+        })
+    return out
 
 
 def get_work_item(

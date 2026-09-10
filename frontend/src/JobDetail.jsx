@@ -4,7 +4,10 @@ import { startAbortable } from './abortable.js'
 import { WorkLoadFailed } from './ui.jsx'
 import { workItemStatusLabel, workUpdatedLabel } from './board.js'
 import { openAsk } from './askOpen.js'
-import { ACTOR_LABEL, askPrompt, canDecide, processSteps, shortHistory } from './jobDetail.js'
+import {
+  ACTOR_LABEL, askPrompt, canDecide, processSteps, runAgentRoute, runCost,
+  runDuration, runErrorLine, shortHistory,
+} from './jobDetail.js'
 
 // ---------------------------------------------------------------------------
 // Job detail — what a work item IS and how it moves, not a second table.
@@ -22,7 +25,7 @@ import { ACTOR_LABEL, askPrompt, canDecide, processSteps, shortHistory } from '.
 // one thing deliberately folded away.
 // ---------------------------------------------------------------------------
 
-export default function JobDetail({ item, onClose, onResolved }) {
+export default function JobDetail({ item, onClose, onResolved, onOpenAgent }) {
   const [detail, setDetail] = useState(null)
   const [err, setErr] = useState(null)
   const [reload, setReload] = useState(0)
@@ -176,7 +179,7 @@ export default function JobDetail({ item, onClose, onResolved }) {
               </section>
             )}
 
-            <AgentRuns itemId={item.id} />
+            <AgentRuns itemId={item.id} onOpenAgent={onOpenAgent} />
           </>
         )}
       </aside>
@@ -250,12 +253,59 @@ function CurrentHandoff({ view, decidable, busy, actionErr, onApprove, onSendBac
   )
 }
 
+/**
+ * One run in the fold. Everything here is optional and everything absent is
+ * simply not drawn: this is the last thing on the page and the only place a
+ * technical reader is served, so it must not pad itself with placeholders
+ * that read like measurements.
+ *
+ * The agent's name is the door out — it opens that agent's page in Fleet, but
+ * only when we were handed both a route and somewhere to send it. Otherwise
+ * it stays text rather than becoming a button that goes nowhere.
+ */
+function RunRow({ run, onOpenAgent }) {
+  const route = runAgentRoute(run)
+  const canOpen = Boolean(onOpenAgent && route)
+  const duration = runDuration(run.duration_ms)
+  const cost = runCost(run.cost_usd)
+  const reason = runErrorLine(run)
+
+  return (
+    <li className={run.errored ? 'is-errored' : ''}>
+      <div className="jobd-run-top">
+        <span className="jobd-run-name">{run.name}</span>
+        <span className={`jobd-run-result${run.errored ? ' is-errored' : ''}`}>
+          {run.errored ? 'Error' : 'OK'}
+        </span>
+      </div>
+      <div className="jobd-run-meta">
+        {run.agent &&
+          (canOpen ? (
+            <button
+              type="button"
+              className="jobd-run-agent"
+              onClick={() => onOpenAgent(route[0], route[1])}
+            >
+              {run.agent}
+            </button>
+          ) : (
+            <span className="jobd-run-agent is-plain">{run.agent}</span>
+          ))}
+        {run.at && <span>{workUpdatedLabel(run.at)} ago</span>}
+        {duration && <span>{duration}</span>}
+        {cost && <span>{cost}</span>}
+      </div>
+      {reason && <p className="jobd-run-why">{reason}</p>}
+    </li>
+  )
+}
+
 // --- 6. underlying runs, collapsed ----------------------------------------
 
 // Folded away on purpose: this screen is the process, and the raw runs are the
 // thing it exists to spare you. Fetched only when opened, so the spine never
 // pays for them.
-function AgentRuns({ itemId }) {
+function AgentRuns({ itemId, onOpenAgent }) {
   const [open, setOpen] = useState(false)
   const [runs, setRuns] = useState(null)
   const [err, setErr] = useState(null)
@@ -308,13 +358,7 @@ function AgentRuns({ itemId }) {
           ) : (
             <ul className="jobd-run-list">
               {runs.map((r, i) => (
-                <li key={i} className={r.errored ? 'is-errored' : ''}>
-                  <span className="jobd-run-name">{r.name}</span>
-                  <span className="jobd-run-meta">
-                    {r.agent}
-                    {r.at ? ` · ${workUpdatedLabel(r.at)} ago` : ''}
-                  </span>
-                </li>
+                <RunRow key={i} run={r} onOpenAgent={onOpenAgent} />
               ))}
             </ul>
           )}
