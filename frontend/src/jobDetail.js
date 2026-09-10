@@ -73,10 +73,96 @@ export function processSteps(timeline, { holder = null, status = null, max = MAX
   return { steps, hidden }
 }
 
-/** The log: newest-last, capped. Entries without text are dropped. */
+/**
+ * The passes: newest-last, capped. Entries without text are dropped.
+ *
+ * Identical consecutive entries collapse into one carrying a `count` and the
+ * LATEST of their timestamps. An agent that re-announces the same wait on
+ * every export produced five rows of "Waiting on someone · 19d ago", which
+ * reads as five separate passes when it is one — and it crowded out the
+ * passes that actually differed. Collapsing happens BEFORE the cap for that
+ * reason: the cap should spend its five rows on five different things.
+ *
+ * The count is kept rather than dropped so nothing is hidden silently.
+ */
 export function shortHistory(timeline, { max = MAX_HISTORY } = {}) {
-  const rows = (timeline || []).filter((e) => e && e.text)
+  const rows = []
+  for (const e of timeline || []) {
+    if (!e || !e.text) continue
+    const last = rows[rows.length - 1]
+    const sameActor =
+      String(last?.actor?.kind || '') === String(e.actor?.kind || '') &&
+      String(last?.actor?.name || '').toLowerCase() ===
+        String(e.actor?.name || '').toLowerCase()
+    if (last && last.text === e.text && sameActor) {
+      last.count += 1
+      if (e.at) last.at = e.at
+      continue
+    }
+    rows.push({ ...e, count: 1 })
+  }
   return rows.slice(Math.max(0, rows.length - max))
+}
+
+// --- the action list --------------------------------------------------------
+//
+// "How this job ran" is the MOVES this one job made, which is a different cut
+// from the kind page's path (coarse hands: Agent → Tool → Person) and from
+// the passes above (who was holding it). Two tool calls are two moves even
+// though they are one Tool node on the path and no pass at all.
+//
+// The source is the runs payload, because that is the only array in hand that
+// is action-shaped: the timeline is lifecycle events ("Started", "Waiting on
+// someone"), which are passes by construction. See the PR note.
+
+/**
+ * `agent_run_complete` -> "Agent run complete".
+ *
+ * Shortening the operation, not translating it. Turning `tool_call` into
+ * "Refunded the customer" would be inventing a claim the record cannot
+ * support — the operation name is all we have, so the operation name is what
+ * it says, just readable.
+ */
+export function shortenOperation(name) {
+  const raw = String(name || '').trim()
+  if (!raw) return 'Ran'
+  const words = raw.replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!words) return 'Ran'
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/**
+ * One row per move: what · who · system · result · time.
+ *
+ * `who` is the agent that ran it; `system` is the tool it reached for, when
+ * there was one. Oldest first, so the list reads as a sequence rather than a
+ * feed.
+ *
+ * `isCurrent` marks the newest move only when the job is actually moving. On
+ * a job waiting on a person there is no current ACTION — the wait is the
+ * current thing and the block above the list already says so, so marking a
+ * finished move as "current" there would be false.
+ */
+export function jobActions(runs, { status = null } = {}) {
+  const rows = (runs || [])
+    .filter((r) => r && (r.name || r.agent))
+    .map((r) => ({
+      what: shortenOperation(r.name),
+      who: { kind: 'agent', name: String(r.agent || '').trim() },
+      system: String(r.tool || '').trim() || null,
+      errored: Boolean(r.errored),
+      result: r.errored ? 'Error' : 'OK',
+      at: r.at || null,
+      duration: runDuration(r.duration_ms),
+      cost: runCost(r.cost_usd),
+      reason: runErrorLine(r),
+      route: runAgentRoute(r),
+      isCurrent: false,
+    }))
+  // The payload is newest-first; a sequence reads oldest-first.
+  rows.sort((a, b) => (Date.parse(a.at || '') || 0) - (Date.parse(b.at || '') || 0))
+  if (status === 'moving' && rows.length > 0) rows[rows.length - 1].isCurrent = true
+  return rows
 }
 
 /**

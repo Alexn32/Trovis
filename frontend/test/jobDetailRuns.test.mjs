@@ -122,7 +122,9 @@ test('the agent name invokes onOpenAgent when there is somewhere to send it', ()
 })
 
 test('the callback is threaded from the app, not invented in the pane', () => {
-  assert.match(code, /export default function JobDetail\(\{ item, onClose, onResolved, onOpenAgent \}\)/)
+  const sig = code.slice(code.indexOf('export default function JobDetail'),
+                         code.indexOf(') {', code.indexOf('export default function JobDetail')))
+  assert.match(sig, /\bonOpenAgent\b/, 'JobDetail takes the callback as a prop')
   assert.match(bare, /<AgentRuns itemId=\{item\.id\} onOpenAgent=\{onOpenAgent\} \/>/)
   for (const [file, label] of [['WorkTab.jsx', 'Work'], ['Dashboard.jsx', 'Home']]) {
     const src = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')
