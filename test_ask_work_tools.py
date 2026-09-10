@@ -86,7 +86,9 @@ with TestClient(main.app) as c:
     H = {"Authorization": f"Bearer {T}"}
     uid = r["user"]["id"]
     aid = r["org"]["id"]
-    c.post("/team", headers=H, json={"name": "Sarah Chen", "email": "sarah@t.com", "role": "Lead"})
+    # A named pending invite: she has no login, and work handed to her
+    # address still reads as her name. (POST /team is closed — 410.)
+    c.post("/org/invites", headers=H, json={"email": "sarah@t.com", "name": "Sarah Chen"})
 
     def post(svc, spans):
         return c.post("/v1/traces", json={"resourceSpans": [{
@@ -362,8 +364,8 @@ with TestClient(main.app) as c:
     qa_k, qa_t = r3["api_key"], r3["token"]
     qa_h = {"Authorization": f"Bearer {qa_t}"}
     qa_aid, qa_uid = r3["org"]["id"], r3["user"]["id"]
-    c.post("/team", headers=qa_h, json={
-        "name": "Sam", "email": "sam@t.com", "role": "Lead",
+    c.post("/org/invites", headers=qa_h, json={
+        "email": "sam@t.com", "name": "Sam",
     })
     c.post("/v1/traces", json={"resourceSpans": [{
         "resource": {"attributes": kv({"service.name": "main"})},

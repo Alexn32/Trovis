@@ -2542,36 +2542,33 @@ def list_team(request: Request) -> list[TeamMember]:
     ]
 
 
-@app.post("/team", response_model=TeamMember, status_code=201, deprecated=True)
-def add_team_member(request: Request, body: TeamMemberCreate) -> TeamMember:
-    """Deprecated: add a person to the legacy directory.
+@app.post("/team", status_code=410, deprecated=True)
+def add_team_member(request: Request, body: TeamMemberCreate) -> None:
+    """Closed. People in Trovis are org members or named invites.
 
-    People in Trovis are org members now — invite them (POST /org/invites),
-    put them in a role, and assign agents with
-    PUT /agents/{service}/owner {"user_id": …}. Nothing in the product calls
-    this any more, and the Org page is the only place people are managed, so
-    the competing *invite* path is gone.
+    `team_members` was a directory of people with no login, from before
+    Trovis had real users. It survived one ship longer than the rest of it
+    for a single reason: it was the only way a handoff to someone who had
+    not signed up could read as their name instead of "a human".
 
-    The endpoint itself stays open on purpose, and it is worth being precise
-    about why: `team_members` is also how a handoff target who has NO Trovis
-    login gets a name. An agent can hand work to sarah@company.com whether or
-    not she ever signs in, and _resolve_human_name falls back to this table
-    to render her name instead of "a human". Closing this would quietly
-    degrade that, which is a worse outcome than one deprecated writer.
+    A named pending invite does that job now, and does it better — the
+    person is invited, named, and optionally placed in a role, all at once,
+    and accepting the invite turns them into the same `users` row everything
+    else already uses. So the last writer to the old directory closes here.
+
+    Existing rows still RESOLVE (see _resolve_human_name) — names already in
+    them keep working, which is why there is no backfill: minting invite
+    tokens for old directory rows would create redeemable links nobody asked
+    for, to fix names that already work.
     """
-    account_id = getattr(request.state, "account_id", None)
-    try:
-        m = database.create_team_member(
-            account_id=account_id,
-            name=body.name,
-            email=body.email,
-            role=body.role,
-        )
-    except database.TeamMemberEmailExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return TeamMember(**m)
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "team members are org members now — invite them at POST /org/invites "
+            'with {"email": …, "name": …, "role_id": …}. A named invite gives '
+            "them a name on handoffs before they ever sign in."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4393,6 +4390,7 @@ def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
             role,
             inviter["id"] if inviter else None,
             role_id=body.role_id,
+            display_name=body.name,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4414,6 +4412,7 @@ def create_invite(request: Request, body: InviteCreate) -> InviteCreateResponse:
         email=inv["email"],
         role=inv["role"],
         role_id=inv.get("role_id"),
+        display_name=inv.get("display_name"),
         expires_at=inv["expires_at"],
     )
 

@@ -225,8 +225,9 @@ export default function Org({ seat, org, onGraduated }) {
             {invites.map((i) => (
               <li key={i.id} className="org-row">
                 <span className="org-row-main">
-                  <span className="org-row-name">{i.email}</span>
+                  <span className="org-row-name">{i.display_name || i.email}</span>
                   <span className="org-row-sub">
+                    {i.display_name ? `${i.email} · ` : ''}
                     {roles.find((r) => r.id === i.role_id)?.title || 'No role yet'}
                   </span>
                 </span>
@@ -481,6 +482,11 @@ function AddRoleForm({ parentId, levels, onSubmit, label, compact = false }) {
 
 function InviteToRoleForm({ roleId, act }) {
   const [email, setEmail] = useState('')
+  // Their name, and it starts working immediately: work handed to this
+  // address reads as a person rather than "a human", before they ever sign
+  // in. Optional — an invite with no name still works, it just leaves the
+  // handoff nameless until they accept.
+  const [name, setName] = useState('')
   const [link, setLink] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -496,6 +502,7 @@ function InviteToRoleForm({ roleId, act }) {
           const ok = await act(async () => {
             created = await api.createInvite({
               email: email.trim(),
+              name: name.trim() || null,
               role: 'member',
               role_id: roleId,
             })
@@ -503,6 +510,7 @@ function InviteToRoleForm({ roleId, act }) {
           setBusy(false)
           if (ok) {
             setEmail('')
+            setName('')
             // The link is shown as well as emailed: email delivery is
             // fail-soft on the server, so a copyable link is the only thing
             // that makes an invite reliable when email isn't configured.
@@ -517,6 +525,14 @@ function InviteToRoleForm({ roleId, act }) {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           aria-label="Invite email"
+          disabled={busy}
+        />
+        <input
+          className="text-input"
+          placeholder="Their name (optional)"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          aria-label="Their name"
           disabled={busy}
         />
         <button type="submit" className="btn btn-primary" disabled={busy || !email.trim()}>

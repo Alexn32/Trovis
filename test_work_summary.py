@@ -39,7 +39,7 @@ with TestClient(main.app) as c:
     r = c.post("/auth/signup", json={"email": "s@t.com", "password": "supersecret123",
         "name": "Alex", "account_type": "business", "org_name": "Co"}).json()
     K, T = r["api_key"], r["token"]; H = {"Authorization": f"Bearer {T}"}
-    c.post("/team", headers=H, json={"name": "Sarah Chen", "email": "sarah@t.com", "role": "Lead"})
+    c.post("/org/invites", headers=H, json={"email": "sarah@t.com", "name": "Sarah Chen"})
     def post(svc, spans):
         return c.post("/v1/traces", json={"resourceSpans": [{
             "resource": {"attributes": kv({"service.name": svc})},
