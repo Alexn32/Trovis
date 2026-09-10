@@ -14,7 +14,7 @@ import {
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
-import { groupByJob, rowJobLine } from './workBoard.js'
+import { tableJobMeta } from './workBoard.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
 // IA: Work home stays Monday table (overview + Suggestions + job rows).
@@ -22,6 +22,13 @@ import { QuietBrand } from './BrandMarks.jsx'
 // 4-column board landing (locked v1.1 + #135).
 // Must NOT call /work/summary or /work/board on this path (those starve
 // the replica). Board.jsx stays in the repo unused until F4 reopens it.
+//
+// Dual path on the Monday table (home):
+//   Primary row click → the job (/work/jobs/:id) when the row has one.
+//   Nested click on the task title → that run (/work/runs/:id).
+// Unmatched rows have only the run, so the row opens it. Kind page is
+// already the job, so its table rows stay run doors. The job-name
+// subline remains a job door so click-in cannot become undiscoverable.
 //
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
@@ -355,14 +362,18 @@ function PastRunsBand({ runs, loading, onOpenItem }) {
 
 /**
  * The inventory table. Shared by Work home and the Kind page so the two
- * genuinely are the same table — same columns, same sort, same row-opens-
- * JobDetail — rather than two that merely look alike and drift.
+ * genuinely are the same table — same columns, same sort — rather than
+ * two that merely look alike and drift.
  *
  * Home may pass `jobMeta` / `onOpenJob` so a row can name its job and a
  * numbered verdict under Task. Those are sublines, not extra columns, and
  * they never rearrange the page into Working | Waiting | Stuck | Done.
+ *
+ * Click-in: `onOpen` is the primary row door (job on home, run on the
+ * kind page). `onOpenRun` is the nested task-title door to the run, so
+ * run detail stays secondary and the job path cannot disappear.
  */
-function WorkTable({ rows, onOpen, onOpenJob, jobMeta, nextCursor, onLoadMore }) {
+function WorkTable({ rows, onOpen, onOpenJob, onOpenRun, jobMeta, nextCursor, onLoadMore }) {
   function onRowKey(e, row) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
@@ -380,9 +391,10 @@ function WorkTable({ rows, onOpen, onOpenJob, jobMeta, nextCursor, onLoadMore })
       </div>
       {rows.map((row) => {
         const meta = jobMeta
-          ? (jobMeta.get(String(row.workflow_id))
+          ? (jobMeta.get(row.id)
             || (row.workflow_name ? { name: row.workflow_name, badge: null } : null))
           : null
+        const runNested = onOpenRun && row.workflow_id != null
         return (
           <div
             key={row.id}
@@ -394,7 +406,20 @@ function WorkTable({ rows, onOpen, onOpenJob, jobMeta, nextCursor, onLoadMore })
             aria-label={row.title}
           >
             <span className="work-td-title">
-              <span className="work-td-task">{row.title}</span>
+              {runNested ? (
+                <button
+                  type="button"
+                  className="work-td-task"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenRun(row)
+                  }}
+                >
+                  {row.title}
+                </button>
+              ) : (
+                <span className="work-td-task">{row.title}</span>
+              )}
               {meta?.name && (
                 <span className="work-td-job">
                   {onOpenJob && row.workflow_id != null ? (
@@ -541,16 +566,10 @@ function WorkHome({
   // Filtered down to nothing is a different situation from having no work:
   // the answer is to clear a chip, not to connect an agent.
   const filteredOut = !!items && rows.length === 0 && all.length > 0
-  const jobMeta = useMemo(() => {
-    const now = Date.now()
-    const grouped = groupByJob(jobs || [], items || [], { now })
-    const map = new Map()
-    for (const g of grouped) {
-      const line = rowJobLine(g, { now })
-      if (line) map.set(g.key, line)
-    }
-    return map
-  }, [jobs, items])
+  const jobMeta = useMemo(
+    () => tableJobMeta(jobs || [], items || [], rows),
+    [jobs, items, rows],
+  )
 
   return (
     <div className="view work-home">
@@ -618,7 +637,11 @@ function WorkHome({
       {items && !empty && !filteredOut && (
         <WorkTable
           rows={rows}
-          onOpen={onOpenItem}
+          onOpen={(row) => {
+            if (row.workflow_id != null) onOpenJob(row.workflow_id)
+            else onOpenItem(row)
+          }}
+          onOpenRun={onOpenItem}
           onOpenJob={onOpenJob}
           jobMeta={jobMeta}
           nextCursor={nextCursor}
@@ -915,7 +938,7 @@ export default function WorkTab({
         filter={filter}
         onClearFilter={() => setFilter(null)}
         onBack={() => onRoute({ job: null, run: null })}
-        onOpenItem={(it) => onRoute({ job: route.job, run: it.id })}
+        onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
         onOpenAgent={onOpenAgent}
       />
     ) : (
@@ -938,7 +961,7 @@ export default function WorkTab({
       onEditSuggestion={editSuggestion}
       filter={filter}
       onClearFilter={() => setFilter(null)}
-      onOpenItem={(it) => onRoute({ job: route.job, run: it.id })}
+      onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
       onOpenJob={(id) => onRoute({ job: Number(id), run: null })}
     />
     )

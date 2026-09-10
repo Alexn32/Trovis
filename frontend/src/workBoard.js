@@ -369,6 +369,65 @@ export function rowJobLine(grouped, { now = Date.now() } = {}) {
   return { name: grouped.name, badge: loud ? badge : null }
 }
 
+// Same heat as hottestOpen: the row that needs a person, oldest first.
+const LOUD_PIN_RANK = { stuck: 0, waiting_on_you: 1, waiting_on_other: 2 }
+
+/**
+ * Pin a loud job verdict to one row in a visible cluster.
+ *
+ * Clustering rule: one badge per job, on the hottest attention sibling
+ * (stuck → waiting_on_you → waiting_on_other, oldest first). Healthy /
+ * moving / done siblings keep the job *name* and drop the alarm. If the
+ * visible slice has no attention row (e.g. a Moving filter), pin to the
+ * first sibling in table order so the problem does not vanish.
+ */
+export function pinLoudVerdict(grouped, visibleRows, { now = Date.now() } = {}) {
+  const line = rowJobLine(grouped, { now })
+  if (!line) return null
+  if (!line.badge) return { name: line.name, badge: null, badgeOnId: null }
+  const siblings = (visibleRows || []).filter(
+    (r) => r?.workflow_id != null && String(r.workflow_id) === String(grouped.key),
+  )
+  const attention = siblings
+    .filter((r) => LOUD_PIN_RANK[r.status] != null)
+    .sort((a, b) => {
+      const ra = LOUD_PIN_RANK[a.status]
+      const rb = LOUD_PIN_RANK[b.status]
+      if (ra !== rb) return ra - rb
+      return (Date.parse(a.updated_at || '') || 0) - (Date.parse(b.updated_at || '') || 0)
+    })
+  const pin = attention[0] || siblings[0] || null
+  return { name: line.name, badge: line.badge, badgeOnId: pin?.id ?? null }
+}
+
+/**
+ * Per-row Task sublines for the Monday table.
+ *
+ * Keyed by run id so siblings of one job can share a name and still
+ * differ on the badge. Unmatched / undeclared names fall through to
+ * `workflow_name` on the row.
+ */
+export function tableJobMeta(jobs, items, visibleRows, { now = Date.now() } = {}) {
+  const grouped = groupByJob(jobs || [], items || [], { now })
+  const pinnedByKey = new Map()
+  for (const g of grouped) {
+    const pinned = pinLoudVerdict(g, visibleRows, { now })
+    if (pinned) pinnedByKey.set(g.key, pinned)
+  }
+  const map = new Map()
+  for (const row of visibleRows || []) {
+    const key = row?.workflow_id != null ? String(row.workflow_id) : null
+    const pinned = key ? pinnedByKey.get(key) : null
+    const name = pinned?.name || row?.workflow_name || null
+    if (!name) continue
+    map.set(row.id, {
+      name,
+      badge: pinned?.badgeOnId === row.id ? pinned.badge : null,
+    })
+  }
+  return map
+}
+
 /** The header's counts, from the same arrays the rows are built from. */
 export function boardTotals(rows) {
   const t = { jobs: 0, working: 0, waiting: 0, stuck: 0, done: 0 }
