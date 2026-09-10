@@ -4,23 +4,28 @@ import { startAbortable } from './abortable.js'
 import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
-  OTHER_KIND,
   holderLabel,
   hottestOpen,
   kindPath,
-  kindSegments,
   matchesKind,
   pastRuns,
   sortWorkItems,
   workItemStatusLabel,
-  workKinds,
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
+import {
+  COLUMNS, applyScope, boardTotals, ageLabel, groupByJob,
+  healthBadge, observedPerDay, quietLine, runCardLead,
+} from './workBoard.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
-// Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
-// Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
+// Work — three levels: the board (grouped by job), a job page, a run page.
+//
+// The board's counts are DERIVED from the run rows it draws, not fetched
+// separately: two numbers on one screen disagreeing is the failure this
+// product sells against, and /work/overview was a second source for the same
+// facts. It is no longer called from here.
 // Must NOT call /work/summary or /work/board on this path (those starve
 // the replica). Board.jsx stays in the repo unused until F4 reopens it.
 //
@@ -33,13 +38,6 @@ import { QuietBrand } from './BrandMarks.jsx'
 
 const POLL_START_MS = 30000
 const POLL_MAX_MS = 120000
-
-const OVERVIEW_PILLS = [
-  { key: 'needs_you', label: 'Needs you', tone: 'waiting' },
-  { key: 'needs_attention', label: 'Needs attention', tone: 'stuck' },
-  { key: 'open', label: 'Open', tone: null },
-  { key: 'completed_week', label: 'Done this week', tone: 'quiet' },
-]
 
 // Filters Home's cards navigate in with. Kept in the same vocabulary the Home
 // tiles use; 'attention' mirrors home.js's rule (stuck + aging waits) so the
@@ -85,36 +83,6 @@ function rowClass(status) {
 
 // Render the contract as the API sent it. Do not re-filter rows to "fix"
 // overview totals if /work/items still includes flood until a hotfix.
-
-// Two count rows competing for the same glance is one too many. Once the kind
-// cards are on the page they own moving / waiting / stuck, so the strip drops
-// to the two cuts a kind card structurally cannot express: whose work it is,
-// and what actually finished.
-const DEMOTED_PILLS = new Set(['needs_you', 'completed_week'])
-
-function OverviewStrip({ overview, demoted = false }) {
-  // Counts are the server contract. Do not recompute or clamp them here.
-  const pills = demoted
-    ? OVERVIEW_PILLS.filter((p) => DEMOTED_PILLS.has(p.key))
-    : OVERVIEW_PILLS
-  return (
-    <div className={`work-overview${demoted ? ' is-demoted' : ''}`} aria-label="Work overview">
-      {pills.map((p) => {
-        const n = overview[p.key] || 0
-        const tone = p.tone && n ? p.tone : p.tone === 'quiet' ? 'quiet' : null
-        return (
-          <div
-            key={p.key}
-            className={`work-pill${tone ? ` is-${tone}` : ''}`}
-          >
-            <span className="work-pill-label">{p.label}</span>
-            <span className="work-pill-value">{n}</span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
 
 function suggestionWhy(s) {
   const who = s.draft_holder?.name
@@ -230,87 +198,6 @@ function SuggestionsStrip({ suggestions, busyId, note, onApprove, onDecline, onE
     </section>
   )
 }
-
-function OverviewSkeleton() {
-  return (
-    <div className="work-overview" aria-busy="true" aria-label="Loading overview">
-      <span className="work-skel-pill" />
-      <span className="work-skel-pill" />
-      <span className="work-skel-pill" />
-      <span className="work-skel-pill" />
-    </div>
-  )
-}
-
-function TableSkeleton() {
-  return (
-    <div className="work-skel-table" aria-busy="true" aria-label="Loading work">
-      <span />
-      <span />
-      <span />
-      <span />
-    </div>
-  )
-}
-
-/**
- * One quiet card per kind of work.
- *
- * The kind is `workflow_name` off /work/items — the declared workflow the
- * matcher claimed the loop for. Nothing here is guessed from a title, and
- * nothing here costs a second request: the cards are grouped from the rows
- * the table is already showing.
- *
- * Absent entirely when no kind is declared anywhere, because one card reading
- * "Other work" over the whole table is a heading, not a map.
- *
- * No cost figure: per-kind cost only exists on the board's span aggregate,
- * which is the scan this page exists to avoid.
- */
-function KindsStrip({ kinds, active, onPick }) {
-  if (kinds.length === 0) return null
-  // Everything unmatched is not a map of anything.
-  if (kinds.length === 1 && kinds[0].isOther) return null
-
-  return (
-    <div className="work-kinds" aria-label="Kinds of work">
-      {kinds.map((k) => {
-        const on = active === k.name
-        return (
-          <button
-            key={k.name}
-            type="button"
-            className={`work-kind${on ? ' is-active' : ''}${k.isOther ? ' is-other' : ''}`}
-            aria-pressed={on}
-            onClick={() => onPick(on ? null : k.name)}
-          >
-            <span className="work-kind-name">{k.name}</span>
-            <span className="work-kind-counts">
-              {kindSegments(k).map((seg) => (
-                <span key={seg.label} className={`work-kind-seg tone-${seg.tone}`}>
-                  <span className="work-kind-num">{seg.value}</span>
-                  <span className="work-kind-lbl">{seg.label}</span>
-                </span>
-              ))}
-            </span>
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
-
-// ---------------------------------------------------------------------------
-// Page 2 — one kind of work.
-//
-// Subject: this kind. What the path is, what is live on it, what past runs
-// did, and what is still open. Page 3 is still JobDetail.
-//
-// Everything here is read from the rows this kind already loaded, plus at
-// most ONE extra lean request for finished work. No detail fetch per row, no
-// board, no summary.
-// ---------------------------------------------------------------------------
 
 /**
  * Band A — the path.
@@ -549,90 +436,219 @@ function KindPage({
   )
 }
 
-function WorkHome({
-  onConnectAgent,
-  overview,
-  overviewErr,
-  onRetryOverview,
-  items,
-  itemsErr,
-  onRetryItems,
-  suggestions,
-  nextCursor,
-  onLoadMore,
-  busyId,
-  suggestionNote,
-  onApproveSuggestion,
-  onDeclineSuggestion,
-  onEditSuggestion,
-  filter,
-  onClearFilter,
-  onOpenItem,
-  onOpenKind,
-  onOpenAgent,
-}) {
+// --- the board, grouped by job -------------------------------------------
+//
+// The job is the object. A run only earns a card when it needs a person;
+// everything else is a count, because a wall of equal cards buries the two
+// rows that matter and hides the job that stopped running entirely.
 
-  // The kind filter is in-page and composes with the one Home arrives with:
-  // "Stuck" from Home plus "Refunds" here is a legitimate question, and both
-  // chips stay visible and dismissible so the table never looks broken.
-  const [kind, setKind] = useState(null)
-  const all = sortWorkItems(items || [])
-  const kinds = workKinds(items || [])
-  // A kind that emptied out (resolved, or filtered away by Home's chip) must
-  // not leave the table showing nothing with no way back.
-  const activeKind = kinds.some((k) => k.name === kind) ? kind : null
-  const rows = all
-    .filter((r) => (filter ? matchesWorkFilter(r, filter) : true))
-    .filter((r) => matchesKind(r, activeKind))
-  const empty = !!items && rows.length === 0 && (!overview || (overview.open || 0) === 0)
-  // Filtered down to nothing is a different situation from having no work:
-  // the answer is to clear a chip, not to connect an agent.
-  const filteredOut = !!items && rows.length === 0 && all.length > 0
+function HealthBadge({ badge }) {
+  return <span className={`jb-badge tone-${badge.tone}`}>{badge.label}</span>
+}
+
+function RunCard({ row, onOpen, now }) {
+  const { lead, sub } = runCardLead(row, { now })
+  return (
+    <button
+      type="button"
+      className={`jb-card is-${row.status}`}
+      onClick={() => onOpen(row)}
+      title={row.title || undefined}
+    >
+      <span className="jb-card-lead">{lead}</span>
+      {sub && <span className="jb-card-sub">{sub}</span>}
+    </button>
+  )
+}
+
+/** The counts strip, aligned to the four columns. Every run is in here. */
+function CountStrip({ counts }) {
+  return (
+    <div className="jb-counts" aria-label="Runs by state">
+      {COLUMNS.map((c) => (
+        <span key={c.key} className={`jb-count tone-${c.key}`}>
+          <b>{counts[c.key]}</b> {c.label.toLowerCase()}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function JobRow({ row, onOpenJob, onOpenRun, now }) {
+  const badge = healthBadge(row, { now })
+  const job = row.job
+  const perDay = observedPerDay(job)
+  // Cadence sits here only when there is an expectation to read it against.
+  // Without one the badge already carries the bare observed number, and the
+  // same figure twice on one row is noise.
+  const cadence =
+    perDay !== null && job?.expected_per_day_min != null
+      ? `${perDay}/day, expected ${
+          job.expected_per_day_max != null
+            ? `${job.expected_per_day_min}–${job.expected_per_day_max}`
+            : `${job.expected_per_day_min}+`
+        }`
+      : null
+  const meta = [
+    job?.owning_service_name || null,
+    cadence,
+    // Only a real cost. A per-run figure of $0.00 on a job whose spans
+    // carried no cost reads as a measurement of zero.
+    job?.cost_per_run != null ? `${fmtCost(job.cost_per_run)}/run` : null,
+  ].filter(Boolean)
+
+  // A job that ran nothing at all collapses to its header plus when it last
+  // ran. This is the row a flat board of live runs cannot draw.
+  const idle = row.total === 0
+  const lastRan = ageLabel(job?.last_run_at, now)
 
   return (
-    <div className="view work-home">
+    <section className={`jb-row${idle ? ' is-idle' : ''}`} aria-label={row.name}>
+      <header className="jb-head">
+        {row.isUnmatched ? (
+          <span className="jb-name is-unmatched">{row.name}</span>
+        ) : (
+          <button type="button" className="jb-name" onClick={() => onOpenJob(row)}>
+            {row.name}
+          </button>
+        )}
+        {job?.workflow_archived_at && <span className="jb-archived">archived</span>}
+        {!row.isUnmatched && <HealthBadge badge={badge} />}
+      </header>
+      {row.isUnmatched ? (
+        <p className="jb-meta">
+          {row.total} {row.total === 1 ? 'run' : 'runs'} matched to no job
+        </p>
+      ) : (
+        meta.length > 0 && <p className="jb-meta">{meta.join(' \u00b7 ')}</p>
+      )}
+
+      {idle ? (
+        <p className="jb-quiet">{lastRan ? `Last ran ${lastRan} ago.` : 'Never run.'}</p>
+      ) : (
+        <>
+          <CountStrip counts={row.counts} />
+          {row.exceptions === 0 ? (
+            <p className="jb-quiet">{quietLine(row)}</p>
+          ) : (
+            <div className="jb-grid">
+              {COLUMNS.map((c) => (
+                <div key={c.key} className="jb-cell">
+                  {row.columns[c.key].slice(0, 2).map((r) => (
+                    <RunCard key={r.id} row={r} onOpen={onOpenRun} now={now} />
+                  ))}
+                  {row.columns[c.key].length > 2 && !row.isUnmatched && (
+                    <button
+                      type="button"
+                      className="jb-more"
+                      onClick={() => onOpenJob(row, c.key)}
+                    >
+                      {row.columns[c.key].length - 2} more \u2192
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+/** "$4.12" / "$0.0042" — null when there is nothing real to show. */
+function fmtCost(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
+}
+
+function BoardHome({
+  jobs, items, itemsErr, onRetryItems, costToday, layout, onLayout,
+  scope, onScope, filter, onClearFilter, onOpenJob, onOpenRun, onNewJob,
+  suggestions, busyId, suggestionNote,
+  onApproveSuggestion, onDeclineSuggestion, onEditSuggestion,
+  nextCursor, onLoadMore,
+}) {
+  const now = Date.now()
+  const all = applyScope(items || [], scope, { now })
+  const shown = filter ? all.filter((r) => matchesWorkFilter(r, filter)) : all
+  const rows = groupByJob(jobs || [], shown, { now })
+  const totals = boardTotals(rows)
+  const cost = fmtCost(costToday)
+
+  if (itemsErr && !items) {
+    return (
+      <div className="view work-home">
+        <WorkLoadFailed lead="Can\'t load work" onRetry={onRetryItems} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="view work-home work-board">
       <header className="work-home-head">
         <h1>Work</h1>
-        {/* Arriving from a Home card. Always dismissible — a filter you cannot
-            see or clear is just a table that looks broken. */}
-        {filter && (
-          <button
-            type="button"
-            className="work-filter-chip"
-            onClick={onClearFilter}
-            aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
-          >
-            {WORK_FILTER_LABELS[filter] || filter}
-            <span aria-hidden="true">×</span>
-          </button>
-        )}
-        {activeKind && (
-          <button
-            type="button"
-            className="work-filter-chip"
-            onClick={() => setKind(null)}
-            aria-label={`Clear the ${activeKind} filter`}
-          >
-            {activeKind}
-            <span aria-hidden="true">×</span>
-          </button>
-        )}
+        <button type="button" className="btn btn-primary jb-new" onClick={onNewJob}>
+          New job
+        </button>
       </header>
 
-      {/* A card is a door to that kind's own page now. Holding shift (or
-          the in-page chip below) still narrows the table without leaving. */}
-      <KindsStrip
-        kinds={kinds}
-        active={activeKind}
-        onPick={(name) => (name && onOpenKind ? onOpenKind(name) : setKind(name))}
-      />
-      {overview && <OverviewStrip overview={overview} demoted={kinds.length > 1} />}
-      {!overview && overviewErr && (
-        <div className="work-section-failed">
-          <WorkLoadFailed lead="Can't load these counts" onRetry={onRetryOverview} />
-        </div>
-      )}
-      {!overview && !overviewErr && <OverviewSkeleton />}
+      {/* Every number here is derived from the rows below, never queried
+          separately — two counts on one screen disagreeing is the failure
+          this product sells against. The cost is the exception and says so:
+          it is account-wide and includes spend no job can claim. */}
+      <p className="jb-totals">
+        <span>{totals.jobs} {totals.jobs === 1 ? 'job' : 'jobs'}</span>
+        <button type="button" onClick={() => onScope(scope === 'today' ? null : 'today')}>
+          {totals.done} done today
+        </button>
+        <button type="button" onClick={() => onClearFilter('waiting')}>
+          {totals.waiting} waiting
+        </button>
+        <button type="button" onClick={() => onClearFilter('stuck')}>
+          {totals.stuck} stuck
+        </button>
+        {cost && <span className="jb-cost">{cost} in 24h</span>}
+      </p>
+
+      <div className="jb-filters" role="group" aria-label="Board view">
+        <button
+          type="button"
+          className={`jb-pill${layout === 'grouped' ? ' is-on' : ''}`}
+          onClick={() => onLayout('grouped')}
+        >
+          By job
+        </button>
+        <button
+          type="button"
+          className={`jb-pill${layout === 'flat' ? ' is-on' : ''}`}
+          onClick={() => onLayout('flat')}
+        >
+          Flat
+        </button>
+        <button
+          type="button"
+          className={`jb-pill${scope === 'mine' ? ' is-on' : ''}`}
+          onClick={() => onScope(scope === 'mine' ? null : 'mine')}
+        >
+          Mine
+        </button>
+        <button
+          type="button"
+          className={`jb-pill${scope === 'today' ? ' is-on' : ''}`}
+          onClick={() => onScope(scope === 'today' ? null : 'today')}
+        >
+          Today
+        </button>
+        {filter && (
+          <button type="button" className="work-filter-chip" onClick={() => onClearFilter(null)}>
+            {WORK_FILTER_LABELS[filter] || filter}
+            <span aria-hidden="true">\u00d7</span>
+          </button>
+        )}
+      </div>
+
       <SuggestionsStrip
         suggestions={suggestions}
         busyId={busyId}
@@ -642,43 +658,23 @@ function WorkHome({
         onEdit={onEditSuggestion}
       />
 
-      {itemsErr && !items && (
-        <div className="work-section-failed">
-          <WorkLoadFailed lead="Can't load this work" onRetry={onRetryItems} />
-        </div>
+      {layout === 'flat' ? (
+        <WorkTable rows={sortWorkItems(shown)} onOpen={onOpenRun}
+                   nextCursor={nextCursor} onLoadMore={onLoadMore} />
+      ) : rows.length === 0 ? (
+        <p className="jb-quiet">No work on the record yet.</p>
+      ) : (
+        <>
+          {/* The column headers appear ONCE, not per job. */}
+          <div className="jb-colheads" aria-hidden="true">
+            {COLUMNS.map((c) => <span key={c.key}>{c.label}</span>)}
+          </div>
+          {rows.map((r) => (
+            <JobRow key={r.key} row={r} now={now}
+                    onOpenJob={onOpenJob} onOpenRun={onOpenRun} />
+          ))}
+        </>
       )}
-      {!items && !itemsErr && <TableSkeleton />}
-
-      {filteredOut && !empty && (
-        <div className="board-empty">
-          <p className="board-empty-lead">Nothing matches these filters.</p>
-          <p className="board-empty-sub">Clear a filter above to see the rest of the work.</p>
-        </div>
-      )}
-
-      {empty && (
-        <div className="board-empty">
-          <p className="board-empty-lead">No named work yet.</p>
-          <p className="board-empty-sub">
-            Connect an agent and titled tasks show up here on their own. You will not have to enter any of it.
-          </p>
-          {onConnectAgent && (
-            <button type="button" className="btn btn-primary" onClick={onConnectAgent}>
-              Connect an agent
-            </button>
-          )}
-        </div>
-      )}
-
-      {items && !empty && !filteredOut && (
-        <WorkTable
-          rows={rows}
-          onOpen={onOpenItem}
-          nextCursor={nextCursor}
-          onLoadMore={onLoadMore}
-        />
-      )}
-
     </div>
   )
 }
@@ -693,6 +689,11 @@ export default function WorkTab({
   onNewWorkflow,
   onOpenAgent,
   active = true,
+  // Which Work page the URL is pointing at, and how to change it. The URL is
+  // the single source of truth for job/run — not a mirror of local state, so
+  // Back and a pasted link behave identically.
+  route = { job: null, run: null },
+  onRoute = () => {},
   // { value, nonce } from a Home card. The nonce matters: keep-alive means
   // this component is never remounted, so re-clicking the SAME tile after
   // clearing the chip has to re-apply — an unchanged `value` alone would not.
@@ -709,15 +710,6 @@ export default function WorkTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterNonce])
 
-  // Which page of the Work section is on screen. Local view state, not a
-  // route: the app is pane-based and Work is one pane, so a kind is a view
-  // inside it — the same shape the tab switcher already uses.
-  const [kindView, setKindView] = useState(null)
-  // A job is a third view in the same pane, on top of whichever page opened
-  // it. Storing it BESIDE kindView rather than replacing it is what makes
-  // Back exact: clearing jobView reveals the kind (and its filters) exactly
-  // as it was, because that state was never torn down.
-  const [jobView, setJobView] = useState(null)
   // This kind's CLOSED work. The main page carries done rows only
   // incidentally (it is a mixed page of 50 ordered by recency), so the kind
   // page asks for them directly. One extra lean request, column-filtered —
@@ -725,18 +717,26 @@ export default function WorkTab({
   const [finished, setFinished] = useState(null)
   const [finishedLoading, setFinishedLoading] = useState(false)
 
-  const [overview, setOverview] = useState(null)
+  // The declared jobs. Needed even when a job has no runs today — a job that
+  // STOPPED running is exactly what a board of live runs cannot show, and it
+  // is the main reason this page groups.
+  const [jobs, setJobs] = useState(null)
+  const [costToday, setCostToday] = useState(null)
+  // Bumped when a write should re-read the declarations (a new job, a
+  // resolved handoff). Not a poll.
+  const [refreshKeyForJobs, setRefreshKeyForJobs] = useState(0)
+  const [layout, setLayout] = useState('grouped')  // 'grouped' | 'flat'
+  const [scope, setScope] = useState(null)         // null | 'mine' | 'today'
   const [items, setItems] = useState(null)
   const [suggestions, setSuggestions] = useState([])
   const [nextCursor, setNextCursor] = useState(null)
-  const [overviewErr, setOverviewErr] = useState(null)
   const [itemsErr, setItemsErr] = useState(null)
   const [busyId, setBusyId] = useState(null)
   const [suggestionNote, setSuggestionNote] = useState(null)
 
-  // Load this kind's finished work when its page opens, and only then.
-  const kindWorkflowId = kindView?.workflowId ?? null
-  const kindOpen = kindView?.name || null
+  // Load this job's finished work when its page opens, and only then.
+  const kindWorkflowId = route.job ?? null
+  const kindOpen = route.job ? String(route.job) : null
   useEffect(() => {
     if (!kindOpen) {
       setFinished(null)
@@ -761,27 +761,14 @@ export default function WorkTab({
     })
   }, [kindOpen, kindWorkflowId])
 
-  const overviewFailSoftRef = useRef(false)
   const itemsFailSoftRef = useRef(false)
   const failSoftRef = useRef(false)
   // Read by the poll timer, which is scheduled once — a ref so a tab switch
   // doesn't tear down and restart the interval.
   const activeRef = useRef(active)
   activeRef.current = active
-  overviewFailSoftRef.current = !overview && !!overviewErr
   itemsFailSoftRef.current = !items && !!itemsErr
-  failSoftRef.current = overviewFailSoftRef.current && itemsFailSoftRef.current
-
-  const loadOverview = useCallback(async () => {
-    try {
-      const ov = await api.getWorkOverview()
-      setOverview(ov)
-      setOverviewErr(null)
-    } catch (e) {
-      setOverviewErr(e?.message || "Can't load these counts")
-      throw e
-    }
-  }, [])
+  failSoftRef.current = itemsFailSoftRef.current
 
   const loadItems = useCallback(async () => {
     try {
@@ -804,19 +791,13 @@ export default function WorkTab({
 
   const load = useCallback(async () => {
     const tasks = []
-    if (!overviewFailSoftRef.current) tasks.push(loadOverview())
     if (!itemsFailSoftRef.current) tasks.push(loadItems())
     loadSuggestions()
     const results = await Promise.allSettled(tasks)
     if (results.some((r) => r.status === 'rejected')) {
       throw new Error('section failed')
     }
-  }, [loadOverview, loadItems, loadSuggestions])
-
-  function retryOverview() {
-    setOverviewErr(null)
-    loadOverview().catch(() => {})
-  }
+  }, [loadItems, loadSuggestions])
 
   function retryItems() {
     setItemsErr(null)
@@ -824,7 +805,8 @@ export default function WorkTab({
   }
 
   async function refreshNamedWork() {
-    await Promise.allSettled([loadOverview(), loadItems()])
+    await Promise.allSettled([loadItems()])
+    setRefreshKeyForJobs((n) => n + 1)
   }
 
   async function approveSuggestion(id) {
@@ -883,6 +865,23 @@ export default function WorkTab({
     }
   }
 
+  // Jobs and today's spend, alongside the runs. Two more lean reads, both
+  // already in use elsewhere; no new polling — these ride the same effect and
+  // simply do not refetch on the interval, because a declaration and a daily
+  // total do not change between ticks the way live runs do.
+  useEffect(
+    () =>
+      startAbortable(({ signal, isAlive }) => {
+        api.getWorkflows({ signal })
+          .then((r) => isAlive() && setJobs(Array.isArray(r) ? r : []))
+          .catch(() => isAlive() && setJobs([]))
+        api.getCost({ signal })
+          .then((r) => isAlive() && setCostToday(Number(r?.today) || 0))
+          .catch(() => isAlive() && setCostToday(null))
+      }),
+    [refreshKeyForJobs],
+  )
+
   useEffect(() => {
     load().catch(() => {})
     let delay = POLL_START_MS
@@ -918,18 +917,22 @@ export default function WorkTab({
     }
   }
 
-  // A job sits on top of whichever page opened it; the page underneath keeps
-  // its state, so Back is a single setJobView(null).
-  if (jobView) {
+  // WHICH PAGE is the URL's job now, not local state. Back, Forward and a
+  // pasted link all go through the same path, so they cannot diverge.
+  const openJob = route.job ? (jobs || []).find((j) => j.id === route.job) || null : null
+
+  if (route.run) {
     return (
       <JobDetail
         variant="page"
-        item={jobView.item}
-        backLabel={kindView ? `← ${kindView.name}` : '← All work'}
+        // Only the id is in the URL; JobDetail fetches the rest and renders
+        // its header from whatever it has.
+        item={{ id: route.run }}
+        backLabel={openJob ? `← ${openJob.name}` : '← Work'}
         onOpenAgent={onOpenAgent}
-        onClose={() => setJobView(null)}
+        onClose={() => onRoute({ job: route.job, run: null })}
         onResolved={() => {
-          setJobView(null)
+          onRoute({ job: route.job, run: null })
           refreshNamedWork()
         }}
       />
@@ -937,44 +940,43 @@ export default function WorkTab({
   }
 
   return (
-    kindView ? (
+    route.job ? (
       <KindPage
-        kindName={kindView.name}
-        workflowId={kindView.workflowId}
+        kindName={openJob?.name || ''}
+        workflowId={route.job}
         items={items || []}
         finished={finished}
         finishedLoading={finishedLoading}
         filter={filter}
         onClearFilter={() => setFilter(null)}
-        onBack={() => setKindView(null)}
-        onOpenItem={(it) => setJobView({ item: it })}
+        onBack={() => onRoute({ job: null, run: null })}
+        onOpenItem={(it) => onRoute({ job: route.job, run: it.id })}
         onOpenAgent={onOpenAgent}
       />
     ) : (
-    <WorkHome
-      onConnectAgent={connectAgent}
-      overview={overview}
-      overviewErr={overviewErr}
-      onRetryOverview={retryOverview}
+    <BoardHome
+      jobs={jobs}
       items={items}
       itemsErr={itemsErr}
       onRetryItems={retryItems}
+      costToday={costToday}
+      layout={layout}
+      onLayout={setLayout}
+      scope={scope}
+      onScope={setScope}
+      filter={filter}
+      onClearFilter={setFilter}
       suggestions={suggestions}
-      nextCursor={nextCursor}
-      onLoadMore={loadMore}
       busyId={busyId}
       suggestionNote={suggestionNote}
       onApproveSuggestion={approveSuggestion}
       onDeclineSuggestion={declineSuggestion}
       onEditSuggestion={editSuggestion}
-      filter={filter}
-      onClearFilter={() => setFilter(null)}
-      onOpenItem={(it) => setJobView({ item: it })}
-      onOpenAgent={onOpenAgent}
-      onOpenKind={(name) => {
-        const k = workKinds(items || []).find((x) => x.name === name)
-        setKindView({ name, workflowId: k?.workflowId ?? null })
-      }}
+      nextCursor={nextCursor}
+      onLoadMore={loadMore}
+      onNewJob={onNewWorkflow || connectAgent}
+      onOpenRun={(it) => onRoute({ job: route.job, run: it.id })}
+      onOpenJob={(row) => onRoute({ job: Number(row.key), run: null })}
     />
     )
   )

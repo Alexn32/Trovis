@@ -76,7 +76,7 @@ test('the path is built from list rows only — never a detail per row', () => {
   // A per-row detail fetch is the thing this page must not do. The band is
   // fed the rows the section already has.
   assert.match(code, /const path = kindPath\(mine\)/)
-  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function HealthBadge'))
   assert.doesNotMatch(fn, /getWorkItem\(/)
 })
 
@@ -165,23 +165,23 @@ test('done work is never the live item', () => {
 
 test('no cost anywhere on the page', () => {
   // Per-kind cost only exists on the board's span aggregate. Absent beats fake.
-  const fn = code.slice(code.indexOf('function PathBand'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function PathBand'), code.indexOf('function HealthBadge'))
   assert.doesNotMatch(fn, /cost/i)
 })
 
 // --- routing ----------------------------------------------------------------
 
-test('a kind card opens that kind page, and Other work opens the undeclared', () => {
-  assert.match(code, /onOpenKind\(name\)/)
-  assert.match(code, /setKindView\(\{ name, workflowId: k\?\.workflowId \?\? null \}\)/)
-  // "Other work" carries a null workflowId, which the fetch sends as 'none'.
-  assert.match(code, /kindWorkflowId === null \? 'none' : kindWorkflowId/)
+test('a job row opens that job page, by id, at its own URL', () => {
+  // The board's rows ARE the jobs now, so a row opens /work/jobs/:id — no
+  // name lookup, no local view state to fall out of step with the URL.
+  assert.match(code, /onOpenJob=\{\(row\) => onRoute\(\{ job: Number\(row\.key\), run: null \}\)\}/)
+  assert.match(code, /const kindWorkflowId = route\.job \?\? null/)
   const rows = [item({ id: 1, workflow_name: 'Refunds' }), item({ id: 2, workflow_name: null })]
   assert.deepEqual(rows.filter((r) => matchesKind(r, OTHER_KIND)).map((r) => r.id), [2])
 })
 
-test('All work returns to Work home', () => {
-  assert.match(code, /onBack=\{\(\) => setKindView\(null\)\}/)
+test('All work returns to the board', () => {
+  assert.match(code, /onBack=\{\(\) => onRoute\(\{ job: null, run: null \}\)\}/)
   assert.match(code, /← All work/)
 })
 
@@ -193,7 +193,7 @@ test('"Still open" holds no finished work', () => {
   // The lean list carries done rows incidentally, so the table has to drop
   // them itself. A heading that says open over a row that says Done is the
   // page contradicting itself in one glance.
-  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function HealthBadge'))
   assert.match(fn, /const openRows = mine\.filter\(\(r\) => r\.status !== 'done'\)/)
   assert.match(fn, /filter \? openRows\.filter\(\(r\) => matchesWorkFilter\(r, filter\)\) : openRows/)
   // ...and "nothing matches" is measured against what the table can show.
@@ -201,13 +201,13 @@ test('"Still open" holds no finished work', () => {
 })
 
 test('a Home filter still applies here and stays dismissible', () => {
-  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function HealthBadge'))
   assert.match(fn, /filter \? openRows\.filter\(\(r\) => matchesWorkFilter\(r, filter\)\) : openRows/)
   assert.match(fn, /onClick=\{onClearFilter\}/)
 })
 
 test('filtered to nothing says so, instead of asking for an agent', () => {
-  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function HealthBadge'))
   assert.match(fn, /Nothing matches these filters/)
   assert.doesNotMatch(fn, /Connect an agent/)
   // A kind with genuinely nothing open is quiet, not first-run theatre.
@@ -216,7 +216,7 @@ test('filtered to nothing says so, instead of asking for an agent', () => {
 
 test('no jargon on the kind page', () => {
   const FORBIDDEN = /\b(loops?|workloops?|possession|segments?|stations?|handoffs?)\b/i
-  const fn = code.slice(code.indexOf('function PathBand'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function PathBand'), code.indexOf('function HealthBadge'))
   for (const m of fn.matchAll(/>([^<>{}]{3,})</g)) {
     assert.ok(!FORBIDDEN.test(m[1]), `kind page ships jargon: ${JSON.stringify(m[1])}`)
   }
@@ -226,6 +226,6 @@ test('no jargon on the kind page', () => {
 })
 
 test('no second Ask on the kind page', () => {
-  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function WorkHome'))
+  const fn = code.slice(code.indexOf('function KindPage'), code.indexOf('function HealthBadge'))
   assert.doesNotMatch(fn, /openAsk|AskPill|home-ask/)
 })
