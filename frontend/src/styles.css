@@ -6956,6 +6956,7 @@ select.wf2-input { cursor: pointer; }
 @media (max-width: 860px) {
   .jb-colheads { display: none; }
   .jb-counts, .jb-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 /* =============================================================================
    Org — the chart, the people in it, and what each role sees.

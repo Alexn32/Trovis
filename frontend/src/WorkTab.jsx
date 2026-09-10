@@ -382,8 +382,10 @@ function WorkTable({ rows, onOpen, onOpenJob, jobMeta, nextCursor, onLoadMore })
         <span role="columnheader">Updated</span>
       </div>
       {rows.map((row) => {
-        const meta = jobMeta?.get(String(row.workflow_id))
-          || (row.workflow_name ? { name: row.workflow_name, badge: null } : null)
+        const meta = jobMeta
+          ? (jobMeta.get(String(row.workflow_id))
+            || (row.workflow_name ? { name: row.workflow_name, badge: null } : null))
+          : null
         return (
           <div
             key={row.id}
