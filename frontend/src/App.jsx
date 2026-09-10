@@ -305,6 +305,30 @@ function AppInner() {
     setOverlay(null)
   }
 
+  // The people this seat may name in Whose work. Only fetched when the seat
+  // actually has reports — an IC has no picker to fill, and the chart is not
+  // free. Fails soft: without it the control still offers Me / My team.
+  const [orgPeople, setOrgPeople] = useState([])
+  const hasSubtree = (me?.seat?.subtree_user_ids || []).length > 0
+  useEffect(() => {
+    if (!hasSubtree) {
+      setOrgPeople([])
+      return undefined
+    }
+    let alive = true
+    api
+      .getOrgChart()
+      .then((chart) => {
+        if (alive) setOrgPeople(chart?.members || [])
+      })
+      .catch(() => {
+        if (alive) setOrgPeople([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [hasSubtree])
+
   async function refreshMe() {
     // A full /auth/me, not a merge of what the last call returned. Graduation
     // changes account_type, the chart AND the founder's seat at once, and a
@@ -618,6 +642,10 @@ function AppInner() {
           onOpenAgent={openDetail}
           onConnectAgent={openAddAgent}
           onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
+          // Whose work: the seat picks the options and the default; the
+          // server still decides what each one may contain.
+          seat={seat}
+          people={orgPeople}
           onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
         />
       </TabPane>

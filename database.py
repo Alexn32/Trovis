@@ -4200,6 +4200,71 @@ def _attach_awaiting_human(
 _ASSIGNEE_SCAN_LIMIT = 500
 
 
+def _loops_assigned_to_any(
+    cur, account_id: int | None, user_ids: list[int], *, named_only: bool = True,
+) -> list[int]:
+    """Loop ids whose latest unresolved to_human handoff targets ANY of these
+    people. The set version of _loops_assigned_to, for the Whose-work filter;
+    same bounded scan, same fold, one pass instead of one per person."""
+    if not user_ids:
+        return []
+    matched: list[int] = []
+    for uid in user_ids:
+        ids, _ = _loops_assigned_to(cur, account_id, uid, named_only=named_only)
+        matched.extend(ids)
+    return sorted(set(matched))
+
+
+def _work_person_filter(
+    cur, account_id: int | None, user_ids: list[int] | None
+) -> tuple[str, list[Any]]:
+    """SQL restricting the work list to work that belongs to these people.
+
+    `None` means no filter at all — a company-breadth seat. That is NOT the
+    same as an empty list, which means "nobody", and correctly matches
+    nothing.
+
+    "Belongs to" is deliberately two things, because either alone gives a
+    wrong answer:
+
+      * the work is RUN BY an agent this person owns. Most work is not
+        waiting on a human at any given moment, so ownership alone is what
+        makes a manager's team view non-empty.
+      * the work is WAITING ON this person. An agent someone else owns can
+        still hand work to you, and that work is yours until you pass it on.
+
+    The ownership leg is a plain column join, so it filters BEFORE pagination
+    — which it must, or a page would come back short while matching rows sat
+    behind the cursor. The waiting-on leg is a stream fold (the latest
+    UNRESOLVED handoff is not a SQL predicate), so it is resolved first, over
+    the same bounded scan Work overview already uses, and injected as an id
+    list.
+    """
+    if user_ids is None:
+        return "", []
+    if not user_ids:
+        return " AND 1 = 0 ", []
+    placeholders = ", ".join([PH] * len(user_ids))
+    owner_sql = (
+        "EXISTS (SELECT 1 FROM agent_owners o "
+        "        WHERE o.service_name = l.service_name "
+        "          AND COALESCE(o.agent_id, 'main') = COALESCE(l.agent_id, 'main') "
+        f"          AND o.user_id IN ({placeholders})"
+    )
+    args: list[Any] = list(user_ids)
+    if account_id is not None:
+        owner_sql += f" AND o.account_id = {PH}"
+        args.append(account_id)
+    owner_sql += ")"
+
+    assigned = _loops_assigned_to_any(cur, account_id, user_ids)
+    if assigned:
+        loop_ph = ", ".join([PH] * len(assigned))
+        args.extend(assigned)
+        return f" AND ({owner_sql} OR l.id IN ({loop_ph})) ", args
+    return f" AND ({owner_sql}) ", args
+
+
 def _loops_assigned_to(
     cur, account_id: int | None, user_id: int, *, named_only: bool = False,
 ) -> tuple[list[int], bool]:
@@ -4591,6 +4656,7 @@ def get_work_overview(
     account_id: int | None,
     viewer_user_id: int | None = None,
     now_ns: int | None = None,
+    only_user_ids: list[int] | None = None,
 ) -> dict[str, int]:
     """Counts only. Named work (plugin-provided human titles). No span
     aggregates, no full-board event fold.
@@ -4603,6 +4669,13 @@ def get_work_overview(
 
     Index: idx_loops_account_title_closed (account_id, title_source, closed_at).
     Assignee scan is named_only so untitled OTel is not folded.
+
+    `only_user_ids` applies the same seat constraint the item list uses, so
+    the counts describe the rows the person can actually see — a strip
+    reading "12 open" above a table of 3 is worse than either number alone.
+    needs_you is deliberately NOT narrowed by it: that count is the desk, and
+    the desk is resolved against the session identity, never against a
+    Whose-work choice.
     """
     now_ns = now_ns if now_ns is not None else time.time_ns()
     lp = _loops_mod()
@@ -4622,6 +4695,9 @@ def get_work_overview(
     try:
         with _connect() as conn, _cursor(conn) as cur:
             _set_statement_timeout(cur, _WORK_OVERVIEW_TIMEOUT_MS)
+            person_sql, person_args = _work_person_filter(
+                cur, account_id, only_user_ids
+            )
             # One pass for open + completed_week. Both are named-work COUNTs
             # over the same index prefix; combining them halves the round-trips.
             cur.execute(
@@ -4639,8 +4715,11 @@ def get_work_overview(
                 # than it is. The database compares timestamps as timestamps.
                 "  COALESCE(SUM(CASE WHEN l.created_at < "
                 f"              {PH} THEN 1 ELSE 0 END), 0) AS older_than_week "
-                f"FROM loops l WHERE {scope}",
-                tuple([week_ago, two_weeks_ago, week_ago, week_ago, *scope_args]),
+                f"FROM loops l WHERE {scope} {person_sql}",
+                tuple([
+                    week_ago, two_weeks_ago, week_ago, week_ago,
+                    *scope_args, *person_args,
+                ]),
             )
             totals = dict(cur.fetchone() or {})
             open_n = int(totals.get("open_n") or 0)
@@ -4661,8 +4740,8 @@ def get_work_overview(
                 "  l.cached_state IN ('stalled', 'awaiting_system') "
                 f"  OR (l.cached_state = 'awaiting_human' "
                 f"      AND COALESCE(l.last_event_unix, 0) <= {PH})"
-                ")",
-                tuple([*scope_args, stall_ns_cutoff]),
+                f") {person_sql}",
+                tuple([*scope_args, stall_ns_cutoff, *person_args]),
             )
             attention_ids = {int(r["id"]) for r in cur.fetchall()}
 
@@ -4874,6 +4953,7 @@ def get_work_items(
     include_agent: bool = False,
     workflow_id: int | str | None = None,
     finished_only: bool = False,
+    only_user_ids: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Paginated named items for the Work home table. Plugin-provided human
     titles only — no untitled OTel flood, no Trovis-generated labels, no
@@ -4884,6 +4964,12 @@ def get_work_items(
 
     `workflow_id` narrows to one kind of work; the string "none" narrows to
     the undeclared ones. `finished_only` narrows to work that has closed.
+
+    `only_user_ids` is the seat's Whose-work constraint — the work belonging
+    to these people (see _work_person_filter). None means no person filter,
+    which is what a company-breadth seat gets; an EMPTY list means nobody and
+    correctly returns nothing. It is applied in SQL, before the cursor, so a
+    page is never short while matching rows sit behind it.
 
     Both are COLUMN predicates (l.workflow_id, l.closed_at) on the same scan
     this function already does — which is the point. The Work section's kind
@@ -4942,13 +5028,19 @@ def get_work_items(
             f"     OR (COALESCE(l.last_event_unix, 0) = {PH} AND l.id < {PH})) "
         )
         args.extend([cursor_ts, cursor_ts, cursor_id])
-    sql += (
+    order_sql = (
         "ORDER BY COALESCE(l.last_event_unix, 0) DESC, l.id DESC "
         f"LIMIT {PH}"
     )
-    args.append(limit + 1)
 
     with _connect() as conn, _cursor(conn) as cur:
+        # Resolved inside the connection: the waiting-on leg is a fold over
+        # the event stream and needs a cursor of its own.
+        person_sql, person_args = _work_person_filter(cur, account_id, only_user_ids)
+        sql += person_sql
+        args.extend(person_args)
+        sql += order_sql
+        args.append(limit + 1)
         cur.execute(sql, tuple(args))
         fetched = [dict(r) for r in cur.fetchall()]
         extra = fetched[limit:]

@@ -67,6 +67,12 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   via `_migrate_scope_level_presets`, which only touches a row still matching a legacy shape
   exactly. The `Fleet` atom keeps its name in the DB; the nav label reads **Agents**. Filter lists
   with `visible_user_ids_for_breadth` (**`None` = company-wide, skip the filter** — not "empty").
+  `/work/items` and `/work/overview` take `whose` (`everyone|me|team|person` + `person_id`);
+  `main._resolve_whose_work` INTERSECTS the request with the seat, so the query string can only
+  ever narrow. Attribution is two things (`database._work_person_filter`): work run by an agent
+  you own, plus work waiting on you. The ownership leg is SQL so it filters BEFORE the cursor;
+  the waiting-on leg is a bounded fold injected as an id list. **`needs_you` is never narrowed** —
+  that count is the desk, and the desk answers to the session identity, not to a Whose-work choice.
   Chart edits go through `can_edit_chart`: Org builder anywhere, everyone else strictly *below*
   their own role. Org builder is a separate ladder from view breadth — a company-breadth Exec is
   not a builder. Enforce all of it server-side; the client renders the seat, it never asserts one.
