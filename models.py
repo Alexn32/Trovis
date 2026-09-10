@@ -474,6 +474,9 @@ class WorkflowObserved(BaseModel):
     intervention_pct: float | None = None
     failure_pct: float | None = None
     window_days: int = 14
+    # When this job last did anything, ignoring the window — a job that
+    # STOPPED running is exactly what a board of live runs cannot show.
+    last_run_at: str | None = None
     # True once at least one measurable ceiling is declared. Every verdict is
     # gated on this; a description alone is not an expectation.
     has_expectation: bool = False

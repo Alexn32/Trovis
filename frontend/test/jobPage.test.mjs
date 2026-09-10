@@ -28,35 +28,31 @@ function run(o = {}) {
 
 // --- 1. navigation: enter the task ------------------------------------------
 
-test('a job is a view in the Work pane, beside the kind — not an overlay', () => {
-  assert.match(work, /const \[jobView, setJobView\] = useState\(null\)/)
-  assert.match(work, /if \(jobView\) \{/)
+test('a run is a page at its own URL, not an overlay', () => {
+  // Which page is showing is now the URL's answer, not local state — so a
+  // pasted link, Back, and a click all arrive the same way.
+  assert.match(work, /if \(route\.run\) \{/)
   assert.match(work, /<JobDetail\s+variant="page"/)
-  // The old in-page slide-overs are gone from Work: no scrim, no local
-  // `open` state racing the view state.
+  // No slide-over left in Work: no scrim, no local `open` racing the route.
   assert.doesNotMatch(work, /const \[open, setOpen\] = useState\(null\)/)
-  assert.doesNotMatch(work, /onClose=\{\(\) => setOpen\(null\)\}/)
+  assert.doesNotMatch(work, /const \[jobView, setJobView\]/)
 })
 
-test('every way into a job from Work opens the page', () => {
-  // Table row, the hottest live item, and a past run all go through the one
-  // handler — three doors, one destination.
-  assert.match(work, /<WorkTable rows=\{rows\} onOpen=\{onOpenItem\} \/>/)
-  assert.match(work, /onOpenItem=\{onOpenItem\}/)
-  assert.match(work, /<PastRunsBand runs=\{runs\} loading=\{finishedLoading\} onOpenItem=\{onOpenItem\} \/>/)
-  assert.equal((work.match(/onOpenItem=\{\(it\) => setJobView\(\{ item: it \}\)\}/g) || []).length, 2,
-               'both Work home and the kind page open the job page')
+test('every way into a run goes through the route', () => {
+  // A table row and a past run are doors to one destination, and none of
+  // them may open a run any other way.
+  assert.match(work, /onOpenItem=\{\(it\) => onRoute\(\{ job: route\.job, run: it\.id \}\)\}/)
+  assert.doesNotMatch(work, /setJobView\(/)
 })
 
-test('Back returns to the exact view you came from', () => {
-  // kindView and the filter are never torn down while a job is open, so
-  // leaving the job reveals the page underneath unchanged. That is the whole
-  // reason jobView is stored BESIDE kindView rather than replacing it.
-  assert.match(work, /onClose=\{\(\) => setJobView\(null\)\}/)
-  assert.match(work, /backLabel=\{kindView \? `← \$\{kindView\.name\}` : '← All work'\}/)
-  const jobBlock = work.slice(work.indexOf('if (jobView) {'), work.indexOf('return (\n    kindView'))
-  assert.doesNotMatch(jobBlock, /setKindView|setFilter/,
-                      'opening or leaving a job must not disturb the page under it')
+test('leaving a run returns to the job it was opened from', () => {
+  // Closing a run clears only the run: the job stays in the route, so Back
+  // lands on that job's page and not the board. The filter is untouched.
+  assert.match(work, /onClose=\{\(\) => onRoute\(\{ job: route\.job, run: null \}\)\}/)
+  assert.match(work, /backLabel=\{openJob \? `← \$\{openJob\.name\}` : '← Work'\}/)
+  const runBlock = work.slice(work.indexOf('if (route.run) {'), work.indexOf('return (\n    route.job'))
+  assert.doesNotMatch(runBlock, /setFilter/,
+                      'opening or leaving a run must not disturb the page under it')
 })
 
 test('Home desk keeps the slide-over — act and be done', () => {

@@ -4,6 +4,7 @@ import Dashboard from './Dashboard.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
 import WorkTab from './WorkTab.jsx'
+import { currentView, navigate, onPopState } from './route.js'
 import WorkflowPage from './WorkflowPage.jsx'
 import WorkflowEditor from './WorkflowEditor.jsx'
 import Fleet from './Fleet.jsx'
@@ -85,7 +86,12 @@ function readLegalPath() {
 // browser reload would otherwise reset to Work. Persist it to
 // sessionStorage and restore on mount so reload keeps you on the page you were
 // on. sessionStorage (not local) so it's scoped to the tab and cleared on
-// logout; the URL is intentionally left unchanged (no router).
+// logout.
+//
+// The URL now carries the tab too, and WINS when it says something: a link to
+// /work/runs/4471 has to open that run, not whatever pane this browser tab was
+// last on. sessionStorage is the fallback for a bare "/" — someone who
+// reloaded the root still lands where they were.
 const VIEW_KEY = 'trovis_view'
 function readPersistedView() {
   try {
@@ -138,9 +144,41 @@ function AppInner() {
   // The old "Workflows" and "Stuck" tabs consolidated into "Work" — remap any
   // stale persisted view from before the change (Stuck keeps its sub-view).
   const legacyTab = persistedView.tab
-  const initialTab =
+  const persistedTab =
     legacyTab === 'workflows' || legacyTab === 'stuck' ? 'work' : legacyTab || 'work'
+  // A path of "/" is "no opinion" — the address bar's default, not a choice —
+  // so the persisted tab still wins there. Any other path is a real request.
+  const bootView = currentView()
+  const urlSaysSomething =
+    typeof window !== 'undefined' && window.location.pathname !== '/'
+  const initialTab = urlSaysSomething ? bootView.tab : persistedTab
   const [tab, setTab] = useState(initialTab) // 'dashboard' | 'fleet' | 'team' | 'work'
+  // Which Work page the URL is pointing at: {job} | {run} | neither.
+  const [workRoute, setWorkRoute] = useState(
+    urlSaysSomething ? { job: bootView.job, run: bootView.run } : { job: null, run: null },
+  )
+
+  // Keep the address bar in step, and follow Back/Forward when it moves —
+  // but only while the app shell is what is on screen. /terms, /privacy and
+  // an unconsumed /accept-invite?token= or /?reset= are other pages living at
+  // other paths, and rewriting the URL under them would blank a legal page or
+  // throw away a single-use token. Hooks run even behind an early return, so
+  // this has to be a condition, not a placement.
+  const routingActive = Boolean(me) && !legalPath && !inviteToken && !resetToken
+  useEffect(() => {
+    if (!routingActive) return
+    navigate({ tab, ...workRoute }, { replace: !urlSaysSomething })
+    // urlSaysSomething is a boot-time fact, not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routingActive, tab, workRoute.job, workRoute.run])
+  useEffect(() => {
+    if (!routingActive) return undefined
+    return onPopState((v) => {
+      setTab(v.tab)
+      setWorkRoute({ job: v.job, run: v.run })
+      setOverlay(null)
+    })
+  }, [routingActive])
   // Work tab sub-view: 'loops' | 'workflow' | 'stuck'
   const [workView, setWorkView] = useState(
     persistedView.workView || (legacyTab === 'stuck' ? 'stuck' : 'loops'),
@@ -541,6 +579,8 @@ function AppInner() {
           // pane nobody is looking at (same rule it already applies to
           // document.hidden). No new polling is introduced here.
           active={workVisible}
+          route={workRoute}
+          onRoute={setWorkRoute}
           incomingFilter={workFilter}
           // The job pane's technical fold names the agent behind each run;
           // that name is the door out of Work into Fleet, same as Home's
@@ -561,6 +601,9 @@ function AppInner() {
         tab={tab}
         onTabChange={(t) => {
           setTab(t)
+          // Clicking the Work tab means the board, not whichever job or run
+          // was last open — the same thing every other tab click means.
+          setWorkRoute({ job: null, run: null })
           setOverlay(null)
         }}
         onAddAgent={openAddAgent}

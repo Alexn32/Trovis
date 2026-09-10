@@ -171,17 +171,17 @@ test('no cost anywhere on the page', () => {
 
 // --- routing ----------------------------------------------------------------
 
-test('a kind card opens that kind page, and Other work opens the undeclared', () => {
-  assert.match(code, /onOpenKind\(name\)/)
-  assert.match(code, /setKindView\(\{ name, workflowId: k\?\.workflowId \?\? null \}\)/)
-  // "Other work" carries a null workflowId, which the fetch sends as 'none'.
-  assert.match(code, /kindWorkflowId === null \? 'none' : kindWorkflowId/)
+test('a job name opens that job page, by id, at its own URL', () => {
+  // Table rows stay runs. The job under Task is the door to /work/jobs/:id —
+  // no name lookup, no local view state to fall out of step with the URL.
+  assert.match(code, /onOpenJob=\{\(id\) => onRoute\(\{ job: Number\(id\), run: null \}\)\}/)
+  assert.match(code, /const kindWorkflowId = route\.job \?\? null/)
   const rows = [item({ id: 1, workflow_name: 'Refunds' }), item({ id: 2, workflow_name: null })]
   assert.deepEqual(rows.filter((r) => matchesKind(r, OTHER_KIND)).map((r) => r.id), [2])
 })
 
 test('All work returns to Work home', () => {
-  assert.match(code, /onBack=\{\(\) => setKindView\(null\)\}/)
+  assert.match(code, /onBack=\{\(\) => onRoute\(\{ job: null, run: null \}\)\}/)
   assert.match(code, /← All work/)
 })
 

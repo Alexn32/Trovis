@@ -274,7 +274,7 @@ export const api = {
   // A workflow is a named, VERSIONED declaration of a recurring process:
   // ordered stations (who holds the work at each step) + match hints (how a
   // loop is recognized as an instance). Definitions are append-only.
-  getWorkflows: () => request('/workflows'),
+  getWorkflows: (opts = {}) => request('/workflows', opts),
   getWorkflow: (id) => request(`/workflows/${id}`),
   // Live station map: where every non-terminal matched loop currently sits.
   getWorkflowMap: (id) => request(`/workflows/${id}/map`),

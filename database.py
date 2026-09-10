@@ -5970,6 +5970,7 @@ def _workflow_outcome_aggregates(
         return out.setdefault(wid, {
             "closed_runs": 0, "intervention_runs": 0, "failed_runs": 0,
             "cost_usd": 0.0, "cost_runs": 0, "close_times_s": [],
+            "last_run_at": None,
         })
 
     # Closed runs in the window, whether a person was in the chain, and
@@ -6038,6 +6039,19 @@ def _workflow_outcome_aggregates(
         a, z = r["opened_ns"], r["closed_ns"]
         if a is not None and z is not None and int(z) >= int(a):
             bucket(r["wid"])["close_times_s"].append(int((int(z) - int(a)) // _NS_PER_S))
+
+    # When this job last did anything. A job that stopped running is the one
+    # thing a flat board of live runs cannot show, so the board needs this
+    # even for jobs with nothing in the window — hence no window filter here.
+    cur.execute(
+        "SELECT l.workflow_id AS wid, MAX(l.last_event_unix) AS last_ns "
+        f"FROM loops l WHERE l.workflow_id IS NOT NULL "
+        f"AND l.last_event_unix IS NOT NULL {scope} "
+        "GROUP BY l.workflow_id",
+        tuple(scope_args),
+    )
+    for r in cur.fetchall():
+        bucket(r["wid"])["last_run_at"] = _ns_to_iso(r["last_ns"])
 
     for b in out.values():
         times = sorted(b.pop("close_times_s"))
@@ -6109,6 +6123,7 @@ def _workflow_summary_row(
             "cost_usd": 0.0, "cost_runs": 0, "median_close_s": None,
             "cost_per_run": None, "intervention_pct": None,
             "failure_pct": None, "window_days": WORKFLOW_WINDOW_DAYS,
+            "last_run_at": None,
         }),
     }
 

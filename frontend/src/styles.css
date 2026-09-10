@@ -6596,8 +6596,28 @@ select.wf2-input { cursor: pointer; }
   box-shadow: inset 3px 0 0 var(--error);
 }
 .work-td-title {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  min-width: 0;
+}
+.work-td-task {
   color: var(--text-primary); font-weight: 600; font-size: 13.5px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%;
+}
+.work-td-job {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 500; color: var(--text-muted);
+  min-width: 0; max-width: 100%;
+}
+.work-td-job-name {
+  font: inherit; color: inherit; background: none; border: none;
+  padding: 0; cursor: pointer; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.work-td-job-name.is-plain { cursor: default; }
+.work-td-job-name:hover:not(.is-plain) {
+  color: var(--text-primary); text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .work-status-pill { font-weight: 550; }
 .work-status-pill.waiting_on_you { color: var(--warning); }
@@ -6819,6 +6839,123 @@ select.wf2-input { cursor: pointer; }
 .kind-run-why { font-size: 11.5px; color: var(--text-muted); }
 @media (max-width: 720px) {
   .kind-run { grid-template-columns: 1fr; gap: 2px; }
+}
+
+/* --- Work board, grouped by job ----------------------------------------- */
+/* The job is the object on this page. A job row is dense: name, one line of
+   metadata, a counts strip, and cards ONLY for runs that need a person. A
+   healthy job is one prose line, not an empty four-column grid. */
+.work-board { display: flex; flex-direction: column; gap: 0; }
+.work-board .work-home-head { justify-content: space-between; align-items: flex-start; }
+.jb-new { align-self: flex-start; }
+
+/* Header counts. Every one is derived from the rows below. */
+.jb-totals {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px;
+  margin: 0 0 14px; font-size: 13px; color: var(--text-secondary);
+}
+.jb-totals button {
+  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--text-secondary); text-decoration: underline;
+  text-decoration-color: var(--border-default); text-underline-offset: 2px;
+}
+.jb-totals button:hover { color: var(--text-primary); text-decoration-color: currentColor; }
+/* Account-wide and a different window from the counts beside it, so it says
+   so rather than looking like the same scope. */
+.jb-cost { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.jb-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+.jb-pill {
+  font: inherit; font-size: 12.5px; padding: 5px 12px; cursor: pointer;
+  border: 1px solid var(--border-default); border-radius: 999px;
+  background: var(--bg-surface); color: var(--text-secondary);
+}
+.jb-pill:hover { border-color: var(--border-hover); color: var(--text-primary); }
+.jb-pill.is-on {
+  background: var(--accent-bg); border-color: var(--accent-bg); color: var(--accent-text);
+}
+
+/* The four column headers appear once, above every row. */
+.jb-colheads,
+.jb-counts,
+.jb-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+}
+.jb-colheads {
+  padding: 0 0 6px; border-bottom: 1px solid var(--border-default);
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+
+.jb-row { padding: 14px 0; border-bottom: 1px solid var(--border-default); }
+.jb-row.is-idle { opacity: 0.72; }
+.jb-head { display: flex; align-items: baseline; gap: 10px; }
+/* The job name is the biggest thing in the row — it is the subject. */
+.jb-name {
+  font-family: "Space Grotesk", "DM Sans", sans-serif;
+  font-size: 17px; font-weight: 700; letter-spacing: -0.01em;
+  color: var(--text-primary); background: none; border: none; padding: 0;
+  cursor: pointer; text-align: left;
+}
+.jb-name:hover { text-decoration: underline; text-underline-offset: 3px; }
+.jb-name.is-unmatched { color: var(--text-muted); cursor: default; font-weight: 600; }
+.jb-archived {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.jb-meta { margin: 3px 0 0; font-size: 12.5px; color: var(--text-muted); }
+
+/* One badge, always carrying its number. Never a bare tick. */
+.jb-badge {
+  margin-left: auto; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  padding: 2px 8px; border-radius: 4px;
+}
+.jb-badge.tone-error { color: var(--error); background: var(--error-faint); }
+.jb-badge.tone-warning { color: var(--warning); background: var(--warning-faint); }
+.jb-badge.tone-ok { color: var(--success); background: var(--success-faint); }
+/* Observed, no verdict — a job with no declared expectation. Deliberately
+   the quietest of the four: it is a reading, not a judgement. */
+.jb-badge.tone-none { color: var(--text-muted); font-weight: 500; }
+
+.jb-counts {
+  margin: 10px 0 0; font-size: 12px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.jb-count b { color: var(--text-secondary); font-weight: 600; }
+.jb-count.tone-stuck b { color: var(--error); }
+.jb-count.tone-waiting b { color: var(--warning); }
+
+.jb-quiet { margin: 8px 0 0; font-size: 12.5px; color: var(--text-muted); }
+
+.jb-grid { margin-top: 8px; align-items: start; }
+/* Empty cells keep their height. The SHAPE of a row is the signal — a job
+   with nothing working and one card sitting in Waiting reads at a glance. */
+.jb-cell { display: flex; flex-direction: column; gap: 6px; min-height: 46px; }
+.jb-card {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 7px 9px; font: inherit; cursor: pointer;
+  border: 1px solid var(--border-default); border-left-width: 2px;
+  background: var(--bg-surface);
+}
+.jb-card:hover { border-color: var(--border-hover); }
+.jb-card.is-stuck { border-left-color: var(--error); background: var(--error-faint); }
+.jb-card.is-waiting_on_you { border-left-color: var(--warning); background: var(--warm-fill); }
+.jb-card.is-waiting_on_other { border-left-color: var(--warning); }
+/* The problem leads; the run identifies it. */
+.jb-card-lead { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.jb-card.is-stuck .jb-card-lead { color: var(--error); }
+.jb-card-sub {
+  font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.jb-more {
+  align-self: flex-start; font: inherit; font-size: 11.5px; padding: 2px 0;
+  background: none; border: none; cursor: pointer; color: var(--text-muted);
+}
+.jb-more:hover { color: var(--text-primary); }
+
+@media (max-width: 860px) {
+  .jb-colheads { display: none; }
+  .jb-counts, .jb-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* =============================================================================
@@ -7116,4 +7253,5 @@ select.wf2-input { cursor: pointer; }
 .onboard-chart-form .text-input {
   flex: 1 1 140px;
   min-width: 0;
+
 }

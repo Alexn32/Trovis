@@ -253,6 +253,7 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /Priority/)
   assert.doesNotMatch(work, /KindCard/)
   assert.match(work, /work-suggestions/)
+  assert.match(work, /function WorkHome/)
   // Clicking a row opens the job detail pane (was TaskPanel, the loop panel).
   assert.match(work, /JobDetail/)
   assert.match(work, /holderLabel/)
@@ -261,6 +262,10 @@ test('Work home is the Monday table — Task column, no Priority, no KindCard la
   assert.doesNotMatch(work, /onOpenBoards/)
   assert.doesNotMatch(work, /setSurface/)
   assert.doesNotMatch(work, /import Board\b/)
+  // The 4-col board is not the landing and is not offered from home.
+  assert.doesNotMatch(work, /function BoardHome/)
+  assert.doesNotMatch(work, /jb-colheads/)
+  assert.doesNotMatch(work, /layout === 'grouped'/)
 })
 
 test('Work home never invents a named item from suggestion actions', () => {
