@@ -35,7 +35,9 @@ export function visibleTabs(surfaces) {
     // The pane id stays 'dashboard' (routes, session-restore, TabPane ids);
     // what a person reads is Home, everywhere, always.
     ['dashboard', 'Home'],
-    ['fleet', 'Fleet'],
+    // The pane id and the scope atom both stay 'Fleet' (routes, TabPane ids,
+    // scope_levels.surfaces); what a person reads is Agents.
+    ['fleet', 'Agents'],
     ['work', 'Work'],
     ['org', 'Org'],
   ].filter(([id]) => allowed.has(PANE_SURFACE[id]))

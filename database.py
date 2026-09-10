@@ -1892,6 +1892,11 @@ def init_db() -> None:
         # SQLite's ALTER ADD COLUMN can't enforce one anyway (spans.loop_id
         # precedent). Reads are dual-source until the last legacy row is
         # matched — see _OWNER_JOIN_SQL.
+        # Presets shipped before Fleet/Connect were on every seat, and before
+        # depth stopped being a rank. Move the untouched ones forward — an
+        # existing org would otherwise sit on an Exec seat with no Agents tab
+        # no matter what SCOPE_LEVEL_PRESETS says.
+        _migrate_scope_level_presets(cur)
         _try_add_column(cur, "agent_owners", "user_id", "INTEGER DEFAULT NULL")
         # Backfill by email, within the account. A team_members row whose
         # email matches a login IS that person; one with no email, or no
@@ -9838,20 +9843,37 @@ SURFACES = ("Home", "Work", "Fleet", "Ask", "Cost", "Connect", "Org")
 # Seeded on every account. Presets are ordinary scope_levels rows (is_preset=1)
 # so an org can retire or re-point one without a schema change; the only thing
 # "preset" buys is that we create them and the UI groups them first.
+# Every preset is a full working seat. Two rules learned the hard way:
+#
+#   Fleet and Connect are on ALL of them. An Exec preset without Fleet meant
+#   the founder who put themselves in the top box could not see their own
+#   agents; without Connect they could not wire one up, while an IC could.
+#   A seat narrows WHOSE work you see — it was never meant to take the
+#   product away from the person who bought it. A custom level may still drop
+#   either on purpose; a preset may not.
+#
+#   Depth is NOT baked in. glance-vs-technical is how one person likes to
+#   read a row, not a property of their rank — a hands-on Exec and a
+#   non-technical IC both exist. Every preset ships `technical` and the
+#   choice moves to the person later. Role and scope still own breadth,
+#   surfaces and the org-builder ladder.
+#
+# Cost is the one surface that genuinely differs by role, and it is
+# unchanged: Exec, VP and Manager see spend; Middle manager and IC don't.
 SCOPE_LEVEL_PRESETS: tuple[dict[str, Any], ...] = (
     {
         "key": "exec",
         "name": "Exec",
         "breadth": "company",
-        "depth": "glance",
-        "surfaces": ["Home", "Work", "Ask", "Cost", "Org"],
+        "depth": "technical",
+        "surfaces": ["Home", "Work", "Fleet", "Ask", "Cost", "Connect", "Org"],
     },
     {
         "key": "vp",
         "name": "VP",
         "breadth": "company",
-        "depth": "glance",
-        "surfaces": ["Home", "Work", "Fleet", "Ask", "Cost", "Org"],
+        "depth": "technical",
+        "surfaces": ["Home", "Work", "Fleet", "Ask", "Cost", "Connect", "Org"],
     },
     {
         "key": "manager",
@@ -9864,8 +9886,8 @@ SCOPE_LEVEL_PRESETS: tuple[dict[str, Any], ...] = (
         "key": "middle_manager",
         "name": "Middle manager",
         "breadth": "subtree",
-        "depth": "glance",
-        "surfaces": ["Home", "Work", "Ask", "Org"],
+        "depth": "technical",
+        "surfaces": ["Home", "Work", "Fleet", "Ask", "Connect", "Org"],
     },
     {
         "key": "ic",
@@ -9876,6 +9898,16 @@ SCOPE_LEVEL_PRESETS: tuple[dict[str, Any], ...] = (
     },
 )
 
+# The preset shapes that shipped before Fleet/Connect were universal and
+# depth stopped being a rank. A row still matching one of these EXACTLY was
+# written by us and never touched, so it is safe to move forward; anything
+# else is an org's own edit and is left alone. See _migrate_scope_level_presets.
+_LEGACY_PRESET_SHAPES: dict[str, tuple[str, set[str]]] = {
+    "exec": ("glance", {"Home", "Work", "Ask", "Cost", "Org"}),
+    "vp": ("glance", {"Home", "Work", "Fleet", "Ask", "Cost", "Org"}),
+    "middle_manager": ("glance", {"Home", "Work", "Ask", "Org"}),
+}
+
 # What a person gets when the org has not placed them on a chart yet — every
 # Path A workspace, and every Path B org before roles are drawn. It is
 # deliberately the widest seat: seats only ever *narrow* what an account could
@@ -9883,6 +9915,55 @@ SCOPE_LEVEL_PRESETS: tuple[dict[str, Any], ...] = (
 # before this shipped.
 _DEFAULT_SEAT_BREADTH = "company"
 _DEFAULT_SEAT_DEPTH = "technical"
+
+
+def _migrate_scope_level_presets(cur) -> None:
+    """Move preset rows written before Fleet/Connect were universal.
+
+    ensure_scope_level_presets only INSERTS missing keys, so changing
+    SCOPE_LEVEL_PRESETS alone would fix nothing for an org that already has
+    them — every existing account would sit on an Exec seat with no Agents
+    tab forever.
+
+    Only a row still matching a legacy shape exactly (same depth, same
+    surface set) is moved. That is a row we wrote and nobody edited. An org
+    that deliberately trimmed a preset does not match, and is left alone —
+    silently re-granting surfaces someone removed on purpose would be the
+    worse bug.
+
+    Compared in Python, not SQL: `surfaces` is JSON text, and matching it as
+    a string would turn on separator whitespace rather than meaning.
+    Idempotent — an updated row no longer matches a legacy shape.
+    """
+    try:
+        cur.execute(
+            "SELECT id, key, depth, surfaces FROM scope_levels WHERE is_preset"
+        )
+        rows = cur.fetchall()
+    except Exception:
+        # First boot: scope_levels may not exist yet on a very old DB whose
+        # DDL pass runs after this. Nothing to migrate then.
+        return
+    wanted = {p["key"]: p for p in SCOPE_LEVEL_PRESETS}
+    for row in rows:
+        key = row["key"]
+        legacy = _LEGACY_PRESET_SHAPES.get(key)
+        target = wanted.get(key)
+        if legacy is None or target is None:
+            continue
+        legacy_depth, legacy_surfaces = legacy
+        if row["depth"] != legacy_depth:
+            continue
+        if set(normalize_surfaces(row["surfaces"])) != legacy_surfaces:
+            continue
+        cur.execute(
+            f"UPDATE scope_levels SET depth = {PH}, surfaces = {PH} WHERE id = {PH}",
+            (
+                target["depth"],
+                json.dumps(normalize_surfaces(target["surfaces"])),
+                row["id"],
+            ),
+        )
 
 
 def normalize_surfaces(surfaces: Any) -> list[str]:

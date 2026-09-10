@@ -60,7 +60,12 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   and how far each row unfolds. It resolves `scope_levels → org_roles.scope_level_id →
   org_role_members.user_id` (`database.resolve_seat`, surfaced on `GET /auth/me`). The atoms are a
   closed set — breadth `self|subtree|company`, depth `glance|technical`, surfaces `Home|Work|Fleet|
-  Ask|Cost|Connect|Org`; a custom scope level composes them and can never add an axis. Filter lists
+  Ask|Cost|Connect|Org`; a custom scope level composes them and can never add an axis. **Every
+  preset carries Fleet and Connect and ships `technical`** — a seat narrows whose work you see, it
+  never takes the product away from the person who bought it, and depth is a reader's preference
+  rather than a rank. Changing `SCOPE_LEVEL_PRESETS` fixes nothing on its own: existing orgs move
+  via `_migrate_scope_level_presets`, which only touches a row still matching a legacy shape
+  exactly. The `Fleet` atom keeps its name in the DB; the nav label reads **Agents**. Filter lists
   with `visible_user_ids_for_breadth` (**`None` = company-wide, skip the filter** — not "empty").
   Chart edits go through `can_edit_chart`: Org builder anywhere, everyone else strictly *below*
   their own role. Org builder is a separate ladder from view breadth — a company-breadth Exec is

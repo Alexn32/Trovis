@@ -678,7 +678,7 @@ function AppInner() {
 // of the tab order — a hidden pane must not be focusable. `inert` isn't a
 // supported JSX attribute on React 18, so it's set on the node directly.
 // What each pane calls itself when it has to apologise.
-const PANE_LABELS = { dashboard: 'Home', fleet: 'Fleet', org: 'Org', work: 'Work' }
+const PANE_LABELS = { dashboard: 'Home', fleet: 'Agents', org: 'Org', work: 'Work' }
 
 function TabPane({ id, visible, children }) {
   const ref = useRef(null)

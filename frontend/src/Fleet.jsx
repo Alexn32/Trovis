@@ -227,7 +227,7 @@ function FleetSummary({ counts, usage, onUpgrade }) {
         }
       />
       <Stat
-        label="Fleet health"
+        label="Agent health"
         value={fleetHealthLabel(counts)}
         tone={counts.degraded > 0 ? 'warn' : undefined}
       />
@@ -237,7 +237,7 @@ function FleetSummary({ counts, usage, onUpgrade }) {
         value={counts.errors.toLocaleString()}
         tone={counts.errors > 0 ? 'error' : undefined}
       />
-      <Stat label="Fleet cost today" value={formatCost(counts.costToday || 0)} />
+      <Stat label="Agent cost today" value={formatCost(counts.costToday || 0)} />
     </div>
   )
 }
