@@ -474,6 +474,9 @@ function AppInner() {
   const account = {
     type: me?.org?.account_type,
     userName: me?.user?.name || me?.user?.email || null,
+    // Null for an API-key session. Agent detail uses it to decide whether
+    // there is a person here who could pick an owner at all.
+    userId: me?.user?.id ?? null,
   }
 
   // ---- Overlays -----------------------------------------------------------
