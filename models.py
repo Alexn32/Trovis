@@ -415,6 +415,85 @@ class ConnectionsFromDescription(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class WorkflowExpectation(BaseModel):
+    """What a job DECLARES about itself — the thing its observed numbers get
+    measured against.
+
+    Every field is optional and None means NOT DECLARED. None is never
+    rendered as zero and never stands in for a default baseline: a job with
+    no expectation reports what was observed and says "no expectation set".
+    A verdict with no declared number behind it is an adjective, and this
+    product does not ship adjectives.
+
+    Expectations live on a VERSION, so changing one is a new version with the
+    old preserved — and, like stations and match_hints, a version carries a
+    FULL definition, so an omitted field clears it rather than inheriting.
+    """
+
+    # Two sentences, in the operator's own words, on what this job is.
+    definition: str | None = None
+    expected_per_day_min: int | None = None
+    expected_per_day_max: int | None = None
+    # Close-time ceiling, seconds.
+    expected_close_s: int | None = None
+    # Ceiling on the share of closed runs whose possession chain crosses a
+    # PERSON. Agent-to-agent handoffs are not intervention.
+    expected_intervention_pct: float | None = None
+    expected_failure_pct: float | None = None
+    # service_name + agent_id is the ROUTE to the agent's page; a display
+    # label is never a route.
+    owning_service_name: str | None = None
+    owning_agent_id: str | None = None
+    approval_routing: str | None = None
+    # Per-job stall override. None = the global threshold.
+    stall_threshold_s: int | None = None
+
+
+class WorkflowObserved(BaseModel):
+    """What the RECORD says, over the stated window. Computed once per
+    request and read by every surface, so the board row, the health section
+    and the path diagram cannot disagree with each other.
+
+    A rate is None rather than 0 when there is nothing to divide: "no closed
+    runs yet" and "nothing needed a person" are different facts.
+    """
+
+    closed_runs: int = 0
+    intervention_runs: int = 0
+    failed_runs: int = 0
+    cost_usd: float = 0.0
+    cost_runs: int = 0
+    median_close_s: int | None = None
+    cost_per_run: float | None = None
+    intervention_pct: float | None = None
+    failure_pct: float | None = None
+    window_days: int = 14
+    # True once at least one measurable ceiling is declared. Every verdict is
+    # gated on this; a description alone is not an expectation.
+    has_expectation: bool = False
+
+
+class WorkflowStaleLink(BaseModel):
+    """One open run holding a job that no current hint set would produce."""
+
+    loop_id: int
+    workflow_id: int
+    workflow_name: str | None = None
+    title: str | None = None
+    # As far as the record can say: "workflow archived" or "hints no longer
+    # match". Which of those is a mis-link cannot be decided from the data,
+    # so this reports rather than acts.
+    reason: str = ""
+
+
+class WorkflowMatchHealth(BaseModel):
+    """GET /workflows/match-health — the cost of sticky matching, made
+    visible. `count` on its own is the signal worth watching."""
+
+    count: int = 0
+    links: list[WorkflowStaleLink] = Field(default_factory=list)
+
+
 class WorkflowCreate(BaseModel):
     """POST /workflows body. stations describe who holds the work at each
     step (stored + validated, not used for matching yet); match_hints are
@@ -425,6 +504,7 @@ class WorkflowCreate(BaseModel):
     stations: list[dict[str, Any]] = Field(default_factory=list)
     match_hints: list[dict[str, Any]] = Field(default_factory=list)
     note: str | None = None
+    expectation: WorkflowExpectation | None = None
 
 
 class WorkflowDraftRequest(BaseModel):
@@ -451,6 +531,7 @@ class WorkflowVersionCreate(BaseModel):
     stations: list[dict[str, Any]] = Field(default_factory=list)
     match_hints: list[dict[str, Any]] = Field(default_factory=list)
     note: str | None = None
+    expectation: WorkflowExpectation | None = None
 
 
 class WorkflowVersionInfo(BaseModel):
@@ -460,8 +541,9 @@ class WorkflowVersionInfo(BaseModel):
     created_at: str | None = None
 
 
-class WorkflowSummary(BaseModel):
-    """One workflow in GET /workflows: identity + live loop aggregates."""
+class WorkflowSummary(WorkflowExpectation, WorkflowObserved):
+    """One workflow in GET /workflows: identity, its declared expectation,
+    and what the record observed over the window."""
 
     id: int
     name: str
@@ -1224,6 +1306,10 @@ class LoopSummary(BaseModel):
     # loop matched — frozen once the loop reaches a terminal state.
     workflow_id: int | None = None
     workflow_name: str | None = None
+    # Set when the job has been archived. Matching is sticky, so a run can
+    # outlive its job's retirement: the name stays (the run really did run
+    # under it) and this says it is no longer current.
+    workflow_archived_at: str | None = None
     workflow_version: int | None = None
     last_event_unix: int | None = None
     created_at: str | None = None
