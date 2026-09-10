@@ -464,6 +464,11 @@ class WorkflowObserved(BaseModel):
     runs yet" and "nothing needed a person" are different facts.
     """
 
+    # Runs that STARTED in the window — the cadence basis. Distinct from
+    # closed_runs on purpose: "how often does this job run" and "how often
+    # does it finish" are different questions, and a declared per-day
+    # expectation is asking the first.
+    started_runs: int = 0
     closed_runs: int = 0
     intervention_runs: int = 0
     failed_runs: int = 0

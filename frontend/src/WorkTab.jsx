@@ -5,16 +5,15 @@ import JobDetail from './JobDetail.jsx'
 import { WorkLoadFailed } from './ui.jsx'
 import {
   holderLabel,
-  hottestOpen,
-  kindPath,
-  matchesKind,
-  pastRuns,
   sortWorkItems,
   workItemStatusLabel,
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
 import { tableJobMeta } from './workBoard.js'
+import {
+  computedFrom, healthRows, jobPath, jobStats, recentRuns, settingsRows,
+} from './jobPage.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
 // IA: Work home stays Monday table (overview + Suggestions + job rows).
@@ -251,116 +250,6 @@ function TableSkeleton() {
 }
 
 /**
- * Band A — the path.
- *
- * A spine of the hands this kind's work passes through. The ORDER is
- * canonical (agent → tool → person → done), not observed: a list row says
- * where a job sits now, never the sequence it took, and learning the real
- * sequence means one detail fetch per row. Absent when it cannot be drawn
- * honestly — see kindPath.
- */
-function PathBand({ path }) {
-  if (!path) return null
-  return (
-    <section className="kind-band" aria-label="Path">
-      <h2 className="dash-caps">How this work moves</h2>
-      <ol className="kind-path">
-        {path.map((n, i) => (
-          <li key={`${n.kind}-${i}`} className={`kind-node kind-${n.kind}`}>
-            <span className="kind-node-label">{n.label}</span>
-            {/* Exceptions only. A node with nothing waiting and nothing stuck
-                stays quiet. */}
-            {n.stuck > 0 && <span className="kind-node-flag is-stuck">{n.stuck} stuck</span>}
-            {n.waiting > 0 && (
-              <span className="kind-node-flag is-waiting">{n.waiting} waiting on a person</span>
-            )}
-          </li>
-        ))}
-      </ol>
-    </section>
-  )
-}
-
-/** Band B — what is live for this kind, as one block, not one per row. */
-function LiveBand({ kindName, open, hottest, onOpenItem }) {
-  if (open.length === 0) {
-    return (
-      <section className="kind-band" aria-label="Now">
-        <h2 className="dash-caps">Now</h2>
-        <p className="kind-quiet">No {kindName.toLowerCase()} running.</p>
-      </section>
-    )
-  }
-  return (
-    <section className="kind-band" aria-label="Now">
-      <h2 className="dash-caps">Now</h2>
-      <p className="kind-live-lead">
-        {open.length} open
-        {hottest && (
-          <>
-            <span className="dash-dot-sep">·</span>
-            {workItemStatusLabel(hottest.status).toLowerCase()} with{' '}
-            {holderLabel(hottest.holder, hottest.status) || 'an agent'}
-          </>
-        )}
-      </p>
-      {hottest && (
-        <button type="button" className="kind-live-row" onClick={() => onOpenItem(hottest)}>
-          <span className="kind-live-title">{hottest.title}</span>
-          <span className="kind-live-meta">
-            {hottest.whats_next}
-            {hottest.updated_at && (
-              <>
-                <span className="dash-dot-sep">·</span>
-                {workUpdatedLabel(hottest.updated_at)}
-              </>
-            )}
-          </span>
-        </button>
-      )}
-    </section>
-  )
-}
-
-/**
- * Band C — past runs. The technical door.
- *
- * Absent when the record has no finished or stuck work for this kind, rather
- * than an empty frame. "Sent back" is not offered: it lives in an item's own
- * history, and naming an outcome we did not observe is worse than naming the
- * two we did.
- */
-function PastRunsBand({ runs, loading, onOpenItem }) {
-  if (loading) {
-    return (
-      <section className="kind-band" aria-label="Past runs">
-        <h2 className="dash-caps">Past runs</h2>
-        <div className="dash-skel"><span style={{ width: '60%' }} /></div>
-      </section>
-    )
-  }
-  if (runs.length === 0) return null
-  return (
-    <section className="kind-band" aria-label="Past runs">
-      <h2 className="dash-caps">Past runs</h2>
-      <ul className="kind-runs">
-        {runs.map((r) => (
-          <li key={r.id}>
-            <button type="button" className="kind-run" onClick={() => onOpenItem(r.item)}>
-              <span className="kind-run-when">{r.at ? workUpdatedLabel(r.at) : ''}</span>
-              <span className={`kind-run-result is-${r.status}`}>{r.result}</span>
-              <span className="kind-run-what">{r.title}</span>
-              {r.reason && <span className="kind-run-why">{r.reason}</span>}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </section>
-  )
-}
-
-
-/**
  * The inventory table. Shared by Work home and the Kind page so the two
  * genuinely are the same table — same columns, same sort — rather than
  * two that merely look alike and drift.
@@ -463,33 +352,154 @@ function WorkTable({ rows, onOpen, onOpenJob, onOpenRun, jobMeta, nextCursor, on
   )
 }
 
-/**
- * The Kind page. One subject: this kind of work.
- *
- * `items` is the page Work home already loaded, filtered to this kind — no
- * refetch for the bands. `finished` is the ONE extra lean request: this
- * kind's closed work, which the main page only carries incidentally.
- */
-function KindPage({
-  kindName, workflowId, items, finished, finishedLoading,
-  filter, onClearFilter, onBack, onOpenItem, onOpenAgent,
-}) {
-  const mine = items.filter((r) => matchesKind(r, kindName))
-  // "Still open" means still open. Finished work is Past runs' subject, and
-  // listing it under both headings would make one of the two a lie.
-  const openRows = mine.filter((r) => r.status !== 'done')
-  const rows = sortWorkItems(
-    filter ? openRows.filter((r) => matchesWorkFilter(r, filter)) : openRows,
+// --- the job page: a PATTERN, not an instance ----------------------------
+//
+// Every number here is an aggregate. The provenance line under the diagram
+// and the empty comparison column in health are what keep this page from
+// reading like the run page one click away, which states facts.
+
+/** The typical route, and the one branch worth naming. */
+function JobPathBand({ path, provenance }) {
+  if (!path) return null
+  return (
+    <section className="kind-band" aria-label="How this job usually runs">
+      <h2 className="dash-caps">How this job usually runs</h2>
+      <ol className="kind-path">
+        {path.map((n, i) => (
+          // The connector is a sibling of the node, not a pseudo-element on
+          // it: rendered inside, the arrow lands within the pill's border and
+          // reads as part of the label rather than as the step between two.
+          <li key={`${n.kind}-${i}`} className="kind-step">
+            {i > 0 && <span className="kind-arrow" aria-hidden="true">→</span>}
+            <span
+              className={`kind-node kind-${n.kind}${n.isDivergence ? ' is-divergence' : ''}`}
+            >
+              <span className="kind-node-label">{n.label}</span>
+              {/* Gated on the MEASUREMENT, not on the branch: a measured 0% is
+                  still a fact the reader is owed, it just is not highlighted.
+                  Gating on isDivergence hid it. */}
+              {n.pct !== null && <span className="kind-node-pct">{n.pct}% of runs</span>}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {/* Never optional. An average with no stated basis is an assertion,
+          and this page sits one click from a page of recorded facts. */}
+      {provenance && <p className="jobp-computed">{provenance}</p>}
+    </section>
   )
-  const path = kindPath(mine)
-  // Past runs are the CLOSED rows and nothing else — only the focused
-  // request's payload feeds it. A stuck job is live: it belongs on the path
-  // flag, in Now, and in Still open, but listing it under a heading that
-  // means the run ended is the page telling two stories about one job.
-  // While that request is in flight there are no past runs to show yet;
-  // backfilling from open rows would put live work under that heading again.
-  const runs = pastRuns(finished || [])
-  const filteredOut = rows.length === 0 && openRows.length > 0
+}
+
+/** Four metrics, each naming the number it is read against — or nothing. */
+function HealthBand({ rows, declared }) {
+  return (
+    <section className="kind-band" aria-label="Health">
+      <h2 className="dash-caps">Health</h2>
+      {!declared && (
+        <p className="jobp-nodecl">
+          No expectation set. These are the observed numbers; nothing is being
+          graded against them.
+        </p>
+      )}
+      <dl className="jobp-health">
+        {rows.map((r) => (
+          <div key={r.key} className={`jobp-metric${r.over ? ' is-over' : ''}`}>
+            <dt>{r.label}</dt>
+            <dd className="jobp-observed">{r.observed ?? '\u2014'}</dd>
+            {/* Empty, not a dash pretending to be a verdict. */}
+            <dd className="jobp-expected">{r.expected || ''}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
+
+/** Recent runs — every state, so a repeated failure reads as a cluster. */
+function RecentRunsBand({ rows, onOpenItem }) {
+  if (rows.length === 0) {
+    return (
+      <section className="kind-band" aria-label="Recent runs">
+        <h2 className="dash-caps">Recent runs</h2>
+        <p className="kind-quiet">No runs on the record yet.</p>
+      </section>
+    )
+  }
+  return (
+    <section className="kind-band" aria-label="Recent runs">
+      <h2 className="dash-caps">Recent runs</h2>
+      <ul className="jobp-runs">
+        {rows.map((r) => (
+          <li key={r.id}>
+            <button type="button" className={`jobp-run is-${r.status}`} onClick={() => onOpenItem(r)}>
+              <span className="jobp-run-what">{r.title}</span>
+              <span className={`work-status-pill ${r.status || ''}`}>
+                {workItemStatusLabel(r.status)}
+              </span>
+              <span className="jobp-run-age">{workUpdatedLabel(r.updated_at)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/** The technical block, below the fold, and only what is declared. */
+function SettingsBand({ rows, onOpenAgent }) {
+  if (rows.length === 0) return null
+  return (
+    <section className="kind-band jobp-settings" aria-label="Settings">
+      <h2 className="dash-caps">Settings</h2>
+      <dl>
+        {rows.map((r) => (
+          <div key={`${r.label}-${r.value}`}>
+            <dt>{r.label}</dt>
+            <dd>
+              {r.route && onOpenAgent ? (
+                <button
+                  type="button"
+                  className="jobd-run-agent"
+                  onClick={() => onOpenAgent(r.route[0], r.route[1])}
+                >
+                  {r.value}
+                </button>
+              ) : (
+                r.value
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
+
+/**
+ * The job page: /work/jobs/:id.
+ *
+ * One subject, and it is a PATTERN — how this job usually runs, what it
+ * declared about itself, how the record compares. Individual runs appear
+ * only as a recent sample that links out; the instance-level story lives on
+ * the run page.
+ */
+function JobPage({
+  job, jobErr, name, runs: jobRuns, runsLoading, filter, onClearFilter,
+  onBack, onOpenItem, onOpenAgent,
+}) {
+  const now = Date.now()
+  // This job's own runs, id-filtered by the server. The aggregates come from
+  // the job itself, precomputed — the client does no arithmetic on them, so
+  // it cannot disagree with the board.
+  const mine = jobRuns || []
+  const shown = filter ? mine.filter((r) => matchesWorkFilter(r, filter)) : mine
+  const path = jobPath(job, mine)
+  const stats = jobStats(job, { now })
+  const health = healthRows(job)
+  const settings = settingsRows(job)
+  const provenance = computedFrom(job, mine)
+  const runs = recentRuns(shown)
+  const filteredOut = runs.length === 0 && mine.length > 0
 
   return (
     <div className="view work-kind-page">
@@ -497,7 +507,7 @@ function KindPage({
         <button type="button" className="wf2-back" onClick={onBack}>
           ← All work
         </button>
-        <h1>{kindName}</h1>
+        <h1>{job?.name || name}</h1>
         {filter && (
           <button
             type="button"
@@ -511,29 +521,45 @@ function KindPage({
         )}
       </header>
 
-      <PathBand path={path} />
-      <LiveBand
-        kindName={kindName}
-        open={openRows}
-        hottest={hottestOpen(mine)}
-        onOpenItem={onOpenItem}
-      />
-      <PastRunsBand runs={runs} loading={finishedLoading} onOpenItem={onOpenItem} />
+      {jobErr && !job && (
+        <p className="kind-quiet" role="alert">
+          Couldn&apos;t load this job&apos;s definition. The runs below are still real.
+        </p>
+      )}
+      {/* The operator's own words. Absent until somebody writes them — this
+          page will not summarise a job it has only counted. */}
+      {job?.definition && <p className="jobp-definition">{job.definition}</p>}
 
-      <section className="kind-band" aria-label="Open work">
-        <h2 className="dash-caps">Still open</h2>
-        {filteredOut ? (
+      <div className="jobp-stats">
+        {stats.map((st) => (
+          <div key={st.key} className="jobp-stat">
+            <span className="jobp-stat-label">{st.label}</span>
+            <span className="jobp-stat-value">{st.value ?? '\u2014'}</span>
+          </div>
+        ))}
+      </div>
+
+      <JobPathBand path={path} provenance={provenance} />
+      <HealthBand rows={health} declared={Boolean(job?.has_expectation)} />
+
+      {runsLoading && mine.length === 0 ? (
+        <section className="kind-band" aria-label="Recent runs">
+          <h2 className="dash-caps">Recent runs</h2>
+          <div className="dash-skel"><span style={{ width: '60%' }} /></div>
+        </section>
+      ) : filteredOut ? (
+        <section className="kind-band" aria-label="Recent runs">
+          <h2 className="dash-caps">Recent runs</h2>
           <div className="board-empty">
             <p className="board-empty-lead">Nothing matches these filters.</p>
-            <p className="board-empty-sub">Clear the filter above to see the rest of this work.</p>
+            <p className="board-empty-sub">Clear the filter above to see the rest of this job.</p>
           </div>
-        ) : rows.length === 0 ? (
-          <p className="kind-quiet">Nothing open here.</p>
-        ) : (
-          <WorkTable rows={rows} onOpen={onOpenItem} />
-        )}
-      </section>
+        </section>
+      ) : (
+        <RecentRunsBand rows={runs} onOpenItem={onOpenItem} />
+      )}
 
+      <SettingsBand rows={settings} onOpenAgent={onOpenAgent} />
     </div>
   )
 }
@@ -708,6 +734,32 @@ export default function WorkTab({
   // Load this job's finished work when its page opens, and only then.
   const kindWorkflowId = route.job ?? null
   const kindOpen = route.job ? String(route.job) : null
+
+  // The job's own definition, expectation and observed numbers. One lean
+  // read, only on the job page — the board never needs this depth, and the
+  // aggregates come precomputed so the client does no arithmetic on them.
+  const [jobDetail, setJobDetail] = useState(null)
+  const [jobDetailErr, setJobDetailErr] = useState(null)
+  useEffect(() => {
+    if (!route.job) {
+      setJobDetail(null)
+      return undefined
+    }
+    setJobDetailErr(null)
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkflow(route.job, { signal })
+        .then((d) => isAlive() && setJobDetail(d))
+        .catch((e) => isAlive() && setJobDetailErr(e))
+    })
+  }, [route.job])
+  // THIS job's runs, in every state — one lean column-filtered read.
+  //
+  // Not sliced out of the board's 50-row page: that page is ordered by
+  // recency across every job, so on a busy account one job's runs are
+  // whatever happens to have survived the crowd. Asking by workflow_id gets
+  // this job's actual recent history, and it matches on the id rather than
+  // the name, so renaming a job does not empty its own page.
   useEffect(() => {
     if (!kindOpen) {
       setFinished(null)
@@ -719,7 +771,6 @@ export default function WorkTab({
         .getWorkItems({
           limit: 50,
           workflowId: kindWorkflowId === null ? 'none' : kindWorkflowId,
-          status: 'done',
           signal,
         })
         .then((p) => {
@@ -727,7 +778,6 @@ export default function WorkTab({
           setFinished(Array.isArray(p?.items) ? p.items : [])
           setFinishedLoading(false)
         })
-        // Past runs is a band, not the page. Its absence is quiet.
         .catch(() => isAlive() && setFinishedLoading(false))
     })
   }, [kindOpen, kindWorkflowId])
@@ -929,12 +979,12 @@ export default function WorkTab({
 
   return (
     route.job ? (
-      <KindPage
-        kindName={kindName}
-        workflowId={route.job}
-        items={items || []}
-        finished={finished}
-        finishedLoading={finishedLoading}
+      <JobPage
+        job={jobDetail}
+        jobErr={jobDetailErr}
+        name={kindName}
+        runs={finished}
+        runsLoading={finishedLoading}
         filter={filter}
         onClearFilter={() => setFilter(null)}
         onBack={() => onRoute({ job: null, run: null })}

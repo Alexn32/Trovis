@@ -6797,56 +6797,138 @@ button.work-td-task:hover {
   background: var(--bg-surface); border: 1px solid var(--border-default);
   font-size: 12.5px; font-weight: 600; color: var(--text-secondary);
 }
-.kind-node + .kind-node::before,
-.kind-node.kind-done::before {
-  content: '→'; color: var(--text-dim); margin: 0 10px 0 -3px; font-weight: 400;
-}
+.kind-step { display: inline-flex; align-items: center; }
+.kind-arrow { color: var(--text-dim); margin: 0 10px; font-size: 12.5px; }
 .kind-node.kind-done { background: none; border-color: transparent; color: var(--text-muted); }
-.kind-node-flag {
-  font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+/* The one branch worth naming: where a person had to step in. Warning, never
+   the accent — the accent is navigation, colour here is state. */
+.kind-node.is-divergence {
+  border-color: var(--warning); background: var(--warm-fill); color: var(--text-primary);
 }
-.kind-node-flag.is-stuck { color: var(--error); background: var(--error-faint); }
-.kind-node-flag.is-waiting { color: var(--warning); background: var(--warm-fill); }
+/* A measured 0% still prints, but quietly — colour belongs to the branch,
+   and at nil there is no branch. */
+.kind-node-pct {
+  font-size: 11px; font-weight: 700; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.kind-node.is-divergence .kind-node-pct { color: var(--warning); }
 
-/* Band B — now. */
-.kind-live-lead {
-  font-size: 13.5px; color: var(--text-secondary); margin: 0;
-  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
-}
-.kind-live-row {
-  display: flex; flex-direction: column; gap: 3px; align-items: flex-start;
-  width: 100%; text-align: left; padding: 10px 13px; border-radius: 9px;
-  background: var(--bg-surface); border: 1px solid var(--border-default);
-  cursor: pointer; font-family: inherit;
-}
-.kind-live-row:hover { border-color: var(--border-hover); }
-.kind-live-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.kind-live-title { font-size: 13.5px; font-weight: 650; color: var(--text-primary); }
-.kind-live-meta {
-  font-size: 11.5px; color: var(--text-muted);
-  display: flex; align-items: center; gap: 6px;
+/* --- Work page 2: one job (a pattern) ---------------------------------------
+   Everything on this page is an average. The provenance line and the empty
+   comparison column are what keep it from reading like the run page. */
+
+/* The operator's own words, in the display face — the definition is the
+   subject of the page, not metadata about it. */
+.jobp-definition {
+  font-family: "Space Grotesk", "DM Sans", sans-serif;
+  font-size: 15.5px; line-height: 1.5; color: var(--text-secondary);
+  margin: -8px 0 0; max-width: 68ch;
 }
 
-/* Band C — past runs. The technical door: dense, quiet, tabular. */
-.kind-runs { list-style: none; margin: 0; padding: 0; }
-.kind-runs > li + li { border-top: 1px solid var(--border-default); }
-.kind-run {
-  display: grid; grid-template-columns: 56px 74px minmax(0, 1fr) minmax(0, 1fr);
+/* Four aggregates. A missing one is an em dash, never a zero. */
+.jobp-stats {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px; background: var(--border-default);
+  border: 1px solid var(--border-default); border-radius: 9px; overflow: hidden;
+}
+.jobp-stat {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 14px; background: var(--bg-surface);
+}
+.jobp-stat-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.jobp-stat-value {
+  font-size: 19px; font-weight: 650; color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 720px) {
+  .jobp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Never optional, never far from the diagram. */
+.jobp-computed {
+  margin: 2px 0 0; font-size: 11.5px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Said plainly, once, above the rows it applies to. */
+.jobp-nodecl { margin: 0; font-size: 12.5px; color: var(--text-muted); max-width: 68ch; }
+
+.jobp-health {
+  margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+}
+.jobp-metric {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 0 10px 12px; border-left: 2px solid var(--border-default);
+}
+/* Colour only on a breach, and only when there was a declared number to
+   breach. An observation with nothing to grade it against stays neutral. */
+.jobp-metric.is-over { border-left-color: var(--error); }
+.jobp-metric dt {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.jobp-metric dd { margin: 0; }
+.jobp-observed {
+  font-size: 16px; font-weight: 650; color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.jobp-metric.is-over .jobp-observed { color: var(--error); }
+/* Empty when nothing was declared — an empty cell, not a dash pretending to
+   be a verdict. It keeps its height so the four rows stay aligned. */
+.jobp-expected {
+  font-size: 11.5px; color: var(--text-muted); min-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 720px) {
+  .jobp-health { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Recent runs. Dense and quiet, and every state in the one list so a
+   repeated failure reads as a cluster. */
+.jobp-runs { list-style: none; margin: 0; padding: 0; }
+.jobp-runs > li + li { border-top: 1px solid var(--border-default); }
+.jobp-run {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto 52px;
   align-items: baseline; gap: 12px; width: 100%; text-align: left;
   padding: 9px 4px; background: none; border: none; cursor: pointer;
   font-family: inherit;
 }
-.kind-run:hover { background: var(--bg-surface-hover); }
-.kind-run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.kind-run-when {
-  font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+.jobp-run:hover { background: var(--bg-surface-hover); }
+.jobp-run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.jobp-run-what {
+  font-size: 13px; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.kind-run-result { font-size: 11.5px; font-weight: 700; color: var(--text-muted); }
-.kind-run-result.is-stuck { color: var(--error); }
-.kind-run-what { font-size: 13px; color: var(--text-primary); }
-.kind-run-why { font-size: 11.5px; color: var(--text-muted); }
+.jobp-run-age {
+  font-size: 11.5px; color: var(--text-muted); text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The technical block, below the fold. This detail lives here and nowhere
+   else — it does not go on a run page. */
+.jobp-settings dl {
+  margin: 0; display: grid; grid-template-columns: 168px minmax(0, 1fr);
+  gap: 0 16px;
+}
+.jobp-settings dl > div {
+  display: contents;
+}
+.jobp-settings dt {
+  font-size: 12px; color: var(--text-muted); padding: 6px 0;
+  border-top: 1px solid var(--border-default);
+}
+.jobp-settings dd {
+  margin: 0; font-size: 12.5px; color: var(--text-secondary); padding: 6px 0;
+  border-top: 1px solid var(--border-default);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 720px) {
-  .kind-run { grid-template-columns: 1fr; gap: 2px; }
+  .jobp-settings dl { grid-template-columns: 1fr; gap: 0; }
+  .jobp-settings dd { border-top: none; padding-top: 0; }
 }
 
 /* --- Work board, grouped by job ----------------------------------------- */

@@ -151,6 +151,10 @@ with TestClient(main.app) as c:
     check("the cost denominator is published, because it is NOT the rate "
           "denominator — 4 runs cost, 3 runs closed",
           d["cost_runs"] == 4 and d["closed_runs"] == 3)
+    check("CADENCE counts runs started, not runs finished — grading a declared "
+          "per-day expectation against closed runs answers a different "
+          f"question (4 started, 3 closed, got {d['started_runs']})",
+          d["started_runs"] == 4 and d["started_runs"] != d["closed_runs"])
     check("the window is stated, so a computed number can say what it came from",
           d["window_days"] == database.WORKFLOW_WINDOW_DAYS)
 
@@ -189,6 +193,10 @@ with TestClient(main.app) as c:
           oo["cost_runs"] == 1 and oo["cost_usd"] > 0
           and oo["closed_runs"] == 0
           and oo["intervention_pct"] is None and oo["failure_pct"] is None)
+    check("...but it DOES have a cadence — a job mid-flight is running, and "
+          "reporting 0/day against a declared floor would call it stalled",
+          oo["started_runs"] == 1)
+    check("a job that never ran has no cadence to report", quiet["started_runs"] == 0)
 
     print("\n--- sticky matching: a run keeps the job it belongs to ---")
     before = {i["title"] for i in c.get(f"/workflows/{wf['id']}/loops", headers=H).json()}

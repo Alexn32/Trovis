@@ -244,12 +244,20 @@ export function healthBadge(row, { now = Date.now(), waitAfterS = WAIT_ATTENTION
   return { tone: 'ok', label: 'Healthy' }
 }
 
-/** Runs per day over the job's own stated window, or null with no data. */
+/**
+ * Runs per day over the job's own stated window, or null with no data.
+ *
+ * Runs STARTED, not runs closed. A declared `expected_per_day` says how often
+ * the job is supposed to run, so reading it against finished runs grades a
+ * job that ran seven times and closed two as running at a fifth of its rate —
+ * a wrong verdict, not a slow job. `started_runs` is the number the server
+ * computes for exactly this.
+ */
 export function observedPerDay(job) {
   const days = numOrNull(job?.window_days)
-  const closed = numOrNull(job?.closed_runs)
-  if (days === null || days <= 0 || closed === null) return null
-  const n = closed / days
+  const started = numOrNull(job?.started_runs)
+  if (days === null || days <= 0 || started === null) return null
+  const n = started / days
   return n >= 10 ? Math.round(n) : Math.round(n * 10) / 10
 }
 

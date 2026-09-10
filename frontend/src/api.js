@@ -275,7 +275,7 @@ export const api = {
   // ordered stations (who holds the work at each step) + match hints (how a
   // loop is recognized as an instance). Definitions are append-only.
   getWorkflows: (opts = {}) => request('/workflows', opts),
-  getWorkflow: (id) => request(`/workflows/${id}`),
+  getWorkflow: (id, opts = {}) => request(`/workflows/${id}`, opts),
   // Live station map: where every non-terminal matched loop currently sits.
   getWorkflowMap: (id) => request(`/workflows/${id}/map`),
   getWorkflowLoops: (id, state = null) =>
