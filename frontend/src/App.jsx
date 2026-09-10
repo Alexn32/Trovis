@@ -16,6 +16,7 @@ import TrovisLanding from './TrovisLanding.jsx'
 import TrovisLegal from './TrovisLegal.jsx'
 import UpgradeModal from './UpgradeModal.jsx'
 import Org from './Org.jsx'
+import GraduateCard from './Graduate.jsx'
 import Settings from './Settings.jsx'
 import Onboarding from './Onboarding.jsx'
 // A render crash used to blank the whole app; each pane and the overlay now
@@ -305,9 +306,35 @@ function AppInner() {
   }
 
   async function refreshMe() {
+    // A full /auth/me, not a merge of what the last call returned. Graduation
+    // changes account_type, the chart AND the founder's seat at once, and a
+    // partial merge left nav reading a stale seat until the next reload.
     const payload = await api.validateSession()
     if (payload) setMe(payload)
   }
+
+  // Path A's soft invitation to become a company, shown on Home. Dismissal is
+  // per browser and permanent-ish on purpose: this is an offer, and an offer
+  // that keeps reappearing after you decline it is a nag. Graduating clears
+  // account_type anyway, so the banner goes on its own for anyone who accepts.
+  const GRADUATE_DISMISSED = 'trovis_graduate_dismissed'
+  const [graduateDismissed, setGraduateDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(GRADUATE_DISMISSED) === '1'
+    } catch {
+      return false
+    }
+  })
+  function dismissGraduate() {
+    setGraduateDismissed(true)
+    try {
+      localStorage.setItem(GRADUATE_DISMISSED, '1')
+    } catch {
+      /* private mode — dismissed for this session only */
+    }
+  }
+  const showGraduate =
+    Boolean(me?.user) && me?.org?.account_type === 'individual' && !graduateDismissed
 
   // Public legal pages (/terms, /privacy) — no auth, no session restore.
   if (legalPath) {
@@ -527,6 +554,17 @@ function AppInner() {
   const panes = (
     <>
       <TabPane id="dashboard" visible={dashboardVisible}>
+        {/* Path A's way in. Graduation used to live only on the Org page —
+            the one surface a solo user has no reason to open — so it was
+            effectively unreachable. It belongs where they already are. */}
+        {showGraduate && (
+          <GraduateCard
+            variant="banner"
+            orgName={me?.org?.name || ''}
+            onGraduated={refreshMe}
+            onDismiss={dismissGraduate}
+          />
+        )}
         <Dashboard
           key={`dashboard-${shownEpoch.current.dashboard}`}
           // Off screen, Home stops re-syncing on focus (same rule as Work).
@@ -562,15 +600,7 @@ function AppInner() {
         />
       </TabPane>
       <TabPane id="org" visible={isPaneVisible('org', paneState)}>
-        <Org
-          seat={seat}
-          org={me?.org}
-          // Graduation flips account_type and hands the founder a role, so
-          // the shell's copy of `me` is stale the moment it returns.
-          onGraduated={(updated) =>
-            setMe((prev) => (prev ? { ...prev, org: updated || prev.org } : prev))
-          }
-        />
+        <Org seat={seat} org={me?.org} onGraduated={refreshMe} />
       </TabPane>
       <TabPane id="work" visible={workVisible}>
         <WorkTab

@@ -371,8 +371,11 @@ test('a job row opens the job page, and All work returns to the board', () => {
   assert.match(pageSrc, /← All work/)
 })
 
-test('a run on this page opens the run page', () => {
-  assert.match(work, /onOpenItem=\{\(it\) => onRoute\(\{ job: route\.job, run: it\.id \}\)\}/)
+test('a run on this page opens the run page, carrying its OWN job', () => {
+  // it.workflow_id, falling back to the page's job — so a run opened from
+  // here keeps the breadcrumb it actually belongs to rather than inheriting
+  // whichever page happened to launch it.
+  assert.match(work, /onOpenItem=\{\(it\) => onRoute\(\{ job: it\.workflow_id \?\? route\.job, run: it\.id \}\)\}/)
 })
 
 test('a filter carried in still applies here and stays dismissible', () => {

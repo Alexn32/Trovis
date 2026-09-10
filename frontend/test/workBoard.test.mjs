@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 import {
   COLUMNS, UNMATCHED, ageLabel, boardTotals, columnOf, durationLabel,
   firstOverCeiling, groupByJob, healthBadge, needsCard, observedPerDay,
-  quietLine, rowJobLine, runCardLead,
+  pinLoudVerdict, quietLine, rowJobLine, runCardLead, tableJobMeta,
 } from '../src/workBoard.js'
 import { buildPath, parsePath } from '../src/route.js'
 
@@ -47,9 +47,13 @@ test('the three levels are real URLs, and they round-trip', () => {
   assert.deepEqual(parsePath('/work'), { tab: 'work', job: null, run: null })
   assert.deepEqual(parsePath('/work/jobs/12'), { tab: 'work', job: 12, run: null })
   assert.deepEqual(parsePath('/work/runs/4471'), { tab: 'work', job: null, run: 4471 })
-  for (const p of ['/', '/fleet', '/team', '/work', '/work/jobs/12', '/work/runs/4471']) {
+  for (const p of ['/', '/fleet', '/org', '/work', '/work/jobs/12', '/work/runs/4471']) {
     assert.equal(buildPath(parsePath(p)), p, p)
   }
+  // /team was the pane Org replaced. An old bookmark still lands somewhere
+  // real; it just normalises to the URL the tab actually has now.
+  assert.equal(parsePath('/team').tab, 'org')
+  assert.equal(buildPath({ tab: 'org' }), '/org')
 })
 
 test('a junk id is not an id', () => {
@@ -373,6 +377,63 @@ test('a loud job verdict rides under the Task title, not as its own column', () 
   assert.equal(rowJobLine(null), null)
 })
 
+test('a failing job alarms one sibling, not every calm row in the cluster', () => {
+  // Clustering rule: hottest attention row (stuck → waiting_on_you →
+  // waiting_on_other, oldest first). Moving / done siblings keep the name.
+  const jobs = [job({ id: 1 })]
+  const items = [
+    run({ id: 10, status: 'stuck', updated_at: ago(9 * 3600) }),
+    run({ id: 11, status: 'stuck', updated_at: ago(3600) }),
+    run({ id: 12, status: 'moving' }),
+    run({ id: 13, status: 'done' }),
+  ]
+  const grouped = groupByJob(jobs, items, { now: NOW })[0]
+  const pinned = pinLoudVerdict(grouped, items, { now: NOW })
+  assert.equal(pinned.badge.label, 'Failing 2 of 4')
+  assert.equal(pinned.badgeOnId, 10, 'oldest stuck row carries the alarm')
+
+  const meta = tableJobMeta(jobs, items, items, { now: NOW })
+  assert.deepEqual(meta.get(10), {
+    name: 'Refunds',
+    badge: { tone: 'error', label: 'Failing 2 of 4' },
+  })
+  assert.deepEqual(meta.get(11), { name: 'Refunds', badge: null })
+  assert.deepEqual(meta.get(12), { name: 'Refunds', badge: null })
+  assert.deepEqual(meta.get(13), { name: 'Refunds', badge: null })
+  const loud = [...meta.values()].filter((m) => m.badge)
+  assert.equal(loud.length, 1, 'exactly one loud badge in the cluster')
+})
+
+test('a Moving-only slice still names the problem once, on the first sibling', () => {
+  // A Home/Work filter can hide the stuck row. Vanishing the verdict would
+  // make the remaining calm rows look like a healthy job.
+  const jobs = [job({ id: 1 })]
+  const items = [
+    run({ id: 10, status: 'stuck' }),
+    run({ id: 12, status: 'moving', updated_at: ago(120) }),
+    run({ id: 13, status: 'moving', updated_at: ago(60) }),
+  ]
+  const visible = items.filter((r) => r.status === 'moving')
+  const grouped = groupByJob(jobs, items, { now: NOW })[0]
+  const pinned = pinLoudVerdict(grouped, visible, { now: NOW })
+  assert.equal(pinned.badge.label, 'Failing 1 of 3')
+  assert.equal(pinned.badgeOnId, 12)
+  const meta = tableJobMeta(jobs, items, visible, { now: NOW })
+  assert.deepEqual(meta.get(12).badge, pinned.badge)
+  assert.equal(meta.get(13).badge, null)
+})
+
+test('waiting outranks moving when nothing is stuck', () => {
+  const jobs = [job({ id: 1 })]
+  const items = [
+    run({ id: 20, status: 'waiting_on_you', updated_at: ago(31 * 3600) }),
+    run({ id: 21, status: 'moving' }),
+  ]
+  const pinned = pinLoudVerdict(groupByJob(jobs, items, { now: NOW })[0], items, { now: NOW })
+  assert.match(pinned.badge.label, /waiting/)
+  assert.equal(pinned.badgeOnId, 20)
+})
+
 test('Work home stays on the lean trio; jobs enrich rows, they do not land a board', () => {
   // Grouping by job is what made the fat board tempting. It stays banned:
   // /work/overview + /work/items + suggestions are the home reads.
@@ -384,6 +445,25 @@ test('Work home stays on the lean trio; jobs enrich rows, they do not land a boa
   assert.match(work, /function WorkHome/)
   assert.doesNotMatch(work, /function BoardHome/)
   assert.doesNotMatch(work, /jb-colheads/)
+  assert.match(work, />Task</)
+  assert.match(work, /What&apos;s next/)
+  assert.doesNotMatch(work, /Other views/)
+})
+
+test('home row click opens the job; the run is a nested title click', () => {
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const home = work.slice(work.indexOf('function WorkHome'), work.indexOf('export default function'))
+  const table = work.slice(work.indexOf('function WorkTable'), work.indexOf('// --- the job page'))
+  // Primary: a named job on the row, unmatched falls through to the run.
+  assert.match(home, /if \(row\.workflow_id != null\) onOpenJob\(row\.workflow_id\)/)
+  assert.match(home, /else onOpenItem\(row\)/)
+  assert.match(home, /onOpenRun=\{onOpenItem\}/)
+  // Job name stays a job door so click-in cannot vanish.
+  assert.match(table, /onOpenJob\(row\.workflow_id\)/)
+  // Nested task title is the run.
+  assert.match(table, /onOpenRun\(row\)/)
+  assert.match(home, /onOpenJob=\{onOpenJob\}/)
 })
 
 test('filtered to nothing is not the same as having no work', () => {

@@ -39,9 +39,9 @@ test('a run is a page at its own URL, not an overlay', () => {
 })
 
 test('every way into a run goes through the route', () => {
-  // A table row and a past run are doors to one destination, and none of
-  // them may open a run any other way.
-  assert.match(work, /onOpenItem=\{\(it\) => onRoute\(\{ job: route\.job, run: it\.id \}\)\}/)
+  // Kind-page rows and past runs stay run doors. Home's primary click is
+  // the job; its nested title click reuses this same run route.
+  assert.match(work, /onOpenItem=\{\(it\) => onRoute\(\{ job: it\.workflow_id \?\? route\.job, run: it\.id \}\)\}/)
   assert.doesNotMatch(work, /setJobView\(/)
 })
 
