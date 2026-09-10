@@ -267,7 +267,7 @@ function Features() {
       body: "Token and dollar costs per agent, per task, per day. Attributed, not aggregated. Know which agent spent what before the invoice tells you.",
     },
     {
-      title: "Fleet",
+      title: "Agents",
       body: "Every agent in one sortable view — status, activity, cost, owner. Scales from your first agent to your fiftieth without changing how you work.",
     },
     {

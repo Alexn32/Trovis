@@ -484,7 +484,7 @@ function FleetPulse({ pulse, health, insight, graphic, onOpenAgent, onGoFleet, o
   const shown = needLook.slice(0, PULSE_PREVIEW)
 
   return (
-    <section className="home-pulse" aria-label="Fleet">
+    <section className="home-pulse" aria-label="Agents">
       <div className="home-pulse-workforce">
         <div className="home-pulse-row">
           {count !== null && (

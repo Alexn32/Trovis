@@ -74,6 +74,35 @@ test('nav shows exactly the surfaces in the seat', () => {
   assert.deepEqual(ids(['Work', 'Ask', 'Connect']), ['work'])
 })
 
+test('the Fleet pane reads Agents in the nav, while the atom stays Fleet', () => {
+  // The label is the only thing that changed. The pane id ('fleet'), the
+  // route (/fleet) and the scope atom ('Fleet', stored in
+  // scope_levels.surfaces) all stay — renaming those would be a schema
+  // migration for a word.
+  const byId = Object.fromEntries(visibleTabs(ALL_SURFACES))
+  assert.equal(byId.fleet, 'Agents')
+  assert.ok(!visibleTabs(ALL_SURFACES).some(([, label]) => label === 'Fleet'))
+  assert.ok(ALL_SURFACES.includes('Fleet'))
+  assert.equal(TAB_PATHS.fleet, '/fleet')
+  // A seat still gates it by the atom's name, not the label.
+  assert.deepEqual(visibleTabs(['Home', 'Work']).map(([id]) => id), ['dashboard', 'work'])
+  assert.ok(visibleTabs(['Fleet']).some(([id]) => id === 'fleet'))
+})
+
+test('nothing a person reads calls the surface Fleet any more', () => {
+  for (const f of ['App.jsx', 'Dashboard.jsx', 'Fleet.jsx', 'TrovisLanding.jsx']) {
+    const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    for (const m of src.matchAll(/>([^<>{}]+)</g)) {
+      assert.doesNotMatch(m[1], /\bfleet\b/i, `${f} shows "${m[1].trim()}"`)
+    }
+    for (const m of src.matchAll(/(?:aria-label|title|placeholder|label)=["']([^"']+)["']/g)) {
+      assert.doesNotMatch(m[1], /\bfleet\b/i, `${f} labels something "${m[1]}"`)
+    }
+  }
+})
+
 test('Org is a nav item now, and Team is gone', () => {
   assert.ok(visibleTabs(ALL_SURFACES).some(([, label]) => label === 'Org'))
   assert.ok(!visibleTabs(ALL_SURFACES).some(([, label]) => label === 'Team'))

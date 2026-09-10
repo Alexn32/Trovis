@@ -120,6 +120,31 @@ check(
     ),
 )
 check("IC preset is self-breadth", by_key["ic"]["breadth"] == "self")
+# A seat narrows WHOSE work you see. It was never meant to take the product
+# away from the person who bought it: an Exec preset without Agents left a
+# founder unable to see their own agents, and without Connect unable to wire
+# one up while an IC could.
+check(
+    "every preset can reach Agents",
+    all("Fleet" in l["surfaces"] for l in levels),
+)
+check(
+    "every preset can connect an agent",
+    all("Connect" in l["surfaces"] for l in levels),
+)
+check(
+    "depth is a person's preference, not a rank — every preset is technical",
+    all(l["depth"] == "technical" for l in levels),
+)
+# Cost is the one surface that really does differ by role, and is unchanged.
+check(
+    "Cost stays with Exec, VP and Manager",
+    all("Cost" in by_key[k]["surfaces"] for k in ("exec", "vp", "manager")),
+)
+check(
+    "...and off Middle manager and IC",
+    all("Cost" not in by_key[k]["surfaces"] for k in ("middle_manager", "ic")),
+)
 check("Manager preset is subtree-breadth", by_key["manager"]["breadth"] == "subtree")
 check("Exec preset is company-breadth", by_key["exec"]["breadth"] == "company")
 
@@ -148,6 +173,78 @@ for bad in ({"breadth": "everything"}, {"depth": "xray"}):
     except ValueError:
         check(f"invented {list(bad)[0]} rejected", True)
 
+
+
+# ---------------------------------------------------------------------------
+# 1b. Existing orgs move forward — and only the untouched rows
+# ---------------------------------------------------------------------------
+print("\nPreset migration")
+
+# ensure_scope_level_presets only INSERTS missing keys, so changing
+# SCOPE_LEVEL_PRESETS fixes nothing for an org that already has them. Without
+# the boot migration every existing account would sit on an Exec seat with no
+# Agents tab forever, no matter what the constant says.
+migr = signup("founder@legacy.test", "Legacy Co")
+legacy_id = migr["org"]["id"]
+
+
+def _write_shape(account_id, key, depth, surfaces):
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE scope_levels SET depth = {database.PH}, surfaces = {database.PH} "
+            f"WHERE account_id = {database.PH} AND key = {database.PH}",
+            (depth, __import__("json").dumps(surfaces), account_id, key),
+        )
+
+
+def _shape(account_id, key):
+    lv = {l["key"]: l for l in database.get_scope_levels(account_id)}[key]
+    return lv["depth"], set(lv["surfaces"])
+
+
+# Roll three rows back to exactly the shapes that shipped before.
+_write_shape(legacy_id, "exec", "glance", ["Home", "Work", "Ask", "Cost", "Org"])
+_write_shape(legacy_id, "vp", "glance", ["Home", "Work", "Fleet", "Ask", "Cost", "Org"])
+_write_shape(legacy_id, "middle_manager", "glance", ["Home", "Work", "Ask", "Org"])
+# ...and edit one deliberately: a Manager preset this org trimmed on purpose.
+_write_shape(legacy_id, "manager", "glance", ["Home", "Work"])
+
+check(
+    "before the migration, Exec cannot reach Agents",
+    "Fleet" not in _shape(legacy_id, "exec")[1],
+)
+
+database.init_db()  # idempotent boot
+
+for key in ("exec", "vp", "middle_manager"):
+    depth, surfaces = _shape(legacy_id, key)
+    check(f"{key} gains Agents", "Fleet" in surfaces)
+    check(f"{key} gains Connect", "Connect" in surfaces)
+    check(f"{key} is technical now", depth == "technical")
+check(
+    "...and Cost is neither granted nor taken by the migration",
+    "Cost" in _shape(legacy_id, "exec")[1]
+    and "Cost" in _shape(legacy_id, "vp")[1]
+    and "Cost" not in _shape(legacy_id, "middle_manager")[1],
+)
+# The one that matters most: an org that trimmed a preset itself keeps its
+# edit. Silently re-granting surfaces someone removed on purpose would be a
+# worse bug than the one being fixed.
+check(
+    "a deliberately edited preset is left exactly alone",
+    _shape(legacy_id, "manager") == ("glance", {"Home", "Work"}),
+)
+
+database.init_db()
+check(
+    "running the migration again changes nothing",
+    _shape(legacy_id, "exec")[0] == "technical"
+    and _shape(legacy_id, "manager") == ("glance", {"Home", "Work"}),
+)
+check(
+    "a fresh org is untouched by it",
+    _shape(acme_id, "exec")[0] == "technical",
+)
 
 # ---------------------------------------------------------------------------
 # 2. Inheritance: scope level → role → person
@@ -208,8 +305,8 @@ check(
     ceo_seat["subtree_user_ids"] == sorted([mgr["user"]["id"], ic["user"]["id"]]),
 )
 check(
-    "Exec preset is a glance seat (no technical folds)",
-    ceo_seat["depth"] == "glance",
+    "depth is not baked into a rank — every preset seat is technical",
+    ceo_seat["depth"] == "technical",
 )
 
 # A role with no scope level attached, and a person with no role at all, both
