@@ -17,14 +17,11 @@ import { partitionLookAt } from './home.js'
 import { groupByJob, rowJobLine } from './workBoard.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
-// Work home — UX Architecture v1.1 / Design visual-pass-v1.1.
-// Overview + suggestions + Monday MAIN TABLE. Not kanban landing.
+// IA: Work home stays Monday table (overview + Suggestions + job rows).
+// #167 job-grouping/verdict numbers fold into table row data — not a
+// 4-column board landing (locked v1.1 + #135).
 // Must NOT call /work/summary or /work/board on this path (those starve
 // the replica). Board.jsx stays in the repo unused until F4 reopens it.
-//
-// Job-shaped facts (name, expectation, a numbered verdict) may sit under
-// Task as a subline. They must not become Working | Waiting | Stuck | Done
-// columns on this page.
 //
 // Status wire value waiting_on_other → label "Waiting on someone".
 // Fail-soft AbortSignal (#119): first-load timeout stays on Retry, no
