@@ -364,3 +364,26 @@ test('a person reads Home, never Dashboard — on every surface, not just the sh
     }
   }
 })
+
+// --- naming someone who has not signed in ---------------------------------
+
+test('the invite form can name a person, not just address them', () => {
+  // Work gets handed to people before they have a login. A named invite is
+  // what makes that handoff read as "Sarah Chen" rather than "a human", so
+  // the name field has to be on the one invite form the product has.
+  assert.match(org, /placeholder="Their name \(optional\)"/)
+  assert.match(org, /name: name\.trim\(\) \|\| null/)
+  // Optional, and honestly labelled: an invite with no name still works.
+  assert.match(org, /\(optional\)/)
+})
+
+test('a pending invite is listed by name once it has one', () => {
+  assert.match(org, /\{i\.display_name \|\| i\.email\}/)
+})
+
+test('nothing in the product writes the old directory', () => {
+  for (const f of ['Org.jsx', 'Onboarding.jsx', 'Settings.jsx', 'App.jsx', 'api.js']) {
+    const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
+    assert.doesNotMatch(src, /createTeamMember|post\(.\/team/, `${f} writes team_members`)
+  }
+})

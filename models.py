@@ -835,6 +835,10 @@ class InviteCreate(BaseModel):
     # The chart box the invitee lands in. Optional — an org that hasn't drawn
     # a chart still invites people the way it always did.
     role_id: int | None = None
+    # What this person is CALLED. It works before they sign in: a handoff to
+    # their email reads as their name rather than "a human". This is what
+    # replaced the old team_members directory.
+    name: str | None = None
 
 
 class InviteCreateResponse(BaseModel):
@@ -842,6 +846,7 @@ class InviteCreateResponse(BaseModel):
     email: str
     role: str
     role_id: int | None = None
+    display_name: str | None = None
     expires_at: str | None = None
 
 
@@ -850,6 +855,7 @@ class InvitePublic(BaseModel):
     email: str
     role: str
     role_id: int | None = None
+    display_name: str | None = None
     created_at: str | None = None
     expires_at: str | None = None
 

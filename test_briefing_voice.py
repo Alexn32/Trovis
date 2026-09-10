@@ -81,7 +81,7 @@ with TestClient(main.app) as c:
     }).json()
     KEY, TOK = r["api_key"], r["token"]
     H = {"Authorization": f"Bearer {TOK}"}
-    c.post("/team", headers=H, json={"name": "Sarah Chen", "email": "sarah@test.com", "role": "Ops"})
+    c.post("/org/invites", headers=H, json={"email": "sarah@test.com", "name": "Sarah Chen"})
 
     def post(svc, spans):
         return c.post("/v1/traces", json={"resourceSpans": [{

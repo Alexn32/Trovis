@@ -99,6 +99,20 @@ NS = 1_000_000_000
 _seq = [0]
 
 
+def legacy_directory_row(account_id, name, email, role):
+    """A team_members row, written straight to the table.
+
+    POST /team is closed (410) — people are org members or named invites
+    now. But rows written before that closure still exist in real
+    databases, and their names still have to resolve, so the tests that
+    prove the legacy read path keeps working have to seed it the way a
+    legacy database already looks.
+    """
+    return database.create_team_member(
+        account_id=account_id, name=name, email=email, role=role
+    )
+
+
 def seed_agent(account_id, service, agent_id="main"):
     _seq[0] += 1
     now = time.time_ns()
@@ -241,10 +255,7 @@ print("\nLegacy rows")
 # A directory person with no login. This is still how a handoff target who
 # never signs in gets a name — see _resolve_human_name — so the read path
 # must keep working even though nothing in the product writes here now.
-legacy = client.post(
-    "/team", json={"name": "Pat Nolan", "email": "pat@contractor.test", "role": "Contractor"},
-    headers=auth(FOUNDER),
-).json()
+legacy = legacy_directory_row(acme_id, "Pat Nolan", "pat@contractor.test", "Contractor")
 r = client.put(
     "/agents/triage-agent/owner",
     json={"agent_id": "main", "team_member_id": legacy["id"]},
@@ -261,10 +272,7 @@ check("the same name on the summary", summary["owner_name"] == "Pat Nolan")
 # The pre-migration shape: a row pointing only at team_member_id, for someone
 # who DOES have a login. init_db backfills it by email.
 noah = invite_accept(FOUNDER, "noah@acme.test", "Noah Reed", role_id=support["id"])
-noah_tm = client.post(
-    "/team", json={"name": "Noah R", "email": "noah@acme.test", "role": "Support"},
-    headers=auth(FOUNDER),
-).json()
+noah_tm = legacy_directory_row(acme_id, "Noah R", "noah@acme.test", "Support")
 seed_agent(acme_id, "legacy-agent")
 with database._connect() as conn, database._cursor(conn) as cur:
     cur.execute(
@@ -328,10 +336,7 @@ print("\nTenant isolation")
 other = signup("founder@other.test", "Other Co")
 other_id = other["org"]["id"]
 OTHER = other["token"]
-other_tm = client.post(
-    "/team", json={"name": "Their Person", "email": "them@other.test", "role": "Ops"},
-    headers=auth(OTHER),
-).json()
+other_tm = legacy_directory_row(other_id, "Their Person", "them@other.test", "Ops")
 
 r = client.put(
     "/agents/billing-agent/owner",
@@ -401,8 +406,12 @@ print("\nOne truth")
 # Straight from the app: /openapi.json sits behind the auth middleware.
 schema = main.app.openapi()
 check(
-    "POST /team is deprecated in the API surface",
-    schema["paths"]["/team"]["post"].get("deprecated") is True,
+    "POST /team is closed, not merely discouraged",
+    schema["paths"]["/team"]["post"].get("deprecated") is True
+    and client.post(
+        "/team", json={"name": "Nope", "email": "nope@acme.test"},
+        headers=auth(FOUNDER),
+    ).status_code == 410,
 )
 check(
     "so is the old per-directory-person agent list",

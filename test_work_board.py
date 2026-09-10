@@ -41,7 +41,8 @@ with TestClient(main.app) as c:
     r = c.post("/auth/signup", json={"email": "b@t.com", "password": "supersecret123",
         "name": "Alex", "account_type": "business", "org_name": "B"}).json()
     K, T = r["api_key"], r["token"]; H = {"Authorization": f"Bearer {T}"}
-    c.post("/team", headers=H, json={"name": "Sarah Chen", "email": "s@t.com", "role": "Lead"})
+    # Named pending invite — no login, but handoffs to her read as her name.
+    c.post("/org/invites", headers=H, json={"email": "s@t.com", "name": "Sarah Chen"})
     def post(svc, spans):
         return c.post("/v1/traces", json={"resourceSpans": [{
             "resource": {"attributes": kv({"service.name": svc})},

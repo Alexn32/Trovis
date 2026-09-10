@@ -1883,6 +1883,11 @@ def init_db() -> None:
         # created before org_roles, and SQLite's ALTER ADD COLUMN can't
         # enforce one anyway (same reasoning as spans.loop_id).
         _try_add_column(cur, "invites", "role_id", "INTEGER DEFAULT NULL")
+        # The display name of an invited person. This is what lets a handoff
+        # to someone who has NOT signed up yet read as "Sarah Chen" instead
+        # of "a human" — the job team_members used to do, now done by the
+        # record of the person the org actually invited.
+        _try_add_column(cur, "invites", "display_name", "TEXT")
         # Agent ownership moves onto `users`. team_members was a directory of
         # people with no login, invented before Trovis had real users; the org
         # chart replaced it, and two tables that both mean "the humans here"
@@ -3875,9 +3880,23 @@ def _resolve_human_name(cur, target_id: str, account_id: int | None) -> str | No
 
     For 'to_human' handoffs the ingest contract asks agents to pass the
     teammate's email (or their Trovis user id). Lookup order: numeric ->
-    users.id; email -> users.email, then team_members.email. Strictly
-    scoped to the account — another org's user never resolves. Returns
-    None when nothing matches (the UI falls back to "a human").
+    users.id; email -> users.email, then a named INVITE, then the legacy
+    team_members directory.
+
+    The invite leg is how a person with no login gets a name. Work is handed
+    to people before they sign in, and often before they ever do; an org
+    that invited sarah@acme.test as "Sarah Chen" has told us who she is, and
+    that fact does not depend on her redeeming the link.
+
+    So the invite is read regardless of accepted_at or expires_at. The TOKEN
+    expiring is what stops someone joining late; the NAME is just a record,
+    and reading it grants nothing. Scoping is what matters here, and it is
+    strict: account_id, always.
+
+    An email that matches nothing stays nameless (the UI says "a human").
+    That is deliberate and load-bearing — echoing the raw address back as a
+    name would render ANY address an agent emits, including another org's,
+    as a colleague.
     """
     tid = str(target_id or "").strip()
     if not tid:
@@ -3898,6 +3917,22 @@ def _resolve_human_name(cur, target_id: str, account_id: int | None) -> str | No
         row = cur.fetchone()
         if row:
             return row["name"] or row["email"]
+        # A person the org invited by name but who has not signed in yet.
+        # Newest first: a re-invite is the org correcting itself.
+        cur.execute(
+            "SELECT display_name FROM invites "
+            f"WHERE LOWER(email) = LOWER({PH}) AND display_name IS NOT NULL "
+            f"{acct_sql} ORDER BY id DESC",
+            tuple([tid, *acct_args]),
+        )
+        row = cur.fetchone()
+        if row and (row["display_name"] or "").strip():
+            return row["display_name"].strip()
+        # Legacy: the team_members directory, read-only now. POST /team is
+        # closed, so nothing new lands here — but names already in it still
+        # have to resolve, which is why no backfill is needed or wanted
+        # (minting invite tokens for old rows would create redeemable links
+        # nobody asked for).
         cur.execute(
             f"SELECT name FROM team_members WHERE LOWER(email) = LOWER({PH}) {acct_sql}",
             tuple([tid, *acct_args]),
@@ -9798,6 +9833,7 @@ def create_invite(
     invited_by_user_id: int | None,
     ttl_seconds: int = _INVITE_TTL_SECONDS,
     role_id: int | None = None,
+    display_name: str | None = None,
 ) -> dict[str, Any]:
     """Create a one-time invite. Returns {token (raw), email, role, role_id,
     expires_at} — the raw token is shown once (in the invite link).
@@ -9805,6 +9841,11 @@ def create_invite(
     `role` is the login role ('owner' | 'member'); `role_id` is the box on
     the chart the invitee lands in, and is what gives them a seat. The two
     are different things and both are optional to change.
+
+    `display_name` is what this person is CALLED, and it works before they
+    ever sign in: a handoff to their email resolves through this row (see
+    _resolve_human_name). That is the whole reason the old team_members
+    directory existed, and why closing it needed this first.
     """
     email = (email or "").strip().lower()
     role = role if role in ("owner", "member") else "member"
@@ -9812,18 +9853,23 @@ def create_invite(
         raise ValueError("role not found")
     raw, token_hash = _new_token()
     expires_at = (_utcnow() + timedelta(seconds=ttl_seconds)).isoformat()
+    display_name = (display_name or "").strip() or None
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             "INSERT INTO invites (token_hash, account_id, email, role, "
-            "invited_by_user_id, expires_at, role_id) "
-            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
-            (token_hash, account_id, email, role, invited_by_user_id, expires_at, role_id),
+            "invited_by_user_id, expires_at, role_id, display_name) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (
+                token_hash, account_id, email, role, invited_by_user_id,
+                expires_at, role_id, display_name,
+            ),
         )
     return {
         "token": raw,
         "email": email,
         "role": role,
         "role_id": role_id,
+        "display_name": display_name,
         "expires_at": expires_at,
     }
 
@@ -9834,7 +9880,8 @@ def list_invites(account_id: int) -> list[dict[str, Any]]:
     now_iso = _utcnow().isoformat()
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, email, role, role_id, created_at, expires_at FROM invites "
+            "SELECT id, email, role, role_id, display_name, created_at, expires_at "
+            "FROM invites "
             f"WHERE account_id = {PH} AND accepted_at IS NULL AND expires_at > {PH} "
             "ORDER BY created_at DESC, id DESC",
             (account_id, now_iso),
@@ -9845,6 +9892,7 @@ def list_invites(account_id: int) -> list[dict[str, Any]]:
                 "email": r["email"],
                 "role": r["role"],
                 "role_id": _row_get(r, "role_id"),
+                "display_name": _row_get(r, "display_name"),
                 "created_at": _ts_to_str(r["created_at"]),
                 "expires_at": _ts_to_str(r["expires_at"]),
             }
@@ -9873,7 +9921,7 @@ def accept_invite(
     name = (name or "").strip() or None
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, account_id, email, role, role_id FROM invites "
+            "SELECT id, account_id, email, role, role_id, display_name FROM invites "
             f"WHERE token_hash = {PH} AND accepted_at IS NULL AND expires_at > {PH}",
             (token_hash, now_iso),
         )
@@ -9882,6 +9930,10 @@ def accept_invite(
             raise LookupError("invite invalid, expired, or already used")
         account_id = inv["account_id"]
         invited_role_id = _row_get(inv, "role_id")
+        # The name the org gave them, if they don't give one themselves —
+        # otherwise a person who was "Sarah Chen" on a handoff yesterday
+        # becomes a bare email the moment she signs in.
+        name = name or (_row_get(inv, "display_name") or "").strip() or None
         email = inv["email"]
         role = inv["role"] if inv["role"] in ("owner", "member") else "member"
         cols = "(account_id, email, name, role, password_hash)"

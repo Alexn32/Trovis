@@ -107,9 +107,15 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   name is their **chart role title** (`org_roles.title`) — never `users.role`, which is an account
   permission. Every owner read goes through the one shared resolver (`_OWNER_JOIN_SQL` /
   `_OWNER_COLS_SQL`), which prefers `users` and falls back to `team_members` for legacy rows;
-  don't hand-roll that join again. `team_members` survives for one reason only: it is how a
-  handoff target with **no login** gets a name (`_resolve_human_name`) — an unresolved email must
-  stay nameless, or any address an agent emits would render as a colleague.
+  don't hand-roll that join again.
+- **Naming a person with no login.** `_resolve_human_name` resolves an email to: `users` → a
+  **named pending invite** (`invites.display_name`, account-scoped, read regardless of
+  `accepted_at`/`expires_at` — the token expires, the name is just a record) → the legacy
+  `team_members` directory → **nameless**. That last step is load-bearing: echoing a raw address
+  back as a name would render any address an agent emits, including another org's, as a
+  colleague. `POST /team` is **410** — invite people with `POST /org/invites {email, name,
+  role_id}`. Existing `team_members` rows still resolve and need no backfill; minting invite
+  tokens for them would create redeemable links nobody asked for.
 
 ## Running locally
 
