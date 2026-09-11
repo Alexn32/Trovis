@@ -113,6 +113,7 @@ test('every live door explains how its jobs get named', () => {
     'ClaudeAgentSdkInstructions',
     'CursorOtelInstructions',
     'GrokSdkSetup',
+    'GrokBotInstructions',
   ]) {
     const start = addAgent.indexOf(`function ${fn}`)
     assert.ok(start > 0, `${fn} exists`)
@@ -142,15 +143,56 @@ test('the Grok door is the SDK path, not xai-sdk\'s own OTLP exporter', () => {
   assert.match(px.slice(0, px.indexOf('\n}')), /<GrokSdkSetup/)
 })
 
-test('the Grok door is called "Grok (xAI SDK)" — never a "bot"', () => {
-  // Locked copy. "Grok Bot" is the wrong name for the thing being connected:
-  // what arrives in Trovis is an agent, and the tile is named for the SDK
-  // that emits the telemetry.
+test('the two Grok doors are named apart and never blur together', () => {
+  // Two different products with the same word in the name. "Grok (xAI SDK)" is
+  // an app built on xai-sdk; "Cursor Grok Bot" is a desktop assistant that
+  // reports over MCP. Calling either by the other's name sends a builder down
+  // a path that cannot work for them.
   assert.match(addAgent, /label: 'Grok \(xAI SDK\)'/)
+  assert.match(addAgent, /label: 'Cursor Grok Bot'/)
   assert.match(addAgent, /Connect Grok \(xAI SDK\)/)
+  assert.match(addAgent, /Connect a Cursor Grok Bot/)
   assert.match(guide, /'Grok \(xAI SDK\)'/)
-  for (const [name, src] of [['AddAgent', addAgent], ['ConnectGuide', guide]]) {
-    assert.doesNotMatch(src, /\bGrok bots?\b/i, `${name} calls a Grok agent a bot`)
+  assert.match(guide, /'Cursor Grok Bot'/)
+
+  // The SDK door never calls its user's app a bot...
+  const sdkDoor = addAgent.slice(
+    addAgent.indexOf('function GrokInstructions'),
+    addAgent.indexOf('function GrokBotInstructions'),
+  )
+  assert.doesNotMatch(sdkDoor, /\bbots?\b/i, 'the xAI SDK door calls an app a bot')
+
+  // ...and the Bot door never sells itself as the SDK path. It says so out
+  // loud, because a Grok Bot user who pip-installs trovis-agents gets nothing.
+  // `addAgent` is comment-stripped, so bound the slice by the next function
+  // rather than a comment banner — otherwise it runs to end of file.
+  const botBody = addAgent.slice(
+    addAgent.indexOf('function GrokBotInstructions'),
+    addAgent.indexOf('function ChatGPTInstructions'),
+  )
+  assert.doesNotMatch(botBody, /pip install/, 'the Grok Bot door hands out a pip command')
+  assert.match(botBody, /Not the same as/)
+  assert.match(botBody, /xai-sdk/)
+})
+
+test('the Grok Bot door admits the bot has to call in', () => {
+  // Grok Bots export nothing and Trovis cannot pull them. A page that implies
+  // silent telemetry would have someone add an MCP server, see nothing, and
+  // conclude Trovis is broken.
+  const body = addAgent.slice(
+    addAgent.indexOf('function GrokBotInstructions'),
+    addAgent.indexOf('function ChatGPTInstructions'),
+  )
+  assert.match(body, /reporting, not telemetry/i)
+  assert.match(body, /never reports anything/i)
+  assert.doesNotMatch(body, /automatic(ally)?/i)
+  // The MCP URL and the auth header are the two things they must copy.
+  assert.match(body, /computeGrokMcpUrl\(\)/)
+  assert.match(body, /Authorization/)
+  // And the four tools are named where the reader can check the Bot sees them.
+  for (const tool of ['report_job_started', 'report_job_waiting',
+                      'report_job_finished', 'report_job_failed']) {
+    assert.match(body, new RegExp(tool), tool)
   }
 })
 

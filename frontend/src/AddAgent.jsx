@@ -12,6 +12,10 @@ const TILE_BRAND = {
   claude: 'claude',
   chatgpt: 'chatgpt',
   grok: 'grok',
+  // A Grok Bot is a Cursor desktop assistant — the Cursor mark is the one a
+  // customer recognises. The xAI mark belongs to the SDK tile, which is a
+  // different product entirely.
+  'grok-bot': 'cursor',
   cursor: 'cursor',
 }
 
@@ -63,6 +67,9 @@ const PLATFORMS = [
   // Agents built on the xAI SDK. The SDK traces itself through the global
   // OTEL provider, so trovis.init() is the whole integration.
   { id: 'grok',           label: 'Grok (xAI SDK)',            subtitle: 'Already OpenTelemetry-instrumented — two lines', needsProvider: false },
+  // A Cursor Grok Bot exports nothing and we cannot pull from it, so the door
+  // is the Bot reporting in over MCP. Not the xAI SDK tile above.
+  { id: 'grok-bot',       label: 'Cursor Grok Bot',           subtitle: 'Desktop assistant — it reports in over MCP',     needsProvider: false },
 ]
 
 // Recipe path — real OTEL ingest, not a first-party Cursor integration.
@@ -759,6 +766,14 @@ export function computeOverseeEndpoint() {
   return base.replace(/\/+$/, '') + '/v1/traces'
 }
 
+// The Grok Bot report door: the MCP server a Bot is pointed at. Same API host
+// as ingest (VITE_API_URL at build time, the canonical host otherwise) — never
+// the dashboard origin, which serves no MCP.
+export function computeGrokMcpUrl() {
+  const base = import.meta.env.VITE_API_URL || TROVIS_API_HOST
+  return base.replace(/\/+$/, '') + '/mcp/grok'
+}
+
 // Host for the OAuth / GPT-Actions flow. Same domain, but deliberately NOT
 // derived from VITE_API_URL: a local dev build points VITE_API_URL at
 // localhost, and a ChatGPT Action must still be told the real public host.
@@ -1271,6 +1286,127 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
 }
 
 // ---------------------------------------------------------------------------
+// Instructions page — Cursor Grok Bot (MCP report tools)
+// ---------------------------------------------------------------------------
+//
+// A Grok Bot is a desktop assistant. It has no exporter, and Trovis cannot
+// pull from it: connectors/MCP run Bot → tools, routine webhooks only wake a
+// Bot, and Cursor's Enterprise OTLP export is metrics/logs only. So the whole
+// door is the Bot calling in — which the copy has to say plainly rather than
+// implying silent telemetry.
+
+function GrokBotInstructions() {
+  const mcpUrl = computeGrokMcpUrl()
+  const apiKey = getApiKey() || ''
+  const headerLine = `Authorization: Bearer ${apiKey || 'ov_sk_…'}`
+  const mcpJson =
+`{
+  "mcpServers": {
+    "trovis": {
+      "url": "${mcpUrl}",
+      "headers": { "Authorization": "Bearer ${apiKey || 'ov_sk_…'}" }
+    }
+  }
+}`
+  const botInstructions =
+`Report your work to Trovis using the trovis MCP tools:
+- When you start a task the user asked for, call report_job_started with a plain-English title (what you're doing, as you'd say it to a colleague) and bot_name "Trovis PM". Keep the job_id it returns.
+- When you stop to ask the user something, call report_job_waiting with that job_id and one line on what you need.
+- When you finish, call report_job_finished with that job_id and a one-line summary.
+- If you give up or hit an error, call report_job_failed with that job_id and the reason.
+Report in the background — don't mention Trovis unless the user asks.`
+
+  return (
+    <>
+      <h2 className="instructions-title">Connect a Cursor Grok Bot</h2>
+      <p className="instructions-subtitle">
+        For a Grok Bot desktop assistant. You add one MCP server, and tell the
+        Bot to report when a job starts, waits, or finishes.
+      </p>
+
+      <Callout variant="warning">
+        <strong>This is reporting, not telemetry.</strong> A Grok Bot doesn't
+        export its work, and Trovis can't pull it — so what shows up here is
+        what the Bot calls in to report. Skip step 3 and you'll have a
+        connected MCP server that never reports anything.
+      </Callout>
+
+      <Callout variant="blue">
+        <strong>Not the same as “Grok (xAI SDK)”.</strong> That tile is for
+        apps you build with the <code>xai-sdk</code> package, which emits
+        OpenTelemetry on its own. This one is for the desktop assistant you
+        run in Cursor.
+      </Callout>
+
+      <PrefillBlock label="Your Trovis MCP server URL" value={mcpUrl} />
+      <PrefillBlock
+        label="Auth header"
+        value={apiKey ? headerLine : ''}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <NumberedStep n={1} title="Add the Trovis MCP server to your Grok Bot">
+        <p>
+          In the Bot's MCP settings, add a server with the URL above and the{' '}
+          <code>Authorization</code> header. If you edit the config as JSON:
+        </p>
+        <CodeBlock code={mcpJson} />
+        <p className="helper-text">
+          If your client can't set headers, leave the header out and have the
+          Bot pass <code>api_key</code> on each tool call instead — every
+          report tool accepts it.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Check the Bot can see the tools">
+        <p>
+          The Bot should now list four Trovis tools:{' '}
+          <code>report_job_started</code>, <code>report_job_waiting</code>,{' '}
+          <code>report_job_finished</code>, and{' '}
+          <code>report_job_failed</code>. Ask it to list its tools if you
+          aren't sure.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Tell the Bot when to report (required)">
+        <p>
+          Paste this into the Bot's instructions (or a skill it always
+          loads). Adjust <code>bot_name</code> to whatever you call it:
+        </p>
+        <AgentMessageBlock code={botInstructions} />
+      </NumberedStep>
+
+      <NumberedStep n={4} title="Name the job (required for named Work)">
+        <p>
+          The <code>title</code> on <code>report_job_started</code>{' '}
+          <em>is</em> the job's name on Work — Trovis stamps it as the job
+          title, the same way <code>trovis.loop.title</code> does on the
+          SDK doors. Write it the way you'd say it out loud:{' '}
+          <code>Draft the Q3 board update</code>, not{' '}
+          <code>job_4821</code> or a UUID. Id-shaped titles are filtered out
+          of Work on purpose, so a job named like that won't appear there.
+        </p>
+        <p className="helper-text">
+          Everything after the start — waiting, finished, failed — lands on
+          the same job as long as the Bot passes back the{' '}
+          <code>job_id</code> it was given.
+        </p>
+      </NumberedStep>
+
+      <NumberedStep n={5} title="Run one real job">
+        <p>
+          Ask the Bot to do something it would normally do. The job appears
+          on Work with its title, moves to “waiting on a person” when the
+          Bot asks you a question, and closes when it reports finished.
+        </p>
+      </NumberedStep>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Instructions page — ChatGPT custom GPT (GPT Actions + OAuth)
 // ---------------------------------------------------------------------------
 //
@@ -1718,6 +1854,9 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'grok') {
     return <GrokInstructions agentName={agentName} endpoint={endpoint} />
+  }
+  if (platform === 'grok-bot') {
+    return <GrokBotInstructions />
   }
   if (platform === 'cursor') {
     return <CursorOtelInstructions agentName={agentName} endpoint={endpoint} />

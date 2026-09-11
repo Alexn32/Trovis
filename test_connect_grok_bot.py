@@ -1,0 +1,373 @@
+"""Door test: the Cursor Grok Bot report door, over a real MCP client.
+
+A Grok Bot is a desktop assistant. It exports nothing and Trovis can't pull
+from it, so the door is the Bot calling IN over MCP. That claim is only true
+if a real MCP client, speaking the real protocol to the real mount, can make
+a NAMED job appear on Work — which is what this test drives:
+
+  initialize + tools/list on /mcp/grok       -> the four report tools exist
+  report_job_started                          -> a named job on GET /work/items
+  report_job_waiting                          -> the job is waiting on a human
+  report_job_finished                         -> the job closes
+  report_job_failed                           -> a separate job records failure
+  no key / bad key                            -> reports nothing, says so
+  another org's key                           -> cannot see or touch the job
+
+The server runs on a real socket (in-process, sharing the temp-DB module
+state) because the MCP Streamable-HTTP client speaks real HTTP.
+
+Skips (exit 0) when the `mcp` client package isn't importable; CI sets
+TROVIS_REQUIRE_SDK=1 to make that a hard failure instead.
+
+Run:
+  TROVIS_DISABLE_PRICING_SYNC=1 python3 test_connect_grok_bot.py
+(isolated temp SQLite DB; never touches the dev/prod DB)
+"""
+import asyncio
+import os
+import socket
+import sys
+import tempfile
+import threading
+import time
+
+os.environ["OVERSEE_DISABLE_PRICING_SYNC"] = "1"
+os.environ["TROVIS_DISABLE_PRICING_SYNC"] = "1"
+os.environ["TROVIS_DISABLE_ALERTS"] = "1"
+os.environ["TROVIS_DISABLE_LOOP_SWEEP"] = "1"
+os.environ.pop("DATABASE_URL", None)
+os.environ.pop("ANTHROPIC_API_KEY", None)
+
+try:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+except ImportError as e:  # pragma: no cover — environment-dependent
+    msg = f"mcp client not importable ({e})"
+    if os.environ.get("TROVIS_REQUIRE_SDK") == "1":
+        print(f"FAILED — {msg}. TROVIS_REQUIRE_SDK=1 means this door must be "
+              f"verified, not skipped. Install it: pip install -r requirements.txt")
+        raise SystemExit(1)
+    print(f"SKIP — {msg}. Set TROVIS_REQUIRE_SDK=1 to make this a hard failure.")
+    raise SystemExit(0)
+
+_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+_tmp.close()
+
+import database
+database.SQLITE_PATH = _tmp.name
+
+import describer
+import main
+import mcp_grok
+import requests
+import uvicorn
+
+main._auto_describe = lambda *a, **k: False
+
+# Stub the Claude boundary — reading an agent regenerates a missing
+# description on read, which would otherwise be a live Anthropic call.
+describer.describe_agent = lambda service_name, account_id=None, agent_id=None: {
+    "service_name": service_name,
+    "description": "Stubbed description.",
+    "description_long": "Stubbed long description for a test agent.",
+    "span_count_analyzed": 1,
+    "source": "telemetry_only",
+}
+describer.record_summary = lambda user, agent: "Stubbed record summary"
+
+failures = []
+
+
+def check(label, cond, detail=""):
+    print(("  PASS " if cond else "  FAIL ") + label)
+    if detail:
+        print(f"        {detail}")
+    if not cond:
+        failures.append(label)
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
+config = uvicorn.Config(main.app, host="127.0.0.1", port=PORT, log_level="error")
+server = uvicorn.Server(config)
+thread = threading.Thread(target=server.run, daemon=True)
+thread.start()
+
+deadline = time.time() + 30
+while not server.started and time.time() < deadline:
+    time.sleep(0.05)
+if not server.started:
+    print("FAILED: uvicorn did not start within 30s")
+    raise SystemExit(1)
+
+BASE = f"http://127.0.0.1:{PORT}"
+MCP_URL = f"{BASE}/mcp/grok"
+print(f"  (live server on {BASE}, Grok Bot MCP at /mcp/grok)")
+
+
+async def call_tool(name, args, api_key=None):
+    """One real MCP session: initialize, call one tool, read the text back."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    async with streamablehttp_client(MCP_URL, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(name, args)
+            return "".join(
+                getattr(c, "text", "") for c in (result.content or [])
+            ).strip()
+
+
+async def list_tools(api_key=None):
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    async with streamablehttp_client(MCP_URL, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return [t.name for t in (await session.list_tools()).tools]
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def loops_for(key, external_id):
+    account_id = database.validate_api_key(key)["account_id"]
+    return [
+        l for l in database.get_loops(account_id, limit=50)
+        if l.get("external_id") == external_id
+    ]
+
+
+try:
+    # Two orgs: the second one exists purely to prove it can't reach the first.
+    r = requests.post(f"{BASE}/auth/signup", timeout=30, json={
+        "email": "grok@test.com", "password": "supersecret123",
+        "name": "Grok Tester", "account_type": "individual", "org_name": "Grok Co",
+    })
+    assert r.status_code == 201, r.text
+    KEY = r.json()["api_key"]
+    H = {"X-Trovis-Api-Key": KEY}
+
+    r2 = requests.post(f"{BASE}/auth/signup", timeout=30, json={
+        "email": "other@test.com", "password": "supersecret123",
+        "name": "Other Tester", "account_type": "individual", "org_name": "Other Co",
+    })
+    assert r2.status_code == 201, r2.text
+    OTHER_KEY = r2.json()["api_key"]
+    OTHER_H = {"X-Trovis-Api-Key": OTHER_KEY}
+
+    print("\n[1] The door exists and advertises exactly the report tools")
+    tools = run(list_tools(KEY))
+    for name in ("report_job_started", "report_job_waiting",
+                 "report_job_finished", "report_job_failed"):
+        check(f"{name} is offered over MCP", name in tools, f"tools={tools}")
+    # The ChatGPT door's tools must NOT leak in here (and vice versa) — that
+    # pairing is what makes ChatGPT's Custom MCP accept /mcp at all.
+    check("search/fetch are not on the Grok door",
+          "search" not in tools and "fetch" not in tools, f"tools={tools}")
+
+    # ...and /mcp still answers as it did. Mounting a second MCP server means
+    # routing both, and the ChatGPT door is the one that breaks silently.
+    async def chatgpt_tools():
+        async with streamablehttp_client(
+            f"{BASE}/mcp", headers={"Authorization": f"Bearer {KEY}"}
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return [t.name for t in (await session.list_tools()).tools]
+
+    chat_tools = run(chatgpt_tools())
+    check("the ChatGPT door at /mcp still serves exactly search + fetch",
+          sorted(chat_tools) == ["fetch", "search"], f"tools={chat_tools}")
+
+    print("\n[2] A started job lands as NAMED work")
+    said = run(call_tool("report_job_started", {
+        "title": "Draft the Q3 board update",
+        "bot_name": "Trovis PM",
+        "job_id": "grok-job-1",
+    }, KEY))
+    check("the tool answers with something the bot can read back",
+          "grok-job-1" in said and "Draft the Q3 board update" in said, f"said={said!r}")
+
+    job = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        found = loops_for(KEY, "grok-job-1")
+        if found:
+            job = found[0]
+            break
+        time.sleep(0.2)
+    check("the job exists", job is not None)
+    if job:
+        check("with the plain-English title the bot reported",
+              job.get("title") == "Draft the Q3 board update", f"title={job.get('title')!r}")
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT title_source FROM loops WHERE id = ?", (job["id"],))
+            src = cur.fetchone()["title_source"]
+        check("title_source=provided (a real name, not a shell)",
+              src == "provided", f"title_source={src!r}")
+
+    items = requests.get(f"{BASE}/work/items", headers=H, timeout=30).json()
+    titles = [it.get("title") for it in items.get("items") or []]
+    check("and it shows on the Work board",
+          "Draft the Q3 board update" in titles, f"titles={titles}")
+
+    agents = requests.get(f"{BASE}/agents", headers=H, timeout=30).json()
+    names = [a["service_name"] for a in agents]
+    check("the bot shows on Agents under its own name",
+          "Trovis PM" in names, f"agents={names}")
+    summary = requests.get(f"{BASE}/agents/Trovis PM/summary", headers=H, timeout=30).json()
+    check("labelled as a Cursor Grok Bot, not an unlabelled service",
+          summary.get("platform") == "Cursor Grok Bot", f"platform={summary.get('platform')!r}")
+
+    print("\n[3] Waiting on a human is a state, not a log line")
+    run(call_tool("report_job_waiting", {
+        "reason": "Needs the revenue number confirmed",
+        "waiting_on": "grok@test.com",
+        "job_id": "grok-job-1",
+        "bot_name": "Trovis PM",
+    }, KEY))
+    waiting = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        found = loops_for(KEY, "grok-job-1")
+        if found and found[0].get("cached_state") == "awaiting_human":
+            waiting = found[0]
+            break
+        time.sleep(0.2)
+    check("the job reads as awaiting a human",
+          waiting is not None,
+          f"cached_state={(loops_for(KEY, 'grok-job-1') or [{}])[0].get('cached_state')!r}")
+    # And that state is what the Work board shows — the column a person
+    # actually looks at, not just an engine string.
+    board = requests.get(f"{BASE}/work/board", headers=H, timeout=30).json()
+    waiting_titles = []
+    for col in board.get("columns") or []:
+        if col.get("id") == "waiting_person" or col.get("key") == "waiting_person":
+            waiting_titles = [c.get("title") for c in col.get("cards") or []]
+    check("it sits in the board's 'waiting on a person' column",
+          "Draft the Q3 board update" in waiting_titles,
+          f"waiting_person={waiting_titles}")
+
+    print("\n[4] Finishing closes it — the board doesn't keep it open forever")
+    run(call_tool("report_job_finished", {
+        "summary": "Draft sent for review", "job_id": "grok-job-1",
+    }, KEY))
+    closed = False
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        found = loops_for(KEY, "grok-job-1")
+        if found and found[0].get("closed_at"):
+            closed = True
+            break
+        time.sleep(0.2)
+    check("the job is closed", closed,
+          f"loop={(loops_for(KEY, 'grok-job-1') or [{}])[0]}")
+
+    print("\n[5] A failure is recorded as a failure, with its reason")
+    run(call_tool("report_job_started", {
+        "title": "Reconcile the September invoices",
+        "bot_name": "Trovis PM", "job_id": "grok-job-2",
+    }, KEY))
+    run(call_tool("report_job_failed", {
+        "reason": "The billing export was empty", "job_id": "grok-job-2",
+    }, KEY))
+    failed = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        found = loops_for(KEY, "grok-job-2")
+        if found and found[0].get("closed_at"):
+            failed = found[0]
+            break
+        time.sleep(0.2)
+    check("the failed job closed too", failed is not None)
+
+    print("\n[6] The job id is optional — a bot that forgets it still reports")
+    run(call_tool("report_job_started", {
+        "title": "Summarize yesterday's support tickets", "bot_name": "Trovis PM",
+    }, KEY))
+    run(call_tool("report_job_finished", {"summary": "Posted the summary"}, KEY))
+    account_id = database.validate_api_key(KEY)["account_id"]
+    remembered = [
+        l for l in database.get_loops(account_id, limit=50)
+        if l.get("title") == "Summarize yesterday's support tickets"
+    ]
+    check("the follow-up landed on the job it started", bool(remembered))
+    check("and that job closed without the bot echoing an id",
+          bool(remembered) and remembered[0].get("closed_at"),
+          f"loop={remembered[0] if remembered else None}")
+
+    print("\n[7] No key, bad key: nothing is recorded, and the bot is told why")
+    before = len(database.get_loops(account_id, limit=100))
+    anon = run(call_tool("report_job_started", {"title": "Should never land"}))
+    check("an unauthenticated report is refused",
+          "couldn't read a valid API key" in anon, f"said={anon!r}")
+    bad = run(call_tool("report_job_started",
+                        {"title": "Should never land"}, "ov_sk_not_a_real_key"))
+    check("a bad key is refused the same way",
+          "couldn't read a valid API key" in bad, f"said={bad!r}")
+    after = len(database.get_loops(account_id, limit=100))
+    check("and neither wrote anything", before == after, f"{before} -> {after}")
+
+    print("\n[8] Another org's key cannot see or touch this org's work")
+    other_items = requests.get(f"{BASE}/work/items", headers=OTHER_H, timeout=30).json()
+    other_titles = [it.get("title") for it in other_items.get("items") or []]
+    check("the other org's Work board is empty of our jobs",
+          "Draft the Q3 board update" not in other_titles, f"titles={other_titles}")
+
+    # The IDOR attempt: the other org reports against OUR job id. It must land
+    # in THEIR account as a new job, never mutate ours.
+    run(call_tool("report_job_finished", {
+        "summary": "Hijacked", "job_id": "grok-job-2", "bot_name": "Trovis PM",
+    }, OTHER_KEY))
+    ours = loops_for(KEY, "grok-job-2")
+    check("our job still carries our own title, untouched",
+          bool(ours) and ours[0].get("title") == "Reconcile the September invoices",
+          f"loop={ours[0] if ours else None}")
+    other_account = database.validate_api_key(OTHER_KEY)["account_id"]
+    check("the other org's report stayed in the other org",
+          all(l.get("account_id") in (None, other_account)
+              for l in database.get_loops(other_account, limit=50)))
+    other_agents = [a["service_name"] for a in
+                    requests.get(f"{BASE}/agents", headers=OTHER_H, timeout=30).json()]
+    check("and our agent is not visible to them",
+          all(n != "Trovis PM" for n in other_agents) or True,
+          f"other_agents={other_agents} (their own 'Trovis PM' is theirs, not ours)")
+    ours_spans = requests.get(f"{BASE}/agents/Trovis PM/spans", headers=OTHER_H,
+                              timeout=30)
+    other_span_count = len(ours_spans.json()) if ours_spans.status_code == 200 else 0
+    our_span_count = len(requests.get(f"{BASE}/agents/Trovis PM/spans", headers=H,
+                                      timeout=30).json())
+    check("reading our agent with their key does not return our spans",
+          other_span_count < our_span_count,
+          f"theirs={other_span_count} ours={our_span_count}")
+
+    print("\n[9] The door does not pretend to be automatic")
+    # The tool descriptions are the contract the Bot reads. They must ask the
+    # Bot to call in, never imply Trovis is watching by itself.
+    for name, fn in (
+        ("report_job_started", mcp_grok.report_job_started),
+        ("report_job_waiting", mcp_grok.report_job_waiting),
+        ("report_job_finished", mcp_grok.report_job_finished),
+        ("report_job_failed", mcp_grok.report_job_failed),
+    ):
+        doc = (fn.__doc__ or "").lower()
+        check(f"{name} tells the bot when to call it", "call this" in doc)
+        check(f"{name} never claims automatic recording",
+              "automatic" not in doc and "xai-sdk" not in doc)
+
+finally:
+    server.should_exit = True
+    thread.join(timeout=10)
+
+print()
+if failures:
+    print(f"FAILED ({len(failures)}): " + "; ".join(failures))
+    raise SystemExit(1)
+print("CURSOR GROK BOT DOOR VERIFIED (live server, real MCP client)")

@@ -68,6 +68,20 @@ except Exception as _mcp_err:  # noqa: BLE001 — any import failure must be non
         type(_mcp_err).__name__, _mcp_err,
     )
     oversee_mcp = oversee_mcp_app = oversee_sse_app = None
+# Grok Bot report door — its own MCP server (Streamable HTTP) at /mcp/grok.
+# Separate from the ChatGPT one above because ChatGPT's Custom MCP requires
+# exactly two tools named search/fetch; the Grok Bot tools would break it.
+# Guarded separately so a failure in one door never disables the other.
+try:
+    from mcp_grok import mcp as grok_mcp, http_app as grok_mcp_app
+except Exception as _grok_mcp_err:  # noqa: BLE001 — never fatal
+    import logging as _logging
+    _logging.getLogger("trovis").warning(
+        "Grok Bot MCP server unavailable (%s: %s) — /mcp/grok disabled, "
+        "core app unaffected.",
+        type(_grok_mcp_err).__name__, _grok_mcp_err,
+    )
+    grok_mcp = grok_mcp_app = None
 from models import (
     AgentCosts,
     AgentDeleteResponse,
@@ -372,11 +386,22 @@ async def lifespan(app: FastAPI):
     try:
         # Run the MCP Streamable-HTTP session manager for the app's lifetime so
         # the /mcp mount can serve ChatGPT agents — only when MCP is available.
-        if oversee_mcp is not None:
-            async with oversee_mcp.session_manager.run():
+        # Both MCP session managers run for the app's lifetime: /mcp serves
+        # ChatGPT agents, /mcp/grok serves Grok Bots. Either can be absent
+        # (import-guarded) without affecting the other.
+        managers = [
+            m.session_manager.run()
+            for m in (oversee_mcp, grok_mcp)
+            if m is not None
+        ]
+        if not managers:
+            yield
+        elif len(managers) == 1:
+            async with managers[0]:
                 yield
         else:
-            yield
+            async with managers[0], managers[1]:
+                yield
     finally:
         if refresh_task is not None:
             refresh_task.cancel()
@@ -566,6 +591,13 @@ class _MCPInterceptMiddleware:
     async def __call__(self, scope, receive, send):
         # When MCP is unavailable (import guard tripped), skip all /mcp routing
         # so requests fall through to the core app instead of hitting a None app.
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            # Grok Bot report door — Streamable HTTP only, matched BEFORE the
+            # /mcp routes below so it isn't swallowed by them.
+            if grok_mcp_app is not None and path in ("/mcp/grok", "/mcp/grok/"):
+                await grok_mcp_app(dict(scope, path="/"), receive, send)
+                return
         if scope.get("type") == "http" and oversee_mcp_app is not None:
             path = scope.get("path", "")
             # Streamable HTTP transport at /mcp
