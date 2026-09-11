@@ -606,12 +606,32 @@ function AppInner() {
           // Every count and every finding opens the real page behind it —
           // Work filtered to the bucket that was clicked, that job, or that
           // agent. State-driven destinations, not invented URL routes.
-          onGoWork={(filter = null) => {
-            setWorkFilter({ value: filter, nonce: Date.now() })
+          onGoWork={(filter = null, scope = null) => {
+            // Home's work sections are scoped; the destination arrives scoped
+            // too. Work reconciles the selection against the seat on arrival,
+            // so this can only ask — never widen.
+            setWorkFilter({
+              value: filter,
+              whose: scope?.whose ?? null,
+              personId: scope?.personId ?? null,
+              nonce: Date.now(),
+            })
+            // A job or run left open from a previous visit would render
+            // INSTEAD of the list this navigation asked for. Clear it.
+            setWorkRoute({ job: null, run: null })
             setTab('work')
             setOverlay(null)
           }}
           onOpenJob={(id) => id && setOverlay({ kind: 'workflow', id })}
+          // A finding's run target opens that exact item through Work's own
+          // run route; JobDetail fetches it by id, so an item outside the
+          // first loaded page opens just the same.
+          onOpenRun={(id) => {
+            if (id == null) return
+            setWorkRoute({ job: null, run: Number(id) })
+            setTab('work')
+            setOverlay(null)
+          }}
           onOpenCost={() => setOverlay({ kind: 'cost' })}
           onConnectAgent={openAddAgent}
         />

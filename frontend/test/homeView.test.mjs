@@ -369,11 +369,16 @@ test('snapshot and findings are built from one query helper', () => {
   }
 })
 
-test('one query key drives both reads, and it carries the seat', () => {
-  assert.match(hv, /const queryKey = \[/)
-  assert.match(hv, /seat\?\.surfaces \|\| \[\]\)\.join\(','\)/, 'a permission change is a new key')
-  assert.match(hv, /useHomeRead\(\s*\(signal\) => api\.getHomeSnapshot\(\{ \.\.\.query, signal \}\),\s*\[queryKey\]/)
-  assert.match(hv, /useHomeRead\(\s*\(signal\) => api\.getHomeFindings\(\{ \.\.\.query, signal \}\),\s*\[queryKey\]/)
+test('one context key drives both reads, and it carries the authority', () => {
+  assert.match(hv, /const contextKey = useMemo\(/)
+  assert.match(hv, /homeContextKey\(\{ me, seat, days, tz, whose: whoseParam, personId \}\)/)
+  assert.match(hv, /api\.getHomeSnapshot\(\{ \.\.\.query, signal \}\)/)
+  assert.match(hv, /api\.getHomeFindings\(\{ \.\.\.query, signal \}\)/)
+  // The render-time gate: a body stamped with another context is not this
+  // context's data, whatever the effects have done. (Driven for real in
+  // test/homeMount.test.mjs.)
+  assert.match(hv, /const mine = state\.context === context/)
+  assert.match(hv, /data: mine \? state\.data : null/)
 })
 
 // --- independence and staleness -------------------------------------------------------
@@ -440,13 +445,15 @@ test('snapshot and findings fail separately', () => {
 })
 
 test('a scope or permission change closes the finding detail', () => {
-  assert.match(hv, /setOpenFinding\(null\)[\s\S]{0,120}\}, \[queryKey\]\)/)
+  // Cleared in an effect AND gated during render, so nothing survives a frame.
+  assert.match(hv, /setOpenFinding\(null\)/)
+  assert.match(hv, /const panelFinding = openContext\.current === contextKey \? openFinding : null/)
 })
 
-test('polling is torn down with the pane and the query', () => {
+test('polling is torn down with the pane and the context', () => {
   assert.match(hv, /if \(!active \|\| !analysis\.poll\) return undefined/)
   assert.match(hv, /return \(\) => clearTimeout\(t\)/)
-  assert.match(hv, /pollAttempt\.current = 0\s*\}, \[queryKey\]\)/)
+  assert.match(hv, /pollAttempt\.current = 0\s*\}, \[contextKey\]\)/)
 })
 
 // --- what Home is allowed to fetch -------------------------------------------------------
@@ -487,9 +494,11 @@ test('a failed mutation keeps the finding on screen', () => {
   // optimistic removal.
   assert.match(panel, /setMutationError\(err\?\.message/)
   assert.match(panel, /className="hv-panel-mut-error" role="alert"/)
-  // And the list's acknowledge never drops the row on failure: the catch
-  // clears the busy flag and nothing else.
-  assert.match(hv, /catch \{\s*\n\s*setMutating\(null\)\s*\n\s*\}/)
+  // And a card-level failure is SHOWN and retryable rather than swallowed.
+  assert.match(hv, /setAckError\(/)
+  assert.match(sections, /Couldn&rsquo;t mark this seen/)
+  assert.match(sections, /role="alert" id=\{`hv-ack-err-\$\{finding\.id\}`\}/)
+  assert.match(sections, /ackError \? 'Try again' : 'Mark seen'/)
 })
 
 // --- honesty of language -----------------------------------------------------------------

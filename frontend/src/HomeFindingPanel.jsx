@@ -26,7 +26,7 @@ const CLAIM_WORD = {
 }
 
 export default function HomeFindingPanel({
-  findingId, summary, query, onClose, onGoWork, onOpenAgent, onOpenJob, onAsk,
+  findingId, summary, query, onClose, onOpenRun, onOpenAgent, onOpenJob, onAsk,
   onStateChanged,
 }) {
   const [detail, setDetail] = useState(null)
@@ -96,11 +96,33 @@ export default function HomeFindingPanel({
   const stale = detail?.stale_evidence || []
   const staleKeys = new Set(stale.map((s) => `${s.kind}:${s.ref}`))
 
+  // "Open this work item" must open THAT item. It previously threw the run id
+  // away and called onGoWork(null) — an unfiltered Work list, presented as an
+  // exact destination. Work's run route takes the id and JobDetail fetches the
+  // rest, so an item outside the first loaded page opens just as well as one
+  // on it; a record that has gone is JobDetail's own not-found, not a silent
+  // landing somewhere else.
+  //
+  // Navigating closes the panel: the destination IS the answer, and leaving a
+  // modal over it would trap the reader behind the thing they just opened.
   function openTarget(t) {
-    if (t.kind === 'agent' && onOpenAgent) onOpenAgent(t.id)
-    else if (t.kind === 'job' && onOpenJob) onOpenJob(t.id)
-    else if (onGoWork) onGoWork(null)
+    if (t.kind === 'run' && t.id != null && onOpenRun) {
+      onOpenRun(t.id)
+      onClose()
+    } else if (t.kind === 'agent' && onOpenAgent) {
+      onOpenAgent(t.id)
+      onClose()
+    } else if (t.kind === 'job' && t.id != null && onOpenJob) {
+      onOpenJob(t.id)
+      onClose()
+    }
   }
+  // A target with no wired destination is not offered at all, rather than
+  // offered and silently ignored.
+  const canOpen = (t) =>
+    (t.kind === 'run' && t.id != null && Boolean(onOpenRun)) ||
+    (t.kind === 'agent' && Boolean(onOpenAgent)) ||
+    (t.kind === 'job' && t.id != null && Boolean(onOpenJob))
 
   return (
     <>
@@ -211,11 +233,11 @@ export default function HomeFindingPanel({
 
             <CoverageNote finding={finding} />
 
-            {targets.length ? (
+            {targets.filter(canOpen).length ? (
               <section className="hv-panel-sec">
                 <h3 className="hv-panel-h">Go and look</h3>
                 <ul className="hv-targets">
-                  {targets.map((t, i) => (
+                  {targets.filter(canOpen).map((t, i) => (
                     <li key={i}>
                       <button
                         type="button"

@@ -26,7 +26,10 @@ import {
 } from './httpTimeout.js'
 import { homeQuery } from './homeQuery.js'
 
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+// `import.meta.env` is Vite's, and is undefined outside a Vite build — the
+// optional chain is what lets this module be imported by a plain Node test
+// runner so the components that use it can be mounted at all.
+const BASE = import.meta.env?.VITE_API_URL || 'http://localhost:8080'
 const LS_KEY = 'trovis_api_key'
 const LS_TOKEN = 'trovis_session_token'
 
@@ -54,8 +57,8 @@ function _writeKeyToStorage(key) {
 
 let API_KEY =
   _readKeyFromStorage() ||
-  import.meta.env.VITE_TROVIS_API_KEY ||
-  import.meta.env.VITE_OVERSEE_API_KEY ||
+  import.meta.env?.VITE_TROVIS_API_KEY ||
+  import.meta.env?.VITE_OVERSEE_API_KEY ||
   null
 
 export function setApiKey(key) {

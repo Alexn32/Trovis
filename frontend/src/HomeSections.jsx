@@ -231,18 +231,22 @@ const CATEGORY_WORD = {
  * shown is what the finding actually carries: what was seen, why it matters
  * when the evidence establishes that, and the qualification when one applies.
  */
-export function FindingCard({ finding, onOpen, onAcknowledge, busy }) {
+export function FindingCard({ finding, onOpen, onAcknowledge, busy, ackError, dismissed }) {
   const qualifier = findingQualifier(finding)
   const step = finding.next_step
   const entities = (finding.entities || []).slice(0, 3)
   return (
     <li className="hv-finding">
-      <article className={`hv-finding-card hv-cat-${finding.category}`}>
+      <article
+        className={`hv-finding-card hv-cat-${finding.category}${dismissed ? ' is-dismissed' : ''}`}
+      >
         <div className="hv-finding-top">
           <span className={`hv-finding-cat hv-cat-${finding.category}`}>
             {CATEGORY_WORD[finding.category] || finding.category}
           </span>
-          {finding.state === 'acknowledged' ? (
+          {finding.state === 'dismissed' ? (
+            <span className="hv-finding-state">Dismissed</span>
+          ) : finding.state === 'acknowledged' ? (
             <span className="hv-finding-state">Acknowledged</span>
           ) : null}
         </div>
@@ -276,11 +280,20 @@ export function FindingCard({ finding, onOpen, onAcknowledge, busy }) {
               className="btn btn-ghost btn-sm"
               disabled={busy}
               onClick={() => onAcknowledge(finding)}
+              aria-describedby={ackError ? `hv-ack-err-${finding.id}` : undefined}
             >
-              Mark seen
+              {busy ? 'Saving…' : ackError ? 'Try again' : 'Mark seen'}
             </button>
           ) : null}
         </div>
+        {/* A failure has to be VISIBLE and retryable. Swallowing it made
+            "Mark seen" a button that silently did nothing, and the finding
+            keeps its prior state either way. */}
+        {ackError ? (
+          <p className="hv-finding-ack-error" role="alert" id={`hv-ack-err-${finding.id}`}>
+            Couldn&rsquo;t mark this seen. {ackError}
+          </p>
+        ) : null}
       </article>
     </li>
   )

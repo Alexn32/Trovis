@@ -57,48 +57,94 @@ function localZone() {
 }
 
 /**
- * One endpoint's state, with the staleness rule built in.
+ * One endpoint's state, STAMPED with the context that authorized it.
  *
- * `nonce` is the request generation. A response only lands if its nonce still
- * matches the live one, so a late answer for a scope the reader has already
- * left is discarded rather than rendered under the new heading.
+ * The race guard stops a late response landing. It does not remove what is
+ * already on screen — and that was the hole: `setState` kept `data` while the
+ * next request ran, so after a scope narrowed or a permission was removed, the
+ * previous answer stayed rendered until the replacement arrived. For Cost that
+ * means financial findings visible to someone who just lost the Cost surface.
+ *
+ * So every stored response carries the `context` that asked for it, and the
+ * comparison happens DURING RENDER, not in an effect. The moment the context
+ * changes, `data` reads as null — before any effect runs, before any request
+ * is issued, and regardless of what is in flight. Nothing authorized by the
+ * old context can be rendered under the new one.
+ *
+ * `reload` is the one same-context refresh: it re-runs the same question and
+ * is represented as loading beside the data it is refreshing.
  */
-function useHomeRead(load, deps, { active = true } = {}) {
-  const [state, setState] = useState({ data: null, error: null, loading: true })
+function useHomeRead(load, context, { active = true } = {}) {
+  const [state, setState] = useState({
+    data: null, error: null, loading: true, context: null,
+  })
   const guard = useRef(createRaceGuard()).current
   const [attempt, setAttempt] = useState(0)
 
-  const run = useCallback(() => {
+  useEffect(() => {
+    if (!active) return undefined
     const mine = guard.next()
     const controller = new AbortController()
-    setState((s) => ({ ...s, loading: true, error: null }))
+    setState((s) =>
+      s.context === context
+        // Same question, asked again: keep what is on screen and say it is
+        // refreshing. This is the only case where old data may survive.
+        ? { ...s, loading: true, error: null }
+        : { data: null, error: null, loading: true, context: null },
+    )
     load(controller.signal)
       .then((data) => {
         if (!guard.isCurrent(mine)) return
-        setState({ data, error: null, loading: false })
+        setState({ data, error: null, loading: false, context })
       })
       .catch((err) => {
         if (!guard.isCurrent(mine)) return
         if (err?.name === 'AbortError') return
-        setState({ data: null, error: err, loading: false })
+        setState({ data: null, error: err, loading: false, context })
       })
-    return () => controller.abort()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
-
-  useEffect(() => {
-    if (!active) return undefined
-    // Invalidating on teardown is what makes a scope change safe: aborting
-    // alone is not enough, because a response already in flight can still
-    // resolve. After this, nothing issued for the OLD deps is current.
-    const abort = run()
     return () => {
+      // Aborting alone is not enough: a response already in flight can still
+      // resolve. After this, nothing issued for the old context is current.
       guard.invalidate()
-      if (abort) abort()
+      controller.abort()
     }
-  }, [run, active, attempt])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [context, active, attempt])
 
-  return { ...state, reload: () => setAttempt((a) => a + 1) }
+  // THE RENDER-TIME GATE. A body stamped with another context is not this
+  // context's data, whatever the effects have or have not done yet.
+  const mine = state.context === context
+  return {
+    data: mine ? state.data : null,
+    error: mine ? state.error : null,
+    loading: !mine || state.loading,
+    reload: () => setAttempt((a) => a + 1),
+  }
+}
+
+/**
+ * Everything that decides what a reader may be shown, as one string.
+ *
+ * Not just the query: the ACCOUNT and the SESSION identity, the seat's
+ * surfaces and breadth, and — the one a breadth check misses — the resolved
+ * membership list. A reorg that moves people in or out of someone's subtree
+ * changes what they may see without changing either atom, so the ids
+ * themselves are in the key.
+ *
+ * `visible_user_ids: null` means company-wide (no filter), which is a
+ * different key from `[]` (nobody), exactly as it is server-side.
+ */
+export function homeContextKey({ me, seat, days, tz, whose, personId }) {
+  const visible = seat?.visible_user_ids
+  return JSON.stringify({
+    account: me?.org?.id ?? null,
+    viewer: me?.user?.id ?? null,
+    surfaces: [...(seat?.surfaces || [])].sort(),
+    breadth: seat?.breadth ?? null,
+    visible: visible == null ? null : [...visible].sort((a, b) => a - b),
+    subtree: [...(seat?.subtree_user_ids || [])].sort((a, b) => a - b),
+    days, tz, whose, personId: personId ?? null,
+  })
 }
 
 export default function HomeView({
@@ -110,6 +156,7 @@ export default function HomeView({
   onOpenCost,
   onOpenAgent,
   onOpenJob,
+  onOpenRun,
   onConnectAgent,
 }) {
   const [whose, setWhose] = useState('everyone')
@@ -117,6 +164,11 @@ export default function HomeView({
   const [openFinding, setOpenFinding] = useState(null)
   const [expanded, setExpanded] = useState({})
   const [mutating, setMutating] = useState(null)
+  // Acknowledgement failures, keyed by finding id AND by the context they
+  // happened in, so an error from a scope the reader has left never decorates
+  // a card in the new one.
+  const [ackError, setAckError] = useState({ context: null, byId: {} })
+  const [showDismissed, setShowDismissed] = useState(false)
   const tz = useMemo(() => localZone(), [])
   const locale = undefined
 
@@ -130,36 +182,49 @@ export default function HomeView({
   }, [effectiveWhose, whose])
 
   const { whose: whoseParam, personId } = whoseParams(effectiveWhose)
-  // The identity of the question. Both reads take this, so the page cannot
-  // show a snapshot for one slice beside findings for another. The seat's own
-  // surface list is in here too: when permissions change, every cached body
-  // below is discarded rather than re-shown.
-  const queryKey = [
-    days, tz, whoseParam, personId,
-    (seat?.surfaces || []).join(','), seat?.breadth || '',
-    me?.user?.id ?? me?.id ?? '',
-  ].join('|')
-  const query = { days, tz, whose: whoseParam, personId }
+  // The identity of the question AND of the authority behind it. Both reads
+  // take this, so the page can never show a snapshot for one slice beside
+  // findings for another — and the moment account, identity, surfaces,
+  // breadth or resolved membership move, every body below reads as absent.
+  const contextKey = useMemo(
+    () => homeContextKey({ me, seat, days, tz, whose: whoseParam, personId }),
+    [me, seat, days, tz, whoseParam, personId],
+  )
+  const query = useMemo(
+    () => ({ days, tz, whose: whoseParam, personId }),
+    [days, tz, whoseParam, personId],
+  )
 
   const snapshot = useHomeRead(
-    (signal) => api.getHomeSnapshot({ ...query, signal }),
-    [queryKey],
+    useCallback((signal) => api.getHomeSnapshot({ ...query, signal }), [query]),
+    contextKey,
     { active },
   )
   const findings = useHomeRead(
-    (signal) => api.getHomeFindings({ ...query, signal }),
-    [queryKey],
+    useCallback((signal) => api.getHomeFindings({ ...query, signal }), [query]),
+    contextKey,
     { active },
   )
 
-  // Close a detail panel whenever the question changes. A finding opened under
+  // Close a detail panel whenever the context changes. A finding opened under
   // the previous scope is not necessarily readable under this one — the server
   // would 404 it — and leaving the old body on screen would present it as
-  // though it still applied.
+  // though it still applied. The state is cleared in an effect AND the panel
+  // is gated on the context during render, so nothing survives even one frame.
+  // A LIVE read of the context for async work already in flight. `contextKey`
+  // captured in a closure is the value at call time; this is the value now.
+  const contextRef = useRef(contextKey)
+  contextRef.current = contextKey
+  const openContext = useRef(contextKey)
+  if (openContext.current !== contextKey && openFinding) openContext.current = null
   useEffect(() => {
+    openContext.current = contextKey
     setOpenFinding(null)
     setExpanded({})
-  }, [queryKey])
+    setShowDismissed(false)
+    setAckError({ context: contextKey, byId: {} })
+  }, [contextKey])
+  const panelFinding = openContext.current === contextKey ? openFinding : null
 
   const snap = snapshot.data
   const finds = findings.data
@@ -176,7 +241,7 @@ export default function HomeView({
   const pollAttempt = useRef(0)
   useEffect(() => {
     pollAttempt.current = 0
-  }, [queryKey])
+  }, [contextKey])
   useEffect(() => {
     if (!active || !analysis.poll) return undefined
     const delay = pollDelay(analysis.state, pollAttempt.current)
@@ -187,28 +252,69 @@ export default function HomeView({
     }, delay)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, analysis.poll, analysis.state, finds, queryKey])
+  }, [active, analysis.poll, analysis.state, finds, contextKey])
 
   const financialSurface = hasSurface(seat, 'Cost')
   const grouped = useMemo(() => groupFindings(finds?.findings), [finds])
 
+  // Acknowledging from a card. Three things this has to get right:
+  //   * a FAILURE is visible and retryable, not swallowed — the previous
+  //     handler caught the error and told the reader nothing, so "Mark seen"
+  //     silently did nothing;
+  //   * the finding and its prior state survive a failure untouched;
+  //   * a completion that lands after the context moved changes nothing,
+  //     because it belongs to a scope the reader has left.
   const acknowledge = useCallback(
     async (finding) => {
+      const inContext = contextKey
       setMutating(finding.id)
+      setAckError((e) => ({
+        context: inContext,
+        byId: { ...(e.context === inContext ? e.byId : {}), [finding.id]: null },
+      }))
       try {
         await api.setFindingState(finding.id, 'acknowledged', query)
+        if (contextRef.current !== inContext) return
         findings.reload()
-      } catch {
-        // The finding stays on screen. A failed mutation must not remove what
-        // it failed to change.
-        setMutating(null)
+      } catch (err) {
+        if (contextRef.current !== inContext) return
+        setAckError((e) => ({
+          context: inContext,
+          byId: {
+            ...(e.context === inContext ? e.byId : {}),
+            [finding.id]: err?.message || 'That did not save.',
+          },
+        }))
       } finally {
-        setMutating(null)
+        if (contextRef.current === inContext) setMutating(null)
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [queryKey],
+    [contextKey, query],
   )
+  const ackErrors = ackError.context === contextKey ? ackError.byId : {}
+
+  // ---- navigation ---------------------------------------------------------
+  // Home's work sections are scoped; their destinations must arrive scoped
+  // too, or the reader lands on a wider list than the one they tapped away
+  // from. `whose`/`person_id` are the existing Work selectors; Work reconciles
+  // them against the seat on arrival, so this can only ever ask.
+  const goWorkScoped = useCallback(
+    (filter = null) => {
+      onGoWork && onGoWork(filter, { whose: whoseParam, personId })
+    },
+    [onGoWork, whoseParam, personId],
+  )
+  // The personal link is DELIBERATELY different. `needs_you` answers to the
+  // signed-in person and is never narrowed by the work scope — so sending the
+  // work scope with it would hand Work a filter that can exclude the very
+  // items being counted. It goes as the widest selection the seat allows,
+  // with Work's canonical personal filter: 'mine', which Work resolves to
+  // `waiting_on_you`. ('waiting_on_you' is not a value Work knows; it fell
+  // through to an unfiltered list.)
+  const goMyWork = useCallback(() => {
+    onGoWork && onGoWork('mine', { whose: 'everyone', personId: null })
+  }, [onGoWork])
 
   return (
     <div className="hv">
@@ -257,7 +363,7 @@ export default function HomeView({
 
       <WorkDone
         snapshot={snapshot}
-        onGoWork={onGoWork}
+        onGoWork={goWorkScoped}
         onOpenJob={onOpenJob}
         onConnectAgent={onConnectAgent}
         tz={tz}
@@ -269,10 +375,11 @@ export default function HomeView({
         findings={findings}
         analysis={analysis}
         items={grouped.attention}
-        onGoWork={onGoWork}
+        onGoMyWork={goMyWork}
         onOpen={setOpenFinding}
         onAcknowledge={acknowledge}
         mutating={mutating}
+        ackErrors={ackErrors}
         expanded={Boolean(expanded.attention)}
         onExpand={() => setExpanded((e) => ({ ...e, attention: true }))}
       />
@@ -290,6 +397,7 @@ export default function HomeView({
         onOpen={setOpenFinding}
         onAcknowledge={acknowledge}
         mutating={mutating}
+        ackErrors={ackErrors}
         expanded={Boolean(expanded.opportunity)}
         onExpand={() => setExpanded((e) => ({ ...e, opportunity: true }))}
       />
@@ -303,17 +411,27 @@ export default function HomeView({
         onOpen={setOpenFinding}
         onAcknowledge={acknowledge}
         mutating={mutating}
+        ackErrors={ackErrors}
         expanded={Boolean(expanded.positive_change)}
         onExpand={() => setExpanded((e) => ({ ...e, positive_change: true }))}
       />
 
-      {openFinding ? (
+      <DismissedFindings
+        open={showDismissed}
+        onToggle={setShowDismissed}
+        query={query}
+        context={contextKey}
+        active={active}
+        onOpen={setOpenFinding}
+      />
+
+      {panelFinding ? (
         <HomeFindingPanel
-          findingId={openFinding.id}
-          summary={openFinding}
+          findingId={panelFinding.id}
+          summary={panelFinding}
           query={query}
           onClose={() => setOpenFinding(null)}
-          onGoWork={onGoWork}
+          onOpenRun={onOpenRun}
           onOpenAgent={onOpenAgent}
           onOpenJob={onOpenJob}
           onAsk={(f) => {
@@ -452,12 +570,20 @@ function WorkDone({ snapshot, onGoWork, onOpenJob, onConnectAgent, tz, locale })
  * nothing.
  */
 function Attention({
-  snapshot, findings, analysis, items, onGoWork, onOpen, onAcknowledge,
-  mutating, expanded, onExpand,
+  snapshot, findings, analysis, items, onGoMyWork, onOpen, onAcknowledge,
+  mutating, ackErrors, expanded, onExpand,
 }) {
   const snap = snapshot.data
   const att = snap ? readAttention(snap) : null
   const shown = expanded ? items : items.slice(0, VISIBLE_PER_GROUP)
+  // Five outcomes, kept apart. The old version asked only "is there data?",
+  // so a FAILED snapshot sat under a loading skeleton for ever — the one
+  // state that definitely was not loading.
+  const attState =
+    snapshot.error ? 'error'
+    : !snap ? 'loading'
+    : att.kind === 'unavailable' ? 'unavailable'
+    : att.kind
 
   return (
     <Section
@@ -466,10 +592,24 @@ function Attention({
       id="hv-attention"
     >
       <div className="hv-att-grid">
-        <div className="hv-att-personal">
-          {!snap ? (
+        <div className="hv-att-personal" data-att-state={attState}>
+          {attState === 'error' ? (
+            <div className="hv-att-failed" role="alert">
+              <span className="hv-att-value hv-att-unknown">—</span>
+              <span className="hv-att-label">
+                Trovis couldn&rsquo;t load what is waiting on you
+              </span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={snapshot.reload}
+              >
+                Retry
+              </button>
+            </div>
+          ) : attState === 'loading' ? (
             <Skeleton lines={2} label="Loading personal attention" />
-          ) : att.kind === 'unavailable' ? (
+          ) : attState === 'unavailable' ? (
             <>
               <span className="hv-att-value hv-att-unknown">—</span>
               <span className="hv-att-label">{att.text}</span>
@@ -489,7 +629,7 @@ function Attention({
               <button
                 type="button"
                 className="btn btn-secondary btn-sm"
-                onClick={() => onGoWork && onGoWork('waiting_on_you')}
+                onClick={() => onGoMyWork && onGoMyWork()}
               >
                 Open your work
               </button>
@@ -524,6 +664,7 @@ function Attention({
                         onOpen={onOpen}
                         onAcknowledge={onAcknowledge}
                         busy={mutating === f.id}
+                        ackError={ackErrors?.[f.id] || null}
                       />
                     ))}
                   </ul>
@@ -577,10 +718,87 @@ function CostContext({ snapshot, onOpenCost, locale }) {
   )
 }
 
+/* ── dismissed findings ────────────────────────────────────────────── */
+
+/**
+ * Findings a person has dismissed, still reachable.
+ *
+ * "Dismiss" removes something from Home. Offering that with no way back would
+ * make a finding unreachable through the UI, which is a worse outcome than not
+ * offering it — so this is the way back. It reads the SAME scope and period
+ * through the same `include_dismissed` capability the API already has, keeps
+ * dismissed items out of the active counts and groups (the default read
+ * excludes them, so they were never in either), and opens the same evidence
+ * panel.
+ *
+ * There is no "restore" control, because the backend has no such state: a
+ * person may set `open`, `acknowledged` or `dismissed`, and only re-analysis
+ * retires a finding. Re-opening the evidence is what this offers.
+ *
+ * It fetches only when opened, and it is stamped with the same context as
+ * everything else — so a permission change empties it during render.
+ */
+function DismissedFindings({ open, onToggle, query, context, active, onOpen }) {
+  const read = useHomeRead(
+    useCallback(
+      (signal) => api.getHomeFindings({ ...query, includeDismissed: true, signal }),
+      [query],
+    ),
+    context,
+    { active: active && open },
+  )
+  const items = useMemo(
+    () => (read.data?.findings || []).filter((f) => f.state === 'dismissed'),
+    [read.data],
+  )
+  return (
+    <details
+      className="hv-dismissed"
+      open={open}
+      onToggle={(e) => onToggle(e.currentTarget.open)}
+    >
+      <summary className="hv-dismissed-summary">
+        Dismissed findings
+        <span aria-hidden="true">›</span>
+      </summary>
+      <div className="hv-dismissed-body">
+        {!open ? null : read.error ? (
+          <SectionError
+            lead="Trovis couldn't load dismissed findings."
+            onRetry={read.reload}
+          />
+        ) : read.loading ? (
+          <Skeleton lines={2} label="Loading dismissed findings" />
+        ) : items.length ? (
+          <>
+            <p className="hv-none">
+              Dismissed means you asked Trovis to stop showing it. It does not
+              say the condition ended, and these are not counted anywhere above.
+            </p>
+            <ul className="hv-findings">
+              {items.map((f) => (
+                <FindingCard
+                  key={f.id}
+                  finding={f}
+                  onOpen={onOpen}
+                  dismissed
+                />
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="hv-none">Nothing dismissed in this scope and period.</p>
+        )}
+      </div>
+    </details>
+  )
+}
+
 /* ── opportunity / positive groups ─────────────────────────────────── */
 
 function FindingGroup({
-  id, title, sub, items, loading, onOpen, onAcknowledge, mutating, expanded, onExpand,
+  id, title, sub, items, loading, onOpen, onAcknowledge, mutating, ackErrors,
+  expanded, onExpand, emptyNote,
 }) {
   // Nothing is forced into these sections. No canned copy, no client-generated
   // "insight" — an empty opportunities list means Trovis found no specific
@@ -602,6 +820,7 @@ function FindingGroup({
                 onOpen={onOpen}
                 onAcknowledge={onAcknowledge}
                 busy={mutating === f.id}
+                ackError={ackErrors?.[f.id] || null}
               />
             ))}
           </ul>

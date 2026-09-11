@@ -7840,6 +7840,22 @@ button.work-td-task:hover {
                font-size: 9.5px; letter-spacing: 0.05em; }
 .hv-finding-qual { font-size: 11.5px; color: var(--text-dim); margin: 2px 0 0; line-height: 1.5; }
 .hv-finding-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: auto; padding-top: 6px; }
+.hv-finding-ack-error { font-size: 11.5px; color: var(--error); margin: 4px 0 0; line-height: 1.5; }
+
+/* A settled personal-attention failure, not a spinner. */
+.hv-att-failed { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+
+/* Dismissed findings — reachable, clearly marked, out of the active groups. */
+.hv-dismissed { border-top: 1px solid var(--border-default); padding-top: 14px; }
+.hv-dismissed-summary {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  font-size: 12.5px; color: var(--text-muted); list-style: none;
+}
+.hv-dismissed-summary::-webkit-details-marker { display: none; }
+.hv-dismissed-summary:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+.hv-dismissed-summary:hover { color: var(--text-secondary); }
+.hv-dismissed-body { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.hv-finding-card.is-dismissed { opacity: 0.72; box-shadow: inset 3px 0 0 var(--text-dim); }
 
 /* ── the analysis lifecycle line ── */
 .hv-ai-note {

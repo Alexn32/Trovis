@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings 0",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --import ./test/register-loader.mjs --test \"test/*.test.mjs\""
   },
   "dependencies": {
     "@sentry/react": "^10.59.0",
@@ -20,6 +20,7 @@
     "eslint": "^10.10.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.12.0",
+    "jsdom": "^30.0.1",
     "vite": "^5.4.11"
   }
 }

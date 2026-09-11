@@ -10,9 +10,17 @@ const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
 const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
 
 test('App wires every destination Home expects', () => {
-  assert.match(app, /onGoWork=\{\(filter = null\) => \{/)
-  assert.match(app, /setWorkFilter\(\{ value: filter, nonce: Date\.now\(\) \}\)/)
+  assert.match(app, /onGoWork=\{\(filter = null, scope = null\) => \{/)
+  // The navigation carries Home's scope, and clears any job/run left open
+  // from a previous visit — otherwise that detail renders instead of the
+  // list this navigation asked for.
+  assert.match(app, /whose: scope\?\.whose \?\? null/)
+  assert.match(app, /personId: scope\?\.personId \?\? null/)
+  assert.match(app, /setWorkRoute\(\{ job: null, run: null \}\)/)
   assert.match(app, /incomingFilter=\{workFilter\}/)
+  // A finding's run target opens that exact run through Work's run route.
+  assert.match(app, /onOpenRun=\{\(id\) => \{/)
+  assert.match(app, /setWorkRoute\(\{ job: null, run: Number\(id\) \}\)/)
   assert.match(app, /onOpenCost=\{\(\) => setOverlay\(\{ kind: 'cost' \}\)\}/)
   assert.match(app, /onConnectAgent=\{openAddAgent\}/)
   // The by-job bars open the job pane App already owns.
@@ -33,9 +41,16 @@ test('a Work filter arriving from Home is visible and clearable', () => {
 
 test('every filter Home navigates with is one Work understands', () => {
   // A tap that lands on an unfiltered table is a lie about where it went.
+  const table = readFileSync(new URL('../src/workFilter.js', import.meta.url), 'utf8')
   for (const f of ['mine', 'moving', 'waiting', 'stuck', 'done']) {
-    assert.match(work, new RegExp(`case '${f}':`), `Work cannot filter by ${f}`)
+    assert.match(table, new RegExp(`case '${f}':`), `Work cannot filter by ${f}`)
   }
+  // And the value Home's personal link sends is in that table. It used to
+  // send 'waiting_on_you' — a row status, not a filter — which fell through
+  // to an unfiltered list.
+  const hvSrc = readFileSync(new URL('../src/HomeView.jsx', import.meta.url), 'utf8')
+  assert.match(hvSrc, /onGoWork\('mine', \{ whose: 'everyone', personId: null \}\)/)
+  assert.doesNotMatch(hvSrc, /onGoWork\('waiting_on_you'/)
 })
 
 // --- the name --------------------------------------------------------------
