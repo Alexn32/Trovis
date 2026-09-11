@@ -24,13 +24,13 @@ const GRAIN =
 
 const TITLE = "Trovis — Founding waitlist";
 const DESCRIPTION =
-  "Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s stuck, and where handoffs die.";
+  "Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s blocked, and where handoffs get stuck.";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const BENEFITS = [
   "Home desk: what needs you, not another dashboard",
-  "Work as jobs you can see and judge — people + agents + SaaS in one loop",
+  "Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.",
   "Built for eng/founder teams with agents already in production",
 ];
 
@@ -268,7 +268,7 @@ export default function TrovisLanding({ onSignIn = () => {} }) {
             </h1>
             <p style={{ fontFamily: F.body, fontSize: 17.5, lineHeight: 1.6, color: C.body, maxWidth: 520, margin: "0 0 28px" }}>
               Trovis is the operating layer for hybrid work — the desk that shows what’s
-              waiting on you, what’s stuck, and where handoffs die. Founding seats for
+              waiting on you, what’s blocked, and where handoffs get stuck. Founding seats for
               teams already running agents.
             </p>
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 16 }}>
