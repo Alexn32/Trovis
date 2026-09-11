@@ -33,7 +33,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 import alerts
@@ -203,8 +203,11 @@ _OPEN_PATHS = {
     "/oauth/authorize/submit",  # OAuth consent form submission
     "/oauth/token",              # OAuth token exchange (ChatGPT server-to-server)
     "/actions/openapi.json",     # OpenAPI spec (public, no auth)
-    "/waitlist",                 # public marketing-site signup
+    "/",                         # public founding waitlist landing (HTML)
+    "/waitlist",                 # public founding waitlist (GET HTML / POST JSON)
+    "/waitlist/",
     "/waitlist/count",           # public signup count for the marketing site
+    "/trovis-favicon.svg",       # mark on the public waitlist page
     "/billing/webhook",          # Stripe *billing* webhook — Trovis plan gate. Isolated.
     "/saas/stripe/webhook",      # Stripe *SaaS* Work webhook — signature, not a Trovis key
     "/saas/stripe/oauth/callback",  # Stripe Connect redirects the browser here
@@ -2712,18 +2715,99 @@ def add_team_member(request: Request, body: TeamMemberCreate) -> None:
 # pull in a full RFC-5322 validator for a marketing funnel.
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
+# Founding-list capture is public and cheap to hit. Per-IP fixed window —
+# generous for a human retrying a typo, enough to blunt a dumb flood.
+# In-memory (same as ingest): one Railway replica is fine.
+_WAITLIST_RATE_MAX = 8
+_WAITLIST_RATE_WINDOW_S = 600
+_waitlist_hits: dict[str, tuple[int, float]] = {}
+_WAITLIST_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "waitlist.html")
+
+
+def _waitlist_client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    client = request.client
+    return client.host if client else "unknown"
+
+
+def _check_waitlist_rate_limit(request: Request) -> None:
+    now = time.monotonic()
+    bkey = f"ip:{_waitlist_client_ip(request)}"
+    count, start = _waitlist_hits.get(bkey, (0, now))
+    if now - start >= _WAITLIST_RATE_WINDOW_S:
+        count, start = 0, now
+    count += 1
+    _waitlist_hits[bkey] = (count, start)
+    if len(_waitlist_hits) > 10_000:
+        cutoff = now - _WAITLIST_RATE_WINDOW_S
+        for k, (_, s) in list(_waitlist_hits.items()):
+            if s < cutoff:
+                _waitlist_hits.pop(k, None)
+    if count > _WAITLIST_RATE_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many tries — wait a few minutes and try again.",
+            headers={"Retry-After": str(_WAITLIST_RATE_WINDOW_S)},
+        )
+
+
+def _clip_waitlist_field(value: str | None, limit: int) -> str | None:
+    clean = (value or "").strip()
+    if not clean:
+        return None
+    return clean[:limit]
+
+
+_FAVICON_PATH = os.path.join(
+    os.path.dirname(__file__), "frontend", "public", "trovis-favicon.svg"
+)
+
+
+@app.get("/trovis-favicon.svg", include_in_schema=False)
+def public_favicon():
+    if not os.path.isfile(_FAVICON_PATH):
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(_FAVICON_PATH, media_type="image/svg+xml")
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/waitlist", include_in_schema=False)
+@app.get("/waitlist/", include_in_schema=False)
+def public_waitlist_page() -> HTMLResponse:
+    """Public founding waitlist. Served from FastAPI so trovisai.com
+    (Railway) has a homepage — the SPA is a separate app host."""
+    try:
+        with open(_WAITLIST_HTML_PATH, encoding="utf-8") as fh:
+            html = fh.read()
+    except OSError:
+        raise HTTPException(status_code=500, detail="waitlist page unavailable")
+    return HTMLResponse(html, headers={"Cache-Control": "public, max-age=120"})
+
 
 @app.post("/waitlist", response_model=WaitlistResponse)
-def join_waitlist(body: WaitlistRequest) -> WaitlistResponse:
-    """Public marketing-site signup. No auth. Idempotent: a repeat email
-    returns {"status": "already_joined"} with 200 rather than erroring."""
+def join_waitlist(body: WaitlistRequest, request: Request) -> WaitlistResponse:
+    """Public founding-list signup. No auth. Idempotent: a repeat email
+    returns {"status": "already_joined"} with 200 rather than erroring.
+
+    A filled honeypot (`website`) looks like success and is not stored.
+    """
+    _check_waitlist_rate_limit(request)
+    if (body.website or "").strip():
+        return WaitlistResponse(status="joined")
     email = (body.email or "").strip()
     if not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail="Please enter a valid email address.")
+    tools = _clip_waitlist_field(body.tools, 2000) or _clip_waitlist_field(
+        body.runtime_interest, 2000
+    )
     status = database.add_waitlist_signup(
         email=email,
-        source=body.source,
-        runtime_interest=body.runtime_interest,
+        source=_clip_waitlist_field(body.source, 80) or "founding-waitlist",
+        runtime_interest=tools,
+        company=_clip_waitlist_field(body.company, 200),
+        role=_clip_waitlist_field(body.role, 200),
     )
     return WaitlistResponse(status=status)
 

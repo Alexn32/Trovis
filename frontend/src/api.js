@@ -174,6 +174,10 @@ function _withAgent(path, agentId) {
 }
 
 export const api = {
+  // Public founding waitlist — no auth required.
+  joinWaitlist: (data) =>
+    request('/waitlist', { method: 'POST', body: JSON.stringify(data) }),
+
   // --- data ---
   listAgents: (opts = {}) => request('/agents', opts),
   getAgentSummary: (name, agentId) =>

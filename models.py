@@ -284,11 +284,21 @@ class AgentOwnerSet(BaseModel):
 
 
 class WaitlistRequest(BaseModel):
-    """Body for POST /waitlist (public marketing-site signup)."""
+    """Body for POST /waitlist (public founding-list signup).
+
+    `website` is a honeypot — real browsers leave it empty. `tools` is the
+    "what agents / tools are already in your loop?" field; `runtime_interest`
+    is the older name and is still accepted.
+    """
 
     email: str
+    company: str | None = None
+    role: str | None = None
+    tools: str | None = None
     source: str | None = None
     runtime_interest: str | None = None
+    website: str | None = None
+
 
 
 class WaitlistResponse(BaseModel):

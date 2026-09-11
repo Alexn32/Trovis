@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trovis — Founding waitlist</title>
+    <meta
+      name="description"
+      content="Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s blocked, and where handoffs get stuck."
+    />
+    <link rel="icon" type="image/svg+xml" href="/trovis-favicon.svg" />
+    <meta property="og:title" content="Trovis — Founding waitlist" />
+    <meta property="og:site_name" content="Trovis" />
+    <meta
+      property="og:description"
+      content="Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s blocked, and where handoffs get stuck."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://trovisai.com/" />
+    <meta property="og:image" content="https://trovisai.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@tryTrovis" />
+    <meta name="twitter:title" content="Trovis — Founding waitlist" />
+    <meta
+      name="twitter:description"
+      content="Founding seats for teams already running agents. See what’s waiting, what’s blocked, and where handoffs get stuck."
+    />
+    <meta name="twitter:image" content="https://trovisai.com/og.png" />
+    <link rel="canonical" href="https://trovisai.com/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --linen: #f5f1eb;
+        --cream: #fbf8f3;
+        --subtle: #ece8e1;
+        --border: #ddd7ce;
+        --ink: #2c2418;
+        --body: #4a4137;
+        --muted: #8c8378;
+        --faint: #b8b0a4;
+        --teal: #5a7b7b;
+        --teal-hover: #4a6b6b;
+        --ok: #2a9d6e;
+        --err: #c43528;
+        --disp: "Space Grotesk", sans-serif;
+        --sans: "DM Sans", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        min-height: 100vh;
+        background: var(--linen);
+        color: var(--ink);
+        font-family: var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      .grain {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.04;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+        z-index: 1;
+      }
+      .wrap {
+        position: relative;
+        z-index: 2;
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+      nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 24px 0;
+        gap: 14px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        text-decoration: none;
+        color: var(--teal);
+      }
+      .brand span {
+        font-family: var(--disp);
+        font-weight: 700;
+        font-size: 21px;
+        letter-spacing: -0.02em;
+      }
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+      }
+      .nav-links a {
+        font-size: 14.5px;
+        color: var(--body);
+        text-decoration: none;
+      }
+      .nav-links a:hover { color: var(--ink); }
+      main.hero {
+        display: flex;
+        gap: 48px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        padding: 36px 0 72px;
+      }
+      .copy { flex: 1 1 420px; min-width: 0; }
+      .panel { flex: 1 1 340px; min-width: 0; }
+      .eyebrow {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 18px;
+      }
+      h1 {
+        font-family: var(--disp);
+        font-weight: 700;
+        font-size: clamp(34px, 5vw, 52px);
+        line-height: 1.06;
+        letter-spacing: -0.02em;
+        margin: 0 0 20px;
+      }
+      h1 em {
+        font-style: normal;
+        color: var(--teal);
+      }
+      .lede {
+        font-size: 17.5px;
+        line-height: 1.6;
+        color: var(--body);
+        max-width: 520px;
+        margin: 0 0 28px;
+      }
+      .benefits {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .benefits li {
+        background: var(--cream);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px 18px;
+      }
+      .benefits strong {
+        display: block;
+        font-family: var(--disp);
+        font-size: 16px;
+        letter-spacing: -0.01em;
+        margin-bottom: 4px;
+      }
+      .benefits p {
+        margin: 0;
+        font-size: 14.5px;
+        line-height: 1.55;
+        color: var(--body);
+      }
+      .card {
+        background: var(--cream);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 28px 26px 26px;
+        box-shadow: 0 24px 60px -30px rgba(44, 36, 24, 0.22);
+      }
+      .card h2 {
+        font-family: var(--disp);
+        font-size: 20px;
+        letter-spacing: -0.02em;
+        margin: 0 0 6px;
+      }
+      .card .hint {
+        font-size: 14px;
+        color: var(--muted);
+        margin: 0 0 20px;
+        line-height: 1.5;
+      }
+      label {
+        display: block;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--body);
+        margin: 0 0 6px;
+      }
+      .field { margin-bottom: 14px; }
+      input, textarea {
+        width: 100%;
+        padding: 11px 12px;
+        font: 400 15px/1.4 var(--sans);
+        color: var(--ink);
+        background: var(--linen);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        outline: none;
+      }
+      input:focus, textarea:focus {
+        border-color: var(--teal);
+        box-shadow: 0 0 0 3px rgba(90, 123, 123, 0.16);
+      }
+      textarea { min-height: 88px; resize: vertical; }
+      .hp {
+        position: absolute;
+        left: -10000px;
+        top: auto;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+      }
+      button[type="submit"] {
+        width: 100%;
+        margin-top: 6px;
+        padding: 13px 18px;
+        border: none;
+        border-radius: 10px;
+        background: var(--teal);
+        color: var(--cream);
+        font-family: var(--disp);
+        font-weight: 600;
+        font-size: 15px;
+        letter-spacing: -0.01em;
+        cursor: pointer;
+      }
+      button[type="submit"]:hover { background: var(--teal-hover); }
+      button[type="submit"]:disabled { opacity: 0.55; cursor: wait; }
+      .err {
+        color: var(--err);
+        font-size: 13.5px;
+        margin: 0 0 12px;
+        display: none;
+      }
+      .fine {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 12px 0 0;
+        line-height: 1.5;
+      }
+      .success {
+        display: none;
+        text-align: left;
+      }
+      .success h2 {
+        margin-bottom: 10px;
+      }
+      .success p {
+        font-size: 15.5px;
+        line-height: 1.6;
+        color: var(--body);
+        margin: 0;
+      }
+      .check {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: rgba(42, 157, 110, 0.12);
+        color: var(--ok);
+        margin-bottom: 14px;
+        font-size: 18px;
+      }
+      footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        padding: 26px 0 44px;
+        border-top: 1px solid var(--border);
+      }
+      footer p, footer a {
+        font-size: 13px;
+        color: var(--muted);
+        text-decoration: none;
+        margin: 0;
+      }
+      footer a:hover { color: var(--body); }
+      .foot-links { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+      a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+        outline: 2px solid var(--teal);
+        outline-offset: 2px;
+      }
+      @media (max-width: 720px) {
+        main.hero { padding-top: 12px; gap: 32px; }
+        h1 { font-size: 34px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <div class="wrap">
+      <nav>
+        <a class="brand" href="/">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <line x1="3" y1="5" x2="21" y2="5" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round" />
+            <line x1="12" y1="5" x2="12" y2="21" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round" />
+            <line x1="6.5" y1="12" x2="9.5" y2="12" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round" />
+            <line x1="14.5" y1="12" x2="17.5" y2="12" stroke="#5A7B7B" stroke-width="2.4" stroke-linecap="round" />
+          </svg>
+          <span>trovis</span>
+        </a>
+        <div class="nav-links">
+          <a href="https://app.trovisai.com">Sign in</a>
+        </div>
+      </nav>
+
+      <main class="hero">
+        <div class="copy">
+          <div class="eyebrow">Founding seats</div>
+          <h1>See the Work<br /><em>across humans, agents, and tools.</em></h1>
+          <p class="lede">
+            Trovis is the operating layer for hybrid work — the desk that shows what’s
+            waiting on you, what’s blocked, and where handoffs get stuck. Founding seats for
+            teams already running agents.
+          </p>
+          <ul class="benefits">
+            <li>
+              <strong>Home desk: what needs you, not another dashboard</strong>
+            </li>
+            <li>
+              <strong>Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.</strong>
+            </li>
+            <li>
+              <strong>Built for eng/founder teams with agents already in production</strong>
+            </li>
+          </ul>
+        </div>
+
+        <div class="panel">
+          <div class="card" id="form-card">
+            <p class="hint">
+              Desk and Work visibility first. Connect adapters and deeper SaaS loops
+              come next — we’re not pitching them as live yet.
+            </p>
+            <form id="waitlist-form" novalidate>
+              <div class="hp" aria-hidden="true">
+                <label for="website">Website</label>
+                <input id="website" name="website" type="text" tabindex="-1" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="email">Work email</label>
+                <input id="email" name="email" type="email" required autocomplete="email" placeholder="you@company.com" />
+              </div>
+              <div class="field">
+                <label for="company">Company <span style="font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)">(optional)</span></label>
+                <input id="company" name="company" type="text" autocomplete="organization" />
+              </div>
+              <div class="field">
+                <label for="role">Role <span style="font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)">(optional)</span></label>
+                <input id="role" name="role" type="text" autocomplete="organization-title" placeholder="Founder, eng lead…" />
+              </div>
+              <div class="field">
+                <label for="tools">What agents/tools are already in your loop? <span style="font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)">(optional)</span></label>
+                <textarea id="tools" name="tools" placeholder="OpenClaw, Cursor, Claude, ChatGPT Actions…"></textarea>
+              </div>
+              <p class="err" id="form-error" role="alert"></p>
+              <button type="submit" id="submit-btn">Join the founding list</button>
+              <p class="fine">We’ll only write about founding access. No product tour, no drip.</p>
+            </form>
+            <div class="success" id="success" role="status">
+              <div class="check" aria-hidden="true">✓</div>
+              <h2>You’re on the founding list.</h2>
+              <p>
+                We’ll write when a founding seat is ready for you. Same address —
+                nothing else in the meantime.
+              </p>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <footer>
+        <p>The operating layer for hybrid work.</p>
+        <div class="foot-links">
+          <a href="mailto:hello@trovisai.com">Contact</a>
+          <a href="https://x.com/tryTrovis">X</a>
+          <span style="color:var(--faint)">© 2026 Trovis</span>
+        </div>
+      </footer>
+    </div>
+    <script>
+      (function () {
+        var form = document.getElementById("waitlist-form");
+        var err = document.getElementById("form-error");
+        var btn = document.getElementById("submit-btn");
+        var success = document.getElementById("success");
+        var emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          err.style.display = "none";
+          var email = (form.email.value || "").trim();
+          if (!emailRe.test(email)) {
+            err.textContent = "Please enter a valid email address.";
+            err.style.display = "block";
+            form.email.focus();
+            return;
+          }
+          btn.disabled = true;
+          btn.textContent = "Joining…";
+          fetch("/waitlist", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              email: email,
+              company: (form.company.value || "").trim() || null,
+              role: (form.role.value || "").trim() || null,
+              tools: (form.tools.value || "").trim() || null,
+              website: (form.website.value || "").trim() || null,
+              source: "founding-waitlist",
+            }),
+          })
+            .then(function (res) {
+              return res.json().then(function (body) {
+                if (!res.ok) {
+                  var detail = body && body.detail;
+                  throw new Error(typeof detail === "string" ? detail : "Could not join just now. Try again.");
+                }
+                return body;
+              });
+            })
+            .then(function () {
+              form.style.display = "none";
+              success.style.display = "block";
+            })
+            .catch(function (ex) {
+              err.textContent = ex.message || "Could not join just now. Try again.";
+              err.style.display = "block";
+              btn.disabled = false;
+              btn.textContent = "Join the founding list";
+            });
+        });
+      })();
+    </script>
+  </body>
+</html>
