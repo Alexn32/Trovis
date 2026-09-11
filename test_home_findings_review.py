@@ -507,9 +507,13 @@ with TestClient(main.app) as c:
           {str(r["run_id"]) for r in sent["runs"]}
           >= {k.split(":", 1)[1] for k in sess.evidence if k.startswith("run:")}
           or all(f"run:{r['run_id']}" in sess.evidence for r in sent["runs"]))
+    kept_ids = {str(k["run_id"]) for k in sent["runs"]}
     dropped_id = None
     for r in runs_payload["runs"]:
-        if all(str(r["run_id"]) != str(k["run_id"]) for k in sent["runs"]):
+        # Only a run this response was the first to retrieve. One an EARLIER
+        # response already delivered stays quotable on purpose — see the
+        # sequential-delivery section in test_home_findings_round2.py.
+        if str(r["run_id"]) not in kept_ids and f"run:{r['run_id']}" not in sess.delivered:
             dropped_id = r["run_id"]
             break
     check("evidence dropped for size is no longer quotable",
@@ -562,7 +566,7 @@ with TestClient(main.app) as c:
                 (old, old, job_id))
 
     crashed = database.enqueue_analysis_job(ACCT, "crashed", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-crashed", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     make_stale(crashed["id"])
     check("a crashed job does not count against live concurrency",
@@ -573,18 +577,18 @@ with TestClient(main.app) as c:
           recovered is not None and recovered["job_id"] == crashed["id"])
 
     follow = database.enqueue_analysis_job(ACCT, "follow-on", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-follow-on", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     nxt = analysis_jobs.run_one()
     check("queued work behind it then progresses",
           nxt is not None and nxt["job_id"] == follow["id"])
 
     live = database.enqueue_analysis_job(ACCT, "live-one", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-live-one", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     database.claim_analysis_job()  # genuinely running, fresh heartbeat
     blocked = database.enqueue_analysis_job(ACCT, "blocked-by-live", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-blocked-by-live", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     check("a genuinely active job still holds the concurrency slot",
           analysis_jobs.run_one() is None)
@@ -594,7 +598,7 @@ with TestClient(main.app) as c:
 
     print("\n--- competing recovery ---")
     race = database.enqueue_analysis_job(ACCT, "race-recover", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-race-recover", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     original = database.claim_analysis_job()
     make_stale(race["id"])
@@ -609,7 +613,7 @@ with TestClient(main.app) as c:
 
     print("\n--- a superseded worker cannot publish over its replacement ---")
     supersede = database.enqueue_analysis_job(ACCT, "supersede", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-supersede", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     old_claim = database.claim_analysis_job()
     make_stale(supersede["id"])
@@ -644,7 +648,7 @@ with TestClient(main.app) as c:
         if j:
             database.requeue_analysis_job(j["id"], "boom")
     behind = database.enqueue_analysis_job(ACCT, "behind-doomed", {
-        "scope_key": "x", "viewer_user_id": ceo_id, "whose": "everyone",
+        "scope_key": "scope-behind-doomed", "viewer_user_id": ceo_id, "whose": "everyone",
         "person_id": None, "days": 7, "timezone": "UTC", "evidence": {}})
     got = analysis_jobs.run_one()
     check("an exhausted job is retired and does not block the queue",
@@ -797,8 +801,10 @@ with TestClient(main.app) as c:
         _, first_out = run_pipeline(days=7, tz="UTC")
         check("an analysis publishes", len(first_out["findings"]) == 1)
 
-        # Same evidence bucket: the key has not moved, so the read is simply
-        # current. This is coalescence doing its job, not debounce.
+        # Same evidence bucket: the SCHEDULING key has not moved, so no second
+        # investigation is bought. But the completed analysis did not read
+        # these records, and this read must not say it did — that was the
+        # round-2 freshness bug. Deferred is fine; "already covered" is not.
         for i in range(3):
             database.ingest_spans_with_loops([
                 span("burst-agent", 0, {"trovis.loop.external_id": f"deb{i}"})
@@ -806,7 +812,11 @@ with TestClient(main.app) as c:
         same_bucket = c.get("/home/findings?days=7&tz=UTC", headers=auth(CEO)).json()
         check("evidence inside one bucket does not start a second investigation",
               same_bucket["analysis"]["enqueued"] is False
-              and same_bucket["analysis"]["state"] == "current")
+              and same_bucket["analysis"]["state"] != "current")
+        check("and the read says the new evidence is not yet analysed",
+              same_bucket["analysis"]["newer_evidence_available"] is True
+              and same_bucket["analysis"]["analyzed_evidence_version"]
+              != same_bucket["analysis"]["evidence_version"])
 
         # Now push evidence into a LATER bucket, so the job key really moves.
         # Without the debounce floor this would start a fresh investigation

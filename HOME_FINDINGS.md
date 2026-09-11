@@ -13,7 +13,8 @@ Abstaining is a correct outcome, and on a quiet account it is the expected one.
 - Durable queue: `analysis_jobs.py`
 - Endpoints: `main.home_findings`, `main.home_finding_detail`
 - Shapes: `models.FindingSummary` / `FindingDetail`
-- Tests: `test_home_findings.py` (pipeline), `test_home_findings_eval.py` (rubric)
+- Tests: `test_home_findings.py` (pipeline), `test_home_findings_eval.py` (rubric),
+  `test_home_findings_review.py` + `test_home_findings_round2.py` (review regressions)
 
 ## What this PR is not
 
@@ -46,6 +47,62 @@ immediately with whatever is already published. A worker task started in
 thread, so no model call ever touches the event loop, an ingest transaction, or
 a request.
 
+### Nothing is written while a model call is outstanding
+
+The investigation **stages** its findings into `report["publication"]` and
+writes nothing. `run_one()` then commits the whole publication —
+findings published, findings retired, job closed — inside a single
+transaction whose first statement is the ownership test:
+
+```sql
+UPDATE analysis_jobs SET status = ?, result = ?, analyzed_evidence_version = ?
+ WHERE id = ? AND status = 'running' AND attempts = ?
+```
+
+Zero rows means this worker no longer owns the job, and nothing else in the
+transaction runs. The earlier arrangement checked the claim once, *before* the
+model work, and wrote findings as it went — so a worker whose claim was
+reclaimed as stale mid-investigation had already published by the time
+`run_one()` returned `superseded`. Re-checking immediately before each write
+would not have fixed it either: a check in one statement and a write in the
+next is still a race. The four protected writes are publishing a finding,
+retiring a finding, completing the job, and requeuing an attempt — and
+`requeue_analysis_job` is fenced too, because an old worker requeuing "its"
+job would be cancelling the **replacement's** live analysis.
+
+No model call happens inside the transaction; it is opened only once the
+investigation has finished and the records are in hand.
+
+### A failed analysis is not an empty one
+
+An empty result means one of two completely different things, and flattening
+them let an unparseable discovery reply retire a standing, true finding under
+"no candidate worth investigating". Every run now reports an
+`analysis_outcome`:
+
+| outcome | meaning | may retire findings? |
+|---|---|---|
+| `complete` | the analysis ran to a conclusion — **including a genuine abstention** | yes, if coverage was whole |
+| `discovery_unusable` | the reply was unparseable, had no `candidates` key, or no usable entry | no |
+| `deadline` | the wall clock expired before the work was done | no |
+| `retrieval_failed` | retrieval left a required question unanswered | no |
+| `interrupted` | the worker raised partway through | no |
+| `scope_changed` | permissions moved while it was queued; nothing is published | no |
+| `superseded` | the claim was taken over; nothing is written at all | no |
+
+Retirement additionally requires the run to have **covered its slice**. Any of
+these leaves standing findings alone even under `complete`: a candidate not
+examined because the deadline arrived, a candidate that produced no usable
+verdict, a draft nothing could be composed from, a rewrite that could not be
+narrowed, or a retrieval that was itself incomplete. The reasons are listed in
+`report["coverage_gaps"]`. *Skipping* a condition is not *looking and finding
+it gone*.
+
+An unsuccessful run is retried within the usual bounded attempts, and while it
+is unresolved the read reports `state: "incomplete"` with the previous
+findings still served and flagged `findings_from_previous_analysis`. It is
+never reported as `current`.
+
 ## The finding contract
 
 | field | meaning |
@@ -75,7 +132,7 @@ stopped standing behind it.
 | key | built from | what it buys |
 |---|---|---|
 | `scope_key` | account + surfaces + breadth + visible user ids + whose + person + **viewer** + days + tz | the audience slice. Re-derived on every read, so a permission change makes the old slice unreachable in the same request. |
-| `job_key` | scope + evidence version + prompt version | the unit of work. Polling and ingest bursts land on the same key and buy no model call. |
+| `job_key` | scope + evidence **schedule bucket** + period slot + prompt version | the unit of work. Deliberately coarse, so polling and ingest bursts land on the same key. Pending work is additionally coalesced on `scope_key` alone — see *One pending analysis per audience*. |
 | `finding_key` | category + entities + topic | the condition. Re-analysis updates the same row instead of stacking near-duplicates. |
 
 ### Evidence and staleness
@@ -147,6 +204,39 @@ step is told what could not be seen, and the finding carries
 conclusion, the flow abstains or publishes a qualified observation — never a
 guessed diagnosis.
 
+### What "the search was incomplete" actually covers
+
+Budget exhaustion is **one** of five sources, and for a long time it was the
+only one that reached validation. `session.budget.report()` was handed to the
+validator; a tool returned 30 rows, size fitting delivered 15, the budget was
+untouched, and `complete: true` let *"no other job is affected"* publish as
+supported over half a result.
+
+`InvestigationSession.retrieval_report()` is now the coverage input, and it
+sees all of them:
+
+| limitation kind | raised when |
+|---|---|
+| `budget_exhausted` | the per-analysis allowance ran out |
+| `query_row_cap` | a query hit its own row cap (`truncated`) |
+| `query_event_cap` | a run's event history was capped (`events_truncated`) |
+| `assignment_resolution_incomplete` | the assignee scan was bounded, so some waits have no resolved holder |
+| `size_trimmed` | `fit` dropped list entries to make the result sendable |
+| `result_dropped` | a whole tool result was too large to send |
+| `retrieval_failed` | a tool raised, or returned an error, leaving its question open |
+
+`retrieval_report()["complete"]` is true only when none of them fired, and
+`coverage.retrieval_limitations` names the ones that did. The budget's own
+report deliberately no longer carries a `complete` key at all — it publishes
+`budget_complete`, so it cannot be mistaken for a coverage verdict — and
+`derive_coverage` **fails closed**: a retrieval report that does not explicitly
+say it was complete is treated as incomplete.
+
+The consequences travel to calculations and graphics as well as to prose. A
+`calculation` claim over a partial result is stamped `partial: true` /
+`qualifier: "at_least"`, graphic points are stamped `partial`, an exhaustive
+chart label is rejected, and confidence drops to `qualified`.
+
 ### Result size
 
 A tool result is bounded by trimming the **structure** before serializing, not
@@ -161,6 +251,25 @@ titles raised `JSONDecodeError`.
 Evidence dropped for size is also **removed from the ledger**, so a finding
 cannot cite a row the model was never shown. What the investigation and the
 assessment received is exactly what may be published.
+
+Removal is scoped **per tool response**, not per evidence kind. The first
+version called `forget_beyond("run", kept_ids)`, which dropped every `run:`
+entry outside the current response — so a run delivered whole by call 1
+disappeared the moment call 3's unrelated run list was trimmed, and a finding
+legitimately citing it was then rejected as a fabrication. Each response now
+records which ledger keys it *introduced* and where each one sits in the
+payload, and after trimming:
+
+* a record this response introduced and did not deliver is removed;
+* a record an **earlier** response already delivered is kept, even when this
+  response also mentioned it and then trimmed it away;
+* if the whole result is dropped, everything it introduced is removed, so
+  unseen content never becomes citable.
+
+Provenance is keyed on the payload handed to `fit`, not on "the most recent
+`run`", so two retrievals before either result is sent cannot attribute one
+response's rows to the other. It covers runs, run events, failed spans and the
+job/agent references that ride along with them.
 
 ## Validation before publishing
 
@@ -188,8 +297,10 @@ anything reaches the database.
   with what the model supplied. An earlier version used `setdefault`, so a
   draft asserting `counts_exact: true` over an incomplete snapshot published
   "No other job is affected" as supported. Two independent sources feed it: the
-  snapshot's own completeness, and the investigation's **retrieval budget** — a
-  capped search did not see everything either. When either is short, a
+  snapshot's own completeness, and the investigation's **retrieval session** —
+  which knows about a capped query, an unresolved assignment, a trimmed or
+  dropped result and a failed tool, none of which the budget can see. When
+  either is short, a
   percentage or an exhaustive claim ("none", "only", "all of") is rejected, a
   chart label implying a whole is rejected and its points are marked
   `partial`, and confidence drops to `qualified`.
@@ -259,9 +370,63 @@ returns what was observed, why it matters, supporting **and** contradicting
 evidence, what is uncertain, and one supported next step.
 
 `analysis.state` is one of `current`, `queued`, `running`, `debounced`,
-`failed`, `unavailable`. **`unavailable` / `no_model_configured` is a real product
-state**: the snapshot stays fully usable and analysis is explicitly absent.
-There is no deterministic fallback copy presented as an AI finding.
+`incomplete`, `failed`, `unavailable`. **`unavailable` / `no_model_configured`
+is a real product state**: the snapshot stays fully usable and analysis is
+explicitly absent. There is no deterministic fallback copy presented as an AI
+finding.
+
+### Freshness is reported from what was analysed
+
+Two versions travel on every response, and conflating them was a bug:
+
+| field | says |
+|---|---|
+| `evidence_version` | what the record hashes to **right now** |
+| `analyzed_evidence_version` | what the last **completed** analysis actually read |
+| `newer_evidence_available` | those two differ — records have moved since |
+
+`state: "current"` now means one specific thing: a completed analysis read
+*these* records. Previously, evidence arriving inside the same 15-minute
+scheduling bucket left the job key unchanged, so the endpoint reported
+`current` and echoed the **new** version back — over an analysis that had read
+the old one. A deferred refresh is fine and expected; reporting that the
+refresh already happened is not.
+
+Three places this is enforced:
+
+* the version an analysis covered is persisted on the job
+  (`analysis_jobs.analyzed_evidence_version`) at commit time, by the run that
+  published it;
+* `_execute` re-reads `database.evidence_version` **at execution**, not from
+  the queued row, so a job that sat in the queue does not label the records it
+  is about to retrieve with an enqueue-time cutoff;
+* a queued, running or debounced read reports the version of the last
+  *completed* analysis, never the version of the request in hand, so findings
+  on screen are never stamped with evidence nothing has looked at. During
+  debounce the reason explicitly says newer evidence is waiting.
+
+### One pending analysis per audience
+
+Coalescence of **pending** work is keyed on `scope_key` (the audience), not on
+`job_key`. The job key carries the evidence bucket and the period slot, so it
+*moves*: two reads a bucket apart produced two different keys and two queued
+jobs for one reader, and the completed-job debounce could not stop it because
+that floor only looks at analyses that have finished. The invariant is enforced
+by the partial unique index `uq_analysis_jobs_pending_scope`, so concurrent
+requests produce one job and N joins rather than N jobs.
+
+Joining is not forgetting. A read that joins stamps the observed version onto
+the pending job as `pending_evidence_version`, so what arrived while it was
+queued or running stays recorded as needing coverage, and the response says
+`joined_pending_analysis: true`.
+
+**Follow-up work is read-triggered, not queued automatically.** When the
+running analysis completes having covered less than what is now present, the
+next read sees `analyzed_evidence_version != evidence_version` and enqueues the
+follow-up. Nothing chains a successor job at completion time — that is what
+would let a backlog of obsolete analyses form, and it is the behaviour
+`test_home_findings_round2.py` section 5 pins. The cost is that an audience
+nobody reads goes stale silently; the freshness window is the backstop.
 
 Navigation targets are typed and honest. A `run` links exactly; a `job` links
 to `/work/items?workflow_id=` with `exact: false` and a note saying it cannot
@@ -308,6 +473,16 @@ Two of the eval cases were written before the checks that catch them and
 initially **failed**, which is how the recovered-error and
 repetition-is-not-waste rules got written.
 
+`test_home_findings_round2.py` covers the six integration defects between
+retrieval, validation, scheduling and publication. It drives the production
+path — a real tool call, a real `fit`, the real validator, the real
+`run_one()`, the real endpoint — rather than asserting that a helper handed a
+hand-built argument returns what it was told; the partial results it validates
+against come from retrievals that actually happened. Ownership is transferred
+and evidence is ingested from **inside** a scripted model call, so the races
+are reproduced where they really occur rather than after the worker has
+finished.
+
 **Backend exercised: SQLite 3.45.1 only, on CPython 3.11.15.** Postgres is
 **not** runtime-verified here; the schema and queries use the shared dual-backend
 helpers (`PH`, `_connect`, `_cursor`, `_try_add_column`) and the new partial
@@ -340,12 +515,26 @@ live model, and neither is evidence that the real model is insightful.
 7. **Scheduling is coarse on purpose.** A burst of ingest inside one 15-minute
    bucket does not trigger re-analysis until the bucket rolls, and the debounce
    floor can hold a further window on top of that. The exact evidence version
-   is always reported, so a reader can see the records have moved even while
-   the analysis behind them has not caught up.
+   and `newer_evidence_available` are always reported, so a reader can see the
+   records have moved even while the analysis behind them has not caught up.
 8. **Revision is bounded at two attempts.** A model that keeps overstating has
    its candidate withheld rather than getting unlimited tries to find wording
    that slips through — which means a real finding can be lost to a persistently
    bad first draft.
+9. **Follow-up refresh is read-triggered.** An audience nobody opens goes stale
+   silently: nothing chains a successor job when a partially-covering analysis
+   completes. Deliberate — automatic chaining is how an obsolete backlog forms
+   — but it means the freshness window, not the evidence, is the real backstop
+   for an unattended slice.
+10. **Coverage degrades globally.** One truncated tool result blocks exhaustive
+   claims for the whole finding, even when the truncated tool is unrelated to
+   the claim being made. Conservative, and occasionally more conservative than
+   the evidence requires.
+11. **`analysis_id` is random-suffixed.** It had been
+   `<scope>-<unix seconds>`, so two analyses of one audience inside a single
+   second shared an id and the retirement clause (`analysis_id <> ?`) excluded
+   the very rows it was meant to close. Fixed, and worth knowing the id is now
+   not derivable from the scope and the clock.
 
 ## Next: what execution would need
 

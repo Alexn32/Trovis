@@ -1963,8 +1963,19 @@ class AnalysisStatus(BaseModel):
     deterministic fallback copy presented as an AI finding.
     """
 
-    state: str  # current | queued | running | debounced | failed | unavailable
+    # current | queued | running | debounced | incomplete | failed | unavailable
+    #
+    # `current` means one specific thing: a COMPLETED analysis read the records
+    # the reader is looking at now. `incomplete` is its opposite number — the
+    # job finished but the analysis did not (an unreadable discovery reply, an
+    # expired deadline, a failed retrieval), so what is on screen came from an
+    # earlier analysis and this one established nothing.
+    state: str
     reason: str | None = None
+    # What that last analysis concluded about itself. `complete` covers a real
+    # abstention ("we looked, there is nothing"); the unsuccessful values never
+    # stand in for one.
+    analysis_outcome: str | None = None
     enqueued: bool = False
     job_id: int | None = None
     stale_findings: bool = False
@@ -1978,7 +1989,17 @@ class AnalysisStatus(BaseModel):
     # How long this audience waits before another investigation may start,
     # whatever evidence arrives meanwhile. Set only on `debounced`.
     debounce_seconds: int | None = None
+    # What the record hashes to RIGHT NOW.
     evidence_version: str | None = None
+    # What the last completed analysis actually read. When these differ,
+    # findings on screen do not cover everything that has arrived — which is
+    # acceptable, and is the thing that must be said rather than hidden behind
+    # `state: current`.
+    analyzed_evidence_version: str | None = None
+    newer_evidence_available: bool = False
+    # True when this read joined a pending analysis queued under a different
+    # scheduling key for the same audience, instead of starting a second one.
+    joined_pending_analysis: bool = False
     prompt_version: str | None = None
 
 

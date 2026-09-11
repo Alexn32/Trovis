@@ -1594,6 +1594,9 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     attempts      INTEGER   NOT NULL DEFAULT 0,
     error         TEXT,
     result        TEXT,
+    evidence_version         TEXT,
+    analyzed_evidence_version TEXT,
+    pending_evidence_version  TEXT,
     enqueued_at   TIMESTAMP DEFAULT NOW(),
     started_at    TIMESTAMP,
     heartbeat_at  TIMESTAMP,
@@ -1612,6 +1615,9 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     attempts      INTEGER NOT NULL DEFAULT 0,
     error         TEXT,
     result        TEXT,
+    evidence_version          TEXT,
+    analyzed_evidence_version TEXT,
+    pending_evidence_version  TEXT,
     enqueued_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at    TIMESTAMP,
     heartbeat_at  TIMESTAMP,
@@ -1753,6 +1759,13 @@ _INDEXES = [
     # once its evidence moves on.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_jobs_pending "
     "ON analysis_jobs(account_id, job_key) WHERE status IN ('queued', 'running')",
+    # The stronger invariant, and the one that bounds the backlog: ONE pending
+    # analysis per authorized audience, whatever the scheduling key does. Two
+    # reads whose evidence sat in different buckets used to queue two jobs for
+    # the same reader; the completed-job debounce could not stop it, because
+    # the floor only looks at analyses that FINISHED.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_jobs_pending_scope "
+    "ON analysis_jobs(account_id, scope_key) WHERE status IN ('queued', 'running')",
 ]
 
 
@@ -1947,6 +1960,14 @@ def init_db() -> None:
         # evidence moves buckets, and the whole point is to hold the floor
         # across those changes.
         _try_add_column(cur, "analysis_jobs", "scope_key", "TEXT")
+        # Freshness is reported from what an analysis ACTUALLY covered, not
+        # from what the request observed. Three separate facts:
+        #   evidence_version          what was true when the job was enqueued
+        #   analyzed_evidence_version what the run that published actually read
+        #   pending_evidence_version  what has arrived since, still uncovered
+        for _col in ("evidence_version", "analyzed_evidence_version",
+                     "pending_evidence_version"):
+            _try_add_column(cur, "analysis_jobs", _col, "TEXT")
         _try_add_column(cur, "loops", "workflow_version", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "loops", "workflow_confidence", "REAL DEFAULT NULL")
         # THE DECLARED EXPECTATION. Until now a workflow declared how to
@@ -12732,6 +12753,16 @@ def upsert_finding(account_id: int, scope_key: str, finding: dict[str, Any]) -> 
     person's own `state` survives the update — re-analysis may sharpen the
     evidence behind a finding somebody dismissed, but it may not un-dismiss it.
     """
+    cols, vals = _finding_write_columns(account_id, scope_key, finding)
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        return _upsert_finding_body(cur, account_id, scope_key, finding,
+                                    cols, vals, now_sql)
+
+
+def _finding_write_columns(
+    account_id: int, scope_key: str, finding: dict[str, Any]
+) -> tuple[list[str], list[Any]]:
     payload = {
         f: json.dumps(finding.get(f)) if finding.get(f) is not None else None
         for f in _FINDING_JSON_FIELDS
@@ -12756,31 +12787,51 @@ def upsert_finding(account_id: int, scope_key: str, finding: dict[str, Any]) -> 
         finding.get("evidence_cutoff"), finding["prompt_version"],
         finding["model"], float(finding.get("rank_score") or 0.0),
     ]
+    return cols, vals
+
+
+def _upsert_finding_cur(
+    cur, account_id: int, scope_key: str, finding: dict[str, Any]
+) -> int:
+    """`upsert_finding`'s body, on a caller-supplied cursor.
+
+    Exists so the queue can publish inside the same transaction that verifies
+    the job claim — an ownership check in one transaction and a write in
+    another is not an ownership check.
+    """
+    cols, vals = _finding_write_columns(account_id, scope_key, finding)
     now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
-    with _connect() as conn, _cursor(conn) as cur:
+    return _upsert_finding_body(cur, account_id, scope_key, finding,
+                                cols, vals, now_sql)
+
+
+def _upsert_finding_body(
+    cur, account_id: int, scope_key: str, finding: dict[str, Any],
+    cols: list[str], vals: list[Any], now_sql: str,
+) -> int:
+    cur.execute(
+        f"SELECT id FROM findings WHERE account_id = {PH} AND scope_key = {PH} "
+        f"AND finding_key = {PH}",
+        (account_id, scope_key, finding["finding_key"]),
+    )
+    row = cur.fetchone()
+    if row is not None:
+        sets = ", ".join(f"{c} = {PH}" for c in cols)
         cur.execute(
-            f"SELECT id FROM findings WHERE account_id = {PH} AND scope_key = {PH} "
-            f"AND finding_key = {PH}",
-            (account_id, scope_key, finding["finding_key"]),
+            f"UPDATE findings SET {sets}, analyzed_at = {now_sql} "
+            # A refreshed finding is live again unless a person parked it.
+            f", state = CASE WHEN state IN ('resolved', 'superseded') "
+            f"THEN 'open' ELSE state END "
+            f"WHERE id = {PH}",
+            tuple([*vals, row["id"]]),
         )
-        row = cur.fetchone()
-        if row is not None:
-            sets = ", ".join(f"{c} = {PH}" for c in cols)
-            cur.execute(
-                f"UPDATE findings SET {sets}, analyzed_at = {now_sql} "
-                # A refreshed finding is live again unless a person parked it.
-                f", state = CASE WHEN state IN ('resolved', 'superseded') "
-                f"THEN 'open' ELSE state END "
-                f"WHERE id = {PH}",
-                tuple([*vals, row["id"]]),
-            )
-            return int(row["id"])
-        ph_list = ", ".join([PH] * len(cols))
-        cur.execute(
-            f"INSERT INTO findings ({', '.join(cols)}) VALUES ({ph_list})",
-            tuple(vals),
-        )
-        return int(_last_insert_id(cur, "findings"))
+        return int(row["id"])
+    ph_list = ", ".join([PH] * len(cols))
+    cur.execute(
+        f"INSERT INTO findings ({', '.join(cols)}) VALUES ({ph_list})",
+        tuple(vals),
+    )
+    return int(_last_insert_id(cur, "findings"))
 
 
 def get_findings(
@@ -12846,6 +12897,21 @@ def mark_findings_superseded(
     behind it — never that the condition was fixed. A dismissed finding stays
     dismissed.
     """
+    with _connect() as conn, _cursor(conn) as cur:
+        return _mark_findings_superseded_cur(
+            cur, account_id, scope_key, analysis_id, keep_keys
+        )
+
+
+def _mark_findings_superseded_cur(
+    cur, account_id: int, scope_key: str, analysis_id: str, keep_keys: list[str]
+) -> int:
+    """`mark_findings_superseded`'s body, on a caller-supplied cursor.
+
+    Retiring a finding is a protected write like publishing one — it is the
+    one that can make a true, standing condition disappear from a reader's
+    Home — so the queue performs it inside the ownership transaction.
+    """
     sql = (
         f"UPDATE findings SET state = 'superseded' WHERE account_id = {PH} "
         f"AND scope_key = {PH} AND analysis_id <> {PH} "
@@ -12856,9 +12922,8 @@ def mark_findings_superseded(
         ph_list = ", ".join([PH] * len(keep_keys))
         sql += f" AND finding_key NOT IN ({ph_list})"
         args.extend(keep_keys)
-    with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(sql, tuple(args))
-        return cur.rowcount or 0
+    cur.execute(sql, tuple(args))
+    return cur.rowcount or 0
 
 
 def _last_insert_id(cur, table: str) -> int:
@@ -12880,48 +12945,152 @@ ANALYSIS_JOB_STALE_S = 900
 def enqueue_analysis_job(
     account_id: int, job_key: str, request: dict[str, Any],
     scope_key: str | None = None,
+    evidence_version: str | None = None,
 ) -> dict[str, Any]:
-    """Queue one analysis, or join the one already pending for this key.
+    """Queue one analysis, or join the one already pending for this AUDIENCE.
 
     Deduplication is the whole point: Home is polled, ingest is continuous, and
     without this every page view and every span burst would buy another model
     call for the same question.
+
+    Coalescence is by `scope_key`, not by `job_key`, and that is the fix. The
+    job key carries the evidence bucket and the period slot, so it MOVES — two
+    reads a bucket apart produced two different keys and two queued jobs for
+    one reader, and the debounce floor could not stop it because that floor
+    only looks at analyses that already finished. Keying the pending check on
+    the audience is what bounds the backlog: at most one queued-or-running
+    analysis per reader, ever, and a chain of obsolete jobs cannot form.
+
+    Joining is not forgetting. The arriving evidence version is stamped onto
+    the pending job as `pending_evidence_version`, so what landed while it was
+    queued or running stays recorded as needing coverage, and the next read
+    after it completes sees the gap and queues the follow-up. Follow-up work
+    is therefore READ-TRIGGERED, not queued automatically — see HOME_FINDINGS.md.
+
+    The invariant is enforced by the partial unique index
+    `uq_analysis_jobs_pending_scope`, not by this SELECT, so two concurrent
+    requests produce one job and one join rather than two jobs.
     """
+    scope = scope_key or (request or {}).get("scope_key")
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"SELECT id, status FROM analysis_jobs WHERE account_id = {PH} "
-            f"AND job_key = {PH} AND status IN ('queued', 'running') "
-            "ORDER BY id DESC LIMIT 1",
-            (account_id, job_key),
-        )
-        row = cur.fetchone()
-        if row is not None:
-            return {"id": int(row["id"]), "status": row["status"], "created": False}
+        existing = _pending_for_scope(cur, account_id, scope, job_key)
+        if existing is not None:
+            _note_pending_evidence(cur, existing["id"], evidence_version)
+            return {
+                "id": int(existing["id"]), "status": existing["status"],
+                "created": False,
+                "joined_scope": existing["job_key"] != job_key,
+                "job_key": existing["job_key"],
+            }
         try:
             cur.execute(
                 f"INSERT INTO analysis_jobs "
-                f"(account_id, job_key, scope_key, status, request) "
-                f"VALUES ({PH}, {PH}, {PH}, 'queued', {PH})",
-                (account_id, job_key,
-                 scope_key or (request or {}).get("scope_key"),
-                 json.dumps(request)),
+                f"(account_id, job_key, scope_key, status, request, "
+                f" evidence_version, pending_evidence_version) "
+                f"VALUES ({PH}, {PH}, {PH}, 'queued', {PH}, {PH}, {PH})",
+                (account_id, job_key, scope, json.dumps(request),
+                 evidence_version, evidence_version),
             )
-        except Exception:  # noqa: BLE001 — the unique index fired: someone won the race
-            cur.execute(
-                f"SELECT id, status FROM analysis_jobs WHERE account_id = {PH} "
-                f"AND job_key = {PH} AND status IN ('queued', 'running') "
-                "ORDER BY id DESC LIMIT 1",
-                (account_id, job_key),
-            )
-            row = cur.fetchone()
-            if row is None:
+        except Exception:  # noqa: BLE001 — a unique index fired: someone won the race
+            existing = _pending_for_scope(cur, account_id, scope, job_key)
+            if existing is None:
                 raise
-            return {"id": int(row["id"]), "status": row["status"], "created": False}
+            _note_pending_evidence(cur, existing["id"], evidence_version)
+            return {
+                "id": int(existing["id"]), "status": existing["status"],
+                "created": False,
+                "joined_scope": existing["job_key"] != job_key,
+                "job_key": existing["job_key"],
+            }
         return {
             "id": int(_last_insert_id(cur, "analysis_jobs")),
             "status": "queued",
             "created": True,
+            "joined_scope": False,
+            "job_key": job_key,
         }
+
+
+def _pending_for_scope(
+    cur, account_id: int, scope_key: str | None, job_key: str
+) -> dict[str, Any] | None:
+    """The one queued-or-running analysis for this audience, if there is one.
+
+    Falls back to the job key for legacy rows written before `scope_key`
+    existed, so an upgrade in flight does not start a second job beside one
+    already running.
+    """
+    if scope_key:
+        cur.execute(
+            f"SELECT id, status, job_key FROM analysis_jobs WHERE account_id = {PH} "
+            f"AND scope_key = {PH} AND status IN ('queued', 'running') "
+            "ORDER BY id DESC LIMIT 1",
+            (account_id, scope_key),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return dict(row)
+    cur.execute(
+        f"SELECT id, status, job_key FROM analysis_jobs WHERE account_id = {PH} "
+        f"AND job_key = {PH} AND status IN ('queued', 'running') "
+        "ORDER BY id DESC LIMIT 1",
+        (account_id, job_key),
+    )
+    row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def _note_pending_evidence(cur, job_id: int, evidence_version: str | None) -> None:
+    """Record that this evidence is still waiting to be covered.
+
+    Only ever moves forward to the NEWEST observed version. What it must never
+    do is overwrite `analyzed_evidence_version` — stamping the current
+    request's version onto an analysis that did not read it is exactly how the
+    endpoint came to report `state: current` for evidence nobody had looked at.
+    """
+    if not evidence_version:
+        return
+    cur.execute(
+        f"UPDATE analysis_jobs SET pending_evidence_version = {PH} WHERE id = {PH}",
+        (evidence_version, int(job_id)),
+    )
+
+
+def note_pending_evidence(job_id: int, evidence_version: str | None) -> None:
+    """Record, on the analysis already in flight for this audience, that newer
+    evidence has arrived and is not yet covered.
+
+    Called by the READ path when it joins a pending job. Without it, a read
+    that joins is a read that forgets: the change is neither queued nor
+    recorded, and nothing afterwards knows the running attempt did not cover
+    it.
+    """
+    if not evidence_version:
+        return
+    with _connect() as conn, _cursor(conn) as cur:
+        _note_pending_evidence(cur, job_id, evidence_version)
+
+
+def pending_analysis_for_scope(
+    account_id: int, scope_key: str
+) -> dict[str, Any] | None:
+    """The queued-or-running analysis for this audience, for a read path."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, status, job_key, evidence_version, "
+            "       pending_evidence_version, enqueued_at, started_at "
+            f"FROM analysis_jobs WHERE account_id = {PH} AND scope_key = {PH} "
+            "AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1",
+            (account_id, scope_key),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["id"] = int(out["id"])
+        for ts in ("enqueued_at", "started_at"):
+            out[ts] = _ts_to_str(out.get(ts))
+        return out
 
 
 def claim_analysis_job(max_attempts: int = ANALYSIS_JOB_MAX_ATTEMPTS) -> dict[str, Any] | None:
@@ -13018,21 +13187,110 @@ def analysis_claim_is_current(job_id: int, claim_token: int) -> bool:
         return bool(row) and int(row["attempts"]) == int(claim_token)
 
 
-def requeue_analysis_job(job_id: int, error: str) -> None:
+def requeue_analysis_job(
+    job_id: int, error: str, claim_token: int | None = None
+) -> bool:
     """Hand a failed attempt back to the queue; claim_analysis_job() retires it
-    once attempts run out."""
+    once attempts run out.
+
+    Fenced like every other write. A superseded worker requeuing "its" job
+    would be requeuing the REPLACEMENT's job — cancelling a live analysis and
+    handing its slot back to the queue on the strength of an error that
+    happened in a run nobody is waiting for any more.
+    """
+    sql = (
+        f"UPDATE analysis_jobs SET status = 'queued', error = {PH}, "
+        f"started_at = NULL, heartbeat_at = NULL WHERE id = {PH}"
+    )
+    args: list[Any] = [error, int(job_id)]
+    if claim_token is not None:
+        sql += f" AND attempts = {PH} AND status = 'running'"
+        args.append(int(claim_token))
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute(
-            f"UPDATE analysis_jobs SET status = 'queued', error = {PH}, "
-            f"started_at = NULL, heartbeat_at = NULL WHERE id = {PH}",
-            (error, job_id),
+        cur.execute(sql, tuple(args))
+        return bool(cur.rowcount)
+
+
+def commit_analysis_publication(
+    job_id: int,
+    claim_token: int | None,
+    account_id: int,
+    scope_key: str,
+    analysis_id: str,
+    publication: dict[str, Any],
+    *,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+    analyzed_evidence_version: str | None = None,
+) -> dict[str, Any]:
+    """Publish an analysis and close its job — all of it, or none of it.
+
+    The race this closes: ownership used to be checked once, before the model
+    work, and the findings were written as the investigation went. A worker
+    whose claim was reclaimed as stale mid-run had therefore already published
+    by the time `run_one()` returned `superseded`; the check protected nothing
+    that mattered. Re-checking immediately before each write would not have
+    fixed it either — a separate check and a later write is still two
+    statements with a gap between them.
+
+    So every protected write lands in ONE transaction whose first statement is
+    the ownership test itself:
+
+        UPDATE ... WHERE id = ? AND attempts = ? AND status = 'running'
+
+    Zero rows means this worker no longer owns the job, and the function
+    returns having written nothing: no findings published, none retired, the
+    job untouched, and the replacement's work undisturbed. No model call is
+    made inside this transaction — the results were staged during the
+    investigation and only committed here.
+    """
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    records = list((publication or {}).get("records") or [])
+    keep_keys = list((publication or {}).get("keep_keys") or [])
+    retire = bool((publication or {}).get("retire"))
+    with _connect() as conn, _cursor(conn) as cur:
+        # 1. Claim the write. This IS the ownership check; there is no window
+        #    between testing and acting because they are the same statement.
+        sql = (
+            f"UPDATE analysis_jobs SET status = {PH}, result = {PH}, error = {PH}, "
+            f"finished_at = {now_sql}"
         )
+        args: list[Any] = [
+            status, json.dumps(result) if result else None, error,
+        ]
+        if analyzed_evidence_version is not None:
+            # What this run ACTUALLY read. Never the request's version, and
+            # never the version a later read observed.
+            sql += f", analyzed_evidence_version = {PH}"
+            args.append(analyzed_evidence_version)
+        sql += f" WHERE id = {PH} AND status = 'running'"
+        args.append(int(job_id))
+        if claim_token is not None:
+            sql += f" AND attempts = {PH}"
+            args.append(int(claim_token))
+        cur.execute(sql, tuple(args))
+        if not cur.rowcount:
+            return {"committed": False, "published": 0, "retired": 0,
+                    "reason": "claim is no longer current"}
+
+        # 2. Same transaction, same owner: the findings.
+        for record in records:
+            _upsert_finding_cur(cur, account_id, scope_key, record)
+        retired = 0
+        if retire:
+            retired = _mark_findings_superseded_cur(
+                cur, account_id, scope_key, analysis_id, keep_keys
+            )
+        return {"committed": True, "published": len(records), "retired": retired}
 
 
 def analysis_job_status(account_id: int, job_key: str) -> dict[str, Any] | None:
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, status, attempts, error, enqueued_at, started_at, finished_at "
+            "SELECT id, status, attempts, error, enqueued_at, started_at, "
+            "       finished_at, evidence_version, analyzed_evidence_version, "
+            "       pending_evidence_version, result "
             f"FROM analysis_jobs WHERE account_id = {PH} AND job_key = {PH} "
             "ORDER BY id DESC LIMIT 1",
             (account_id, job_key),
@@ -13040,11 +13298,21 @@ def analysis_job_status(account_id: int, job_key: str) -> dict[str, Any] | None:
         row = cur.fetchone()
         if row is None:
             return None
-        out = dict(row)
-        for ts in ("enqueued_at", "started_at", "finished_at"):
+        return _analysis_job_row(row)
+
+
+def _analysis_job_row(row: Any) -> dict[str, Any]:
+    out = dict(row)
+    for ts in ("enqueued_at", "started_at", "finished_at"):
+        if ts in out:
             out[ts] = _ts_to_str(out.get(ts))
-        out["id"] = int(out["id"])
-        return out
+    out["id"] = int(out["id"])
+    raw = out.get("result")
+    try:
+        out["result"] = json.loads(raw) if isinstance(raw, str) and raw else None
+    except (TypeError, ValueError):
+        out["result"] = None
+    return out
 
 
 def last_completed_analysis(account_id: int, scope_key: str) -> dict[str, Any] | None:
@@ -13057,19 +13325,16 @@ def last_completed_analysis(account_id: int, scope_key: str) -> dict[str, Any] |
     """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, status, finished_at, result FROM analysis_jobs "
+            "SELECT id, status, finished_at, result, job_key, "
+            "       analyzed_evidence_version, pending_evidence_version "
+            "FROM analysis_jobs "
             f"WHERE account_id = {PH} AND scope_key = {PH} "
             "AND status IN ('done', 'failed') AND finished_at IS NOT NULL "
             "ORDER BY finished_at DESC, id DESC LIMIT 1",
             (account_id, scope_key),
         )
         row = cur.fetchone()
-        if row is None:
-            return None
-        out = dict(row)
-        out["id"] = int(out["id"])
-        out["finished_at"] = _ts_to_str(out.get("finished_at"))
-        return out
+        return _analysis_job_row(row) if row is not None else None
 
 
 def count_running_analysis_jobs(include_stale: bool = False) -> int:

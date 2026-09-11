@@ -202,6 +202,16 @@ class ToolBudget:
             self.exhausted.append("retrieved_events")
 
     def report(self) -> dict[str, Any]:
+        """The BUDGET's own view. Not the whole coverage story.
+
+        This says whether the allowance ran out. It cannot know that a query
+        hit its own row cap, that assignment resolution was incomplete, that a
+        result was trimmed to fit, or that a tool failed — those are facts
+        about individual retrievals, and they live on the session (see
+        `InvestigationSession.retrieval_report`). Passing THIS to validation
+        was the bug: a tool returned 30 rows, size fitting delivered 15, and
+        `complete: true` let "no other job is affected" through as supported.
+        """
         return {
             "tool_calls": self.calls,
             "tool_call_limit": self.max_calls,
@@ -210,7 +220,7 @@ class ToolBudget:
             "events_retrieved": self.events,
             "event_limit": self.max_events,
             "exhausted": sorted(set(self.exhausted)),
-            "complete": not self.exhausted,
+            "budget_complete": not self.exhausted,
         }
 
 
@@ -239,22 +249,81 @@ class InvestigationSession:
         self.now = now or datetime.now(timezone.utc)
         # kind:ref -> the payload as retrieved
         self.evidence: dict[str, dict[str, Any]] = {}
+        # Keys the model was ACTUALLY SHOWN. A key in `evidence` but not here
+        # was retrieved and then trimmed away before delivery — it is not
+        # citable, and it is not evidence.
+        self.delivered: set[str] = set()
         # calculation id -> {value, ...}
         self.calculations: dict[str, dict[str, Any]] = {}
         self.transcript: list[dict[str, Any]] = []
+        # Every way this retrieval fell short of a complete search. Budget
+        # exhaustion is only one of them; see `retrieval_report`.
+        self.limitations: list[dict[str, Any]] = []
+        # Provenance for the response currently being assembled: which ledger
+        # keys THIS tool call introduced, and where each one sits in the
+        # payload so delivery can be reconciled after trimming.
+        self._response: dict[str, Any] | None = None
+        # Provenance parked by payload identity, so `fit` reconciles the
+        # response it was actually handed. Keying it on "the last `run`" would
+        # make correctness depend on `run`/`fit` being perfectly interleaved,
+        # and a caller that retrieves twice before sending either result would
+        # silently attribute one response's rows to the other. The payload is
+        # held alongside its provenance so the id cannot be recycled.
+        self._responses: dict[int, tuple[Any, dict[str, Any]]] = {}
 
     # -- ledger ---------------------------------------------------------
-    def _record(self, kind: str, ref: Any, payload: dict[str, Any]) -> None:
-        self.evidence[f"{kind}:{ref}"] = payload
+    def _record(
+        self, kind: str, ref: Any, payload: dict[str, Any],
+        *, listed: tuple[str, Any] | None = None,
+    ) -> None:
+        """Record one retrieved row, with the provenance delivery needs.
+
+        `listed` names the payload list this row travels in (`("runs", 41)`),
+        so when `fit` shortens that list we can tell which ledger entries this
+        response failed to deliver — WITHOUT touching entries an earlier
+        response already delivered. Dropping every entry of a kind was the bug
+        (`forget_beyond`): a run delivered by call 1 vanished when call 3's run
+        list was trimmed, and a finding legitimately citing it was then
+        rejected as a fabrication.
+        """
+        key = f"{kind}:{ref}"
+        first_time = key not in self.evidence
+        self.evidence[key] = payload
+        if self._response is not None:
+            if first_time and key not in self.delivered:
+                self._response["introduced"].add(key)
+            if listed is not None:
+                self._response["listed"].setdefault(listed[0], []).append(
+                    (str(listed[1]), key)
+                )
+            else:
+                self._response["unlisted"].add(key)
 
     def _calc(self, calc_id: str, value: Any, detail: dict[str, Any]) -> str:
         self.calculations[calc_id] = {"value": value, **detail}
         return calc_id
 
+    def note_limitation(self, kind: str, **detail: Any) -> None:
+        """Record one concrete way this retrieval was less than the whole.
+
+        These travel into `derive_coverage` and decide whether an exhaustive
+        claim ("none", "only", "all", a percentage) may be published at all.
+        """
+        entry = {"kind": kind, **detail}
+        if entry not in self.limitations:
+            self.limitations.append(entry)
+
     # -- dispatch -------------------------------------------------------
     def run(self, name: str, raw_input: dict[str, Any]) -> dict[str, Any]:
         """Execute one allowlisted tool. Never raises into the model loop."""
+        self._response = {"introduced": set(), "listed": {}, "unlisted": set(),
+                          "tool": name}
         if not self.budget.can_call():
+            self.note_limitation(
+                "budget_exhausted", tool=name,
+                exhausted=sorted(set(self.budget.exhausted)),
+            )
+            self._response = None
             return {
                 "error": "budget_exhausted",
                 "exhausted": sorted(set(self.budget.exhausted)),
@@ -263,28 +332,62 @@ class InvestigationSession:
         self.budget.spend_call()
         handler = getattr(self, f"_tool_{name}", None)
         if handler is None:
+            self.note_limitation("unknown_tool", tool=name)
+            self._response = None
             return {"error": f"unknown tool {name!r}"}
         try:
             result = handler(raw_input or {})
         except Exception as exc:  # noqa: BLE001 — a tool failure is data, not a crash
             logger.warning("[investigation] tool %s failed: %s", name, exc)
+            # A question the investigation asked and did not get an answer to.
+            # The search is incomplete whatever the budget says.
+            self.note_limitation("retrieval_failed", tool=name)
             result = {"error": f"tool {name} failed"}
         result = _clip_deep(result)
+        if isinstance(result, dict) and result.get("error"):
+            self.note_limitation("retrieval_failed", tool=name,
+                                 error=str(result.get("error"))[:80])
         self.transcript.append({"tool": name, "input": raw_input, "ok": "error" not in result})
+        self._park_response(result)
         return result
 
-    def forget_beyond(self, kind: str, keep_refs: set[str]) -> None:
-        """Drop ledger entries of one kind that the model was not shown.
+    def _park_response(self, result: Any) -> None:
+        """Hold this call's provenance until `fit` is handed its payload."""
+        resp, self._response = self._response, None
+        if resp is None:
+            return
+        if len(self._responses) > 32:  # a tool loop is bounded; this is belt
+            self._responses.pop(next(iter(self._responses)))
+        self._responses[id(result)] = (result, resp)
 
-        Called when `fit` trims a result: a finding may only cite what the
-        investigation actually received, so evidence that fell to the size
-        budget must not stay quotable.
+    # -- coverage -------------------------------------------------------
+    def retrieval_report(self) -> dict[str, Any]:
+        """What this retrieval session could and could not establish.
+
+        The budget's own report is one input. The others are facts only the
+        individual retrievals know:
+
+          query truncation        a row or event cap was reached
+          incomplete resolution   assignment/scope membership was not resolved
+          size trimming           `fit` dropped entries to make a result send
+          dropped results         a whole tool result was too large to send
+          retrieval failure       a tool errored, leaving its question open
+
+        `complete` is true only when NONE of these fired. It is what
+        `findings.derive_coverage` reads, and it is what stops "no other job is
+        affected" being published over a search that returned half its rows.
         """
-        for key in [
-            k for k in self.evidence
-            if k.startswith(f"{kind}:") and k.split(":", 1)[1] not in keep_refs
-        ]:
-            self.evidence.pop(key, None)
+        budget = self.budget.report()
+        kinds = sorted({str(l.get("kind")) for l in self.limitations})
+        return {
+            **budget,
+            "limitations": list(self.limitations),
+            "limitation_kinds": kinds,
+            "exhausted": sorted(set(self.budget.exhausted)),
+            "evidence_delivered": len(self.delivered),
+            "evidence_retrieved": len(self.evidence),
+            "complete": bool(budget["budget_complete"]) and not self.limitations,
+        }
 
     # Lists that may be shortened to make a result fit, in the order they are
     # sacrificed. Rows first: dropping the 20th comparable run costs less than
@@ -311,6 +414,9 @@ class InvestigationSession:
         Returns (payload_as_sent, serialized) so the evidence ledger can be
         reconciled with what the model actually received.
         """
+        parked = self._responses.pop(id(result), None)
+        resp = parked[1] if parked else None
+        tool = (resp or {}).get("tool")
         trimmed = dict(result)
         dropped: dict[str, int] = {}
         blob = json.dumps(trimmed, default=str)
@@ -329,21 +435,6 @@ class InvestigationSession:
                 trimmed[key] = items
                 blob = json.dumps(trimmed, default=str)
         if dropped:
-            # The ledger must match what the model was shown. Evidence that
-            # fell to the size budget is not quotable — citing it would be
-            # citing something never received.
-            if "runs" in dropped and isinstance(trimmed.get("runs"), list):
-                self.forget_beyond(
-                    "run", {str(r.get("run_id")) for r in trimmed["runs"]}
-                )
-            if "waits" in dropped and isinstance(trimmed.get("waits"), list):
-                self.forget_beyond(
-                    "run", {str(r.get("run_id")) for r in trimmed["waits"]}
-                )
-            if "events" in dropped and isinstance(trimmed.get("events"), list):
-                self.forget_beyond(
-                    "run_event", {str(e.get("event_id")) for e in trimmed["events"]}
-                )
             trimmed["size_truncated"] = {
                 "dropped": dropped,
                 "reason": "result exceeded the per-call size budget",
@@ -354,6 +445,7 @@ class InvestigationSession:
                 ),
             }
             blob = json.dumps(trimmed, default=str)
+        whole_result_dropped = False
         if len(blob) > MAX_TOOL_RESULT_CHARS:
             # Nothing left to drop — the scalar fields alone are over budget.
             # Replace rather than slice: a valid small object beats a large
@@ -364,7 +456,64 @@ class InvestigationSession:
                 "budget_chars": MAX_TOOL_RESULT_CHARS,
             }
             blob = json.dumps(trimmed)
+            whole_result_dropped = True
+            self.note_limitation("result_dropped", tool=tool)
+        if dropped:
+            self.note_limitation("size_trimmed", tool=tool, dropped=dict(dropped))
+        self._settle_delivery(resp, trimmed,
+                              whole_result_dropped=whole_result_dropped)
         return trimmed, blob
+
+    def _settle_delivery(
+        self, resp: dict[str, Any] | None, sent: dict[str, Any], *,
+        whole_result_dropped: bool,
+    ) -> None:
+        """Reconcile the ledger with what this response actually delivered.
+
+        Two rules, and the second is the one the old `forget_beyond` broke:
+
+          * A record this response INTRODUCED and did not deliver is removed.
+            It was retrieved but never shown, so citing it would be citing
+            something the investigation never received. If the whole result was
+            dropped, that is every record it introduced.
+          * A record delivered by an EARLIER response is kept, even when this
+            response also mentioned it and then trimmed it away. Overlapping
+            results are normal — the same run comes back from a run list and
+            from an inspection — and losing evidence already put in front of
+            the model would invalidate findings that legitimately rest on it.
+
+        So removal is scoped to what this one response newly introduced, never
+        to a kind.
+        """
+        if resp is None:
+            return
+        introduced: set[str] = set(resp["introduced"])
+        if whole_result_dropped:
+            # Nothing reached the model. Anything this response was the first
+            # to retrieve is unseen content and must not become citable.
+            for key in introduced:
+                self.evidence.pop(key, None)
+            return
+
+        delivered_now: set[str] = set(resp["unlisted"])
+        for list_name, entries in resp["listed"].items():
+            items = sent.get(list_name)
+            kept_refs = set()
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        for field in ("run_id", "event_id", "ref", "id"):
+                            if item.get(field) is not None:
+                                kept_refs.add(str(item[field]))
+            for ref, key in entries:
+                if ref in kept_refs:
+                    delivered_now.add(key)
+        self.delivered |= delivered_now
+        for key in introduced - delivered_now:
+            # Retrieved by this response, trimmed before it was sent, and not
+            # delivered by any earlier response either.
+            if key not in self.delivered:
+                self.evidence.pop(key, None)
 
     def result_text(self, result: dict[str, Any]) -> str:
         """The serialized, size-bounded result. Always valid JSON."""
@@ -383,12 +532,22 @@ class InvestigationSession:
             limit=int(inp.get("limit") or 25),
         )
         for run in res["runs"]:
-            self._record("run", run["run_id"], run)
+            self._record("run", run["run_id"], run, listed=("runs", run["run_id"]))
             if run.get("job_id") is not None:
-                self._record("job", run["job_id"], {"job_id": run["job_id"]})
+                self._record("job", run["job_id"], {"job_id": run["job_id"]},
+                             listed=("runs", run["run_id"]))
             if run.get("agent"):
-                self._record("agent", run["agent"], {"agent": run["agent"]})
+                self._record("agent", run["agent"], {"agent": run["agent"]},
+                             listed=("runs", run["run_id"]))
         self.budget.spend_rows(res["returned"])
+        if res.get("truncated"):
+            # The QUERY hit its own row cap. The budget knows nothing about
+            # this, and a scope the search did not finish reading cannot
+            # support a claim about what is not in it.
+            self.note_limitation(
+                "query_row_cap", tool="list_comparable_runs",
+                returned=res["returned"], row_cap=res.get("row_cap"),
+            )
         res["window_days"] = days
         return res
 
@@ -410,10 +569,21 @@ class InvestigationSession:
              "span_count", "error_span_count")
         })
         for ev in detail["events"]:
-            self._record("run_event", ev["event_id"], ev)
+            self._record("run_event", ev["event_id"], ev,
+                         listed=("events", ev["event_id"]))
         for i, span in enumerate(detail["failed_spans"]):
-            self._record("failed_span", f"{run_id}.{i}", span)
+            # Stamp the citable ref onto the row the model is shown, so the
+            # reference it may quote and the entry delivery reconciles against
+            # are the same string.
+            span["ref"] = f"{run_id}.{i}"
+            self._record("failed_span", span["ref"], span,
+                         listed=("failed_spans", span["ref"]))
         self.budget.spend_events(len(detail["events"]))
+        if detail.get("events_truncated"):
+            self.note_limitation(
+                "query_event_cap", tool="inspect_run", run_id=run_id,
+                event_cap=detail.get("event_cap"),
+            )
         return detail
 
     def _tool_compare_outcome_mix(self, inp: dict[str, Any]) -> dict[str, Any]:
@@ -469,7 +639,7 @@ class InvestigationSession:
         )
         by_holder: dict[str, int] = {}
         for w in res["waits"]:
-            self._record("run", w["run_id"], w)
+            self._record("run", w["run_id"], w, listed=("waits", w["run_id"]))
             holder = w.get("waiting_on") or w.get("state") or "unknown"
             by_holder[holder] = by_holder.get(holder, 0) + 1
         for holder, n in by_holder.items():
@@ -478,6 +648,18 @@ class InvestigationSession:
                 {"holder": holder, "measured": "open work waiting now"},
             )
         self.budget.spend_rows(res["returned"])
+        if res.get("truncated"):
+            self.note_limitation(
+                "query_row_cap", tool="wait_concentration",
+                returned=res["returned"], row_cap=res.get("row_cap"),
+            )
+        if not res.get("assignment_resolution_complete", True):
+            # The snapshot's own bound, reaching the investigation: some of
+            # these rows have no resolved holder, which is not the same as
+            # having none. A concentration claim over that is a floor.
+            self.note_limitation(
+                "assignment_resolution_incomplete", tool="wait_concentration",
+            )
         res["by_holder"] = by_holder
         res["calculation_ids"] = {
             h: f"wait.count.{h}" for h in by_holder

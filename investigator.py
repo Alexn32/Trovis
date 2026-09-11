@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,7 +51,29 @@ logger = logging.getLogger("trovis")
 # Bump when any prompt below changes. It is part of the job key and is stored
 # on every finding, so a prompt edit re-analyses rather than silently mixing
 # outputs from two different sets of instructions.
-PROMPT_VERSION = "home-investigation-2026-09-v1"
+PROMPT_VERSION = "home-investigation-2026-09-v2"
+
+# What an analysis CONCLUDED about itself, which is not the same as what it
+# published. An empty result means one of two completely different things, and
+# conflating them let an unparseable discovery reply retire standing findings
+# with "no candidate worth investigating".
+ANALYSIS_COMPLETE = "complete"              # the analysis ran; empty is a real answer
+ANALYSIS_DISCOVERY_UNUSABLE = "discovery_unusable"
+ANALYSIS_DEADLINE = "deadline"
+ANALYSIS_RETRIEVAL_FAILED = "retrieval_failed"
+ANALYSIS_INTERRUPTED = "interrupted"
+ANALYSIS_SCOPE_CHANGED = "scope_changed"
+ANALYSIS_SUPERSEDED = "superseded"
+
+# Outcomes that mean the analysis did NOT finish its job. None of them may
+# retire a finding, and none of them may be reported as "analysed, found
+# nothing".
+UNSUCCESSFUL_OUTCOMES = (
+    ANALYSIS_DISCOVERY_UNUSABLE,
+    ANALYSIS_DEADLINE,
+    ANALYSIS_RETRIEVAL_FAILED,
+    ANALYSIS_INTERRUPTED,
+)
 
 MODEL = "claude-opus-5"
 # Discovery and assessment are cheap, structured steps; the investigation loop
@@ -411,17 +434,37 @@ def investigate(
     scope_key: str,
     evidence: dict[str, Any],
     now: datetime | None = None,
+    defer_publication: bool = False,
 ) -> dict[str, Any]:
-    """Run one analysis end to end. Returns a report; publishes as it goes.
+    """Run one analysis end to end. Returns a report carrying its publication.
 
     Never raises for ordinary trouble: a refused step, an unparseable reply or
     an exhausted budget all reduce what gets published rather than failing the
     job. `NoModelKey` is the one exception, because "we cannot analyse" is a
     different thing for the reader than "we analysed and found nothing".
+
+    Nothing is written while a model call is outstanding. The findings are
+    STAGED into `report["publication"]` and committed at the end — by the
+    caller when `defer_publication` is set, so the queue can make the whole
+    commit conditional on still owning the job (see
+    `database.commit_analysis_publication`). Writing as it went was the race:
+    a worker whose claim had been taken over mid-investigation had already
+    published by the time `run_one()` discovered it was superseded.
+
+    `report["analysis_outcome"]` says whether this was an analysis at all.
+    `report["retire_previous"]` says whether it covered enough to retire
+    findings it did not republish — a bounded run that skipped a candidate, a
+    rewrite that failed, or a discovery reply that could not be read all
+    publish what they have and leave the rest of the slice alone.
     """
     now = now or datetime.now(timezone.utc)
     deadline = Deadline(wall_clock_budget_s())
-    analysis_id = f"{scope_key[:8]}-{int(now.timestamp())}"
+    # Unique per RUN, not per second. Retirement is `analysis_id <> <this one>`,
+    # so two analyses of the same audience inside one second used to share an
+    # id and the second one silently retired nothing — the supersede clause
+    # excluded the very rows it was meant to close. A random suffix costs
+    # nothing and removes the collision entirely.
+    analysis_id = f"{scope_key[:8]}-{int(now.timestamp())}-{uuid.uuid4().hex[:8]}"
     financial_visible = bool((snapshot.get("financial") or {}).get("visible"))
 
     session = investigation_tools.InvestigationSession(
@@ -443,33 +486,74 @@ def investigate(
         "rejected": [],
         "abstained": [],
         "budget": None,
+        "retrieval": None,
         "deadline_hit": False,
+        "analysis_outcome": ANALYSIS_COMPLETE,
+        "retire_previous": True,
+        "publication": {"records": [], "keep_keys": [], "retire": False},
     }
+    # Reasons this run did not cover its slice. Any one of them means the
+    # findings it did not republish are not retired: the run did not look at
+    # them, which is not the same as looking and finding them gone.
+    incomplete: list[str] = []
+
+    def _finish(outcome: str) -> dict[str, Any]:
+        report["analysis_outcome"] = outcome
+        report["retrieval"] = session.retrieval_report()
+        report["budget"] = session.budget.report()
+        report["deadline_hit"] = deadline.hit
+        if outcome != ANALYSIS_COMPLETE:
+            incomplete.append(outcome)
+        if not report["retrieval"]["complete"]:
+            incomplete.append("retrieval_incomplete")
+        retire = not incomplete
+        report["retire_previous"] = retire
+        report["coverage_gaps"] = sorted(set(incomplete))
+        report["publication"]["retire"] = retire
+        report["published"] = len(report["publication"]["records"])
+        if not defer_publication:
+            commit_publication(account_id, scope_key, analysis_id,
+                               report["publication"])
+        return report
 
     brief = _reader_brief(snapshot, seat, viewer_user_id)
-    candidates = _discover(brief, snapshot, deadline)
+    discovery = _discover(brief, snapshot, deadline)
+    if not discovery["ok"]:
+        # NOT an abstention. Say what actually happened, publish nothing, and
+        # leave every standing finding exactly where it was.
+        report["abstained"].append(f"discovery unusable: {discovery['reason']}")
+        return _finish(discovery["reason"])
+
+    candidates = discovery["candidates"]
     report["candidates"] = len(candidates)
     if not candidates:
+        # A genuine, successful abstention: the model read the snapshot and
+        # said there is nothing here worth a question. This one MAY retire
+        # findings the account has moved past.
         report["abstained"].append("no candidate worth investigating")
-        report["budget"] = session.budget.report()
-        database.mark_findings_superseded(account_id, scope_key, analysis_id, [])
-        return report
+        return _finish(ANALYSIS_COMPLETE)
 
     composed: list[dict[str, Any]] = []
     for candidate in candidates[:MAX_CANDIDATES]:
         if not deadline.ok():
             report["deadline_hit"] = True
+            incomplete.append("candidates_not_examined")
             break
         outcome = _investigate_one(candidate, brief, snapshot, session, deadline)
         if outcome is None:
             report["abstained"].append(f"{candidate.get('topic')}: no usable verdict")
+            # The candidate was raised and never decided. Anything standing
+            # that it might have covered stays standing.
+            incomplete.append("candidate_undecided")
             continue
         if outcome.get("verdict") == "refuted":
+            # Examined and answered. This is a real result, not a gap.
             report["abstained"].append(f"{candidate.get('topic')}: refuted by evidence")
             continue
         draft = _compose(candidate, outcome, brief, snapshot, session, deadline)
         if draft is None:
             report["abstained"].append(f"{candidate.get('topic')}: nothing composable")
+            incomplete.append("candidate_uncomposed")
             continue
         settled = _settle(candidate, draft, outcome, brief, snapshot, session, deadline)
         if settled is None:
@@ -477,21 +561,26 @@ def investigate(
                 "topic": candidate.get("topic"),
                 "reason": "no wording the evidence supports",
             })
+            incomplete.append("wording_withheld")
             continue
         if settled.get("withheld"):
             report["rejected"].append({
                 "topic": candidate.get("topic"), "reason": settled["withheld"],
             })
+            # A rewrite that could not be narrowed says the WORDING failed, not
+            # that the condition ended.
+            incomplete.append("wording_withheld")
             continue
         composed.append(settled["draft"])
 
     if not composed:
-        report["budget"] = session.budget.report()
-        database.mark_findings_superseded(account_id, scope_key, analysis_id, [])
-        return report
+        return _finish(ANALYSIS_COMPLETE)
 
     ordered = _rank(composed, brief, deadline)
-    published_keys: list[str] = []
+    # Coverage the validator will derive from. The SESSION's report, not the
+    # budget's: the budget knows about exhaustion and nothing about a capped
+    # query, a trimmed result, an unresolved assignment or a failed tool.
+    retrieval = session.retrieval_report()
     for rank_index, draft in enumerate(ordered[:MAX_FINDINGS_PUBLISHED]):
         try:
             validated = findings_mod.validate_finding(
@@ -500,9 +589,7 @@ def investigate(
                 evidence_index=session.evidence,
                 calculations=session.calculations,
                 financial_visible=financial_visible,
-                # The investigation's own bound is part of coverage: a capped
-                # search cannot support a claim about what is not there.
-                retrieval=session.budget.report(),
+                retrieval=retrieval,
             )
         except findings_mod.FindingRejected as exc:
             report["rejected"].append({
@@ -527,19 +614,35 @@ def investigate(
             "rank_score": float(draft.get("rank_score") or (1.0 - rank_index * 0.1)),
         }
         # Coverage was derived by the validator from the snapshot and the
-        # retrieval budget; only the deadline is news to it.
+        # retrieval session; only the deadline is news to it.
         record["coverage"] = {
             **(record.get("coverage") or {}),
             "deadline_hit": deadline.hit,
         }
-        database.upsert_finding(account_id, scope_key, record)
-        published_keys.append(key)
+        report["publication"]["records"].append(record)
+        report["publication"]["keep_keys"].append(key)
 
-    database.mark_findings_superseded(account_id, scope_key, analysis_id, published_keys)
-    report["published"] = len(published_keys)
-    report["budget"] = session.budget.report()
-    report["deadline_hit"] = deadline.hit
-    return report
+    return _finish(ANALYSIS_COMPLETE)
+
+
+def commit_publication(
+    account_id: int, scope_key: str, analysis_id: str, publication: dict[str, Any]
+) -> int:
+    """Write a staged publication with no ownership fence.
+
+    The direct path, for callers driving `investigate()` themselves. The QUEUE
+    does not use this — it commits through
+    `database.commit_analysis_publication`, which makes the same writes
+    conditional on still holding the job's claim.
+    """
+    for record in publication.get("records") or []:
+        database.upsert_finding(account_id, scope_key, record)
+    if publication.get("retire"):
+        database.mark_findings_superseded(
+            account_id, scope_key, analysis_id,
+            list(publication.get("keep_keys") or []),
+        )
+    return len(publication.get("records") or [])
 
 
 def _reader_brief(
@@ -584,9 +687,18 @@ def _snapshot_for_prompt(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def _discover(
     brief: dict[str, Any], snapshot: dict[str, Any], deadline: Deadline
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """Choose what deserves a look. Returns {ok, candidates, reason}.
+
+    `ok: False` is NOT an empty candidate list. An unparseable reply, a refused
+    step or an expired deadline says nothing whatever about whether this
+    account has conditions worth reporting — and the earlier version flattened
+    all of them into `[]`, which then read as "we looked and there is nothing"
+    and retired findings that were still true. An invalid response is not
+    evidence that nothing matters.
+    """
     if not deadline.ok():
-        return []
+        return {"ok": False, "candidates": [], "reason": ANALYSIS_DEADLINE}
     user = (
         "SCOPE (who this is for):\n" + json.dumps(brief, indent=2)
         + "\n\nSNAPSHOT (authoritative aggregates — you may cite these by "
@@ -596,12 +708,24 @@ def _discover(
     )
     parsed = _ask(DISCOVERY_PROMPT, user, DISCOVERY_TOKENS)
     if not isinstance(parsed, dict):
-        return []
+        return {"ok": False, "candidates": [],
+                "reason": ANALYSIS_DISCOVERY_UNUSABLE}
+    raw = parsed.get("candidates")
+    if raw is None or not isinstance(raw, list):
+        # The key is missing or the wrong shape. "No candidates" has to be
+        # SAID, not inferred from a reply we could not read.
+        return {"ok": False, "candidates": [],
+                "reason": ANALYSIS_DISCOVERY_UNUSABLE}
     out = []
-    for c in (parsed.get("candidates") or [])[:MAX_CANDIDATES]:
+    for c in raw[:MAX_CANDIDATES]:
         if isinstance(c, dict) and c.get("question"):
             out.append(c)
-    return out
+    if raw and not out:
+        # Entries were returned and not one was usable. That is a malformed
+        # reply, not an account with nothing going on.
+        return {"ok": False, "candidates": [],
+                "reason": ANALYSIS_DISCOVERY_UNUSABLE}
+    return {"ok": True, "candidates": out, "reason": None}
 
 
 def _investigate_one(

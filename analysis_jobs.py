@@ -220,38 +220,87 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
             "prompt_version": request["prompt_version"],
         }
 
+    observed = request["evidence"]["version"]
     base = {
-        "evidence_version": request["evidence"]["version"],
+        # What the record hashes to RIGHT NOW. Distinct from what any analysis
+        # actually read, which is `analyzed_evidence_version` below.
+        "evidence_version": observed,
         "prompt_version": request["prompt_version"],
         "findings_from_previous_analysis": False,
+        "analyzed_evidence_version": None,
+        "newer_evidence_available": False,
     }
-    existing = database.analysis_job_status(request["account_id"], request["job_key"])
-    if existing and existing["status"] in ("queued", "running"):
-        # A refresh is in flight. Whatever findings the reader is being shown
-        # alongside this came from an EARLIER analysis, and saying so is the
-        # difference between "here is the latest" and "here is the last
-        # answer while we look again".
+
+    # The AUDIENCE's pending work comes first, because the job key moves with
+    # the evidence bucket and a scope-level job may be in flight under a
+    # different one. Reporting "nothing queued" because this request's key is
+    # new is how a chain of obsolete jobs used to form.
+    pending = database.pending_analysis_for_scope(
+        request["account_id"], request["scope_key"]
+    )
+    if pending is not None:
+        analyzed = _analyzed_version(request)
+        # Joining is not forgetting: what has arrived since is stamped on the
+        # job in flight, so the change stays recorded as needing coverage even
+        # though this read bought no second analysis.
+        if pending.get("pending_evidence_version") != observed:
+            database.note_pending_evidence(pending["id"], observed)
         return {
             **base,
-            "state": existing["status"],
+            "state": pending["status"],
             "reason": None,
             "enqueued": False,
-            "job_id": existing["id"],
+            "job_id": pending["id"],
+            # A refresh is in flight. Whatever findings the reader is being
+            # shown alongside this came from an EARLIER analysis, and saying so
+            # is the difference between "here is the latest" and "here is the
+            # last answer while we look again".
             "findings_from_previous_analysis": findings_count > 0,
             "previous_analysis_at": newest_analyzed_at,
+            "analyzed_evidence_version": analyzed,
+            "newer_evidence_available": bool(analyzed and analyzed != observed),
+            "joined_pending_analysis": pending["job_key"] != request["job_key"],
         }
+
+    existing = database.analysis_job_status(request["account_id"], request["job_key"])
     if existing and existing["status"] == "done":
         age = _age_seconds(existing.get("finished_at"))
-        if age is not None and age < freshness_s():
+        analyzed = existing.get("analyzed_evidence_version")
+        outcome = ((existing.get("result") or {}).get("analysis_outcome")
+                   or investigator.ANALYSIS_COMPLETE)
+        fresh = age is not None and age < freshness_s()
+        if fresh and outcome in investigator.UNSUCCESSFUL_OUTCOMES:
+            # The job finished; the ANALYSIS did not. An unusable discovery
+            # reply or an expired deadline is not an investigation that found
+            # nothing, and the findings standing from before it are still the
+            # most recent real answer.
+            return {
+                **base,
+                "state": "incomplete",
+                "reason": f"the last analysis did not complete ({outcome})",
+                "enqueued": False,
+                "completed_at": existing["finished_at"],
+                "analysis_outcome": outcome,
+                "findings_from_previous_analysis": findings_count > 0,
+                "previous_analysis_at": newest_analyzed_at,
+                "analyzed_evidence_version": analyzed,
+                "newer_evidence_available": bool(analyzed and analyzed != observed),
+            }
+        if fresh and (analyzed is None or analyzed == observed):
+            # Current means one thing: a completed analysis read THESE records.
             return {
                 **base,
                 "state": "current",
                 "reason": None,
                 "enqueued": False,
                 "completed_at": existing["finished_at"],
+                "analyzed_evidence_version": analyzed,
+                "analysis_outcome": outcome,
             }
-        # Expired. Fall through and queue a refresh — but a job row already
-        # exists for this key, so the enqueue below is what re-opens it.
+        # Either the analysis expired, or evidence has moved since it ran.
+        # Fall through and queue a refresh — the debounce floor below may
+        # still defer it, and if it does the reader is told that newer
+        # evidence is waiting rather than that it was already covered.
     if existing and existing["status"] == "failed":
         # Retries are exhausted for this key. A newer evidence bucket, a moved
         # period or a prompt change is a different key and queues on its own.
@@ -268,6 +317,11 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
             # replacing was wrong.
             "findings_from_previous_analysis": findings_count > 0,
             "previous_analysis_at": newest_analyzed_at,
+            "analyzed_evidence_version": existing.get("analyzed_evidence_version"),
+            "newer_evidence_available": bool(
+                existing.get("analyzed_evidence_version")
+                and existing["analyzed_evidence_version"] != observed
+            ),
         }
 
     # Debounce: however much evidence has arrived, one AUDIENCE does not start
@@ -282,10 +336,14 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
     )
     since_last = _age_seconds((last or {}).get("finished_at"))
     if since_last is not None and since_last < debounce_s():
+        analyzed = (last or {}).get("analyzed_evidence_version")
+        newer = bool(analyzed and analyzed != observed)
         return {
             **base,
             "state": "debounced",
             "reason": (
+                "newer evidence has arrived and is waiting for the next run"
+                if newer else
                 "analysed recently; evidence that arrived since will be covered "
                 "by the next run"
             ),
@@ -294,6 +352,10 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
                                     or newest_analyzed_at,
             "findings_from_previous_analysis": findings_count > 0,
             "debounce_seconds": debounce_s(),
+            "analyzed_evidence_version": analyzed,
+            # A deferred refresh is fine. Saying the refresh already happened
+            # is not, and this is the field that stops it being said.
+            "newer_evidence_available": newer,
         }
 
     queued = database.enqueue_analysis_job(
@@ -302,7 +364,9 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
          ("scope_key", "viewer_user_id", "whose", "person_id", "days",
           "timezone", "evidence")},
         scope_key=request["scope_key"],
+        evidence_version=observed,
     )
+    analyzed = _analyzed_version(request)
     return {
         **base,
         "state": "queued",
@@ -312,7 +376,26 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
         "stale_findings": findings_count > 0,
         "findings_from_previous_analysis": findings_count > 0,
         "previous_analysis_at": newest_analyzed_at,
+        "joined_pending_analysis": bool(queued.get("joined_scope")),
+        # What is on screen still came from the LAST completed analysis, and
+        # a queued refresh does not retroactively make it cover today's
+        # records. Reporting the observed version here was the bug.
+        "analyzed_evidence_version": analyzed,
+        "newer_evidence_available": bool(analyzed and analyzed != observed),
     }
+
+
+def _analyzed_version(request: dict[str, Any]) -> str | None:
+    """What the most recent COMPLETED analysis for this audience actually read.
+
+    Read from the job that ran, never from the request in hand. Stamping the
+    current request's evidence version onto an older analysis is precisely how
+    `state: current` came to be reported for records nothing had looked at.
+    """
+    last = database.last_completed_analysis(
+        request["account_id"], request["scope_key"]
+    )
+    return (last or {}).get("analyzed_evidence_version")
 
 
 def run_one() -> dict[str, Any] | None:
@@ -344,7 +427,8 @@ def run_one() -> dict[str, Any] | None:
         try:
             report = _execute(job)
         except investigator.NoModelKey as exc:
-            # Not retryable — waiting does not configure a key.
+            # Not retryable — waiting does not configure a key. Fenced anyway:
+            # a superseded worker may not fail the job that replaced it.
             database.finish_analysis_job(
                 job["id"], "failed", error=str(exc), claim_token=token)
             return {"job_id": job["id"], "status": "failed", "error": "no_model_key"}
@@ -354,21 +438,61 @@ def run_one() -> dict[str, Any] | None:
                 database.finish_analysis_job(
                     job["id"], "failed", error=str(exc)[:400], claim_token=token)
                 return {"job_id": job["id"], "status": "failed", "error": str(exc)[:200]}
-            database.requeue_analysis_job(job["id"], str(exc)[:400])
+            # Fenced requeue: an old worker must not hand the REPLACEMENT's
+            # live job back to the queue on the strength of its own crash.
+            if not database.requeue_analysis_job(
+                job["id"], str(exc)[:400], claim_token=token
+            ):
+                return {"job_id": job["id"], "status": "superseded"}
             return {"job_id": job["id"], "status": "requeued", "error": str(exc)[:200]}
+
         report["seconds"] = round(time.monotonic() - started, 2)
-        # Fenced: if this job was reclaimed as stale while we were working, a
-        # newer worker owns it and our result is discarded rather than
-        # overwriting theirs.
-        if not database.finish_analysis_job(
-            job["id"], "done", result=report, claim_token=token
-        ):
+        outcome = report.get("analysis_outcome")
+        publication = report.get("publication") or {}
+
+        if outcome in (investigator.ANALYSIS_SCOPE_CHANGED,
+                       investigator.ANALYSIS_SUPERSEDED):
+            # Nothing to publish and nothing to retry. Close the job out
+            # fenced; if the fence refuses, someone else already owns it.
+            landed = database.finish_analysis_job(
+                job["id"], "done", result=report, claim_token=token)
+            return {"job_id": job["id"],
+                    "status": "done" if landed else "superseded", **report}
+
+        if outcome in investigator.UNSUCCESSFUL_OUTCOMES and not publication.get("records"):
+            # The job ran; the analysis did not complete and produced nothing.
+            # It must NOT be closed as a successful empty investigation — the
+            # previously published findings are still the most recent real
+            # answer, and `ensure_analysis` reports `incomplete` rather than
+            # `current`. Retry within the same bounded budget.
+            if job["attempts"] >= database.ANALYSIS_JOB_MAX_ATTEMPTS:
+                database.finish_analysis_job(
+                    job["id"], "done", result=report, claim_token=token)
+                return {"job_id": job["id"], "status": "incomplete", **report}
+            if not database.requeue_analysis_job(
+                job["id"], f"analysis incomplete: {outcome}", claim_token=token
+            ):
+                return {"job_id": job["id"], "status": "superseded"}
+            return {"job_id": job["id"], "status": "requeued", "reason": outcome}
+
+        # THE protected write. Publishing the findings, retiring the ones this
+        # analysis superseded, and closing the job all happen inside one
+        # transaction whose first statement is the ownership test. A worker
+        # whose claim was taken over mid-investigation writes nothing at all —
+        # not a finding, not a retirement, not a job status.
+        committed = database.commit_analysis_publication(
+            job["id"], token, job["account_id"], report.get("scope_key") or "",
+            report.get("analysis_id") or "", publication,
+            status="done", result=report,
+            analyzed_evidence_version=report.get("evidence_version"),
+        )
+        if not committed["committed"]:
             logger.info(
-                "[analysis] job %s was superseded; discarding this worker's result",
-                job["id"],
+                "[analysis] job %s was superseded; nothing was written", job["id"],
             )
             return {"job_id": job["id"], "status": "superseded"}
-        return {"job_id": job["id"], "status": "done", **report}
+        return {"job_id": job["id"], "status": "done",
+                "retired": committed["retired"], **report}
     finally:
         _worker_lock.release()
 
@@ -409,14 +533,16 @@ def _execute(job: dict[str, Any]) -> dict[str, Any]:
             "published": 0,
             "abstained": ["permissions changed since this analysis was queued"],
             "scope_changed": True,
+            "analysis_outcome": investigator.ANALYSIS_SCOPE_CHANGED,
+            "publication": {"records": [], "keep_keys": [], "retire": False},
         }
 
-    # One more fence before anything is published: a worker whose claim was
-    # superseded must not write findings over the worker that replaced it.
-    token = job.get("claim_token")
-    if token is not None and not database.analysis_claim_is_current(job["id"], token):
-        return {"published": 0, "abstained": ["claim superseded before publication"],
-                "superseded": True}
+    # The evidence is re-read HERE, at execution, not taken from the queued
+    # row. A job may sit for minutes and records keep arriving; labelling the
+    # rows this run is about to retrieve with the cutoff that was true when it
+    # was enqueued would stamp fresh records with a stale version and make the
+    # next read call them already covered.
+    evidence = database.evidence_version(account_id)
 
     snapshot = home_snapshot.build_snapshot(
         account_id=account_id,
@@ -424,6 +550,9 @@ def _execute(job: dict[str, Any]) -> dict[str, Any]:
         selection={**selection, "seat": seat},
         period=period,
     )
+    # `defer_publication` is what makes the ownership fence meaningful: the
+    # investigation stages its findings and writes nothing, so `run_one` can
+    # commit them in one transaction conditional on still owning the claim.
     return investigator.investigate(
         account_id=account_id,
         viewer_user_id=viewer_user_id,
@@ -431,7 +560,8 @@ def _execute(job: dict[str, Any]) -> dict[str, Any]:
         only_user_ids=selection["user_ids"],
         snapshot=snapshot,
         scope_key=live_scope,
-        evidence=request.get("evidence") or database.evidence_version(account_id),
+        evidence=evidence,
+        defer_publication=True,
     )
 
 

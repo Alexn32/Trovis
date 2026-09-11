@@ -599,7 +599,11 @@ with TestClient(main.app) as c:
     blocked = session.run("list_comparable_runs", {"job_id": job["id"]})
     check("the tool-call budget stops retrieval and says so",
           blocked.get("error") == "budget_exhausted"
-          and session.budget.report()["complete"] is False)
+          # `complete` now lives on the SESSION's report: the budget knows
+          # about exhaustion, and nothing about a capped query, a trimmed
+          # result or a failed tool.
+          and session.retrieval_report()["complete"] is False
+          and session.budget.report()["budget_complete"] is False)
 
     row_session = investigation_tools.InvestigationSession(
         account_id=ACCT, only_user_ids=None, financial_visible=False,

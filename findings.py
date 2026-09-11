@@ -127,7 +127,13 @@ def derive_coverage(
     """
     completeness = snapshot.get("completeness") or {}
     retrieval = retrieval or {}
-    retrieval_complete = bool(retrieval.get("complete", True))
+    # FAIL CLOSED. A retrieval report that does not say it was complete is not
+    # a complete retrieval. The earlier version defaulted the missing key to
+    # True, so handing it the BUDGET's report — which knows about exhaustion
+    # and nothing else — produced `complete: true` over a search whose rows had
+    # been capped, trimmed, or lost to a failed tool. `complete` is now set
+    # only by `InvestigationSession.retrieval_report`, which sees all of it.
+    retrieval_complete = bool(retrieval.get("complete")) if retrieval else True
     return {
         "counts_exact": bool(completeness.get("counts_exact", True)),
         "scope_membership_complete": bool(
@@ -139,9 +145,14 @@ def derive_coverage(
         # (and a later analysis) can see the search was partial.
         "retrieval_complete": retrieval_complete,
         "retrieval_exhausted": sorted(retrieval.get("exhausted") or []),
+        # WHY the search fell short, named rather than implied: a capped query,
+        # an unresolved assignment, a trimmed result, a dropped result, a
+        # failed tool. A reader (and the next analysis) can see which.
+        "retrieval_limitations": sorted(retrieval.get("limitation_kinds") or []),
         "retrieval": {
             k: retrieval.get(k) for k in
-            ("tool_calls", "rows_retrieved", "events_retrieved")
+            ("tool_calls", "rows_retrieved", "events_retrieved",
+             "evidence_delivered")
             if k in retrieval
         },
         # The distinction that has to survive: we may say exactly what the
@@ -503,8 +514,15 @@ def validate_finding(
                     "an incomplete search cannot support a percentage or an "
                     f"exhaustive claim: {text[:60]!r} "
                     f"(counts_exact={coverage['counts_exact']}, "
-                    f"retrieval_complete={coverage['retrieval_complete']})"
+                    f"retrieval_complete={coverage['retrieval_complete']}, "
+                    f"limitations={coverage['retrieval_limitations']})"
                 )
+            # A number computed over a partial result is a FLOOR, and says so
+            # on the finding. The exact observation it came from stays
+            # publishable; what it may not become is a whole.
+            if claim.get("kind") == "calculation":
+                claim["partial"] = True
+                claim["qualifier"] = "at_least"
 
     # --- financial gate ------------------------------------------------
     mentions_money = _mentions_money(out)
