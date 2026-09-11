@@ -45,6 +45,7 @@ import saas_shopify
 import saas_stripe
 import describer
 import email_send
+import home_snapshot
 import pulse
 import loops
 import pricing_sync
@@ -88,6 +89,7 @@ from models import (
     ActivityItem,
     AttentionItem,
     BriefingResponse,
+    HomeSnapshot,
     PulseInsightRequest,
     PulseInsightResponse,
     ClaimRequest,
@@ -1388,6 +1390,78 @@ def _resolve_whose_work(
     # Intersect: a narrower choice is honored, a wider one is clamped back to
     # the seat rather than refused. The seat decides what exists.
     return sorted(set(wanted) & set(allowed))
+
+
+@app.get("/home/snapshot", response_model=HomeSnapshot)
+def home_snapshot_endpoint(
+    request: Request,
+    days: int = Query(
+        default=home_snapshot.DEFAULT_PERIOD_DAYS,
+        ge=home_snapshot.MIN_PERIOD_DAYS,
+        le=home_snapshot.MAX_PERIOD_DAYS,
+    ),
+    tz: str | None = Query(default=None),
+    whose: str | None = Query(default=None),
+    person_id: int | None = Query(default=None),
+) -> HomeSnapshot:
+    """The authoritative Home snapshot: one bounded read of the record.
+
+    A single set of numbers for the whole Home page, so the page cannot
+    disagree with itself. Counts are SQL aggregates over the complete
+    permitted dataset — never a fold over the first page of /work/items.
+
+    Query:
+      days      bounded period length in LOCAL calendar days (1-90, default 7)
+      tz        IANA timezone for the boundaries and buckets (default UTC)
+      whose     the existing whose-work selector (everyone|me|team|person)
+      person_id required when whose=person
+
+    Shape and field semantics: models.HomeSnapshot and HOME_SNAPSHOT.md.
+
+    Scope is resolved SERVER-SIDE from the session and the seat, and the
+    request is intersected with it by the same `_resolve_whose_work` the Work
+    list uses — a query string can narrow what you see and can never widen it.
+    Personal attention stays tied to the session identity whatever scope is
+    selected. Financial values appear only when the resolved seat carries the
+    Cost surface.
+
+    Sync `def` so SQLite stays off the event loop, matching /work/overview.
+    No model is called on this path and nothing here waits on AI.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    # A machine credential has no person, so it has no seat. We do not invent
+    # one: it keeps the account-wide work view it has always had, and the
+    # person-shaped parts of the snapshot (attention, money) come back
+    # explicitly unavailable rather than as a confident zero.
+    seat = (
+        database.resolve_seat(account_id, viewer_user_id)
+        if (user and account_id is not None)
+        else None
+    )
+    try:
+        period = home_snapshot.resolve_period(days, tz)
+    except home_snapshot.SnapshotInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # The one enforcement point, shared with GET /work/items and
+    # /work/overview. It 403s a person_id outside the caller's reporting line
+    # and clamps anything wider than the seat.
+    effective_ids = _resolve_whose_work(request, whose, person_id)
+    try:
+        snap = home_snapshot.build_snapshot(
+            account_id=account_id,
+            viewer_user_id=viewer_user_id,
+            seat=seat,
+            effective_user_ids=effective_ids,
+            requested_whose=whose,
+            person_id=person_id,
+            period=period,
+        )
+    except database.QueryTimeout as exc:
+        raise HTTPException(status_code=504, detail="home snapshot timed out") from exc
+    return HomeSnapshot(**snap)
 
 
 def _parse_suggestion_id(raw: str) -> int:

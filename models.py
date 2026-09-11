@@ -1545,6 +1545,239 @@ class WorkOverview(BaseModel):
     has_prev_week: bool = False
 
 
+# ---------------------------------------------------------------------------
+# GET /home/snapshot — the authoritative Home snapshot.
+#
+# Field semantics are documented here AND in HOME_SNAPSHOT.md. The rules the
+# shape encodes:
+#   * current_state (now) and period (a window) are separate objects. They are
+#     different kinds of measure and are never added together.
+#   * anything we cannot establish is null + a named reason, never 0.
+#   * a completion is a RECORDED completion, not a verified business outcome.
+# ---------------------------------------------------------------------------
+
+
+class HomeScope(BaseModel):
+    """Work scope: what was asked for, what was granted, what is possible."""
+
+    requested: str  # everyone | me | team | person (unreadable input -> everyone)
+    effective: str  # what the seat actually permitted
+    person_id: int | None = None
+    choices: list[str] = Field(default_factory=list)  # selectors this seat may use
+    narrowed_from_request: bool = False
+    breadth: str | None = None  # seat atom: self | subtree | company
+    scope_level_id: int | None = None
+    role_id: int | None = None
+    filtered: bool = False  # False = company-wide, no person filter at all
+    people_in_scope: int | None = None  # null when unfiltered, NOT "nobody"
+    account_id: int | None = None
+    viewer_user_id: int | None = None
+
+
+class HomeComparison(BaseModel):
+    """The equal-duration window immediately before the period, or why not."""
+
+    available: bool = False
+    unavailable_reason: str | None = None
+    previous_start_utc: str | None = None
+    previous_end_utc: str | None = None
+    previous_completed: int | None = None
+    delta: int | None = None
+
+
+class HomePeriod(BaseModel):
+    """Explicit period boundaries + the period's completion total.
+
+    `completed` counts recorded work completions (closed named work items)
+    whose completion timestamp falls in [start_utc, end_utc). Never spans,
+    tool calls, nested child activity, or agent registrations.
+    """
+
+    start: str  # local ISO-8601 with offset
+    end: str
+    start_utc: str
+    end_utc: str
+    timezone: str  # IANA zone the boundaries and buckets were computed in
+    days: int
+    completed: int = 0
+    comparison: HomeComparison
+
+
+class HomeCurrentState(BaseModel):
+    """Work in flight RIGHT NOW. A state, not a period measure.
+
+    Buckets come from `loops.cached_state` — the same engine state
+    /work/overview counts needs_attention from.
+    """
+
+    as_of: str = "now"
+    open: int = 0
+    moving: int = 0
+    waiting_on_person: int = 0
+    blocked: int = 0
+    # There is no history of these values in the record, so no trend is
+    # offered. Manufacturing one from today's numbers would be a chart of
+    # nothing.
+    trend_available: bool = False
+    trend_unavailable_reason: str | None = None
+
+
+class HomeSeriesPoint(BaseModel):
+    bucket_start: str  # local ISO-8601 with offset
+    bucket_start_utc: str
+    completed: int = 0
+
+
+class HomeCompletionSeries(BaseModel):
+    """Recorded completions per local calendar day, bucketed on closed_at.
+
+    `reconciles` is checked against the independent aggregate COUNT rather
+    than assumed.
+    """
+
+    available: bool = True
+    unavailable_reason: str | None = None
+    bucket: str = "local_day"
+    timezone: str = "UTC"
+    points: list[HomeSeriesPoint] = Field(default_factory=list)
+    total: int | None = None  # sum of the buckets
+    aggregate_total: int = 0  # the period COUNT, computed separately
+    reconciles: bool | None = None
+
+
+class HomeJobRow(BaseModel):
+    workflow_id: int
+    name: str | None = None
+    completed: int = 0
+
+
+class HomeJobBreakdown(BaseModel):
+    """Completions by EXISTING job identity (`loops.workflow_id`).
+
+    No outcome classification is invented. Work the matcher never claimed is
+    reported as `unclassified_completed`, never dropped.
+    """
+
+    rows: list[HomeJobRow] = Field(default_factory=list)
+    row_limit: int = 12
+    truncated: bool = False
+    other_completed: int = 0  # the tail past row_limit, so charts still add up
+    unclassified_completed: int = 0
+    total_job_count: int = 0
+    aggregate_total: int = 0
+    reconciles: bool = True
+
+
+class HomeAttention(BaseModel):
+    """What is waiting on the SIGNED-IN PERSON.
+
+    Tied to session identity and unaffected by the whose-work selection. Null
+    (not 0) for a machine session, which has no person.
+    """
+
+    available: bool = True
+    unavailable_reason: str | None = None
+    needs_you: int | None = None
+    viewer_user_id: int | None = None
+    scoped_to: str = "session_identity"
+    unplaced_viewer: bool | None = None
+
+
+class HomeCostCoverage(BaseModel):
+    """What share of cost-bearing spans carry a stored price.
+
+    A span count, NOT a share of dollars — the value of unpriced spans is
+    exactly what is unknown. `ratio` is null when there is no denominator.
+    """
+
+    measure: str = "priced_cost_bearing_spans"
+    definition: str = ""
+    priced_spans: int = 0
+    unpriced_token_spans: int = 0
+    denominator: int = 0
+    ratio: float | None = None
+    unavailable_reason: str | None = None
+
+
+class HomeFinancial(BaseModel):
+    """Money, only when the resolved seat includes the Cost surface.
+
+    Always ORGANIZATION-WIDE: stored span cost hangs off the account and the
+    agent, not off a work scope. No cost-per-completion is offered, because
+    dividing org-wide spend by a narrowed completion count describes nothing.
+    """
+
+    visible: bool = False
+    unavailable_reason: str | None = None
+    scope: str | None = None  # 'organization_wide' when visible
+    scope_note: str | None = None
+    attributable_to_shown_work: bool | None = None
+    currency: str | None = None
+    period_start_utc: str | None = None
+    period_end_utc: str | None = None
+    spend_usd: float | None = None
+    coverage: HomeCostCoverage | None = None
+
+
+class HomeFreshness(BaseModel):
+    """How current the underlying record is. All UTC ISO-8601, null when the
+    record holds nothing of that kind."""
+
+    latest_recorded_completion_at: str | None = None
+    latest_work_activity_at: str | None = None
+    latest_telemetry_at: str | None = None
+    first_recorded_work_at: str | None = None
+
+
+class HomeUnavailable(BaseModel):
+    field: str
+    reason: str
+
+
+class HomeCompleteness(BaseModel):
+    """Everything the snapshot could not establish, in one place, so a
+    renderer can hide a visual without re-inspecting each block."""
+
+    has_any_recorded_work: bool = False
+    workspace_state: str = "empty"  # empty | populated
+    completion_series_complete: bool = True
+    job_breakdown_complete: bool = True
+    comparison_available: bool = False
+    financial_available: bool = False
+    unavailable: list[HomeUnavailable] = Field(default_factory=list)
+
+
+class HomeNavigation(BaseModel):
+    """Canonical identifiers a later Home UI needs to drill in WITHOUT losing
+    the scope and period on screen."""
+
+    account_id: int | None = None
+    carry_query: dict[str, Any] = Field(default_factory=dict)
+    work_items_path: str = "/work/items"
+    work_overview_path: str = "/work/overview"
+    work_items_supports: list[str] = Field(default_factory=list)
+
+
+class HomeSnapshot(BaseModel):
+    """GET /home/snapshot. One bounded read of the record; no LLM on this path.
+
+    Not a data dump: no raw traces and no full work records. Drill-in stays
+    with /work/items.
+    """
+
+    generated_at: str
+    scope: HomeScope
+    period: HomePeriod
+    current_state: HomeCurrentState
+    completions_series: HomeCompletionSeries
+    by_job: HomeJobBreakdown
+    attention: HomeAttention
+    financial: HomeFinancial
+    freshness: HomeFreshness
+    completeness: HomeCompleteness
+    navigation: HomeNavigation
+
+
 class WorkItemHolder(BaseModel):
     kind: str  # human | agent | tool | unassigned
     name: str
