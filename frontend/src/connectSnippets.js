@@ -8,6 +8,10 @@
 
 export const KEY_PLACEHOLDER = 'TROVIS_API_KEY'
 export const ENDPOINT_PLACEHOLDER = 'TROVIS_ENDPOINT'
+// The Grok Bot report door. A Bot is pointed at the MCP server, not the OTLP
+// ingest endpoint, so it needs its own placeholder — substituting the traces
+// URL there would send a customer's Bot somewhere that speaks no MCP.
+export const MCP_URL_PLACEHOLDER = 'TROVIS_MCP_URL'
 
 // Shown when the session has no key to substitute (see ConnectGuide's note).
 export const KEY_FALLBACK = 'ov_sk_…'
@@ -16,8 +20,12 @@ export const KEY_FALLBACK = 'ov_sk_…'
 // lookahead skips a placeholder used as an env-var NAME (`export
 // TROVIS_API_KEY=…`) so only value positions are substituted — the copy
 // button then copies exactly what's on screen, and the name stays a name.
-export function substitute(text, key, endpoint) {
+export function substitute(text, key, endpoint, mcpUrl) {
   return (text || '')
+    // Longest placeholder first: TROVIS_MCP_URL shares no prefix with the
+    // others today, but replacing the specific before the general is the
+    // habit that keeps it safe if one ever does.
+    .replace(new RegExp(`${MCP_URL_PLACEHOLDER}(?!\\s*=)`, 'g'), mcpUrl || '')
     .replace(new RegExp(`${ENDPOINT_PLACEHOLDER}(?!\\s*=)`, 'g'), endpoint)
     .replace(new RegExp(`${KEY_PLACEHOLDER}(?!\\s*=)`, 'g'), key || KEY_FALLBACK)
 }
