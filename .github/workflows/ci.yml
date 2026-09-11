@@ -135,3 +135,6 @@ jobs:
       - run: python test_smoke.py
       - run: python test_loop_attrs.py
       - run: python test_openai_usage.py
+      # The Grok adapter. Hermetic: xai-sdk is faked where detection matters,
+      # and the span path runs through an in-memory exporter.
+      - run: python test_xai.py

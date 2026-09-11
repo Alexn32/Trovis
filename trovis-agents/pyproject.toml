@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trovis-agents"
-version = "0.4.6"
+version = "0.5.0"
 description = "Connect your agents to Trovis — two lines of code for full observability"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Trovis" }]
-keywords = ["openai", "agents", "observability", "opentelemetry", "trovis"]
+keywords = ["openai", "agents", "grok", "xai", "observability", "opentelemetry", "trovis"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -31,6 +31,7 @@ dependencies = [
 # Per-platform extras so users only install what they need:
 #   pip install trovis-agents[openai]      → OpenAI Agents SDK support
 #   pip install trovis-agents[anthropic]   → Claude Managed Agents support
+#   pip install trovis-agents[xai]         → xAI Grok bot support
 #   pip install trovis-agents[all]         → every SUPPORTED platform's extras
 #
 # [hermes] is retained only so existing install commands keep resolving. Hermes
@@ -48,18 +49,27 @@ anthropic = [
 claude-agent-sdk = [
     "claude-agent-sdk>=0.1.0",
 ]
+# Grok bots. The base SDK is enough: its spans go through the global
+# TracerProvider that init() sets. Deliberately NOT xai-sdk[telemetry-http] —
+# that extra exists to install xAI's own OTLP exporter, which sends protobuf,
+# and Trovis ingest speaks OTLP/JSON.
+xai = [
+    "xai-sdk>=1.0.0",
+]
 # Unsupported — see the note above [project.optional-dependencies].
 hermes = []
 all = [
     "openai-agents-opentelemetry>=0.2.0",
     "anthropic>=0.50.0",
     "claude-agent-sdk>=0.1.0",
+    "xai-sdk>=1.0.0",
 ]
 dev = [
     "openai-agents>=0.0.1",
     "openai-agents-opentelemetry>=0.2.0",
     "anthropic>=0.50.0",
     "claude-agent-sdk>=0.1.0",
+    "xai-sdk>=1.0.0",
 ]
 
 # Hermes discovers plugins via Python entry points, and this group name is

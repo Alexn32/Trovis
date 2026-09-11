@@ -17,6 +17,7 @@ const V1 = [
   'claude',
   'cursor',
   'chatgpt',
+  'grok',
   'slack',
   'github',
   'hubspot',
@@ -33,7 +34,7 @@ test('V1 catalog is locked — Zendesk is out', () => {
 })
 
 test('live doors are only the ones that work today', () => {
-  assert.deepEqual(LIVE_BRAND_IDS, ['openclaw', 'claude', 'chatgpt', 'hubspot', 'stripe', 'shopify'])
+  assert.deepEqual(LIVE_BRAND_IDS, ['openclaw', 'claude', 'chatgpt', 'grok', 'hubspot', 'stripe', 'shopify'])
   assert.deepEqual(RECIPE_BRAND_IDS, ['cursor'])
   assert.deepEqual(COMING_BRAND_IDS, ['slack', 'github', 'intercom'])
 })
@@ -43,6 +44,8 @@ test('resolveBrand maps platform / holder / tool text; unknown is silent', () =>
   assert.equal(resolveBrand('Claude Agent SDK / Claude Code'), 'claude')
   assert.equal(resolveBrand('openai-agents'), 'chatgpt')
   assert.equal(resolveBrand('ChatGPT (custom GPT)'), 'chatgpt')
+  assert.equal(resolveBrand('Grok bots (xAI)'), 'grok')
+  assert.equal(resolveBrand('xai-sdk'), 'grok')
   assert.equal(resolveBrand('Cursor (OpenTelemetry)'), 'cursor')
   assert.equal(resolveBrand('Stripe'), 'stripe')
   assert.equal(resolveBrand('waiting on HubSpot'), 'hubspot')
@@ -96,7 +99,7 @@ test('Add Agent live tiles stay the real doors; SaaS is not a picker door', () =
   const liveBlock = src.match(/const PLATFORMS = \[([\s\S]*?)\]/)
   assert.ok(liveBlock, 'PLATFORMS array exists')
   const live = liveBlock[1]
-  for (const id of ['openclaw', 'openai-agents', 'claude', 'chatgpt']) {
+  for (const id of ['openclaw', 'openai-agents', 'claude', 'chatgpt', 'grok']) {
     assert.match(live, new RegExp(`id: '${id}'`))
   }
   for (const id of ['slack', 'github', 'hubspot', 'stripe', 'intercom', 'shopify', 'zendesk']) {

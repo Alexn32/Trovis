@@ -30,6 +30,7 @@ const OPENING_TURN = {
     'Claude Agent SDK / Claude Code',
     'OpenClaw',
     'ChatGPT (custom GPT)',
+    'Grok bots (xAI SDK)',
     'Cursor (OpenTelemetry)',
     'Custom Python / other',
   ],

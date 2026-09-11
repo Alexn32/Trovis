@@ -22,6 +22,17 @@ export function CursorIcon({ size = 18 }) {
   )
 }
 
+export function GrokIcon({ size = 18 }) {
+  // Angular slashes — the monochrome xAI/Grok mark, drawn not dumped.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5.1 20.4 15.8 5.6h3.6L8.7 20.4H5.1z" fill="currentColor" />
+      <path d="M4.6 12.9 9.2 6.4h3.6l-4.6 6.5H4.6z" fill="currentColor" opacity="0.5" />
+      <path d="M16.1 12.2h3.3v8.2h-3.3v-8.2z" fill="currentColor" opacity="0.5" />
+    </svg>
+  )
+}
+
 export function SlackIcon({ size = 18 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
@@ -95,6 +106,7 @@ const ICONS = {
   claude: AnthropicIcon,
   cursor: CursorIcon,
   chatgpt: OpenAIIcon,
+  grok: GrokIcon,
   slack: SlackIcon,
   github: GitHubIcon,
   hubspot: HubSpotIcon,

@@ -11,6 +11,7 @@ const TILE_BRAND = {
   'openai-agents': 'chatgpt',
   claude: 'claude',
   chatgpt: 'chatgpt',
+  grok: 'grok',
   cursor: 'cursor',
 }
 
@@ -59,6 +60,9 @@ const PLATFORMS = [
   // A custom GPT built in ChatGPT: via GPT Actions (OAuth) it both reports its
   // own activity to Trovis AND can ask about the fleet (askFleet). No code.
   { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor + query a GPT via Actions — no code',    needsProvider: false },
+  // Grok bots built on the xAI SDK. The SDK traces itself through the global
+  // OTEL provider, so trovis.init() is the whole integration.
+  { id: 'grok',           label: 'Grok bots (xAI)',           subtitle: 'xAI SDK — already OpenTelemetry-instrumented',   needsProvider: false },
 ]
 
 // Recipe path — real OTEL ingest, not a first-party Cursor integration.
@@ -570,36 +574,18 @@ function CustomPythonInstructions({ provider, agentName, endpoint }) {
   )
 }
 
+// The xAI (Grok) branch of the provider picker. Same setup as the Grok tile —
+// deliberately NOT xai-sdk's own `Telemetry().setup_otlp_exporter()`, which
+// sends protobuf (Trovis ingest is OTLP/JSON), carries no API key, and names
+// every bot "xai-sdk".
 function PythonXaiInstructions({ agentName, endpoint }) {
-  const nativeInstall = 'pip install xai-sdk[telemetry-http]'
-  const nativeSetup = fill(
-`from xai_sdk.telemetry import Telemetry
-
-telemetry = Telemetry()
-telemetry.setup_otlp_exporter(
-    endpoint="TROVIS_ENDPOINT"
-)`,
-    agentName, endpoint,
-  )
-
   return (
     <>
       <h2 className="instructions-title">Connect a Python agent using xAI (Grok)</h2>
       <Tabs tabs={[
         {
           label: 'Using xAI SDK (native)',
-          content: (
-            <>
-              <NumberedStep n={1} title="Install packages">
-                <CodeBlock code={nativeInstall} />
-              </NumberedStep>
-              <NumberedStep n={2} title="Add this to your agent before making any Grok calls">
-                <CodeBlock code={nativeSetup} />
-              </NumberedStep>
-              <NumberedStep n={3} title="Run your agent normally. Traces flow automatically." />
-              <SuccessCallout />
-            </>
-          ),
+          content: <GrokSdkSetup agentName={agentName} endpoint={endpoint} />,
         },
         {
           label: 'Using OpenAI-compatible SDK',
@@ -1177,6 +1163,114 @@ async for message in query(
 }
 
 // ---------------------------------------------------------------------------
+// Instructions page — Grok bots (xAI SDK)
+// ---------------------------------------------------------------------------
+//
+// The xAI SDK is already OTEL-instrumented: every chat.sample()/stream() opens
+// a span through the GLOBAL TracerProvider. init() owns that provider, so this
+// door is genuinely two lines — no wrapping, no instrumentor package.
+//
+// Two things this page must say out loud, because both fail silently:
+//   - xai_sdk.telemetry.Telemetry() takes the global provider first, names
+//     every bot "xai-sdk", and exports protobuf (Trovis ingest is OTLP/JSON).
+//   - XAI_SDK_DISABLE_TRACING=1 silences the SDK entirely.
+
+function GrokInstructions({ agentName, endpoint }) {
+  return (
+    <>
+      <h2 className="instructions-title">Connect a Grok bot</h2>
+      <p className="instructions-subtitle">
+        For bots built on the <code>xai-sdk</code> package. The xAI SDK
+        emits OpenTelemetry spans already, so there's nothing to wrap —{' '}
+        <code>init()</code> is the whole integration.
+      </p>
+      <GrokSdkSetup agentName={agentName} endpoint={endpoint} />
+    </>
+  )
+}
+
+// The steps themselves — shared by the Grok tile and the xAI (Grok) branch of
+// the Custom Python provider picker, so the two can't drift apart.
+function GrokSdkSetup({ agentName, endpoint }) {
+  const resolvedEndpoint = endpoint || computeOverseeEndpoint()
+  const apiKey = getApiKey() || ''
+  const installCmd = 'pip install trovis-agents[xai]'
+  const setupCode = fill(
+`from trovis import init, set_loop_title
+
+# Call init() BEFORE creating the xAI client — it points OpenTelemetry at
+# Trovis, and the xAI SDK traces itself through that same pipeline.
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="xai")
+
+from xai_sdk import Client
+from xai_sdk.chat import user
+
+# Name the job the way a colleague would say it — this is what turns the
+# run into named Work instead of an untitled trace.
+set_loop_title("Triage refund for order #4821")
+
+client = Client()
+chat = client.chat.create(model="grok-4.20-non-reasoning")
+chat.append(user("Customer wants a refund on order 4821 — what are our options?"))
+response = chat.sample()   # → a Trovis span, with token usage and cost`,
+    agentName,
+    resolvedEndpoint,
+  ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
+
+  return (
+    <>
+      <PrefillBlock label="Your Trovis endpoint" value={resolvedEndpoint} />
+      <PrefillBlock
+        label="Your API key"
+        value={apiKey}
+        placeholder="(no key in session — log in and try again)"
+      />
+
+      <NumberedStep n={1} title="Install the SDK">
+        <CodeBlock code={installCmd} />
+      </NumberedStep>
+
+      <NumberedStep n={2} title="Initialize before you create the xAI client">
+        <CodeBlock code={setupCode} />
+      </NumberedStep>
+
+      <NumberedStep n={3} title="Name the job (required for named Work)">
+        <NamedWorkGuidance />
+      </NumberedStep>
+
+      <NumberedStep n={4} title="Run your bot as you normally would">
+        <p>
+          Every Grok call becomes a span — the model, the token usage, and
+          the cost — grouped into one job per run.
+        </p>
+      </NumberedStep>
+
+      <Callout variant="warning">
+        <strong>Don't call <code>Telemetry()</code> yourself.</strong>{' '}
+        <code>xai_sdk.telemetry.Telemetry()</code> installs its own tracer
+        provider: it names every bot <code>xai-sdk</code> (so they all
+        collapse into one agent here) and exports protobuf, which the
+        Trovis JSON ingest rejects. <code>init()</code> does that job, and
+        OpenTelemetry won't let a second provider take over — if one got
+        there first, <code>init()</code> says so in the logs.
+      </Callout>
+
+      <Callout variant="info">
+        <strong>Seeing nothing at all?</strong> Check{' '}
+        <code>XAI_SDK_DISABLE_TRACING</code> — with it set to{' '}
+        <code>1</code>, the xAI SDK emits no spans, so the bot never
+        appears. Calling Grok through the OpenAI-compatible endpoint
+        (<code>base_url="https://api.x.ai/v1"</code>) instead? That's the
+        OpenAI path — use{' '}
+        <code>opentelemetry-instrumentation-openai</code>.
+      </Callout>
+
+      <SuccessCallout />
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Instructions page — ChatGPT custom GPT (GPT Actions + OAuth)
 // ---------------------------------------------------------------------------
 //
@@ -1621,6 +1715,9 @@ function InstructionsView({ platform, agentName, endpoint }) {
   }
   if (platform === 'chatgpt') {
     return <ChatGPTInstructions />
+  }
+  if (platform === 'grok') {
+    return <GrokInstructions agentName={agentName} endpoint={endpoint} />
   }
   if (platform === 'cursor') {
     return <CursorOtelInstructions agentName={agentName} endpoint={endpoint} />
