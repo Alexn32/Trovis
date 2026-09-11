@@ -955,6 +955,8 @@ CREATE TABLE IF NOT EXISTS waitlist_signups (
     email            TEXT      NOT NULL UNIQUE,
     source           TEXT,
     runtime_interest TEXT,
+    company          TEXT,
+    role             TEXT,
     created_at       TIMESTAMP DEFAULT NOW()
 )
 """
@@ -965,6 +967,8 @@ CREATE TABLE IF NOT EXISTS waitlist_signups (
     email            TEXT    NOT NULL UNIQUE,
     source           TEXT,
     runtime_interest TEXT,
+    company          TEXT,
+    role             TEXT,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -1903,6 +1907,11 @@ def init_db() -> None:
         # no matter what SCOPE_LEVEL_PRESETS says.
         _migrate_scope_level_presets(cur)
         _try_add_column(cur, "agent_owners", "user_id", "INTEGER DEFAULT NULL")
+        # Founding waitlist: optional company / role on the public signup form.
+        # Existing rows stay NULL. Added after launch of email-only capture.
+        _try_add_column(cur, "waitlist_signups", "company", "TEXT")
+        _try_add_column(cur, "waitlist_signups", "role", "TEXT")
+
         # Backfill by email, within the account. A team_members row whose
         # email matches a login IS that person; one with no email, or no
         # matching login, keeps pointing at the legacy row and still resolves
@@ -7866,6 +7875,8 @@ def add_waitlist_signup(
     email: str,
     source: str | None = None,
     runtime_interest: str | None = None,
+    company: str | None = None,
+    role: str | None = None,
 ) -> str:
     """Record a waitlist signup. Email is lowercased + trimmed before insert.
 
@@ -7878,31 +7889,53 @@ def add_waitlist_signup(
         raise ValueError("email is required")
     clean_source = (source or "").strip() or None
     clean_interest = (runtime_interest or "").strip() or None
+    clean_company = (company or "").strip() or None
+    clean_role = (role or "").strip() or None
 
     if USE_POSTGRES:
         sql = """
-            INSERT INTO waitlist_signups (email, source, runtime_interest)
-            VALUES (%s, %s, %s)
+            INSERT INTO waitlist_signups
+                (email, source, runtime_interest, company, role)
+            VALUES (%s, %s, %s, %s, %s)
         """
         try:
             with _connect() as conn, _cursor(conn) as cur:
-                cur.execute(sql, (clean_email, clean_source, clean_interest))
+                cur.execute(
+                    sql,
+                    (clean_email, clean_source, clean_interest, clean_company, clean_role),
+                )
         except psycopg2.errors.UniqueViolation:
             return "already_joined"
     else:
         sql = """
-            INSERT INTO waitlist_signups (email, source, runtime_interest)
-            VALUES (?, ?, ?)
+            INSERT INTO waitlist_signups
+                (email, source, runtime_interest, company, role)
+            VALUES (?, ?, ?, ?, ?)
         """
         try:
             with _connect() as conn, _cursor(conn) as cur:
-                cur.execute(sql, (clean_email, clean_source, clean_interest))
+                cur.execute(
+                    sql,
+                    (clean_email, clean_source, clean_interest, clean_company, clean_role),
+                )
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 return "already_joined"
             raise
 
     return "joined"
+
+
+def get_waitlist_signup(email: str) -> dict | None:
+    """Return one waitlist row by email, or None. Used by tests and operators."""
+    clean = (email or "").strip().lower()
+    if not clean:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(f"SELECT * FROM waitlist_signups WHERE email = {PH}", (clean,))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
 
 
 def get_waitlist_count() -> int:

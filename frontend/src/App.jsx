@@ -135,8 +135,8 @@ function AppInner() {
   // True when /auth/me timed out or the network failed. Token is KEPT so Retry
   // can reuse it; `restoring` is cleared so this cannot spin forever.
   const [restoreFailed, setRestoreFailed] = useState(false)
-  // Logged-out front door: show the marketing landing first, then the Login
-  // flow when the visitor clicks a CTA. authMode picks which Login panel opens.
+  // Logged-out front door: the founding waitlist, then Login when they
+  // click Sign in. authMode picks which Login panel opens.
   const [authView, setAuthView] = useState('landing') // 'landing' | 'auth'
   const [upgradeOpen, setUpgradeOpen] = useState(false) // plan-picker → Stripe
   const [authMode, setAuthMode] = useState('signup')  // 'signup' | 'login'
@@ -414,7 +414,8 @@ function AppInner() {
 
   if (!me) {
     // An invite or password-reset link goes straight to its flow (skip the
-    // landing). Otherwise: the landing page is the front door; its CTAs open Login.
+    // landing). Otherwise the founding waitlist is the front door; Sign in
+    // opens Login.
     const deepLink = inviteToken || resetToken
     if (!deepLink && authView === 'landing') {
       return (
