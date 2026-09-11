@@ -23,12 +23,24 @@ export function CursorIcon({ size = 18 }) {
 }
 
 export function GrokIcon({ size = 18 }) {
-  // Angular slashes — the monochrome xAI/Grok mark, drawn not dumped.
+  // The Grok mark: a broken ring with a tapered blade running through it,
+  // bottom-left to top-right, the ring opening where the blade crosses.
+  // Drawn to the supplied logo's geometry in the same house style as the
+  // other marks here (single-color paths, currentColor) rather than an
+  // embedded asset — these render at 12-20px all over the app.
+  //
+  // Two arc strokes instead of one masked circle: a <mask> needs an id, and
+  // an id repeated across every instance of an icon is invalid markup.
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5.1 20.4 15.8 5.6h3.6L8.7 20.4H5.1z" fill="currentColor" />
-      <path d="M4.6 12.9 9.2 6.4h3.6l-4.6 6.5H4.6z" fill="currentColor" opacity="0.5" />
-      <path d="M16.1 12.2h3.3v8.2h-3.3v-8.2z" fill="currentColor" opacity="0.5" />
+      <g fill="none" stroke="currentColor" strokeWidth="3.1" strokeLinecap="butt">
+        <path d="M14.81 5.37A7.2 7.2 0 0 0 5.37 14.81" />
+        <path d="M9.19 18.63a7.2 7.2 0 0 0 9.44-9.44" />
+      </g>
+      <path
+        d="M22.4 1.6Q9.74 9.74 1.6 22.4Q14.26 14.26 22.4 1.6Z"
+        fill="currentColor"
+      />
     </svg>
   )
 }

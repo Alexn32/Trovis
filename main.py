@@ -2277,6 +2277,64 @@ def _detail_status(stats: dict) -> tuple[str, str]:
     return "healthy", f"Active — last run {_humanize_seconds(age_s)} ago"
 
 
+def _parse_ts(value: Any) -> "datetime | None":
+    """Best-effort timestamp parse. SQLite hands back 'YYYY-MM-DD HH:MM:SS'
+    strings, Postgres hands back datetimes. Anything else -> None, and every
+    caller treats None as "don't act"."""
+    from datetime import datetime
+
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, str) and value.strip():
+        text = value.strip().replace("T", " ").split("+")[0].split(".")[0]
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    return None
+
+
+def _identity_newer_than_description(
+    service_name: str,
+    account_id: int | None,
+    agent_id: str | None,
+) -> bool:
+    """True when the agent registered its identity AFTER its description was
+    written — i.e. the description was inferred from behavior alone and is now
+    out of date.
+
+    This is the first-impression problem: a description is generated once, from
+    whatever telemetry existed at the time, and never revisited. Connect an
+    assistant, let it run a smoke test, and it is permanently described as a
+    thing that runs smoke tests — even after it says, in as many words, that it
+    is a chief of staff. `describe_agent` treats a registration as the primary
+    source, so once one lands the old description is simply wrong.
+
+    Deliberately NOT a staleness heuristic ("lots of new spans since"): that
+    would re-run Claude on a schedule nobody asked for. One identity change,
+    one regeneration. Ambiguity (unparseable timestamps, missing rows) means
+    False — never regenerate on a guess.
+    """
+    try:
+        desc = database.get_latest_description(
+            service_name, account_id=account_id, agent_id=agent_id
+        )
+        if not desc:
+            return False  # nothing to replace; the missing-description path owns this
+        reg = database.get_latest_registration(
+            service_name, account_id=account_id, agent_id=agent_id
+        )
+        if not reg:
+            return False
+        described_at = _parse_ts(desc.get("generated_at"))
+        registered_at = _parse_ts(reg.get("created_at"))
+        if described_at is None or registered_at is None:
+            return False
+        return registered_at > described_at
+    except Exception:  # noqa: BLE001 — a summary read must never 500 on this
+        return False
+
+
 @app.get("/agents/{service_name}/summary", response_model=AgentSummary)
 def agent_summary(
     service_name: str,
@@ -2300,8 +2358,11 @@ def agent_summary(
     summary["status"], summary["status_reason"] = _detail_status(stats)
 
     # Description v2: regenerate once if the short/long pair is missing (pre-v2
-    # rows have no description_long). Best-effort — never fail the page.
-    if not summary.get("description_long"):
+    # rows have no description_long), or when the agent told us who it is
+    # AFTER we described it. Best-effort — never fail the page.
+    if not summary.get("description_long") or _identity_newer_than_description(
+        service_name, account_id=account_id, agent_id=agent_id
+    ):
         try:
             result = describer.describe_agent(
                 service_name, account_id=account_id, agent_id=agent_id

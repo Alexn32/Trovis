@@ -1,4 +1,4 @@
-"""Door test: the Cursor Grok Bot report door, over a real MCP client.
+"""Door test: the Grok Bot report door, over a real MCP client.
 
 A Grok Bot is a desktop assistant. It exports nothing and Trovis can't pull
 from it, so the door is the Bot calling IN over MCP. That claim is only true
@@ -223,8 +223,8 @@ try:
     check("the bot shows on Agents under its own name",
           "Trovis PM" in names, f"agents={names}")
     summary = requests.get(f"{BASE}/agents/Trovis PM/summary", headers=H, timeout=30).json()
-    check("labelled as a Cursor Grok Bot, not an unlabelled service",
-          summary.get("platform") == "Cursor Grok Bot", f"platform={summary.get('platform')!r}")
+    check("labelled as a Grok Bot, not an unlabelled service",
+          summary.get("platform") == "Grok Bot", f"platform={summary.get('platform')!r}")
 
     print("\n[3] Waiting on a human is a state, not a log line")
     run(call_tool("report_job_waiting", {
@@ -348,7 +348,64 @@ try:
           other_span_count < our_span_count,
           f"theirs={other_span_count} ours={our_span_count}")
 
-    print("\n[9] The door does not pretend to be automatic")
+    print("\n[9] A bot's stated role beats what it happened to do first")
+    # The first-impression problem, which the first real Grok Bot hit: its
+    # opening jobs were connection smoke tests, so it was described forever as
+    # a thing that runs smoke tests. A bot that says what it is FOR must
+    # outrank that — and saying so after the fact has to re-open the question.
+    run(call_tool("report_job_started", {
+        "title": "Check the reporting works", "bot_name": "Chief of Staff",
+        "job_id": "grok-smoke-1",
+    }, KEY))
+    reg_before = database.get_latest_registration(
+        "Chief of Staff", account_id=account_id, agent_id="main")
+    check("a bot that never states a role registers nothing to guess from",
+          reg_before is None, f"registration={reg_before}")
+
+    run(call_tool("report_job_started", {
+        "title": "Draft the Monday founder update",
+        "bot_name": "Chief of Staff",
+        "bot_role": "Chief of staff for the founder: drafts updates, chases "
+                    "follow-ups, keeps the week organised",
+        "job_id": "grok-real-1",
+    }, KEY))
+    reg = database.get_latest_registration(
+        "Chief of Staff", account_id=account_id, agent_id="main")
+    check("a stated role is recorded as the bot's identity", reg is not None)
+    if reg:
+        check("and it is the bot's own words, not a task title",
+              "Chief of staff for the founder" in (reg.get("identity") or ""),
+              f"identity={reg.get('identity')!r}")
+
+    # A description written BEFORE that identity arrived is stale by
+    # definition — describe_agent treats a registration as the primary source.
+    database.save_description(
+        service_name="Chief of Staff",
+        description="Runs verification checks on the reporting system.",
+        span_count_analyzed=2, account_id=account_id, agent_id="main",
+        description_long="This agent performs smoke tests after reinstalls.",
+    )
+    check("a description written after the identity is NOT treated as stale",
+          not main._identity_newer_than_description(
+              "Chief of Staff", account_id=account_id, agent_id="main"))
+
+    # Now the identity lands again (the bot re-states its role later) — the
+    # description predates it, so the next read must re-describe.
+    time.sleep(1.1)  # the timestamps are second-resolution
+    database.save_registration(
+        service_name="Chief of Staff", agent_id="main",
+        soul="Chief of staff for the founder", identity="Chief of staff for the founder",
+        operating_manual="", user_context="", memory="", workspace_path="",
+        model="grok", account_id=account_id,
+    )
+    check("an identity that arrives AFTER the description reopens it",
+          main._identity_newer_than_description(
+              "Chief of Staff", account_id=account_id, agent_id="main"))
+    check("an agent with no registration at all is never re-described",
+          not main._identity_newer_than_description(
+              "Trovis PM", account_id=account_id, agent_id="main"))
+
+    print("\n[10] The door does not pretend to be automatic")
     # The tool descriptions are the contract the Bot reads. They must ask the
     # Bot to call in, never imply Trovis is watching by itself.
     for name, fn in (
@@ -370,4 +427,4 @@ print()
 if failures:
     print(f"FAILED ({len(failures)}): " + "; ".join(failures))
     raise SystemExit(1)
-print("CURSOR GROK BOT DOOR VERIFIED (live server, real MCP client)")
+print("GROK BOT DOOR VERIFIED (live server, real MCP client)")

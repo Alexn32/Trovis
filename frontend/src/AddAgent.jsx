@@ -67,9 +67,9 @@ const PLATFORMS = [
   // Agents built on the xAI SDK. The SDK traces itself through the global
   // OTEL provider, so trovis.init() is the whole integration.
   { id: 'grok',           label: 'Grok (xAI SDK)',            subtitle: 'Already OpenTelemetry-instrumented — two lines', needsProvider: false },
-  // A Cursor Grok Bot exports nothing and we cannot pull from it, so the door
-  // is the Bot reporting in over MCP. Not the xAI SDK tile above.
-  { id: 'grok-bot',       label: 'Cursor Grok Bot',           subtitle: 'Desktop assistant — it reports in over MCP',     needsProvider: false },
+  // A Grok Bot exports nothing and we cannot pull from it, so the door is the
+  // Bot reporting in over MCP. Not the xAI SDK tile above.
+  { id: 'grok-bot',       label: 'Grok Bot',                  subtitle: 'Desktop assistant — it reports in over MCP',     needsProvider: false },
 ]
 
 // Recipe path — real OTEL ingest, not a first-party Cursor integration.
@@ -1286,7 +1286,7 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — Cursor Grok Bot (MCP report tools)
+// Instructions page — Grok Bot (MCP report tools)
 // ---------------------------------------------------------------------------
 //
 // A Grok Bot is a desktop assistant. It has no exporter, and Trovis cannot
@@ -1298,85 +1298,85 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
 function GrokBotInstructions() {
   const mcpUrl = computeGrokMcpUrl()
   const apiKey = getApiKey() || ''
-  const headerLine = `Authorization: Bearer ${apiKey || 'ov_sk_…'}`
+  const key = apiKey || 'ov_sk_…'
+  // The whole setup, as one thing you paste into a chat with the Bot. This is
+  // the path that actually worked first time: the Bot installs its own MCP
+  // server and adopts the reporting rules in one go. Editing MCP settings by
+  // hand is the fallback below, not the headline.
+  const botSetup =
+`Add the Trovis reporting MCP server, then report your work through it.
+
+MCP server
+- URL: ${mcpUrl}
+- Header: Authorization: Bearer ${key}
+Put the key in the header itself — not a placeholder — and confirm a tool call actually works before telling me you're done.
+
+Trovis reporting (always do this)
+- At the start of any task, call report_job_started with a short plain-English title describing the task. That title becomes the job name in Trovis. Keep the job_id it returns.
+- On your first report, also pass bot_role: one line on what you are for in general (e.g. "Chief of staff: drafts updates, chases follow-ups, keeps the week organised"), so Trovis describes you by your actual job.
+- If you stop to ask me a question or wait on input, call report_job_waiting with that job_id.
+- When the task is complete, call report_job_finished with that job_id. If it fails or you give up, call report_job_failed with that job_id and a brief reason.
+- Always pass back the same job_id you were given for a task.
+Report in the background — don't mention Trovis unless I ask.`
   const mcpJson =
 `{
   "mcpServers": {
     "trovis": {
       "url": "${mcpUrl}",
-      "headers": { "Authorization": "Bearer ${apiKey || 'ov_sk_…'}" }
+      "headers": { "Authorization": "Bearer ${key}" }
     }
   }
 }`
-  const botInstructions =
-`Report your work to Trovis using the trovis MCP tools:
-- When you start a task the user asked for, call report_job_started with a plain-English title (what you're doing, as you'd say it to a colleague) and bot_name "Trovis PM". Keep the job_id it returns.
-- When you stop to ask the user something, call report_job_waiting with that job_id and one line on what you need.
-- When you finish, call report_job_finished with that job_id and a one-line summary.
-- If you give up or hit an error, call report_job_failed with that job_id and the reason.
-Report in the background — don't mention Trovis unless the user asks.`
 
   return (
     <>
-      <h2 className="instructions-title">Connect a Cursor Grok Bot</h2>
+      <h2 className="instructions-title">Connect a Grok Bot</h2>
       <p className="instructions-subtitle">
-        For a Grok Bot desktop assistant. You add one MCP server, and tell the
-        Bot to report when a job starts, waits, or finishes.
+        For a Grok Bot desktop assistant. Paste one block into a chat with the
+        Bot: it adds the Trovis MCP server itself, then reports each job it
+        starts, waits on, and finishes.
       </p>
 
       <Callout variant="warning">
         <strong>This is reporting, not telemetry.</strong> A Grok Bot doesn't
         export its work, and Trovis can't pull it — so what shows up here is
-        what the Bot calls in to report. Skip step 3 and you'll have a
-        connected MCP server that never reports anything.
+        what the Bot calls in to report. A Bot with the MCP server added but
+        no reporting instructions will never report anything.
       </Callout>
 
       <Callout variant="blue">
         <strong>Not the same as “Grok (xAI SDK)”.</strong> That tile is for
         apps you build with the <code>xai-sdk</code> package, which emits
-        OpenTelemetry on its own. This one is for the desktop assistant you
-        run in Cursor.
+        OpenTelemetry on its own. This one is for a desktop assistant you
+        chat with.
       </Callout>
 
       <PrefillBlock label="Your Trovis MCP server URL" value={mcpUrl} />
       <PrefillBlock
         label="Auth header"
-        value={apiKey ? headerLine : ''}
+        value={apiKey ? `Authorization: Bearer ${apiKey}` : ''}
         placeholder="(no key in session — log in and try again)"
       />
 
-      <NumberedStep n={1} title="Add the Trovis MCP server to your Grok Bot">
-        <p>
-          In the Bot's MCP settings, add a server with the URL above and the{' '}
-          <code>Authorization</code> header. If you edit the config as JSON:
-        </p>
-        <CodeBlock code={mcpJson} />
+      <NumberedStep n={1} title="Paste this to your Bot">
+        <AgentMessageBlock code={botSetup} />
         <p className="helper-text">
-          If your client can't set headers, leave the header out and have the
-          Bot pass <code>api_key</code> on each tool call instead — every
-          report tool accepts it.
+          It carries your real key, so treat it like one — paste it to your
+          own Bot, not into anything shared.
         </p>
       </NumberedStep>
 
-      <NumberedStep n={2} title="Check the Bot can see the tools">
+      <NumberedStep n={2} title="Make it prove the connection works">
         <p>
-          The Bot should now list four Trovis tools:{' '}
-          <code>report_job_started</code>, <code>report_job_waiting</code>,{' '}
-          <code>report_job_finished</code>, and{' '}
-          <code>report_job_failed</code>. Ask it to list its tools if you
-          aren't sure.
+          Ask the Bot to run one small job start-to-finish and tell you the{' '}
+          <code>job_id</code>. The known failure here is an MCP server that
+          installs with a <em>placeholder</em> in the auth header: the four
+          tools appear, and every call fails auth. If that happens, have the
+          Bot remove and re-add the server with the real key in the header.
         </p>
       </NumberedStep>
 
-      <NumberedStep n={3} title="Tell the Bot when to report (required)">
-        <p>
-          Paste this into the Bot's instructions (or a skill it always
-          loads). Adjust <code>bot_name</code> to whatever you call it:
-        </p>
-        <AgentMessageBlock code={botInstructions} />
-      </NumberedStep>
-
-      <NumberedStep n={4} title="Name the job (required for named Work)">
+      <NumberedStep n={3} title="Name the job (required for named Work)">
         <p>
           The <code>title</code> on <code>report_job_started</code>{' '}
           <em>is</em> the job's name on Work — Trovis stamps it as the job
@@ -1393,13 +1393,29 @@ Report in the background — don't mention Trovis unless the user asks.`
         </p>
       </NumberedStep>
 
-      <NumberedStep n={5} title="Run one real job">
+      <NumberedStep n={4} title="Run one real job">
         <p>
           Ask the Bot to do something it would normally do. The job appears
           on Work with its title, moves to “waiting on a person” when the
           Bot asks you a question, and closes when it reports finished.
         </p>
       </NumberedStep>
+
+      <h3 className="section-title section-title-spaced">
+        If your Bot can&apos;t add its own MCP server
+      </h3>
+      <p>
+        Add it by hand in the Bot&apos;s MCP settings, then paste the same
+        block above (the reporting part is what makes it report):
+      </p>
+      <CodeBlock code={mcpJson} />
+      <p className="helper-text">
+        The four tools are <code>report_job_started</code>,{' '}
+        <code>report_job_waiting</code>, <code>report_job_finished</code>, and{' '}
+        <code>report_job_failed</code>. If your client can&apos;t set headers
+        at all, leave the header out and have the Bot pass{' '}
+        <code>api_key</code> on each call instead — every tool accepts it.
+      </p>
 
       <SuccessCallout />
     </>

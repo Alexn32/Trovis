@@ -145,15 +145,15 @@ test('the Grok door is the SDK path, not xai-sdk\'s own OTLP exporter', () => {
 
 test('the two Grok doors are named apart and never blur together', () => {
   // Two different products with the same word in the name. "Grok (xAI SDK)" is
-  // an app built on xai-sdk; "Cursor Grok Bot" is a desktop assistant that
+  // an app built on xai-sdk; "Grok Bot" is a desktop assistant that
   // reports over MCP. Calling either by the other's name sends a builder down
   // a path that cannot work for them.
   assert.match(addAgent, /label: 'Grok \(xAI SDK\)'/)
-  assert.match(addAgent, /label: 'Cursor Grok Bot'/)
+  assert.match(addAgent, /label: 'Grok Bot'/)
   assert.match(addAgent, /Connect Grok \(xAI SDK\)/)
-  assert.match(addAgent, /Connect a Cursor Grok Bot/)
+  assert.match(addAgent, /Connect a Grok Bot/)
   assert.match(guide, /'Grok \(xAI SDK\)'/)
-  assert.match(guide, /'Cursor Grok Bot'/)
+  assert.match(guide, /'Grok Bot'/)
 
   // The SDK door never calls its user's app a bot...
   const sdkDoor = addAgent.slice(
@@ -184,7 +184,16 @@ test('the Grok Bot door admits the bot has to call in', () => {
     addAgent.indexOf('function ChatGPTInstructions'),
   )
   assert.match(body, /reporting, not telemetry/i)
-  assert.match(body, /never reports anything/i)
+  // Paste-to-the-bot is the path that worked first time; MCP-settings editing
+  // is the fallback. If those ever swap, the page is teaching the slower one.
+  assert.ok(
+    body.indexOf('Paste this to your Bot') < body.indexOf("can&apos;t add its own MCP server"),
+    'the manual MCP-settings path outranks paste-to-the-bot',
+  )
+  // The failure the first real connection actually hit.
+  assert.match(body, /placeholder/i)
+  assert.match(body, /remove and re-add/i)
+  assert.match(body, /never report anything/i)
   assert.doesNotMatch(body, /automatic(ally)?/i)
   // The MCP URL and the auth header are the two things they must copy.
   assert.match(body, /computeGrokMcpUrl\(\)/)
