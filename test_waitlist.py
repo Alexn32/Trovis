@@ -110,10 +110,12 @@ with TestClient(main.app) as c:
         check(f"GET {path} has honeypot", 'name="website"' in body)
         check(f"GET {path} title is waitlist", "Founding waitlist" in body)
         check(f"GET {path} has locked headline", "See the Work" in body)
+        hero = body.split("Home desk: what needs you")[0]
+        check(f"GET {path} visibility is not in the hero", "actually doing" not in hero)
         check(f"GET {path} has Home desk bullet", "Home desk: what needs you, not another dashboard" in body)
         check(
             f"GET {path} has Work-as-jobs bullet",
-            "Work as jobs — people, agents, and the tools already in the loop — one place to see and judge." in body,
+            "Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work." in body,
         )
         check(
             f"GET {path} has agent-visibility bullet",

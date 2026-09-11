@@ -14,7 +14,7 @@ function visible(src) {
 
 const LOCKED_BULLETS = [
   'Home desk: what needs you, not another dashboard',
-  'Work as jobs — people, agents, and the tools already in the loop — one place to see and judge.',
+  'Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.',
   'See what your agents are actually doing — and who’s waiting / what’s stuck — without drowning in traces',
   'Built for eng/founder teams with agents already in production',
 ]
@@ -45,6 +45,15 @@ for (const [name, src] of [
     assert.match(src, /What agents\/tools are already in your loop\?/)
   })
 
+  test(`${name} keeps agent visibility as support, not the hero`, () => {
+    assert.match(src, /See what your agents are actually doing/)
+    const hero = src.split(/Home desk: what needs you/)[0]
+    assert.doesNotMatch(hero, /actually doing/)
+    assert.doesNotMatch(hero, /\bfleet\b/i)
+    assert.doesNotMatch(hero, /cost tracking/i)
+    assert.doesNotMatch(hero, /drift/)
+  })
+
   test(`${name} keeps name optional and before email`, () => {
     const nameAt = src.search(/name=["']name["']|id=["']wl-name["']/)
     const emailAt = src.search(/name=["']email["']|id=["']wl-email["']/)
@@ -70,6 +79,7 @@ for (const [name, src] of [
 test('index.html SEO describes the waitlist', () => {
   assert.match(index, /Founding waitlist/)
   assert.match(index, /operating layer for hybrid work/)
+  assert.match(index, /what’s waiting on you/)
+  assert.match(index, /what’s blocked/)
   assert.match(index, /where handoffs get stuck/)
-  assert.match(index, /what your agents are actually doing/)
 })
