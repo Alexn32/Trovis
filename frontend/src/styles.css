@@ -7234,69 +7234,224 @@ button.work-td-task:hover {
   margin-top: 12px;
 }
 
+/* The chart gets the full width and the role detail sits under it. Side by
+   side, the chart was squeezed into a column narrow enough to clip whole
+   branches — and a chart you cannot see the shape of is just a list with
+   extra steps. */
 .org-body {
-  display: grid;
-  grid-template-columns: minmax(260px, 340px) 1fr;
-  gap: 20px;
-  align-items: start;
-}
-@media (max-width: 860px) {
-  .org-body {
-    grid-template-columns: 1fr;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
-.org-tree {
+.org-chart-wrap {
   border: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   border-radius: 10px;
   background: var(--bg-surface);
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  padding: 20px 12px 16px;
+  /* A chart is as wide as the org is broad. Scroll it rather than shrinking
+     boxes until the titles are unreadable. */
+  overflow-x: auto;
 }
-.org-node {
+.org-chart {
+  display: inline-block;
+  min-width: 100%;
+}
+
+/* One row of siblings, fanned out under their parent. */
+.org-chart-foot {
+  border-top: 1px solid var(--border-default);
+  padding-top: 12px;
+}
+
+.oc-level {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  list-style: none;
+  margin: 0;
+  padding: 22px 0 0;
+  position: relative;
+}
+/* The drop from the parent box into this row's bus. */
+.oc-level::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 1px;
+  height: 22px;
+  background: var(--border-hover);
+}
+/* The root row hangs from nothing. */
+.oc-level.is-root {
+  padding-top: 0;
+}
+.oc-level.is-root::before {
+  display: none;
+}
+
+.oc-node {
+  position: relative;
+  padding: 22px 10px 0;
+  list-style: none;
+}
+/* The two halves of the horizontal bus. The first child has no left half and
+   the last no right half, so the bus stops at the outermost siblings instead
+   of running off into space. */
+.oc-node::before,
+.oc-node::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 1px;
+  background: var(--border-hover);
+}
+.oc-node::before { right: 50%; }
+.oc-node::after { left: 50%; }
+.oc-node:first-child::before,
+.oc-node:last-child::after {
+  background: none;
+}
+/* An only child needs no bus at all — just the drop. */
+.oc-node:only-child::before,
+.oc-node:only-child::after {
+  background: none;
+}
+/* The drop from the bus into this box. */
+.oc-cell {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+.oc-cell::before {
+  content: '';
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  width: 1px;
+  height: 22px;
+  background: var(--border-hover);
+}
+.oc-level.is-root > .oc-node {
+  padding-top: 0;
+}
+.oc-level.is-root > .oc-node::before,
+.oc-level.is-root > .oc-node::after,
+.oc-level.is-root > .oc-node > .oc-cell::before {
+  display: none;
+}
+
+/* Leaf-only children stack down the page off an elbow instead of fanning
+   out. A manager with twelve reports would otherwise make the chart wider
+   than any screen. */
+.oc-level.is-stacked {
+  display: block;
+  padding: 0 0 0 26px;
+  /* The spine sits one padding-left in from the list's edge, so the list has
+     to start that far LEFT of the parent box's centre for the two to line
+     up. Measured, not guessed: at -13px the whole branch hung 13px right of
+     the box it reports to. */
+  margin-left: calc(50% - 26px);
+}
+/* The drop has to land ON the spine, not 26px to its left: an absolutely
+   positioned child is placed against the ul's padding box, while the spine
+   sits at the node's left edge, one padding-left further in. */
+.oc-level.is-stacked::before {
+  top: 0;
+  left: 26px;
+  height: 18px;
+}
+.oc-level.is-stacked > .oc-node {
+  padding: 0 0 0 22px;
+  margin-top: 10px;
+}
+/* The spine, running down past every child but stopping at the last one's
+   elbow so the line does not dangle. */
+.oc-level.is-stacked > .oc-node::before {
+  right: auto;
+  left: 0;
+  top: -10px;
+  width: 1px;
+  height: calc(100% + 10px);
+  background: var(--border-hover);
+}
+.oc-level.is-stacked > .oc-node:last-child::before {
+  height: calc(50% + 10px);
+}
+/* The elbow into the box. */
+.oc-level.is-stacked > .oc-node::after {
+  left: 0;
+  top: 50%;
+  width: 22px;
+  height: 1px;
+  background: var(--border-hover);
+}
+.oc-level.is-stacked > .oc-node > .oc-cell {
+  justify-content: flex-start;
+}
+.oc-level.is-stacked > .oc-node > .oc-cell::before {
+  display: none;
+}
+
+/* The box itself. Header line is the role; below it, who is in it. */
+.oc-box {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  align-items: flex-start;
+  gap: 6px;
+  align-items: stretch;
   text-align: left;
-  width: 100%;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 8px 10px;
+  min-width: 150px;
+  max-width: 220px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 9px 12px;
   cursor: pointer;
   color: var(--text-secondary);
 }
-.org-node:hover {
-  background: var(--bg-surface-hover);
-}
-.org-node.is-selected {
+.oc-box:hover {
   border-color: var(--border-hover);
-  background: var(--bg-elevated);
-  color: var(--text-primary);
 }
-.org-node-title {
+.oc-box.is-selected {
+  border-color: var(--brand-accent);
+  background: var(--brand-accent-bg);
+}
+.oc-box-title {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
+  line-height: 1.3;
 }
-.org-node-people {
+.oc-box-people {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
 }
-.org-chip {
+.oc-person {
   font-size: 11px;
   color: var(--text-muted);
   border: 1px solid var(--border-default);
   border-radius: 999px;
   padding: 1px 8px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.org-chip-empty {
+.oc-person.is-vacant {
   color: var(--text-dim);
   border-style: dashed;
+}
+
+@media (max-width: 860px) {
+  .oc-box {
+    min-width: 130px;
+  }
 }
 
 .org-detail-card {

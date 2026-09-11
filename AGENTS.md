@@ -106,7 +106,11 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   arrives late, can fail, and is absent for API-key sessions — failing closed would blank a working
   product and buy nothing, because the server re-checks every request anyway.
 - **Org is the one place people live.** `Org.jsx` (chart, roles, people, invites, scope-on-role,
-  Path A→B graduation); `org.js` holds its pure logic. Affordances come from the server's
+  Path A→B graduation); `org.js` holds its pure logic. The chart is a real top-down hierarchy —
+  nested `<ul>`/`<li>` with connector pseudo-elements (`.oc-*`), no layout library. Children fan
+  out horizontally **unless every one of them is a leaf**, in which case they stack down an elbow;
+  without that a manager with twelve reports is wider than any screen. It takes the full page
+  width and scrolls sideways; the role detail sits under it. Affordances come from the server's
   per-role `can_edit` / `can_add_child` — the client never derives permissions. Settings shows
   members read-only and links to Org; there is deliberately no second invite form.
 - **Agent ownership is a `users` assignment.** `agent_owners.user_id`, and the label beside the
@@ -133,7 +137,10 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 
 ```bash
 # Backend (isolated SQLite, no network price sync)
-DATABASE_PATH=/tmp/dev.db TROVIS_DISABLE_PRICING_SYNC=1 \
+# The SQLite path env var is TROVIS_DB_PATH (legacy: OVERSEE_DB_PATH) — see
+# database.py. DATABASE_PATH is read by nothing and silently gives you a
+# trovis.db in the repo root instead.
+TROVIS_DB_PATH=/tmp/dev.db TROVIS_DISABLE_PRICING_SYNC=1 \
   uvicorn main:app --port 8099 --reload
 
 # Frontend (point it at the backend)

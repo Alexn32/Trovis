@@ -12,10 +12,14 @@
 //      never computes them. Greying out a button the seat says no to is a
 //      courtesy; the API refuses it regardless.
 
-// Build a forest from the flat role list. Roots are roles with no parent AND
-// roles whose parent isn't visible to this caller (see 1 above). Children are
-// ordered by title so the tree is stable across reloads.
-export function buildTree(roles) {
+// Build a real hierarchy from the flat role list: nested nodes, so the page
+// can draw a chart with connectors rather than an indented list.
+//
+// Roots are roles with no parent AND roles whose parent isn't visible to
+// this caller (see 2 above). Children are ordered by title so the chart is
+// stable across reloads — a box that moves between refreshes is a box people
+// stop trusting.
+export function buildForest(roles) {
   const list = Array.isArray(roles) ? roles : []
   const byId = new Map(list.map((r) => [r.id, r]))
   const children = new Map()
@@ -34,12 +38,41 @@ export function buildTree(roles) {
   const build = (role, depth) => {
     // A cycle would recurse forever. The server rejects them on write, but a
     // page must not hang on data it merely received.
-    if (seen.has(role.id)) return []
+    if (seen.has(role.id)) return null
     seen.add(role.id)
-    const kids = (children.get(role.id) || []).sort(byTitle)
-    return [{ role, depth }, ...kids.flatMap((k) => build(k, depth + 1))]
+    const kids = (children.get(role.id) || [])
+      .sort(byTitle)
+      .map((k) => build(k, depth + 1))
+      .filter(Boolean)
+    return { role, depth, children: kids }
   }
-  return roots.sort(byTitle).flatMap((r) => build(r, 0))
+  return roots.sort(byTitle).map((r) => build(r, 0)).filter(Boolean)
+}
+
+// The same hierarchy flattened, parents before their children. Useful for
+// counting, for keyboard order, and for tests that care about shape rather
+// than markup.
+export function flattenForest(forest) {
+  const out = []
+  const walk = (nodes) => {
+    for (const n of nodes || []) {
+      out.push({ role: n.role, depth: n.depth })
+      walk(n.children)
+    }
+  }
+  walk(forest)
+  return out
+}
+
+// How wide the chart is at its widest point. The page uses it to decide
+// whether the chart needs to scroll sideways rather than guessing from a
+// breakpoint.
+export function widestRow(forest) {
+  const perDepth = new Map()
+  for (const { depth } of flattenForest(forest)) {
+    perDepth.set(depth, (perDepth.get(depth) || 0) + 1)
+  }
+  return perDepth.size ? Math.max(...perDepth.values()) : 0
 }
 
 // Everyone standing in a role, resolved against the member list the chart
