@@ -440,7 +440,11 @@ function WeekStrip({ weekly, costDays }) {
 /* ── 4. Work Feed (3 depths) ── */
 function FeedItem({ r }) {
   const [depth, setDepth] = useState(0) // 0 collapsed · 1 exchange · 2 spans
-  const isSystem = r.kind === 'system' || !r.exchange
+  // Only a real registration/heartbeat is a system row. A record with no
+  // exchange is work the agent reported without a transcript — filing it as
+  // "system" is what made a busy bot look like it only ever announced itself.
+  const isSystem = r.kind === 'system'
+  const isReport = r.kind === 'report' || (!isSystem && !r.exchange)
   const dot = r.error ? C.err : isSystem ? C.faint : C.ok
   // A small type tag so each row reads at a glance — and its color matches the
   // status dot, so the dot's meaning is self-explanatory. Errors win; then
@@ -450,7 +454,9 @@ function FeedItem({ r }) {
     ? { label: 'Error', color: C.err }
     : isSystem
       ? { label: 'System', color: C.muted }
-      : r.exchange?.user && r.exchange?.agent
+      : isReport
+        ? { label: 'Reported', color: C.teal }
+        : r.exchange?.user && r.exchange?.agent
         ? { label: 'Interaction', color: C.teal }
         : r.exchange?.agent
           ? { label: 'Agent output', color: C.teal }
@@ -477,7 +483,7 @@ function FeedItem({ r }) {
 
       {depth > 0 && (
         <div style={{ padding: '0 18px 16px 40px' }}>
-          {!isSystem ? (
+          {r.exchange ? (
             <div style={{ maxWidth: 700 }}>
               {r.exchange.user && (
                 <div style={{ marginBottom: 10 }}>
@@ -498,8 +504,19 @@ function FeedItem({ r }) {
               </div>
             </div>
           ) : (
-            <div style={{ fontSize: 13.5, color: C.muted, fontFamily: F.body }}>
-              System record — the agent registered and declared its identity. No exchange to show.
+            <div>
+              <div style={{ fontSize: 13.5, color: C.muted, fontFamily: F.body }}>
+                {isSystem
+                  ? 'System record — the agent registered and declared its identity. No exchange to show.'
+                  : 'The agent reported this job — Trovis recorded what it did, not the conversation. No transcript to show.'}
+              </div>
+              {!isSystem && (
+                <div style={{ display: 'flex', gap: 18, marginTop: 10, fontFamily: F.mono, fontSize: 11.5, color: C.muted }}>
+                  <span>{fmtDur(r.duration_ms)}</span>
+                  <span>{(r.tokens || 0).toLocaleString()} tokens</span>
+                  <span>{fmtCost(r.cost_usd)}</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -540,8 +557,10 @@ const FEED_FILTERS = [
 ]
 function feedCategory(r) {
   if (r.error) return 'error'
-  if (r.kind === 'system' || !r.exchange) return 'system'
-  return 'interaction' // has an exchange (user prompt and/or agent response)
+  if (r.kind === 'system') return 'system'
+  // A reported job is work, so it belongs with the interactions — not filed
+  // away under System where nobody looks for what their agent did.
+  return 'interaction'
 }
 
 function WorkFeed({ serviceName, agentId }) {

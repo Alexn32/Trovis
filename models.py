@@ -1013,8 +1013,13 @@ class RecordExchange(BaseModel):
 
 
 class AgentRecord(BaseModel):
-    """One Work Feed record. `kind` is 'interaction' (has an exchange) or
-    'system' (registration/heartbeat — fixed summary, no exchange)."""
+    """One Work Feed record. `kind` is:
+      'interaction' — a transcript was captured (exchange present)
+      'report'      — real work the agent reported without a transcript
+                      (a report-door agent, or capture off); the summary is
+                      the job's own title
+      'system'      — registration / heartbeat only, fixed summary
+    """
 
     id: str  # the trace_id (immutable → summary cache key)
     summary: str = ""
