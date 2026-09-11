@@ -383,6 +383,89 @@ try:
               or x.get("kind") == "system" for x in records),
           f"records={[(x.get('kind'), x.get('summary')) for x in records]}")
 
+    print("\n[8c] The conversation, one line each side, and a written summary")
+    # The privacy control has to be exact: content reaches Trovis through
+    # `request` and `result` only. A bot still sending the old mechanical
+    # `summary` must not turn a job into a transcript behind the user's back.
+    run(call_tool("report_job_started", {
+        "title": "Quiet job", "bot_name": "Trovis PM", "job_id": "grok-quiet-1",
+    }, KEY))
+    run(call_tool("report_job_finished", {
+        "job_id": "grok-quiet-1", "summary": "Did the thing",
+    }, KEY))
+    quiet = [x for x in (requests.get(f"{BASE}/agents/Trovis PM/records",
+                                      headers=H, timeout=30).json().get("records") or [])
+             if x.get("summary") == "Quiet job"]
+    check("a job reported without request/result holds no conversation",
+          len(quiet) == 1 and quiet[0].get("exchange") is None
+          and quiet[0].get("kind") == "report",
+          f"matched={[(x.get('kind'), x.get('exchange')) for x in quiet]}")
+
+    # A feed that says "no transcript to show" on every row is a feed nobody
+    # reads. The bot sends one line of what was asked and one of what it
+    # answered; those are the attributes the exchange extractor already reads,
+    # so the record becomes a real interaction with a Claude-written summary.
+    run(call_tool("report_job_started", {
+        "title": "Check Alex inbox",
+        "bot_name": "Trovis PM",
+        "job_id": "grok-talk-1",
+        "request": "Asked me to check his inbox and flag anything needing a reply today",
+    }, KEY))
+    run(call_tool("report_job_finished", {
+        "job_id": "grok-talk-1",
+        "result": "Three threads need replies: the Acme renewal, a candidate "
+                  "reschedule, and the board deck review",
+    }, KEY))
+
+    feed = requests.get(f"{BASE}/agents/Trovis PM/records", headers=H, timeout=30).json()
+    talk = [x for x in (feed.get("records") or [])
+            if "inbox" in ((x.get("exchange") or {}).get("user") or "")]
+    check("the job is one record with both reports",
+          len(talk) == 1 and len(talk[0].get("spans") or []) == 2,
+          f"matched={[(x.get('summary'), len(x.get('spans') or [])) for x in talk]}")
+    if talk:
+        rec = talk[0]
+        ex = rec.get("exchange") or {}
+        check("the person's side is what they asked",
+              "check his inbox" in (ex.get("user") or ""), f"user={ex.get('user')!r}")
+        check("the agent's side is what it answered",
+              "Three threads need replies" in (ex.get("agent") or ""),
+              f"agent={ex.get('agent')!r}")
+        check("so it reads as an interaction, not a contentless report",
+              rec.get("kind") == "interaction", f"kind={rec.get('kind')!r}")
+        check("and the feed line is the written summary",
+              rec.get("summary") == "Stubbed record summary",
+              f"summary={rec.get('summary')!r}")
+
+    print("\n[8d] A job's record keeps its title when a report goes astray")
+    # The bug in the wild: a bot echoing a job_id Trovis has never seen turned
+    # a finish into its own record titled "job_finished". Two defenses — the
+    # follow-up lands on the bot's open job, and every report carries the
+    # job's title, so even a stray record can never be titled from a raw
+    # span name.
+    run(call_tool("report_job_started", {
+        "title": "Draft the Monday note", "bot_name": "Trovis PM",
+        "job_id": "grok-stray-1",
+    }, KEY))
+    run(call_tool("report_job_finished", {
+        "job_id": "a-job-id-trovis-has-never-seen",
+        "result": "Sent the draft", "bot_name": "Trovis PM",
+    }, KEY))
+    feed = requests.get(f"{BASE}/agents/Trovis PM/records", headers=H, timeout=30).json()
+    records = feed.get("records") or []
+    check("no record is ever titled from the door's own mechanics",
+          all(x.get("summary") not in ("job_started", "job_waiting",
+                                       "job_finished", "job_failed")
+              for x in records),
+          f"summaries={[x.get('summary') for x in records]}")
+    stray = loops_for(KEY, "a-job-id-trovis-has-never-seen")
+    check("an unknown job id does not open a second job",
+          not stray, f"loops={stray}")
+    drafted = loops_for(KEY, "grok-stray-1")
+    check("the finish landed on the job the bot actually had open",
+          bool(drafted) and drafted[0].get("closed_at"),
+          f"loop={drafted[0] if drafted else None}")
+
     print("\n[9] A bot's stated role beats what it happened to do first")
     # The first-impression problem, which the first real Grok Bot hit: its
     # opening jobs were connection smoke tests, so it was described forever as

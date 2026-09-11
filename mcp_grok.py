@@ -137,11 +137,26 @@ def _resolve_account_id(ctx: Context | None, api_key: str | None = None) -> int 
 
 
 def _remember_job(
-    account_id: int, bot_name: str, job_id: str | None, role: str | None = None
+    account_id: int,
+    bot_name: str,
+    job_id: str | None,
+    role: str | None = None,
+    title: str | None = None,
 ) -> None:
     payload = {"bot_name": bot_name, "job_id": job_id or ""}
     # Keep the last role we registered so we only re-register when it changes.
     payload["role"] = role if role is not None else (_recall_role(account_id) or "")
+    # The job's human title, so every later report for it can carry the title
+    # too. Without this a report that lands on its own record — a bot that
+    # echoes the wrong job_id back, say — shows up as the raw span name
+    # ("job_finished"), which is exactly the id-shaped junk Work filters out.
+    prior = _recall(account_id) or {}
+    if title is not None:
+        payload["title"] = title
+    elif job_id and job_id == prior.get("job_id"):
+        payload["title"] = prior.get("title") or ""
+    else:
+        payload["title"] = ""
     database.save_insight(account_id, _SENTINEL, "main", "current_job", payload)
 
 
@@ -162,6 +177,39 @@ def _recall(account_id: int) -> dict[str, Any] | None:
 def _recall_role(account_id: int) -> str | None:
     data = _recall(account_id)
     return (data or {}).get("role") or None
+
+
+def _recall_title(account_id: int, job_id: str) -> str | None:
+    """The remembered title, but only for the job it belongs to."""
+    data = _recall(account_id) or {}
+    if job_id and data.get("job_id") == job_id:
+        return data.get("title") or None
+    return None
+
+
+def _resolve_job(account_id: int, job_id: Any) -> str | None:
+    """Which job a follow-up report belongs to.
+
+    An explicit id wins when Trovis has actually seen it — that is a bot
+    correctly echoing back what it was given, including for an older job.
+    An id we have never seen is more likely a bot inventing one than a real
+    second job, so the bot's own open job wins instead; that is what keeps
+    "started / waiting / finished" on one record rather than scattering a
+    single job across three.
+    """
+    explicit = _clean(job_id, 120)
+    remembered = _recall_job(account_id)[1]
+    if not explicit:
+        return remembered
+    if explicit == remembered:
+        return explicit
+    try:
+        known = database.find_open_loop_by_external_id(account_id, explicit)
+    except Exception:  # noqa: BLE001 — never fail a report on a lookup
+        known = None
+    if known:
+        return explicit
+    return remembered or explicit
 
 
 def _register_identity(account_id: int, bot_name: str, role: str) -> bool:
@@ -264,6 +312,7 @@ async def report_job_started(
     title: str,
     bot_name: str = "",
     bot_role: str = "",
+    request: str = "",
     job_id: str = "",
     note: str = "",
     api_key: str = "",
@@ -275,6 +324,7 @@ async def report_job_started(
         title: What you're doing, in plain English, as you'd say it to a colleague — e.g. "Draft the Q3 board update". Not an id or a slug.
         bot_name: This bot's name, so Trovis can tell your bots apart (e.g. "Trovis PM"). Send the same name every time.
         bot_role: One line on what YOU are for, in general — e.g. "Chief of staff for the founder: drafts updates, chases follow-ups, keeps the week organised". Send it on your first report so Trovis describes you by your actual job rather than guessing from whatever task it sees first. Harmless to send every time.
+        request: One line on what the person actually asked you for, in their terms — e.g. "Asked me to check his inbox and flag anything needing a reply today". This is what makes the Work Feed readable; leave it out and the job shows as a bare title.
         job_id: Optional id for this job. Omit it and Trovis returns one — pass that back on the later calls for this job.
         note: Optional one-line detail about the job.
         api_key: Only if this MCP server has no Authorization header.
@@ -296,9 +346,13 @@ async def report_job_started(
             "trovis.loop.title": clean_title,
             "trovis.step.name": "job_started",
             "trovis.step.description": _clean(note),
+            # The person's side of the exchange. `_extract_exchange` reads
+            # this, which is what turns the record into a real interaction
+            # with a Claude-written summary instead of a bare title.
+            "trovis.message.content": _clean(request, 2000),
         },
     )
-    _remember_job(account_id, name, jid, role=role or None)
+    _remember_job(account_id, name, jid, role=role or None, title=clean_title)
     return f"Tracking job {jid} in Trovis: {clean_title}"
 
 
@@ -324,7 +378,7 @@ async def report_job_waiting(
     if account_id is None:
         return _NO_AUTH
     name = _bot_name(bot_name, account_id)
-    jid = _clean(job_id, 120) or _recall_job(account_id)[1]
+    jid = _resolve_job(account_id, job_id)
     if not jid:
         return _NO_JOB
     clean_reason = _clean(reason)
@@ -332,11 +386,13 @@ async def report_job_waiting(
         account_id, name, jid, "job_waiting",
         {
             "trovis.event.type": "agent_activity",
+            "trovis.loop.title": _recall_title(account_id, jid) or "",
             "trovis.handoff.direction": "to_human",
             "trovis.handoff.target_id": _clean(waiting_on, 200),
             "trovis.handoff.reason": clean_reason,
             "trovis.handoff.id": uuid.uuid4().hex,
             "trovis.step.name": "job_waiting",
+            "trovis.step.description": clean_reason,
         },
     )
     _remember_job(account_id, name, jid)
@@ -347,6 +403,7 @@ async def report_job_waiting(
 @mcp.tool()
 async def report_job_finished(
     summary: str = "",
+    result: str = "",
     job_id: str = "",
     bot_name: str = "",
     api_key: str = "",
@@ -356,6 +413,7 @@ async def report_job_finished(
 
     Args:
         summary: One line on what you delivered.
+        result: What you actually told the person, in one or two lines — the answer, the finding, the thing you handed back. This is what the Work Feed shows and summarizes; without it the job closes with no outcome recorded.
         job_id: The id report_job_started returned. Omit to use this bot's most recent job.
         bot_name: This bot's name (same value you started the job with).
         api_key: Only if this MCP server has no Authorization header.
@@ -364,16 +422,24 @@ async def report_job_finished(
     if account_id is None:
         return _NO_AUTH
     name = _bot_name(bot_name, account_id)
-    jid = _clean(job_id, 120) or _recall_job(account_id)[1]
+    jid = _resolve_job(account_id, job_id)
     if not jid:
         return _NO_JOB
+    # Only `result` counts as content. `summary` stays what it was — a
+    # mechanical one-liner — so the privacy control on the Connect page is
+    # exact: delete the request/result bullet and Trovis holds nothing you
+    # said to the bot, even from a bot still sending the old field.
+    outcome = _clean(result, 2000)
     _report_span(
         account_id, name, jid, "job_finished",
         {
             "trovis.event.type": "agent_run_complete",
             "trovis.loop.close": "done",
+            "trovis.loop.title": _recall_title(account_id, jid) or "",
             "trovis.task.summary": _clean(summary),
             "trovis.step.name": "job_finished",
+            # The agent's side of the exchange — the outcome a person reads.
+            "trovis.response.content": outcome,
         },
     )
     _remember_job(account_id, name, None)
@@ -400,17 +466,19 @@ async def report_job_failed(
     if account_id is None:
         return _NO_AUTH
     name = _bot_name(bot_name, account_id)
-    jid = _clean(job_id, 120) or _recall_job(account_id)[1]
+    jid = _resolve_job(account_id, job_id)
     if not jid:
         return _NO_JOB
-    clean_reason = _clean(reason) or "failed"
+    clean_reason = _clean(reason, 2000) or "failed"
     _report_span(
         account_id, name, jid, "job_failed",
         {
             "trovis.event.type": "agent_run_complete",
             "trovis.loop.close": clean_reason,
+            "trovis.loop.title": _recall_title(account_id, jid) or "",
             "trovis.task.summary": clean_reason,
             "trovis.step.name": "job_failed",
+            "trovis.response.content": clean_reason,
         },
         status_code=2,
         status_message=clean_reason,

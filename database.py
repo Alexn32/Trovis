@@ -7769,6 +7769,12 @@ def get_agent_spans(
 # Span names that mark a record as a "system" event (no real exchange).
 _SYSTEM_SPAN_NAMES = {"agent_registration", "heartbeat"}
 
+# Span names that describe the REPORT, not the work: a record titled
+# "job_finished" tells an operator nothing about what their agent did.
+_MECHANICAL_SPAN_NAMES = {
+    "job_started", "job_waiting", "job_finished", "job_failed",
+}
+
 
 def _fmt_dur_ns(ns: int | None) -> str:
     """Human duration from a nanosecond delta: 38µs / 51ms / 8.85s."""
@@ -7862,14 +7868,17 @@ def _record_title(
     name, then the first non-system operation. None when the record says
     nothing about itself.
     """
-    for key in ("loop.title", "step.description", "step.name", "task.summary"):
+    for key in ("loop.title", "task.summary", "step.description"):
         for attrs in span_attrs:
             value = attr(attrs, key)
             if isinstance(value, str) and value.strip():
                 return " ".join(value.split())[:200]
+    # Span names are a last resort, and only a name a person would recognize.
+    # A report door's own mechanics ("job_finished") are exactly the id-shaped
+    # junk Work filters out of titles — better to say nothing.
     for sr in span_rows:
         name = sr["span_name"]
-        if name and name not in _SYSTEM_SPAN_NAMES:
+        if name and name not in _SYSTEM_SPAN_NAMES and name not in _MECHANICAL_SPAN_NAMES:
             return str(name)
     return None
 
