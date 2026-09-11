@@ -353,6 +353,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Explicit `trovis.platform` stamps → the label the dashboard shows. Set by
+# the doors that have no SDK to infer from (an assistant reporting over MCP
+# carries no telemetry.sdk.* attributes, so without this it shows as nothing).
+_PLATFORM_LABELS = {
+    "cursor-grok-bot": "Cursor Grok Bot",
+    "chatgpt": "ChatGPT Agent",
+}
+
+
 def _detect_platform(resource_attrs_json: str | None) -> str | None:
     """Infer a human-readable platform label from a span's resource
     attributes. Returns None when no identifying signal is present — we'd
@@ -368,6 +377,14 @@ def _detect_platform(resource_attrs_json: str | None) -> str | None:
         return None
     if not isinstance(attrs, dict):
         return None
+
+    # An explicit, first-party platform stamp beats every inference below.
+    # Only doors we ship set it, and only to a value we map here — an
+    # unknown value falls through rather than becoming a label we can't
+    # vouch for.
+    explicit = attrs.get("trovis.platform") or attrs.get("oversee.platform")
+    if isinstance(explicit, str) and explicit.strip().lower() in _PLATFORM_LABELS:
+        return _PLATFORM_LABELS[explicit.strip().lower()]
 
     if "openclaw.gateway.version" in attrs:
         return "OpenClaw Agent"

@@ -41,7 +41,7 @@ jobs:
       - name: Every claimed ingest door has a test
         run: |
           missing=()
-          for door in otlp sdk plugin actions; do
+          for door in otlp sdk plugin actions grok_bot; do
             [ -f "test_connect_$door.py" ] || missing+=("test_connect_$door.py")
           done
           if [ ${#missing[@]} -gt 0 ]; then
