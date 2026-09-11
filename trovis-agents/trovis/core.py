@@ -197,10 +197,15 @@ def init(
               `openai-agents` or `anthropic` is installed.
             - "openai" — only the OpenAI Agents SDK.
             - "anthropic" — only the Anthropic Claude Managed Agents SDK.
-            - "all" — both, regardless of what's installed (will warn
-              for the missing one).
+            - "claude-agent-sdk" — only the Claude Agent SDK.
+            - "xai" (alias "grok") — only the xAI SDK (Grok).
+            - "all" — every adapter, regardless of what's installed (will
+              warn for each missing one).
     """
     global _INITIALIZED, _CAPTURE_PROCESSOR
+
+    # "grok" is how operators say it; "xai" is the SDK. Same adapter.
+    platform = _normalize_platform(platform)
 
     # Priority: explicit arg → env var (TROVIS_*, legacy OVERSEE_*) → default.
     resolved_endpoint = (
@@ -263,6 +268,7 @@ def init(
     do_claude_sdk = platform in ("claude-agent-sdk", "all") or (
         platform == "auto" and _has_claude_agent_sdk()
     )
+    do_xai = platform in ("xai", "all") or (platform == "auto" and _has_xai())
 
     active: list[str] = []
 
@@ -286,6 +292,15 @@ def init(
 
         setup_claude_agent_sdk()
         active.append("claude-agent-sdk")
+
+    if do_xai:
+        # Grok (xAI SDK). The SDK traces itself through the global provider
+        # we just set, so this only checks the path is clear and attaches
+        # the processor that turns a Grok run into named Work.
+        from trovis.xai import setup_xai
+
+        setup_xai()
+        active.append("xai")
 
     _INITIALIZED = True
 
@@ -313,9 +328,17 @@ def init(
     else:
         print(
             "[Trovis] No agent SDK detected — manual spans only. "
-            "Install openai-agents, anthropic, or claude-agent-sdk to "
-            "enable per-SDK instrumentation."
+            "Install openai-agents, anthropic, claude-agent-sdk, or xai-sdk "
+            "to enable per-SDK instrumentation."
         )
+
+
+def _normalize_platform(platform: str) -> str:
+    """Fold the aliases operators actually type onto the canonical adapter
+    names. Unknown values pass through untouched — init() treats anything
+    it doesn't recognize the same as before (no adapter, manual spans)."""
+    alias = str(platform or "").strip().lower()
+    return {"grok": "xai", "x.ai": "xai"}.get(alias, alias or "auto")
 
 
 def _platform_label_for_init(platform: str) -> str:
@@ -323,7 +346,7 @@ def _platform_label_for_init(platform: str) -> str:
     used on every emitted span. "auto" resolves to whatever SDK is
     actually installed so the dashboard's filter chips read sensibly;
     explicit values are passed through."""
-    if platform in ("openai", "anthropic", "claude-agent-sdk", "all"):
+    if platform in ("openai", "anthropic", "claude-agent-sdk", "xai", "all"):
         return platform
     # auto — count installed SDKs.
     detected = [
@@ -332,6 +355,7 @@ def _platform_label_for_init(platform: str) -> str:
             ("openai", _has_openai_agents()),
             ("anthropic", _has_anthropic()),
             ("claude-agent-sdk", _has_claude_agent_sdk()),
+            ("xai", _has_xai()),
         )
         if present
     ]
@@ -361,6 +385,13 @@ def _has_claude_agent_sdk() -> bool:
     import importlib.util as _u
 
     return _u.find_spec("claude_agent_sdk") is not None
+
+
+def _has_xai() -> bool:
+    """Detect the xAI SDK (Grok) without forcing an import."""
+    import importlib.util as _u
+
+    return _u.find_spec("xai_sdk") is not None
 
 
 def _wire_agents_tracing(capture_processor: CaptureProcessor) -> None:

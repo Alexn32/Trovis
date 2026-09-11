@@ -1,8 +1,9 @@
 # trovis-agents
 
 Connect your AI agents to Trovis in two lines of code. Supports
-the OpenAI Agents SDK, Anthropic Claude Managed Agents, and the
-Claude Agent SDK. Extras pick which dependencies install.
+the OpenAI Agents SDK, Anthropic Claude Managed Agents, the
+Claude Agent SDK, and Grok (xAI SDK). Extras pick which dependencies
+install.
 
 ## Install
 
@@ -15,6 +16,9 @@ pip install trovis-agents[anthropic]
 
 # Claude Agent SDK (query() + ClaudeSDKClient)
 pip install trovis-agents[claude-agent-sdk]
+
+# Grok (xAI SDK)
+pip install trovis-agents[xai]
 
 # All Python-SDK platforms
 pip install trovis-agents[all]
@@ -122,6 +126,47 @@ run's token usage + cost (from the SDK's `ResultMessage`).
 
 `ClaudeSDKClient`'s streaming (`receive_response`) is instrumented the
 same way.
+
+## Grok (xAI SDK)
+
+For agents built on the `xai-sdk` package. The xAI SDK is already
+OpenTelemetry-instrumented, so there is nothing to wrap — `init()` points
+the global tracer provider at Trovis and every Grok call lands there.
+
+```python
+from trovis import init, set_loop_title
+
+# Call init() BEFORE creating the xAI client.
+init(api_key="ov_sk_your_key", agent_name="support-grok", platform="xai")
+
+from xai_sdk import Client
+from xai_sdk.chat import user
+
+set_loop_title("Triage refund for order #4821")   # names the Work item
+
+client = Client()
+chat = client.chat.create(model="grok-4.20-non-reasoning")
+chat.append(user("Customer wants a refund on order 4821 — what are our options?"))
+response = chat.sample()   # → a Trovis span, with token usage and cost
+```
+
+`platform="grok"` is accepted as an alias, and `platform="auto"` picks this
+up whenever `xai-sdk` is installed.
+
+Two things to know:
+
+- **Don't create an `xai_sdk.telemetry.Telemetry()`.** It installs its own
+  tracer provider, which names *every* Grok agent `xai-sdk` (so they all
+  collapse into one in Trovis) and exports protobuf, which the Trovis JSON
+  ingest rejects. `init()` already does that job, and OTEL won't let a
+  second provider take over — if one got there first, `init()` warns.
+- **`XAI_SDK_DISABLE_TRACING=1` silences the SDK entirely.** With it set, a
+  Grok agent emits no spans at all and never appears; `init()` warns about
+  this too.
+
+Calling Grok through the OpenAI-compatible endpoint
+(`base_url="https://api.x.ai/v1"`) instead? That's the OpenAI path — use
+`opentelemetry-instrumentation-openai`, as the Add Agent wizard shows.
 
 ## Hermes Agent — not currently supported
 

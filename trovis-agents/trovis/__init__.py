@@ -4,10 +4,12 @@ Two-line setup: import `init` from this package and call it once at
 startup. Every Agent you create after that gets registered with
 Trovis and every run shows up in your dashboard.
 
-Supports two platforms today:
+Supports these platforms today:
   - OpenAI Agents SDK    — `init(platform="openai")` or "auto"
   - Anthropic Claude     — `init(platform="anthropic")` or "auto"
     Managed Agents
+  - Claude Agent SDK     — `init(platform="claude-agent-sdk")` or "auto"
+  - Grok (xAI SDK)       — `init(platform="xai")` / "grok", or "auto"
 
 `init(platform="auto")` (the default) detects which SDK(s) are
 installed and hooks into both when present.

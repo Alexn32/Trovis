@@ -112,6 +112,7 @@ test('every live door explains how its jobs get named', () => {
     'AnthropicAgentsInstructions',
     'ClaudeAgentSdkInstructions',
     'CursorOtelInstructions',
+    'GrokSdkSetup',
   ]) {
     const start = addAgent.indexOf(`function ${fn}`)
     assert.ok(start > 0, `${fn} exists`)
@@ -120,6 +121,37 @@ test('every live door explains how its jobs get named', () => {
   }
   // OpenClaw teaches it inside its setup tabs.
   assert.match(addAgent, /Work stays untitled/)
+})
+
+test('the Grok door is the SDK path, not xai-sdk\'s own OTLP exporter', () => {
+  // xai_sdk.telemetry.Telemetry().setup_otlp_exporter() looks like the
+  // obvious recipe and fails three ways at once: protobuf against a JSON
+  // ingest, no API key header, and service.name "xai-sdk" on every agent
+  // in the org. The door must teach trovis-agents instead, and say why.
+  const g = addAgent.slice(addAgent.indexOf('function GrokSdkSetup'))
+  assert.match(g, /pip install trovis-agents\[xai\]/)
+  assert.match(g, /platform="xai"/)
+  assert.doesNotMatch(g.slice(0, g.indexOf('\n}')), /setup_otlp_exporter/)
+  // Both silent-failure modes are named where the builder will hit them.
+  assert.match(g, /Telemetry\(\)/)
+  assert.match(g, /XAI_SDK_DISABLE_TRACING/)
+  // And the OpenAI-compatible endpoint is pointed somewhere real.
+  assert.match(g, /api\.x\.ai/)
+  // The provider picker's xAI branch renders the same steps — one recipe.
+  const px = addAgent.slice(addAgent.indexOf('function PythonXaiInstructions'))
+  assert.match(px.slice(0, px.indexOf('\n}')), /<GrokSdkSetup/)
+})
+
+test('the Grok door is called "Grok (xAI SDK)" — never a "bot"', () => {
+  // Locked copy. "Grok Bot" is the wrong name for the thing being connected:
+  // what arrives in Trovis is an agent, and the tile is named for the SDK
+  // that emits the telemetry.
+  assert.match(addAgent, /label: 'Grok \(xAI SDK\)'/)
+  assert.match(addAgent, /Connect Grok \(xAI SDK\)/)
+  assert.match(guide, /'Grok \(xAI SDK\)'/)
+  for (const [name, src] of [['AddAgent', addAgent], ['ConnectGuide', guide]]) {
+    assert.doesNotMatch(src, /\bGrok bots?\b/i, `${name} calls a Grok agent a bot`)
+  }
 })
 
 test('the Actions door admits it cannot produce named jobs yet', () => {

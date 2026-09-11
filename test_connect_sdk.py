@@ -241,6 +241,41 @@ try:
     check("named work appears in lean GET /work/items",
           "Plan the Q3 rollout" in titles, f"titles={titles}")
 
+    print("\n[8] Grok (xAI SDK) — an xAI-scoped span lands, titled, over the wire")
+    # The xAI SDK opens its spans through the GLOBAL provider (the one init()
+    # just set), from tracers named after modules inside `xai_sdk`. So a
+    # tracer with that scope name is exactly what a Grok call produces — no
+    # xai-sdk install needed to prove the door. setup_xai() attaches the
+    # processor that turns set_loop_title() into a named Work item.
+    from trovis.xai import setup_xai
+
+    setup_xai()  # warns about the missing xai-sdk here; the span path is live
+    trovis.set_loop_title("Answer the pricing question")
+    grok_tracer = trace.get_tracer("xai_sdk.sync.chat")
+    with grok_tracer.start_as_current_span("chat.sample grok-4.20-non-reasoning") as span:
+        span.set_attribute("trovis.event.type", "model_call")
+        span.set_attribute("trovis.loop.external_id", "grok-run-1")
+        span.set_attribute("gen_ai.request.model", "grok-4.20-non-reasoning")
+        span.set_attribute("gen_ai.usage.input_tokens", 120)
+        span.set_attribute("gen_ai.usage.output_tokens", 60)
+    check("grok span flushed", bool(provider.force_flush(timeout_millis=15_000)))
+
+    grok_loop = None
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        loops = [l for l in database.get_loops(
+            database.validate_api_key(key)["account_id"], limit=50)
+                 if l.get("external_id") == "grok-run-1"]
+        if loops:
+            grok_loop = loops[0]
+            break
+        time.sleep(0.25)
+    check("the Grok run landed as a loop", grok_loop is not None)
+    if grok_loop:
+        check("set_loop_title named it (no content capture needed)",
+              grok_loop.get("title") == "Answer the pricing question",
+              f"title={grok_loop.get('title')!r}")
+
 finally:
     server.should_exit = True
     thread.join(timeout=10)

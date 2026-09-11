@@ -1,5 +1,23 @@
 # Changelog — trovis-agents
 
+## 0.5.0
+
+**Grok (xAI SDK).** `init(platform="xai")` — alias `"grok"`, and picked up
+by `platform="auto"` when `xai-sdk` is installed — connects a bot built on
+the xAI SDK.
+
+- The xAI SDK traces itself through the global TracerProvider, which
+  `init()` already owns, so there is no wrapping: install
+  `trovis-agents[xai]`, call `init()` before creating the client, and Grok
+  calls land in Trovis with token usage and cost.
+- `set_loop_title()` / `mark_handoff()` now reach Grok runs: a span
+  processor stamps the queued workloop attrs onto the first xAI span, so a
+  Grok run lands as *named* Work instead of an untitled trace.
+- Warns on the two silent-failure modes instead of shipping nothing:
+  `xai_sdk.telemetry.Telemetry()` having taken the global provider first
+  (every agent named "xai-sdk", protobuf to a JSON endpoint), and
+  `XAI_SDK_DISABLE_TRACING` being set.
+
 ## 0.4.6
 
 Named Work titles on the creating span (`trovis.loop.title` → ingest

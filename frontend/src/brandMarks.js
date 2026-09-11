@@ -13,6 +13,7 @@ export const BRAND_ORDER = [
   'claude',
   'cursor',
   'chatgpt',
+  'grok',
   'slack',
   'github',
   'hubspot',
@@ -49,6 +50,13 @@ export const BRANDS = {
     role: 'live',
     color: '#10a37f',
     aliases: ['chatgpt', 'chat gpt', 'openai', 'openai agents'],
+  },
+  grok: {
+    id: 'grok',
+    label: 'Grok',
+    role: 'live',
+    color: null, // currentColor — the xAI mark is monochrome
+    aliases: ['grok', 'xai', 'x ai'],
   },
   slack: {
     id: 'slack',
