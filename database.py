@@ -1589,6 +1589,10 @@ _INDEXES = [
     # GET /agents GROUP BY (service_name, agent_id) for one tenant. Stops the
     # account_id index from fetching 400k heap rows just to discover 6 groups.
     "CREATE INDEX IF NOT EXISTS idx_spans_account_service_agent ON spans(account_id, service_name, agent_id)",
+    # Home snapshot: one tenant's spans inside a bounded time window (cost
+    # aggregate + newest-telemetry freshness). idx_spans_account_id alone
+    # makes MAX(start_time_unix) a heap read of every span the account owns.
+    "CREATE INDEX IF NOT EXISTS idx_spans_account_started ON spans(account_id, start_time_unix)",
     # SaaS connections (Stripe today; HubSpot later). Webhook lookup is
     # (provider, provider_account_id); tenant list is account_id.
     "CREATE INDEX IF NOT EXISTS idx_saas_connections_account ON saas_connections(account_id, provider)",
@@ -3970,26 +3974,12 @@ def _target_is_user(
     users.email) minus the team_members leg: a team_member row has no login,
     so it can never BE the authenticated user. Account-scoped like every
     other lookup — another org's user with the same email never matches.
+
+    One line on top of `_target_user_id` so the "is this you?" and "who is
+    this?" questions can never answer differently about the same target.
     """
-    tid = str(target_id or "").strip()
-    if not tid:
-        return False
-    acct_sql, acct_args = _loop_account_clause(account_id)
-    if tid.isdigit():
-        cur.execute(
-            f"SELECT id FROM users WHERE id = {PH} {acct_sql}",
-            tuple([int(tid), *acct_args]),
-        )
-        row = cur.fetchone()
-        return bool(row) and int(row["id"]) == int(user_id)
-    if "@" in tid:
-        cur.execute(
-            f"SELECT id FROM users WHERE LOWER(email) = LOWER({PH}) {acct_sql}",
-            tuple([tid, *acct_args]),
-        )
-        row = cur.fetchone()
-        return bool(row) and int(row["id"]) == int(user_id)
-    return False
+    resolved = _target_user_id(cur, target_id, account_id)
+    return resolved is not None and resolved == int(user_id)
 
 
 def _loop_events_with_ids(cur, loop_id: int) -> list[dict[str, Any]]:
@@ -4235,24 +4225,347 @@ def _attach_awaiting_human(
 _ASSIGNEE_SCAN_LIMIT = 500
 
 
+# How many candidate loops' handoff events are pulled per round trip. The
+# per-candidate query this replaces made the cost of asking "whose work is
+# this?" scale with the number of open attention loops TIMES the number of
+# people asked about — 500 candidates for 2 people was 1,002 statements before
+# the first aggregate ran. Chunking keeps it at a handful of statements while
+# holding only one chunk's events in memory at a time.
+_ASSIGNEE_EVENT_CHUNK = 200
+
+# Handoff event rows read per resolution, across all chunks. Capping the
+# number of WORK ITEMS does not cap the number of EVENTS: 500 items is a
+# bounded scan only if each carries a bounded history, and one long-running
+# conversation can carry thousands of handoffs by itself. 20k rows is far
+# above any real account's live attention set and still a fixed ceiling on
+# what one request pulls into memory.
+_ASSIGNEE_EVENT_BUDGET = 20_000
+
+# The only event types _unresolved_handoffs reads. Fetching just these keeps
+# the retrieved volume proportional to handoffs rather than to every span-
+# derived activity event a busy loop accumulated — the fold's answer is
+# identical either way, because it ignores every other type.
+_HANDOFF_EVENT_TYPES = (
+    "handoff_initiated",
+    "handoff_accepted",
+    "handoff_completed",
+    "handoff_declined",
+)
+
+
+def _assignee_candidate_ids(
+    cur, account_id: int | None, *, named_only: bool
+) -> tuple[list[int], bool]:
+    """Open attention-state loops that have at least one handoff, newest first.
+
+    Served by idx_loops_account_state, then idx_loop_events_loop_type for the
+    EXISTS. Returns (ids, truncated) — one more than the cap is fetched so the
+    caller can tell a full page from an exact fit.
+    """
+    acct = ""
+    args: list[Any] = []
+    if account_id is not None:
+        acct = f" AND l.account_id = {PH}"
+        args.append(account_id)
+    named_sql = f" AND {_NAMED_TITLE_SQL}" if named_only else ""
+    cur.execute(
+        "SELECT l.id FROM loops l "
+        "WHERE l.closed_at IS NULL "
+        "  AND l.cached_state IN ('awaiting_human', 'stalled')"
+        f"  {acct}{named_sql}"
+        "  AND EXISTS (SELECT 1 FROM loop_events e "
+        "              WHERE e.loop_id = l.id AND e.type = 'handoff_initiated') "
+        f"ORDER BY l.id DESC LIMIT {PH}",
+        tuple([*args, _ASSIGNEE_SCAN_LIMIT + 1]),
+    )
+    ids = [r["id"] for r in cur.fetchall()]
+    truncated = len(ids) > _ASSIGNEE_SCAN_LIMIT
+    return ids[:_ASSIGNEE_SCAN_LIMIT], truncated
+
+
+def assigned_handoff_targets(
+    cur,
+    account_id: int | None,
+    *,
+    named_only: bool = False,
+    cache: dict[Any, Any] | None = None,
+) -> tuple[dict[int, str], bool]:
+    """{loop_id: target_id} for the latest UNRESOLVED to_human handoff.
+
+    "Who is this waiting on?" answered once for the whole account, instead of
+    once per person and once per loop. Two bounded steps:
+
+      1. One candidate query (`_assignee_candidate_ids`), capped at
+         _ASSIGNEE_SCAN_LIMIT loops.
+      2. Those candidates' handoff events, fetched _ASSIGNEE_EVENT_CHUNK loops
+         at a time under a request-wide budget of _ASSIGNEE_EVENT_BUDGET rows,
+         folded through the SAME `loops._unresolved_handoffs` the state machine
+         uses. The fold is never reimplemented here, so accepted, completed and
+         declined handoffs keep resolving exactly as they always did; this only
+         changes how the events are fetched.
+
+    TWO separate bounds, because capping the number of WORK ITEMS does not cap
+    the number of EVENTS — one long-running item can carry thousands of
+    handoffs on its own.
+
+    The event budget is why a loop is only resolved when its handoff history
+    was read WHOLE. A truncated history is not a weaker answer, it is a
+    potentially INVERTED one: the row that would have resolved the pending
+    handoff is exactly the row that got cut, so a partial read can invent a
+    live assignment that no longer exists. Loops whose history may be clipped
+    therefore contribute NOTHING — not a guess, not a maybe — and the result is
+    flagged incomplete instead.
+
+    Returns (targets, incomplete). `incomplete` is either bound being hit: the
+    candidate cap, or the event budget. Either way the answer is a SUBSET of
+    positively established matches, and every caller must say so rather than
+    presenting its count as exact.
+
+    `cache` lets one request resolve this once and reuse it (the Home snapshot
+    needs the same answer for the whose-work filter and for the personal
+    attention count).
+    """
+    key = ("assigned_targets", account_id, bool(named_only))
+    if cache is not None and key in cache:
+        return cache[key]
+
+    lp = _loops_mod()
+    candidates, incomplete = _assignee_candidate_ids(
+        cur, account_id, named_only=named_only
+    )
+    targets: dict[int, str] = {}
+    type_ph = ", ".join([PH] * len(_HANDOFF_EVENT_TYPES))
+    remaining = _ASSIGNEE_EVENT_BUDGET
+
+    for start in range(0, len(candidates), _ASSIGNEE_EVENT_CHUNK):
+        if remaining <= 0:
+            # Budget gone. The rest of the candidates are simply unread — we
+            # stop rather than page on, and say the answer is partial.
+            incomplete = True
+            break
+        chunk = candidates[start:start + _ASSIGNEE_EVENT_CHUNK]
+        loop_ph = ", ".join([PH] * len(chunk))
+        # ORDER BY loop_id first so a LIMIT cuts BETWEEN loops rather than
+        # scattering holes through every loop's history; the secondary keys
+        # keep each loop's own events in stream order for the fold.
+        cur.execute(
+            "SELECT id, loop_id, type, actor_type, actor, payload, event_time_unix "
+            f"FROM loop_events WHERE loop_id IN ({loop_ph}) "
+            f"  AND type IN ({type_ph}) "
+            f"ORDER BY loop_id, event_time_unix, id LIMIT {remaining + 1}",
+            tuple([*chunk, *_HANDOFF_EVENT_TYPES]),
+        )
+        rows = cur.fetchall()
+        over = len(rows) > remaining
+        if over:
+            rows = rows[:remaining]
+        remaining -= len(rows)
+
+        by_loop: dict[int, list[dict]] = {}
+        for r in rows:
+            ev = lp.normalize_loop_event(dict(r))
+            ev["_row_id"] = r["id"]
+            by_loop.setdefault(r["loop_id"], []).append(ev)
+
+        # When the limit bit, the HIGHEST loop_id we read may have had its tail
+        # cut — including the resolution that would have closed its handoff. It
+        # is dropped, not guessed at. Loops in the chunk we never reached are
+        # absent from by_loop and contribute nothing by construction.
+        clipped = max(by_loop) if (over and by_loop) else None
+        for loop_id, events in by_loop.items():
+            if loop_id == clipped:
+                continue
+            pending = lp._unresolved_handoffs(events)
+            to_human = [
+                h for h in pending
+                if (h.get("payload") or {}).get("direction") == "to_human"
+            ]
+            if not to_human:
+                continue
+            tid = (to_human[-1].get("payload") or {}).get("target_id")
+            if tid:
+                targets[int(loop_id)] = str(tid)
+        # by_loop drops out of scope here: only the resolved target survives,
+        # so memory stays bounded by one chunk rather than by the whole scan.
+        if over:
+            incomplete = True
+            break
+
+    out = (targets, incomplete)
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Handoff target -> user identity, in batches
+# ---------------------------------------------------------------------------
+# A handoff target_id is either a numeric users.id or an email address. The
+# per-target lookup below is fine for a page of rows; resolving hundreds of
+# DISTINCT targets one at a time is not, so the bulk paths resolve the whole
+# set in a couple of IN queries.
+#
+# Batch size is deliberately conservative: SQLite's default
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on builds before 3.32, and the account
+# filter takes a slot of its own.
+_IDENTITY_BATCH = 400
+
+
+def _normalize_target(target_id: Any) -> tuple[str, Any] | None:
+    """('id', int) | ('email', lowercased str) | None.
+
+    One place decides what a target IS, so the batched and single-target
+    resolvers cannot disagree. Everything else — a bare name, a tool label, a
+    team_members row with no login — is None: it can never BE an authenticated
+    user. Emails are lowercased here so two spellings of one address
+    deduplicate to a single lookup and still match case-insensitively.
+    """
+    tid = str(target_id or "").strip()
+    if not tid:
+        return None
+    if tid.isdigit():
+        try:
+            return ("id", int(tid))
+        except ValueError:
+            return None
+    if "@" in tid:
+        return ("email", tid.lower())
+    return None
+
+
+def resolve_target_user_ids(
+    cur,
+    targets: Any,
+    account_id: int | None,
+    cache: dict[str, int | None] | None = None,
+) -> dict[str, int | None]:
+    """{raw target_id: users.id | None} for a whole set of targets at once.
+
+    Account-scoped and case-insensitive on email, exactly like the
+    single-target path — another org's user with the same address never
+    matches, and an unknown target resolves to None rather than being dropped
+    (the caller needs to know it was looked at).
+
+    Two bounded IN queries per _IDENTITY_BATCH of distinct ids and of distinct
+    emails, so the statement count scales with batches, not with targets.
+    """
+    raw_list = [str(t) for t in targets]
+    out: dict[str, int | None] = {}
+    pending = [t for t in raw_list if not (cache is not None and t in cache)]
+    for t in raw_list:
+        if cache is not None and t in cache:
+            out[t] = cache[t]
+
+    by_id: dict[int, list[str]] = {}
+    by_email: dict[str, list[str]] = {}
+    for t in pending:
+        norm = _normalize_target(t)
+        if norm is None:
+            out[t] = None
+            continue
+        kind, value = norm
+        (by_id if kind == "id" else by_email).setdefault(value, []).append(t)
+
+    acct_sql, acct_args = _loop_account_clause(account_id)
+
+    ids = sorted(by_id)
+    for start in range(0, len(ids), _IDENTITY_BATCH):
+        batch = ids[start:start + _IDENTITY_BATCH]
+        ph_list = ", ".join([PH] * len(batch))
+        cur.execute(
+            f"SELECT id FROM users WHERE id IN ({ph_list}) {acct_sql}",
+            tuple([*batch, *acct_args]),
+        )
+        found = {int(r["id"]) for r in cur.fetchall()}
+        for value in batch:
+            for t in by_id[value]:
+                out[t] = value if value in found else None
+
+    emails = sorted(by_email)
+    for start in range(0, len(emails), _IDENTITY_BATCH):
+        batch = emails[start:start + _IDENTITY_BATCH]
+        ph_list = ", ".join([PH] * len(batch))
+        cur.execute(
+            f"SELECT id, LOWER(email) AS le FROM users "
+            f"WHERE LOWER(email) IN ({ph_list}) {acct_sql}",
+            tuple([*batch, *acct_args]),
+        )
+        found = {str(r["le"]): int(r["id"]) for r in cur.fetchall()}
+        for value in batch:
+            uid = found.get(value)
+            for t in by_email[value]:
+                out[t] = uid
+
+    if cache is not None:
+        cache.update(out)
+    return out
+
+
+def _target_user_id(
+    cur, target_id: str, account_id: int | None, cache: dict[str, int | None] | None = None
+) -> int | None:
+    """users.id a handoff target_id identifies, org-scoped, or None.
+
+    Single-target convenience over `resolve_target_user_ids`, kept for the
+    page-local callers (the work-item decorator memoizes a page's handful of
+    targets). Bulk paths must use the batched resolver directly.
+    """
+    return resolve_target_user_ids(cur, [target_id], account_id, cache).get(
+        str(target_id)
+    )
+
+
 def _loops_assigned_to_any(
-    cur, account_id: int | None, user_ids: list[int], *, named_only: bool = True,
-) -> list[int]:
+    cur,
+    account_id: int | None,
+    user_ids: list[int],
+    *,
+    named_only: bool = True,
+    cache: dict[Any, Any] | None = None,
+) -> tuple[list[int], bool]:
     """Loop ids whose latest unresolved to_human handoff targets ANY of these
-    people. The set version of _loops_assigned_to, for the Whose-work filter;
-    same bounded scan, same fold, one pass instead of one per person."""
+    people, plus whether the resolution was incomplete.
+
+    One candidate scan and a couple of batched identity queries, however many
+    people are asked about and however many distinct targets they hold — not
+    one scan per person and not one lookup per target.
+    """
     if not user_ids:
-        return []
-    matched: list[int] = []
-    for uid in user_ids:
-        ids, _ = _loops_assigned_to(cur, account_id, uid, named_only=named_only)
-        matched.extend(ids)
-    return sorted(set(matched))
+        return [], False
+    targets, incomplete = assigned_handoff_targets(
+        cur, account_id, named_only=named_only, cache=cache
+    )
+    wanted = {int(u) for u in user_ids}
+    identities = _shared_identity_map(cur, account_id, targets.values(), cache)
+    matched = [
+        loop_id
+        for loop_id, tid in targets.items()
+        if identities.get(str(tid)) in wanted
+    ]
+    return sorted(set(matched)), incomplete
+
+
+def _shared_identity_map(
+    cur, account_id: int | None, targets: Any, cache: dict[Any, Any] | None
+) -> dict[str, int | None]:
+    """Resolve targets to users, reusing one map for the whole request.
+
+    The whose-work filter and the personal attention count look at the same
+    targets; without this they would each pay for the same lookups.
+    """
+    sub: dict[str, int | None] | None = None
+    if cache is not None:
+        sub = cache.setdefault(("identities", account_id), {})
+    return resolve_target_user_ids(cur, targets, account_id, sub)
 
 
 def _work_person_filter(
-    cur, account_id: int | None, user_ids: list[int] | None
-) -> tuple[str, list[Any]]:
+    cur,
+    account_id: int | None,
+    user_ids: list[int] | None,
+    *,
+    cache: dict[Any, Any] | None = None,
+) -> tuple[str, list[Any], bool]:
     """SQL restricting the work list to work that belongs to these people.
 
     `None` means no filter at all — a company-breadth seat. That is NOT the
@@ -4274,11 +4587,17 @@ def _work_person_filter(
     UNRESOLVED handoff is not a SQL predicate), so it is resolved first, over
     the same bounded scan Work overview already uses, and injected as an id
     list.
+
+    Returns (sql, args, membership_incomplete). The third value is the
+    waiting-on leg's candidate cap being hit: the id list is then a SUBSET of
+    the work that actually belongs to these people, so every count built on
+    this filter is a LOWER BOUND, not a total. Callers that cannot say so must
+    at least not claim exactness.
     """
     if user_ids is None:
-        return "", []
+        return "", [], False
     if not user_ids:
-        return " AND 1 = 0 ", []
+        return " AND 1 = 0 ", [], False
     placeholders = ", ".join([PH] * len(user_ids))
     owner_sql = (
         "EXISTS (SELECT 1 FROM agent_owners o "
@@ -4292,66 +4611,55 @@ def _work_person_filter(
         args.append(account_id)
     owner_sql += ")"
 
-    assigned = _loops_assigned_to_any(cur, account_id, user_ids)
+    assigned, truncated = _loops_assigned_to_any(
+        cur, account_id, user_ids, cache=cache
+    )
+    if truncated:
+        logger.warning(
+            "[work] whose-work assignee scan hit the %d-loop cap for "
+            "account=%s — scoped counts are a lower bound",
+            _ASSIGNEE_SCAN_LIMIT, account_id,
+        )
     if assigned:
         loop_ph = ", ".join([PH] * len(assigned))
         args.extend(assigned)
-        return f" AND ({owner_sql} OR l.id IN ({loop_ph})) ", args
-    return f" AND ({owner_sql}) ", args
+        return f" AND ({owner_sql} OR l.id IN ({loop_ph})) ", args, truncated
+    return f" AND ({owner_sql}) ", args, truncated
 
 
 def _loops_assigned_to(
-    cur, account_id: int | None, user_id: int, *, named_only: bool = False,
+    cur,
+    account_id: int | None,
+    user_id: int,
+    *,
+    named_only: bool = False,
+    cache: dict[Any, Any] | None = None,
 ) -> tuple[list[int], bool]:
     """Loop ids whose latest unresolved to_human handoff targets this user.
 
-    Two steps on purpose. SQL narrows to this account's open attention-state
-    loops that have at least one handoff event — served by
-    idx_loops_account_state, then idx_loop_events_loop_type for the EXISTS.
-    Python then replays loops._unresolved_handoffs per candidate, because
-    "latest UNRESOLVED handoff" is a stream fold, not a SQL predicate.
+    A thin projection of `assigned_handoff_targets` onto one person, so the
+    single-person and many-person paths can never drift apart in who they hold
+    responsible.
 
-    named_only=True (Work overview): restrict to plugin-provided titles so
-    a 75k untitled OTel flood is not scanned for assignee. The board path
+    named_only=True (Work overview, Home): restrict to plugin-provided titles
+    so a 75k untitled OTel flood is not scanned for assignee. The board path
     keeps named_only=False (every open attention loop).
 
-    Returns (ids, truncated).
+    Returns (ids, incomplete). `incomplete` means a bound was hit — the
+    candidate cap or the event budget — and the list is a SUBSET of positively
+    established matches. A caller that reports its length as an exact count is
+    reporting a number it does not have.
     """
-    acct = ""
-    args: list[Any] = []
-    if account_id is not None:
-        acct = f" AND l.account_id = {PH}"
-        args.append(account_id)
-    named_sql = f" AND {_NAMED_TITLE_SQL}" if named_only else ""
-    cur.execute(
-        "SELECT l.id FROM loops l "
-        "WHERE l.closed_at IS NULL "
-        "  AND l.cached_state IN ('awaiting_human', 'stalled')"
-        f"  {acct}{named_sql}"
-        "  AND EXISTS (SELECT 1 FROM loop_events e "
-        "              WHERE e.loop_id = l.id AND e.type = 'handoff_initiated') "
-        f"ORDER BY l.id DESC LIMIT {PH}",
-        tuple([*args, _ASSIGNEE_SCAN_LIMIT + 1]),
+    targets, incomplete = assigned_handoff_targets(
+        cur, account_id, named_only=named_only, cache=cache
     )
-    candidates = [r["id"] for r in cur.fetchall()]
-    truncated = len(candidates) > _ASSIGNEE_SCAN_LIMIT
-    candidates = candidates[:_ASSIGNEE_SCAN_LIMIT]
-
-    matched: list[int] = []
-    verdict: dict[str, bool] = {}
-    for loop_id in candidates:
-        handoff = _latest_unresolved_to_human(cur, loop_id)
-        if handoff is None:
-            continue
-        tid = (handoff.get("payload") or {}).get("target_id")
-        if not tid:
-            continue
-        tid = str(tid)
-        if tid not in verdict:
-            verdict[tid] = _target_is_user(cur, tid, account_id, user_id)
-        if verdict[tid]:
-            matched.append(loop_id)
-    return matched, truncated
+    identities = _shared_identity_map(cur, account_id, targets.values(), cache)
+    matched = [
+        loop_id
+        for loop_id, tid in targets.items()
+        if identities.get(str(tid)) == int(user_id)
+    ]
+    return sorted(matched), incomplete
 
 
 # ---------------------------------------------------------------------------
@@ -4594,6 +4902,42 @@ _NAMED_TITLE_SQL = (
     "AND l.title IS NOT NULL AND TRIM(l.title) != '' "
     f"AND NOT {_SHELL_TITLE_SQL}"
 )
+# Recorded completion, defined ONCE.
+#
+# `closed_at IS NOT NULL` is not a completion — it is a TERMINAL CLOSE, and two
+# kinds of terminal close are the opposite of work getting done:
+#
+#   * `abandon_loop` — the sweep gives up on a loop idle past
+#     ABANDON_THRESHOLD. Nobody finished anything.
+#   * `artifact_close_loop` — a phantom loop built from straggler telemetry of
+#     a run that already ended. It was never work at all.
+#
+# Both land `cached_state = 'abandoned'`, and `loops.compute_loop_state` rules
+# 1-2 keep them there through any recompute (reason='ingestion_artifact' maps
+# to abandoned on purpose, so a replay can never flip an artifact to done).
+# So the authoritative lifecycle state, not the timestamp, is what separates a
+# completion from a giving-up. Counting the timestamp credits an org for work
+# it abandoned.
+#
+# This still means RECORDED completion — the record says the work finished, not
+# that the outcome was verified or that it was any good.
+_WORK_COMPLETED_STATE = "done"
+_WORK_COMPLETED_SQL = (
+    f"(l.closed_at IS NOT NULL AND l.cached_state = '{_WORK_COMPLETED_STATE}')"
+)
+# Every terminal close, completions and abandonments alike. Kept named so the
+# places that legitimately mean "no longer open" say so out loud instead of
+# looking like a completion count that forgot the state.
+_WORK_TERMINAL_SQL = "l.closed_at IS NOT NULL"
+
+
+def is_completed_work_row(row: Any) -> bool:
+    """Python mirror of _WORK_COMPLETED_SQL, for rows already in hand."""
+    closed = _row_get(row, "closed_at") if not isinstance(row, dict) else row.get("closed_at")
+    state = _row_get(row, "cached_state") if not isinstance(row, dict) else row.get("cached_state")
+    return closed is not None and state == _WORK_COMPLETED_STATE
+
+
 _WORK_ITEMS_DEFAULT_LIMIT = 50
 _WORK_ITEMS_MAX_LIMIT = 100
 _WORK_COMPLETED_WEEK_DAYS = 7
@@ -4648,7 +4992,27 @@ def _work_item_status(
     return "moving"
 
 
-def _work_whats_next(status: str, holder_name: str, waiting_on: str | None) -> str:
+def _work_whats_next(
+    status: str,
+    holder_name: str,
+    waiting_on: str | None,
+    cached_state: str | None = None,
+) -> str:
+    """The line the table shows. Free text — the wire `status` enum is
+    separate and locked.
+
+    A terminal close that is NOT a recorded completion (abandoned, ingestion
+    artifact) still rides the locked `done` status, because adding a sixth
+    enum value is a product change across five frontend files. What it must
+    not do is say "Done": the sweep giving up on a task is not the task being
+    finished, and this line is the one a person actually reads.
+    """
+    if (
+        status == "done"
+        and cached_state
+        and cached_state != _WORK_COMPLETED_STATE
+    ):
+        return "Closed — not completed"
     if status == "waiting_on_you":
         return "Waiting on you"
     if status == "waiting_on_other":
@@ -4730,17 +5094,22 @@ def get_work_overview(
     try:
         with _connect() as conn, _cursor(conn) as cur:
             _set_statement_timeout(cur, _WORK_OVERVIEW_TIMEOUT_MS)
-            person_sql, person_args = _work_person_filter(
-                cur, account_id, only_user_ids
+            cache: dict[Any, Any] = {}
+            person_sql, person_args, _person_truncated = _work_person_filter(
+                cur, account_id, only_user_ids, cache=cache
             )
             # One pass for open + completed_week. Both are named-work COUNTs
             # over the same index prefix; combining them halves the round-trips.
+            #
+            # completed_* use _WORK_COMPLETED_SQL, not a bare closed_at: an
+            # abandoned or ingestion-artifact close also stamps closed_at, and
+            # counting those as finished work credits the org for giving up.
             cur.execute(
                 "SELECT "
                 "  COALESCE(SUM(CASE WHEN l.closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_n, "
-                "  COALESCE(SUM(CASE WHEN l.closed_at IS NOT NULL "
+                f"  COALESCE(SUM(CASE WHEN {_WORK_COMPLETED_SQL} "
                 f"              AND l.closed_at >= {PH} THEN 1 ELSE 0 END), 0) AS completed_week, "
-                "  COALESCE(SUM(CASE WHEN l.closed_at IS NOT NULL "
+                f"  COALESCE(SUM(CASE WHEN {_WORK_COMPLETED_SQL} "
                 f"              AND l.closed_at >= {PH} AND l.closed_at < {PH} "
                 "              THEN 1 ELSE 0 END), 0) AS completed_prev_week, "
                 # Compared in SQL, deliberately. Doing it in Python would mean
@@ -4783,7 +5152,7 @@ def get_work_overview(
             needs_you_ids: set[int] = set()
             if viewer_user_id is not None:
                 assigned, _ = _loops_assigned_to(
-                    cur, account_id, viewer_user_id, named_only=True,
+                    cur, account_id, viewer_user_id, named_only=True, cache=cache,
                 )
                 needs_you_ids = {int(i) for i in assigned}
 
@@ -4799,6 +5168,326 @@ def get_work_overview(
         if _is_query_canceled(exc):
             raise QueryTimeout("work overview timed out") from exc
         raise
+
+
+# ---------------------------------------------------------------------------
+# Home snapshot aggregates
+#
+# The SQL half of GET /home/snapshot. Period arithmetic, timezone bucketing,
+# seat policy and response shaping all live in home_snapshot.py — this is only
+# the queries, because that is where SQL lives.
+#
+# Everything here reuses the SAME named-work definition the lean Work home
+# uses (_work_named_scope_sql) and the SAME seat filter (_work_person_filter).
+# There is deliberately no second definition of "completed work" in this repo:
+# a completion is one `loops` row with a `closed_at`, counted once. Spans,
+# tool calls, nested child activity and agent registrations are never counted
+# here — none of them is a row in this table.
+# ---------------------------------------------------------------------------
+
+_HOME_SNAPSHOT_TIMEOUT_MS = 8_000
+
+
+def _home_ts(dt: datetime, *, ceil: bool = False) -> str:
+    """A UTC datetime -> the timestamp string both backends compare against.
+
+    Matches the format get_work_overview already uses for its week cutoffs;
+    the comparison happens in SQL so a psycopg2 datetime is never string-
+    compared against a space-separated literal.
+
+    `ceil=True` rounds up to the next whole second, and is used for the
+    EXCLUSIVE upper bounds. `closed_at` is written at second granularity
+    (SQLite CURRENT_TIMESTAMP / PG NOW() truncated by the column), so a strict
+    `< now` over a truncated `now` silently drops everything that finished in
+    the current second — a period that ends "now" would omit the work that
+    just landed. Period starts are local midnight, already second-aligned, so
+    ceiling never widens a window into its neighbour.
+    """
+    dt = dt.astimezone(timezone.utc)
+    if ceil and dt.microsecond:
+        dt = dt.replace(microsecond=0) + timedelta(seconds=1)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# Engine state -> the three buckets Home shows for work in flight. Reading
+# loops.cached_state keeps this the same source /work/overview counts
+# needs_attention from, rather than a second opinion about what "moving"
+# means. Unknown/future states fall through to `moving` (in flight, nothing
+# says otherwise) rather than silently vanishing from the open total.
+_HOME_OPEN_STATE_BUCKETS = {
+    "awaiting_human": "waiting_on_person",
+    "stalled": "blocked",
+    "awaiting_system": "blocked",
+}
+
+
+def home_snapshot_totals_sql(account_id: int | None) -> tuple[str, list[Any]]:
+    """The snapshot's one-pass totals statement, without the seat filter.
+
+    Exported for the same reason work_overview_open_sql is: so a test can
+    EXPLAIN it, and so the Postgres placeholder test can bind it. Every `%`
+    in it comes from the shared named-work predicate, which escapes LIKE
+    wildcards as `%%` on Postgres — psycopg2 consumes a bind slot for a bare
+    one, which is the Railway crash test_work_pg_placeholders.py exists for.
+    """
+    scope, args = _work_named_scope_sql(account_id)
+    sql = (
+        "SELECT "
+        f"  COALESCE(SUM(CASE WHEN {_WORK_COMPLETED_SQL} "
+        f"      AND l.closed_at >= {PH} AND l.closed_at < {PH} "
+        "      THEN 1 ELSE 0 END), 0) AS cur_n, "
+        f"  COALESCE(SUM(CASE WHEN {_WORK_COMPLETED_SQL} "
+        f"      AND l.closed_at >= {PH} AND l.closed_at < {PH} "
+        "      THEN 1 ELSE 0 END), 0) AS prev_n, "
+        "  COALESCE(SUM(CASE WHEN l.closed_at IS NULL THEN 1 ELSE 0 END), 0) "
+        "      AS open_n, "
+        # Terminal-but-not-done, reported separately. Abandonments are real
+        # records and stay visible; what they must never do is arrive inside
+        # a completion count.
+        f"  COALESCE(SUM(CASE WHEN {_WORK_TERMINAL_SQL} "
+        f"      AND l.cached_state <> '{_WORK_COMPLETED_STATE}' "
+        f"      AND l.closed_at >= {PH} AND l.closed_at < {PH} "
+        "      THEN 1 ELSE 0 END), 0) AS abandoned_n, "
+        # Compared in SQL for the same reason get_work_overview does: a
+        # datetime's isoformat() carries a 'T' that sorts above the space in
+        # this literal, so a Python-side comparison would age an org wrongly
+        # on the boundary day.
+        f"  COALESCE(SUM(CASE WHEN l.created_at < {PH} THEN 1 ELSE 0 END), 0) "
+        "      AS before_prev_n, "
+        "  COUNT(*) AS all_n, "
+        "  MIN(l.created_at) AS first_created, "
+        # Freshness follows the same definition as the counts: the newest
+        # RECORDED COMPLETION, not the newest terminal close. An org whose
+        # last event was the sweep giving up has not "completed work" then.
+        f"  MAX(CASE WHEN {_WORK_COMPLETED_SQL} THEN l.closed_at END) AS last_closed, "
+        "  MAX(l.last_event_unix) AS last_event "
+        f"FROM loops l WHERE {scope}"
+    )
+    return sql, args
+
+
+def get_home_snapshot_rows(
+    account_id: int | None,
+    *,
+    only_user_ids: list[int] | None,
+    viewer_user_id: int | None,
+    start_utc: datetime,
+    end_utc: datetime,
+    previous_start_utc: datetime,
+    previous_end_utc: datetime,
+    include_cost: bool = False,
+    series_cap: int = 50_000,
+) -> dict[str, Any]:
+    """One connection, five bounded aggregates, no N+1.
+
+    Returns raw numbers only — no labels, no policy, no rounding. The caller
+    (home_snapshot.build_snapshot) decides what any of it means.
+
+    Query plan:
+      1. One pass over this account's named loops for the period total, the
+         previous-period total, the open total, whether any history predates
+         the comparison window, and the freshness extremes. Filter order is
+         (account_id, title_source, closed_at) — idx_loops_account_title_closed.
+      2. GROUP BY cached_state over the open ones, same index prefix.
+      3. GROUP BY workflow_id over the period's completions (idx_loops_workflow
+         for the join target; the group count is bounded by the number of jobs
+         an account has declared).
+      4. The period's closed_at values, capped at `series_cap + 1`, for the
+         local-day fold. Capped rather than unbounded so one enormous period
+         cannot pull a million timestamps into memory.
+      5. The bounded assignee scan for needs_you — the same one
+         get_work_overview uses, named_only so an untitled OTel flood is never
+         folded.
+      + cost, only when the caller says the seat allows it. One aggregate over
+        spans in the window (idx_spans_account_started).
+    """
+    scope, scope_args = _work_named_scope_sql(account_id)
+    start_s = _home_ts(start_utc)
+    end_s = _home_ts(end_utc, ceil=True)
+    prev_start_s = _home_ts(previous_start_utc)
+    prev_end_s = _home_ts(previous_end_utc, ceil=True)
+
+    out: dict[str, Any] = {}
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            _set_statement_timeout(cur, _HOME_SNAPSHOT_TIMEOUT_MS)
+            # One assignee resolution for the whole request: the whose-work
+            # filter and the personal attention count ask the same question
+            # ("who is this waiting on?") and now share the answer.
+            cache: dict[Any, Any] = {}
+            person_sql, person_args, person_truncated = _work_person_filter(
+                cur, account_id, only_user_ids, cache=cache
+            )
+            # The waiting-on leg's cap being hit means the scope's membership
+            # is a SUBSET. Every count below is then a lower bound, and the
+            # caller must label it as one rather than present it as a total.
+            out["scope_membership_truncated"] = bool(person_truncated)
+
+            # 1. Totals + history floor + freshness, one pass.
+            totals_sql, totals_args = home_snapshot_totals_sql(account_id)
+            cur.execute(
+                totals_sql + person_sql,
+                tuple([
+                    start_s, end_s, prev_start_s, prev_end_s,
+                    start_s, end_s, prev_start_s,
+                    *totals_args, *person_args,
+                ]),
+            )
+            row = dict(cur.fetchone() or {})
+            out["completed_total"] = int(row.get("cur_n") or 0)
+            out["completed_previous_total"] = int(row.get("prev_n") or 0)
+            out["abandoned_total"] = int(row.get("abandoned_n") or 0)
+            out["open_total"] = int(row.get("open_n") or 0)
+            out["has_history_before_previous"] = int(row.get("before_prev_n") or 0) > 0
+            # Named work inside the SELECTED SCOPE. When the scope's membership
+            # is incomplete, `False` here means "none found", not "none
+            # exists" — the caller must not read it as an established absence.
+            out["has_any_work_in_scope"] = int(row.get("all_n") or 0) > 0
+            out["first_work_epoch"] = _ts_to_epoch(row.get("first_created"))
+            out["latest_completion_epoch"] = _ts_to_epoch(row.get("last_closed"))
+            last_event = row.get("last_event")
+            out["latest_work_event_epoch"] = (
+                int(last_event) / 1_000_000_000 if last_event else None
+            )
+
+            # 2. Open work by engine state.
+            cur.execute(
+                "SELECT l.cached_state AS st, COUNT(*) AS n "
+                f"FROM loops l WHERE {scope} AND l.closed_at IS NULL {person_sql} "
+                "GROUP BY l.cached_state",
+                tuple([*scope_args, *person_args]),
+            )
+            buckets: dict[str, int] = {}
+            for r in cur.fetchall():
+                key = _HOME_OPEN_STATE_BUCKETS.get(r["st"] or "", "moving")
+                buckets[key] = buckets.get(key, 0) + int(r["n"] or 0)
+            out["open_by_state"] = buckets
+
+            # 3. Completions by declared job. NULL workflow_id = never matched;
+            # reported as unclassified by the caller, never dropped.
+            cur.execute(
+                "SELECT l.workflow_id AS wid, wf.name AS wname, COUNT(*) AS n "
+                "FROM loops l "
+                "LEFT JOIN workflows wf ON wf.id = l.workflow_id "
+                f"WHERE {scope} AND {_WORK_COMPLETED_SQL} "
+                f"  AND l.closed_at >= {PH} AND l.closed_at < {PH} {person_sql} "
+                "GROUP BY l.workflow_id, wf.name",
+                tuple([*scope_args, start_s, end_s, *person_args]),
+            )
+            out["by_job"] = [
+                {
+                    "workflow_id": r["wid"],
+                    "name": r["wname"],
+                    "completed": int(r["n"] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 4. Completion timestamps for the local-day fold, capped.
+            cap = max(1, int(series_cap))
+            cur.execute(
+                "SELECT l.closed_at AS c "
+                f"FROM loops l WHERE {scope} AND {_WORK_COMPLETED_SQL} "
+                f"  AND l.closed_at >= {PH} AND l.closed_at < {PH} {person_sql} "
+                f"ORDER BY l.closed_at ASC LIMIT {cap + 1}",
+                tuple([*scope_args, start_s, end_s, *person_args]),
+            )
+            stamps = [_ts_to_epoch(r["c"]) for r in cur.fetchall()]
+            stamps = [s for s in stamps if s is not None]
+            out["completed_epochs"] = None if len(stamps) > cap else stamps
+
+            # 5. The desk. Session identity only — never narrowed by scope.
+            # The truncation flag rides along: a capped scan can report zero
+            # while a real item sits behind the cap, and "nothing needs you"
+            # is the single worst thing this endpoint could get wrong.
+            if viewer_user_id is not None:
+                assigned, assigned_truncated = _loops_assigned_to(
+                    cur, account_id, viewer_user_id, named_only=True, cache=cache
+                )
+                out["needs_you"] = len(set(assigned))
+                out["needs_you_truncated"] = bool(assigned_truncated)
+            else:
+                out["needs_you"] = None
+                out["needs_you_truncated"] = False
+
+            # Does the ACCOUNT hold any named work at all? Deliberately
+            # UNFILTERED by the person scope, and therefore always
+            # establishable: "this person's view is empty" and "this workspace
+            # has nothing in it" are different facts, and an onboarding screen
+            # that appears because a manager filtered to one report would be
+            # the page telling the org it does not exist. EXISTS over the same
+            # index prefix the counts use.
+            exists_scope, exists_args = _work_named_scope_sql(account_id)
+            cur.execute(
+                f"SELECT 1 AS x FROM loops l WHERE {exists_scope} LIMIT 1",
+                tuple(exists_args),
+            )
+            out["has_any_work_in_account"] = cur.fetchone() is not None
+
+            # Source freshness: the newest telemetry this account has, so Home
+            # can say how current the picture is instead of implying "live".
+            # Not gated on cost — how fresh the record is, is not a financial
+            # fact, and deriving it from cost access would leak one surface
+            # into another.
+            span_acct = f" WHERE account_id = {PH}" if account_id is not None else ""
+            cur.execute(
+                f"SELECT MAX(start_time_unix) AS m FROM spans{span_acct}",
+                tuple([account_id] if account_id is not None else []),
+            )
+            newest = (dict(cur.fetchone() or {})).get("m")
+            out["latest_span_epoch"] = (
+                int(newest) / 1_000_000_000 if newest else None
+            )
+
+            out["cost"] = (
+                _home_cost_window(cur, account_id, start_utc, end_utc)
+                if include_cost
+                else None
+            )
+            return out
+    except Exception as exc:
+        if _is_query_canceled(exc):
+            raise QueryTimeout("home snapshot timed out") from exc
+        raise
+
+
+def _home_cost_window(
+    cur, account_id: int | None, start_utc: datetime, end_utc: datetime
+) -> dict[str, Any]:
+    """Stored span cost in the window, organization-wide.
+
+    Sums the cost computed at ingest (`insert_spans` -> `_compute_cost`); it
+    never re-prices anything. Spans hang off the account and the agent, not
+    off a work scope, so this total is the ORGANIZATION's — the caller is
+    responsible for labeling it as such and for refusing to divide it by a
+    narrowed completion count.
+
+    `unpriced_token_spans` is the honest other half: spans that carried usage
+    but got no price. Their cost is unknown, not zero, and they are reported
+    rather than folded into the total as free.
+    """
+    start_ns = int(start_utc.timestamp() * 1_000_000_000)
+    end_ns = int(end_utc.timestamp() * 1_000_000_000)
+    acct = f" AND account_id = {PH}" if account_id is not None else ""
+    args: list[Any] = [start_ns, end_ns]
+    if account_id is not None:
+        args.append(account_id)
+    cur.execute(
+        "SELECT "
+        "  COALESCE(SUM(estimated_cost_usd), 0) AS spend, "
+        "  COALESCE(SUM(CASE WHEN estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0) "
+        "      AS priced_n, "
+        "  COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL "
+        "      AND total_tokens IS NOT NULL THEN 1 ELSE 0 END), 0) AS unpriced_n "
+        f"FROM spans WHERE start_time_unix >= {PH} AND start_time_unix < {PH}{acct}",
+        tuple(args),
+    )
+    r = dict(cur.fetchone() or {})
+    return {
+        "spend_usd": float(r.get("spend") or 0.0),
+        "priced_spans": int(r.get("priced_n") or 0),
+        "unpriced_token_spans": int(r.get("unpriced_n") or 0),
+    }
 
 
 def _decode_work_items_cursor(cursor: str | None) -> tuple[int, int] | None:
@@ -4931,7 +5620,9 @@ def _decorate_work_items(
         row["holder_name"] = holder_name
         row["waiting_on"] = waiting_on
         row["awaiting_is_you"] = is_yours
-        row["whats_next"] = _work_whats_next(status, holder_name, waiting_on)
+        row["whats_next"] = _work_whats_next(
+            status, holder_name, waiting_on, row.get("cached_state")
+        )
         row["updated_at"] = _work_updated_at(row)
 
 
@@ -5055,7 +5746,11 @@ def get_work_items(
         sql += f"AND l.workflow_id = {PH} "
         args.append(wid)
     if finished_only:
-        sql += "AND l.closed_at IS NOT NULL "
+        # `status=done` means RECORDED COMPLETION, the same definition the
+        # counts use. Abandoned and ingestion-artifact closes also carry a
+        # closed_at; listing them under "done" would put rows on screen that
+        # the completion count above them deliberately excludes.
+        sql += f"AND {_WORK_COMPLETED_SQL} "
     if key is not None:
         cursor_ts, cursor_id = key
         sql += (
@@ -5071,7 +5766,9 @@ def get_work_items(
     with _connect() as conn, _cursor(conn) as cur:
         # Resolved inside the connection: the waiting-on leg is a fold over
         # the event stream and needs a cursor of its own.
-        person_sql, person_args = _work_person_filter(cur, account_id, only_user_ids)
+        person_sql, person_args, _person_truncated = _work_person_filter(
+            cur, account_id, only_user_ids
+        )
         sql += person_sql
         args.extend(person_args)
         sql += order_sql
