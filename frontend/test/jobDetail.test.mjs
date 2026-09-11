@@ -166,8 +166,10 @@ test('runs are collapsed and cost nothing until opened', () => {
   assert.match(runs, /getWorkItem\(itemId, \{ include: 'runs', signal \}\)/)
 })
 
-test('Work and Home both open this pane, not the old loop panel', () => {
-  for (const f of ['WorkTab.jsx', 'Dashboard.jsx']) {
+test('Work opens this pane, not the old loop panel', () => {
+  // Home used to open work items from its desk. It now sends people INTO
+  // Work instead of reproducing the item pane, so this rule is Work's.
+  for (const f of ['WorkTab.jsx']) {
     const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
     assert.match(src, /import JobDetail from '\.\/JobDetail\.jsx'/, f)
     assert.match(src, /<JobDetail/, f)

@@ -24,6 +24,7 @@ import {
   isUnreachableError,
   unreachableMessage,
 } from './httpTimeout.js'
+import { homeQuery } from './homeQuery.js'
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 const LS_KEY = 'trovis_api_key'
@@ -532,6 +533,43 @@ export const api = {
   // --- dedicated cost page ---
   // `days` is the trend window (7–90) the chart is showing; the budget writes
   // below echo it so the returned overview keeps the same series.
+  // ---- Home: the authoritative snapshot + the investigation ---------------
+  // Two INDEPENDENT reads over the same scope/period, so a model outage never
+  // takes the numbers down with it. Neither runs a model on the request path:
+  // /home/findings serves what is published and says whether more is coming.
+  // Contracts: HOME_SNAPSHOT.md, HOME_FINDINGS.md.
+  //
+  // `homeQuery` builds the query string BOTH endpoints take, so the two can
+  // never be asked different questions — a snapshot for one scope beside
+  // findings for another is a Home that disagrees with itself.
+  getHomeSnapshot: ({ signal, ...q } = {}) =>
+    request(`/home/snapshot${homeQuery(q)}`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+    }),
+  getHomeFindings: ({ signal, includeDismissed = false, ...q } = {}) =>
+    request(
+      `/home/findings${homeQuery({ ...q, includeDismissed })}`,
+      { timeoutMs: WORK_TIMEOUT_MS, ...(signal ? { signal } : {}) },
+    ),
+  // The finding's evidence. Carries the same scope/period: the server
+  // re-checks access against the CURRENT slice and 404s a finding that has
+  // left it, so the query is not decoration.
+  getHomeFinding: (id, { signal, ...q } = {}) =>
+    request(`/home/findings/${encodeURIComponent(id)}${homeQuery(q)}`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      ...(signal ? { signal } : {}),
+    }),
+  // Acknowledge or dismiss. Neither means resolved — the server refuses that
+  // word outright, because a person clicking "stop showing me this" is not
+  // evidence the condition ended.
+  setFindingState: (id, state, { reason = null, ...q } = {}) =>
+    request(`/home/findings/${encodeURIComponent(id)}${homeQuery(q)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ state, reason }),
+      timeoutMs: WORK_TIMEOUT_MS,
+    }),
+
   getCostOverview: (days = 30) => request(`/cost/overview?days=${days}`),
   // Per-day / per-model cost audit — surfaces tokens that landed unpriced
   // (cost undercounted) so a pricing/capture gap is visible, not silent.

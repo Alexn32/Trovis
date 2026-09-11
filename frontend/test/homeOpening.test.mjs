@@ -353,21 +353,6 @@ test('nothing home.js produces can ship Trovis jargon', () => {
   }
 })
 
-test('the desk actions never say "handoff" to a person', () => {
-  // The write path is a handoff resolution; the words on the buttons are not.
-  const src = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  const actions = code.slice(code.indexOf('const DESK_ACTIONS'), code.indexOf('function DeskRow'))
-  for (const m of actions.matchAll(/(?:label|busy):\s*["'`]([^"'`]+)["'`]/g)) {
-    assert.ok(!FORBIDDEN.test(m[1]), `desk action ships jargon: ${JSON.stringify(m[1])}`)
-  }
-  assert.match(actions, /label: 'Done'/)
-  assert.match(actions, /label: "I've got this"/)
-  assert.match(actions, /label: 'Not mine'/)
-})
-
-// --- Ask presets ------------------------------------------------------------
-
 test('a chip is only offered when its answer exists', () => {
   // "What's stuck?" on a day with nothing stuck asks Trovis to describe an
   // empty set — a worse first impression than no chip at all.

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ThemeProvider, useTheme } from './ThemeProvider.jsx'
-import Dashboard from './Dashboard.jsx'
+import HomeView from './HomeView.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
 import WorkTab from './WorkTab.jsx'
@@ -593,27 +593,27 @@ function AppInner() {
             onDismiss={dismissGraduate}
           />
         )}
-        <Dashboard
+        <HomeView
           key={`dashboard-${shownEpoch.current.dashboard}`}
-          // Off screen, Home stops re-syncing on focus (same rule as Work).
+          // Off screen, Home stops fetching and stops its bounded analysis
+          // poll (same rule as Work).
           active={dashboardVisible}
+          seat={seat}
+          me={me}
+          // The whose-work control's person options, same source as Work's.
+          people={orgPeople}
           onOpenAgent={openDetail}
-          // Every count on Home's strip, and every line Trovis noticed, opens
-          // the real page behind it — Work filtered to the bucket that was
-          // clicked, or that agent.
+          // Every count and every finding opens the real page behind it —
+          // Work filtered to the bucket that was clicked, that job, or that
+          // agent. State-driven destinations, not invented URL routes.
           onGoWork={(filter = null) => {
             setWorkFilter({ value: filter, nonce: Date.now() })
             setTab('work')
             setOverlay(null)
           }}
+          onOpenJob={(id) => id && setOverlay({ kind: 'workflow', id })}
           onOpenCost={() => setOverlay({ kind: 'cost' })}
-          // The fleet pulse's count and its "need a look" both open Fleet.
-          onGoFleet={() => {
-            setTab('fleet')
-            setOverlay(null)
-          }}
           onConnectAgent={openAddAgent}
-          userName={account.userName}
         />
       </TabPane>
       <TabPane id="fleet" visible={fleetVisible}>
@@ -688,11 +688,11 @@ function AppInner() {
         )}
         {panes}
       </main>
-      {/* Global Trovis assistant — reachable on every page. Home renders its
-          own Ask field, so the floating pill is suppressed there: two Ask
-          buttons on one screen is two answers to "where do I ask?". ⌘K and
-          openAsk() still work everywhere, including Home. */}
-      <AskPill hideLauncher={dashboardVisible} />
+      {/* Global Trovis assistant — reachable on every page, Home included.
+          Home has no Ask field of its own; its findings open Ask through
+          openAsk() with a specific question already asked, so the launcher
+          must stay visible rather than being suppressed here. */}
+      <AskPill />
       <UpgradeModal
         open={upgradeOpen}
         me={me}
