@@ -9,6 +9,7 @@ that a turn promising a snippet never reaches the user without one.
 """
 import json
 import os
+import pathlib
 import tempfile
 from types import SimpleNamespace
 
@@ -380,6 +381,44 @@ with TestClient(main.app) as c:
 
     r = c.post("/connect/ask", json={"messages": []}, headers=headers)
     check("empty history → 400", r.status_code == 400)
+
+# --- the guide knows every door the manual wizard does ----------------------
+#
+# The AI guide and the manual wizard are two routes to the same setup. When a
+# door ships on one and not the other, the guide confidently gives a recipe
+# that doesn't exist — which is worse than admitting it doesn't know.
+
+PROMPT = asker.SYSTEM_CONNECT
+
+check("the guide knows the Cursor Grok Bot door",
+      "Cursor Grok Bot" in PROMPT)
+check("with the MCP URL as a substitutable placeholder, not a hardcoded host",
+      "TROVIS_MCP_URL" in PROMPT
+      and "https://api.trovisai.com/mcp/grok" not in PROMPT)
+check("and the auth header it actually needs",
+      "Authorization: Bearer TROVIS_API_KEY" in PROMPT)
+for tool in ("report_job_started", "report_job_waiting",
+             "report_job_finished", "report_job_failed"):
+    check(f"the guide can name {tool}", tool in PROMPT)
+check("the guide is told the title IS the job name",
+      "title IS the job name" in PROMPT)
+check("the guide tells the truth: nothing lands unless the Bot calls in",
+      "nothing is recorded unless the Bot calls these tools" in PROMPT)
+
+# The ambiguity that makes this door dangerous to guess at: "Grok" alone.
+check("the guide must ask WHICH Grok before answering",
+      '"Grok" is ambiguous' in PROMPT and "Never guess" in PROMPT)
+check("and it has both chip labels to offer",
+      "Grok (xAI SDK)" in PROMPT and "Cursor Grok Bot" in PROMPT)
+check("the xai-sdk door is still there, unconfused with the Bot one",
+      "trovis-agents[xai]" in PROMPT and 'platform="xai"' in PROMPT)
+
+# Every door the picker offers should be reachable through the guide too.
+_wizard = pathlib.Path("frontend/src/AddAgent.jsx").read_text()
+_chips = pathlib.Path("frontend/src/ConnectGuide.jsx").read_text()
+for label in ("Cursor Grok Bot", "Grok (xAI SDK)", "ChatGPT", "OpenClaw"):
+    check(f"the guide's opening chips offer {label}", label in _chips)
+    check(f"and the manual picker offers {label}", label in _wizard)
 
 print()
 if failures:

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, getApiKey } from './api.js'
-import { CodeBlock, computeOverseeEndpoint } from './AddAgent.jsx'
+import { CodeBlock, computeGrokMcpUrl, computeOverseeEndpoint } from './AddAgent.jsx'
 import { TrovisMark, SendIcon, CheckCircleIcon } from './Icons.jsx'
 import { QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
 // Placeholder → real key/endpoint substitution, and the wire-history
@@ -48,6 +48,8 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
   // undefined = still loading; null = none in this session; string = the key.
   const [orgKey, setOrgKey] = useState(undefined)
   const endpoint = useRef(computeOverseeEndpoint()).current
+  // The Grok Bot door hands out an MCP URL, not the ingest endpoint.
+  const mcpUrl = useRef(computeGrokMcpUrl()).current
   const threadRef = useRef(null)
   const inputRef = useRef(null)
 
@@ -223,6 +225,7 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
               m={m}
               orgKey={orgKey}
               endpoint={endpoint}
+              mcpUrl={mcpUrl}
               chipsEnabled={i === lastAssistantIdx && !pending}
               onPick={send}
             />
@@ -270,7 +273,7 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
   )
 }
 
-function GuideBubble({ m, orgKey, endpoint, chipsEnabled, onPick }) {
+function GuideBubble({ m, orgKey, endpoint, mcpUrl, chipsEnabled, onPick }) {
   if (m.role === 'user') {
     return (
       <div className="dash-msg user">
@@ -293,7 +296,7 @@ function GuideBubble({ m, orgKey, endpoint, chipsEnabled, onPick }) {
         {code.map((c, ci) => (
           <div className="connect-code" key={ci}>
             {c.title && <div className="connect-code-title">{c.title}</div>}
-            <CodeBlock code={substitute(c.content, orgKey, endpoint)} />
+            <CodeBlock code={substitute(c.content, orgKey, endpoint, mcpUrl)} />
             {orgKey === null && c.content.includes(KEY_PLACEHOLDER) && (
               <div className="connect-code-note">
                 No key in this session — replace ov_sk_… with your key from Settings.

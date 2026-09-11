@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import {
   ENDPOINT_PLACEHOLDER,
   KEY_FALLBACK,
+  MCP_URL_PLACEHOLDER,
   KEY_PLACEHOLDER,
   flattenAssistant,
   substitute,
@@ -15,6 +16,7 @@ import {
 // Obvious fakes — never a real credential in a fixture.
 const KEY = 'ov_sk_fake000000000000000000test'
 const ENDPOINT = 'https://api.example.test/v1/traces'
+const MCP_URL = 'https://api.example.test/mcp/grok'
 
 test('value positions get the real key and endpoint', () => {
   const snippet =
@@ -117,6 +119,35 @@ test('an assistant turn with no code flattens to just its answer', () => {
     "What's your agent built with?",
   )
   assert.equal(flattenAssistant({ content: 'No code key at all.' }), 'No code key at all.')
+})
+
+test('a Grok Bot snippet gets the MCP URL, never the traces endpoint', () => {
+  // A Bot is pointed at the MCP server. Filling the OTLP ingest URL in there
+  // would have someone paste a URL that speaks no MCP and see nothing.
+  const snippet =
+    `{"mcpServers":{"trovis":{"url":"${MCP_URL_PLACEHOLDER}",` +
+    `"headers":{"Authorization":"Bearer ${KEY_PLACEHOLDER}"}}}}`
+  const out = substitute(snippet, KEY, ENDPOINT, MCP_URL)
+  assert.match(out, new RegExp(MCP_URL.replace(/[/.]/g, '\\$&')))
+  assert.match(out, new RegExp(KEY))
+  assert.doesNotMatch(out, /TROVIS_MCP_URL|TROVIS_API_KEY/)
+  // The two URLs must not be confusable with each other.
+  assert.doesNotMatch(out, /v1\/traces/)
+})
+
+test('the MCP placeholder as an env-var NAME stays a name, like the others', () => {
+  assert.equal(
+    substitute(`${MCP_URL_PLACEHOLDER}=${MCP_URL_PLACEHOLDER}`, KEY, ENDPOINT, MCP_URL),
+    `${MCP_URL_PLACEHOLDER}=${MCP_URL}`,
+  )
+})
+
+test('the guide passes the real MCP URL through to snippets', () => {
+  // substitute() can only fill what ConnectGuide hands it — a missing 4th
+  // argument would silently blank every Grok Bot URL.
+  const guide = readFileSync(new URL('../src/ConnectGuide.jsx', import.meta.url), 'utf8')
+  assert.match(guide, /computeGrokMcpUrl\(\)/)
+  assert.match(guide, /substitute\(c\.content, orgKey, endpoint, mcpUrl\)/)
 })
 
 test('ConnectGuide uses these helpers instead of its own copy', () => {
