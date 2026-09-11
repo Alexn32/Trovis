@@ -230,12 +230,12 @@ with TestClient(main.app) as c:
         account_id=ACCT, only_user_ids=None, financial_visible=True,
         budget=investigation_tools.ToolBudget(max_calls=40, max_rows=4000),
     )
-    session.run("list_comparable_runs", {"job_id": job["id"], "limit": 50})
-    session.run("list_comparable_runs", {"agent": "search-agent", "limit": 50})
+    session.retrieve("list_comparable_runs", {"job_id": job["id"], "limit": 50})
+    session.retrieve("list_comparable_runs", {"agent": "search-agent", "limit": 50})
     for rid in (*BLOCKED, RECOVERED, REPEATED, CLEAN):
-        session.run("inspect_run", {"run_id": rid})
-    mix = session.run("compare_outcome_mix", {"days": 7, "job_id": job["id"]})
-    session.run("cost_evidence", {"days": 7})
+        session.retrieve("inspect_run", {"run_id": rid})
+    mix = session.retrieve("compare_outcome_mix", {"days": 7, "job_id": job["id"]})
+    session.retrieve("cost_evidence", {"days": 7})
 
     SNAPSHOT = c.get("/home/snapshot?days=7&tz=UTC", headers=auth(TOKEN)).json()
 

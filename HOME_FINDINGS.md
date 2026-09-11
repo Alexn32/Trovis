@@ -14,7 +14,8 @@ Abstaining is a correct outcome, and on a quiet account it is the expected one.
 - Endpoints: `main.home_findings`, `main.home_finding_detail`
 - Shapes: `models.FindingSummary` / `FindingDetail`
 - Tests: `test_home_findings.py` (pipeline), `test_home_findings_eval.py` (rubric),
-  `test_home_findings_review.py` + `test_home_findings_round2.py` (review regressions)
+  `test_home_findings_review.py`, `test_home_findings_round2.py`,
+  `test_home_findings_round3.py` (review regressions)
 
 ## What this PR is not
 
@@ -80,28 +81,64 @@ them let an unparseable discovery reply retire a standing, true finding under
 "no candidate worth investigating". Every run now reports an
 `analysis_outcome`:
 
-| outcome | meaning | may retire findings? |
+| outcome | meaning | retired? | retried? |
+|---|---|---|---|
+| `complete` | ran to a conclusion — **including a genuine abstention or a supported refutation** | yes, if coverage was whole | — |
+| `incomplete` | ran, and left at least one question it raised unanswered. May have published | no | no |
+| `discovery_unusable` | the reply was unparseable, had no `candidates` key, or no usable entry | no | yes |
+| `deadline` | the wall clock expired before the work was done | no | yes |
+| `retrieval_failed` | retrieval left a required question unanswered | no | yes |
+| `interrupted` | the worker raised partway through | no | yes |
+| `scope_changed` | permissions moved while it was queued; nothing is published | no | no |
+| `superseded` | the claim was taken over; nothing is written at all | no | no |
+
+**The outcome is derived, never asserted.** Both terminal paths used to
+`return _finish(ANALYSIS_COMPLETE)` unconditionally, so a run whose only
+candidate the validator refused reported itself complete with no gaps — and
+retired the standing finding it had just failed to replace.
+
+Two questions are kept apart, because they have different consequences:
+
+| | asks | decides |
 |---|---|---|
-| `complete` | the analysis ran to a conclusion — **including a genuine abstention** | yes, if coverage was whole |
-| `discovery_unusable` | the reply was unparseable, had no `candidates` key, or no usable entry | no |
-| `deadline` | the wall clock expired before the work was done | no |
-| `retrieval_failed` | retrieval left a required question unanswered | no |
-| `interrupted` | the worker raised partway through | no |
-| `scope_changed` | permissions moved while it was queued; nothing is published | no |
-| `superseded` | the claim was taken over; nothing is written at all | no |
+| **completion** | did the run answer everything it raised? | the `analysis_outcome`, and therefore whether the read may say `current` |
+| **coverage** | could the run have seen the whole slice? | whether it may retire a finding |
 
-Retirement additionally requires the run to have **covered its slice**. Any of
-these leaves standing findings alone even under `complete`: a candidate not
-examined because the deadline arrived, a candidate that produced no usable
-verdict, a draft nothing could be composed from, a rewrite that could not be
-narrowed, or a retrieval that was itself incomplete. The reasons are listed in
-`report["coverage_gaps"]`. *Skipping* a condition is not *looking and finding
-it gone*.
+`COMPLETION_GAPS` are the five ways a run raises a question and does not
+answer it — `candidates_not_examined` (the deadline arrived mid-list),
+`candidate_undecided` (no usable verdict), `candidate_uncomposed` (nothing
+composable), `wording_withheld` (unusable assessment, or no supported
+rewrite), and `validation_rejected` (the deterministic validator refused the
+draft). Any one of them makes the outcome `incomplete` even when other
+candidates published successfully, and none of them may retire anything.
 
-An unsuccessful run is retried within the usual bounded attempts, and while it
-is unresolved the read reports `state: "incomplete"` with the previous
-findings still served and flagged `findings_from_previous_analysis`. It is
-never reported as `current`.
+Coverage gaps are those five **plus** `retrieval_incomplete`. That one is
+deliberately not a completion gap: a bounded search that answered its
+questions *is* a completed analysis. It publishes, it reads as `current`, its
+findings carry `coverage.retrieval_complete: false` and a `qualified`
+confidence — and it still retires nothing, because a partial search cannot
+establish that a condition is gone.
+
+A rejected draft is **not** retried. `RETRYABLE_OUTCOMES` is the four
+transport- and parse-level failures, where a second attempt may genuinely
+succeed; `incomplete` means the run executed and produced a report saying
+which candidates were refused and why, and re-running the whole investigation
+to have the same deterministic validator refuse the same draft buys nothing
+and would discard that report. Bounded attempts are unchanged for the four.
+
+While an unsuccessful run is the latest for a key, the read reports
+`state: "incomplete"` with `analysis_outcome`, `completion_gaps` and
+`published_this_analysis`, the previous findings still served and flagged
+`findings_from_previous_analysis`. It is never reported as `current`. No
+refresh is queued while the records are unchanged — re-running the same
+investigation over the same evidence reaches the same refusal — but **new
+evidence and the freshness window are both routes back to `current`**.
+
+`findings_from_previous_analysis` is computed per row, from each finding's
+`analysis_id`, wherever an analysis has just run for this key. A refresh that
+published one finding and left another standing is showing output from two
+analyses, and `published_this_analysis` alongside it says how much of what is
+on screen is new.
 
 ## The finding contract
 
@@ -252,24 +289,43 @@ Evidence dropped for size is also **removed from the ledger**, so a finding
 cannot cite a row the model was never shown. What the investigation and the
 assessment received is exactly what may be published.
 
-Removal is scoped **per tool response**, not per evidence kind. The first
-version called `forget_beyond("run", kept_ids)`, which dropped every `run:`
-entry outside the current response — so a run delivered whole by call 1
-disappeared the moment call 3's unrelated run list was trimmed, and a finding
-legitimately citing it was then rejected as a fabrication. Each response now
-records which ledger keys it *introduced* and where each one sits in the
-payload, and after trimming:
+The ledger holds what was **delivered**, and retrieval alone never writes to
+it. `_record` stages a response's rows; `_settle_delivery` promotes the ones
+that reached the model. Two earlier versions of this were wrong in opposite
+ways:
 
-* a record this response introduced and did not deliver is removed;
-* a record an **earlier** response already delivered is kept, even when this
-  response also mentioned it and then trimmed it away;
-* if the whole result is dropped, everything it introduced is removed, so
-  unseen content never becomes citable.
+* `forget_beyond("run", kept_ids)` dropped every `run:` entry outside the
+  current response, so a run delivered whole by call 1 disappeared the moment
+  call 3's unrelated list was trimmed, and a finding legitimately citing it was
+  rejected as a fabrication.
+* Scoping removal per response fixed the **keys** and not the **contents**.
+  `_record` still wrote straight into the ledger, so a re-fetched run
+  overwrote the delivered payload at the moment it was *retrieved* — a run
+  delivered as `Refund 0` / `abandoned`, re-fetched after a rename as
+  `RENAMED…` / `completed` and then trimmed out of the later response, left the
+  ledger holding a title, an outcome and a digest nobody had been shown. Every
+  claim, assessment and stored digest downstream read that version.
 
-Provenance is keyed on the payload handed to `fit`, not on "the most recent
-`run`", so two retrievals before either result is sent cannot attribute one
-response's rows to the other. It covers runs, run events, failed spans and the
-job/agent references that ride along with them.
+Promotion, not deletion, is the rule now:
+
+* a staged row that was delivered is promoted, replacing any earlier version —
+  the model has seen the newer payload, so that is what may be cited;
+* a staged row that was trimmed away is discarded, and whatever was delivered
+  before stands untouched;
+* if the whole result is dropped, nothing it staged is promoted, so unseen
+  content never becomes citable and an update inside it does not land.
+
+The promoted payload is taken from the **sent** list entry — the clipped object
+the model actually received — and rebuilt on the way in, so a later retrieval
+mutating a shared dict cannot reach evidence already delivered. Provenance is
+keyed on the payload handed to `fit`, not on "the most recent `run`", so two
+retrievals before either result is sent cannot cross-attribute, and responses
+fitted out of order each settle against their own rows. It covers runs, run
+events, failed spans and the job/agent references that ride along with them.
+
+Because delivery is the promotion point, `run()` alone records nothing
+citable. The production loop always pairs `run` with `fit`; everything else
+should use `session.retrieve(name, args)`, which does both.
 
 ## Validation before publishing
 
@@ -370,7 +426,9 @@ returns what was observed, why it matters, supporting **and** contradicting
 evidence, what is uncertain, and one supported next step.
 
 `analysis.state` is one of `current`, `queued`, `running`, `debounced`,
-`incomplete`, `failed`, `unavailable`. **`unavailable` / `no_model_configured`
+`incomplete`, `failed`, `unavailable`. `current` requires a **completed**
+analysis (`analysis_outcome: "complete"`) that read the records now present;
+`incomplete` is its counterpart and carries `completion_gaps`. **`unavailable` / `no_model_configured`
 is a real product state**: the snapshot stays fully usable and analysis is
 explicitly absent. There is no deterministic fallback copy presented as an AI
 finding.
@@ -473,6 +531,14 @@ Two of the eval cases were written before the checks that catch them and
 initially **failed**, which is how the recovered-error and
 repetition-is-not-waste rules got written.
 
+`test_home_findings_round3.py` covers the three remaining defects: a rejected
+replacement retiring what it failed to replace, an unfinished run reporting
+`current`, and undelivered content overwriting delivered evidence. Its
+unsuccessful-path cases each start from a fresh publication **and a cleared job
+history**, so no earlier failure or debounce floor can make the next one pass
+by accident, and the evidence cases assert payload contents and digests rather
+than key membership.
+
 `test_home_findings_round2.py` covers the six integration defects between
 retrieval, validation, scheduling and publication. It drives the production
 path — a real tool call, a real `fit`, the real validator, the real
@@ -530,7 +596,15 @@ live model, and neither is evidence that the real model is insightful.
    claims for the whole finding, even when the truncated tool is unrelated to
    the claim being made. Conservative, and occasionally more conservative than
    the evidence requires.
-11. **`analysis_id` is random-suffixed.** It had been
+11. **A rejected draft is not retried.** The run reports `incomplete` and
+   leaves the standing finding in place, but nothing re-attempts that
+   candidate until new evidence arrives or the freshness window rolls. A
+   transient composition problem therefore costs one refresh cycle.
+12. **`incomplete` blocks nothing except `current`.** An audience whose every
+   refresh keeps hitting a validator rejection keeps serving the same
+   findings and keeps reading `incomplete`. That is truthful, and it is also
+   not self-healing: only new evidence or the freshness window moves it.
+13. **`analysis_id` is random-suffixed.** It had been
    `<scope>-<unix seconds>`, so two analyses of one audience inside a single
    second shared an id and the retirement clause (`analysis_id <> ?`) excluded
    the very rows it was meant to close. Fixed, and worth knowing the id is now

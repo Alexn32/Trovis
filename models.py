@@ -1976,6 +1976,15 @@ class AnalysisStatus(BaseModel):
     # abstention ("we looked, there is nothing"); the unsuccessful values never
     # stand in for one.
     analysis_outcome: str | None = None
+    # The questions the last run raised and did not answer — a skipped
+    # candidate, an undecided verdict, an uncomposed draft, a withheld rewrite,
+    # a draft the validator refused. Non-empty means `analysis_outcome` is
+    # `incomplete`, whether or not the run also published something.
+    completion_gaps: list[str] = Field(default_factory=list)
+    # How many findings the last completed analysis actually published. With
+    # `findings_from_previous_analysis`, this is what distinguishes "all of
+    # this is new" from "one is new and one is standing from before".
+    published_this_analysis: int | None = None
     enqueued: bool = False
     job_id: int | None = None
     stale_findings: bool = False

@@ -403,9 +403,12 @@ with TestClient(main.app) as c:
         "evidence_needed": ["the runs"]}]})
 
     def investigation(kw, o):
-        k = o.counts.get("t", 0)
-        o.counts["t"] = k + 1
-        if k == 0:
+        # Stateless: retrieve on the first turn of EACH investigation, decide
+        # once a tool result is in the conversation. A per-client counter made
+        # this depend on how many jobs one `install()` served — the second job
+        # in a `drain()` skipped retrieval entirely and then failed validation
+        # for citing evidence it had never fetched.
+        if len(kw.get("messages") or []) <= 1:
             return _tool("list_comparable_runs", {"job_id": job["id"]}, "1")
         return _text({
             "verdict": "supported",
@@ -570,9 +573,7 @@ with TestClient(main.app) as c:
 
     def steal_mid_investigation(kw, o):
         """Transfer ownership WHILE the old worker is inside a model call."""
-        k = o.counts.get("t", 0)
-        o.counts["t"] = k + 1
-        if k == 0 and stolen["job_id"] is None:
+        if stolen["job_id"] is None:
             with database._connect() as conn, database._cursor(conn) as cur:
                 cur.execute(
                     f"SELECT id FROM analysis_jobs WHERE account_id = {database.PH} "
@@ -617,9 +618,7 @@ with TestClient(main.app) as c:
     raised = {"job_id": None, "new_token": None}
 
     def steal_then_raise(kw, o):
-        k = o.counts.get("t", 0)
-        o.counts["t"] = k + 1
-        if k == 0 and raised["job_id"] is None:
+        if raised["job_id"] is None:
             with database._connect() as conn, database._cursor(conn) as cur:
                 cur.execute(
                     f"SELECT id FROM analysis_jobs WHERE account_id = {database.PH} "
@@ -731,9 +730,11 @@ with TestClient(main.app) as c:
     during = {"version_at_start": None, "inserted": False}
 
     def ingest_mid_investigation(kw, o):
-        k = o.counts.get("t", 0)
-        o.counts["t"] = k + 1
-        if k == 0 and not during["inserted"]:
+        # Ingest on the FIRST investigation turn and then delegate, WITHOUT
+        # touching `o.counts` — `investigation` owns that counter, and
+        # incrementing it here too skipped the tool-call turn entirely, so the
+        # run reached composition having retrieved nothing.
+        if not during["inserted"]:
             during["version_at_start"] = database.evidence_version(ACCT)["version"]
             database.ingest_spans_with_loops(
                 [span("burst-agent", 0,
@@ -755,6 +756,7 @@ with TestClient(main.app) as c:
           == mid["analysis"]["evidence_version"])
     check("a later read eventually queues the follow-up",
           read()["analysis"]["state"] in ("queued", "running", "current"))
+    install(GOOD)
     analysis_jobs.drain(4)
     settled = read()
     check("and once it runs, analysed matches observed again",

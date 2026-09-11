@@ -191,7 +191,8 @@ def analysis_available() -> bool:
 
 
 def ensure_analysis(request: dict[str, Any], *, findings_count: int,
-                    newest_analyzed_at: str | None) -> dict[str, Any]:
+                    newest_analyzed_at: str | None,
+                    finding_analysis_ids: list[str] | None = None) -> dict[str, Any]:
     """Decide whether to queue, and report the status either way.
 
     Returns the `analysis` block a read serves. It never waits: the caller
@@ -269,11 +270,18 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
         outcome = ((existing.get("result") or {}).get("analysis_outcome")
                    or investigator.ANALYSIS_COMPLETE)
         fresh = age is not None and age < freshness_s()
-        if fresh and outcome in investigator.UNSUCCESSFUL_OUTCOMES:
+        if (fresh and outcome in investigator.UNSUCCESSFUL_OUTCOMES
+                and (analyzed is None or analyzed == observed)):
             # The job finished; the ANALYSIS did not. An unusable discovery
-            # reply or an expired deadline is not an investigation that found
-            # nothing, and the findings standing from before it are still the
-            # most recent real answer.
+            # reply, an expired deadline or a draft the validator refused is
+            # not an investigation that found nothing, and the findings
+            # standing from before it are still the most recent real answer.
+            #
+            # No refresh is queued while the records are unchanged: re-running
+            # the same investigation over the same evidence would reach the
+            # same refusal. NEW evidence falls through to the enqueue below,
+            # and so does the freshness window — both are routes back to a
+            # `current` state.
             return {
                 **base,
                 "state": "incomplete",
@@ -281,13 +289,24 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
                 "enqueued": False,
                 "completed_at": existing["finished_at"],
                 "analysis_outcome": outcome,
-                "findings_from_previous_analysis": findings_count > 0,
+                # Some of what is on screen may have just been published by
+                # this very run, and some may be standing from before it. The
+                # flag says whether ANY row predates the latest analysis.
+                "findings_from_previous_analysis": _from_earlier_analysis(
+                    finding_analysis_ids, findings_count,
+                    (existing.get("result") or {}).get("analysis_id")),
+                "published_this_analysis": int(
+                    (existing.get("result") or {}).get("published") or 0),
+                "completion_gaps": list(
+                    (existing.get("result") or {}).get("completion_gaps") or []),
                 "previous_analysis_at": newest_analyzed_at,
                 "analyzed_evidence_version": analyzed,
                 "newer_evidence_available": bool(analyzed and analyzed != observed),
             }
-        if fresh and (analyzed is None or analyzed == observed):
-            # Current means one thing: a completed analysis read THESE records.
+        if (fresh and outcome not in investigator.UNSUCCESSFUL_OUTCOMES
+                and (analyzed is None or analyzed == observed)):
+            # `current` means all of: a COMPLETED analysis (outcome `complete`)
+            # which read THESE records.
             return {
                 **base,
                 "state": "current",
@@ -296,6 +315,11 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
                 "completed_at": existing["finished_at"],
                 "analyzed_evidence_version": analyzed,
                 "analysis_outcome": outcome,
+                "published_this_analysis": int(
+                    (existing.get("result") or {}).get("published") or 0),
+                "findings_from_previous_analysis": _from_earlier_analysis(
+                    finding_analysis_ids, findings_count,
+                    (existing.get("result") or {}).get("analysis_id")),
             }
         # Either the analysis expired, or evidence has moved since it ran.
         # Fall through and queue a refresh — the debounce floor below may
@@ -385,6 +409,30 @@ def ensure_analysis(request: dict[str, Any], *, findings_count: int,
     }
 
 
+def _from_earlier_analysis(
+    finding_analysis_ids: list[str] | None, findings_count: int,
+    latest_analysis_id: str | None,
+) -> bool:
+    """Did any finding being served come from an EARLIER run than the latest?
+
+    Counted per row, not inferred from "there are findings". A refresh that
+    published one new finding and left one standing is showing output from two
+    analyses, and saying they all came from the latest attempt would misreport
+    the older one; a refresh that republished everything is not.
+
+    Only used where an analysis JUST ran for this key (`current`,
+    `incomplete`). Where a refresh is queued, running, debounced or failed,
+    everything on screen predates it by construction and the count is enough.
+
+    Falls back to the count when the caller did not supply the ids.
+    """
+    if finding_analysis_ids is None:
+        return findings_count > 0
+    if not latest_analysis_id:
+        return bool(finding_analysis_ids)
+    return any(aid != latest_analysis_id for aid in finding_analysis_ids)
+
+
 def _analyzed_version(request: dict[str, Any]) -> str | None:
     """What the most recent COMPLETED analysis for this audience actually read.
 
@@ -459,12 +507,18 @@ def run_one() -> dict[str, Any] | None:
             return {"job_id": job["id"],
                     "status": "done" if landed else "superseded", **report}
 
-        if outcome in investigator.UNSUCCESSFUL_OUTCOMES and not publication.get("records"):
+        if outcome in investigator.RETRYABLE_OUTCOMES and not publication.get("records"):
             # The job ran; the analysis did not complete and produced nothing.
             # It must NOT be closed as a successful empty investigation — the
             # previously published findings are still the most recent real
             # answer, and `ensure_analysis` reports `incomplete` rather than
             # `current`. Retry within the same bounded budget.
+            #
+            # `ANALYSIS_INCOMPLETE` is deliberately not here: that run executed
+            # and produced a report explaining which candidates were refused
+            # and why. It commits below — publishing whatever validated,
+            # retiring nothing — and the read reports `incomplete` from the
+            # stored outcome.
             if job["attempts"] >= database.ANALYSIS_JOB_MAX_ATTEMPTS:
                 database.finish_analysis_job(
                     job["id"], "done", result=report, claim_token=token)

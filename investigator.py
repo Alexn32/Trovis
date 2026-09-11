@@ -58,6 +58,11 @@ PROMPT_VERSION = "home-investigation-2026-09-v2"
 # conflating them let an unparseable discovery reply retire standing findings
 # with "no candidate worth investigating".
 ANALYSIS_COMPLETE = "complete"              # the analysis ran; empty is a real answer
+# The analysis ran and answered SOME of what it raised. It may have published;
+# it did not finish. Distinct from `complete` because "we looked and there is
+# nothing" and "we looked at three of four things" are different answers, and
+# distinct from the outright failures because there may be real output.
+ANALYSIS_INCOMPLETE = "incomplete"
 ANALYSIS_DISCOVERY_UNUSABLE = "discovery_unusable"
 ANALYSIS_DEADLINE = "deadline"
 ANALYSIS_RETRIEVAL_FAILED = "retrieval_failed"
@@ -69,10 +74,36 @@ ANALYSIS_SUPERSEDED = "superseded"
 # retire a finding, and none of them may be reported as "analysed, found
 # nothing".
 UNSUCCESSFUL_OUTCOMES = (
+    ANALYSIS_INCOMPLETE,
     ANALYSIS_DISCOVERY_UNUSABLE,
     ANALYSIS_DEADLINE,
     ANALYSIS_RETRIEVAL_FAILED,
     ANALYSIS_INTERRUPTED,
+)
+
+# Outcomes worth another attempt. Deliberately NOT all of the unsuccessful
+# ones: `incomplete` means the run executed and produced a usable report whose
+# candidates were examined and refused — most often by the deterministic
+# validator, which will refuse the same draft again. Re-running the whole
+# investigation for that buys nothing and discards the report that says why.
+# These four are transport- and parse-level failures, where a second attempt
+# genuinely may succeed.
+RETRYABLE_OUTCOMES = (
+    ANALYSIS_DISCOVERY_UNUSABLE,
+    ANALYSIS_DEADLINE,
+    ANALYSIS_RETRIEVAL_FAILED,
+    ANALYSIS_INTERRUPTED,
+)
+
+# A question this run RAISED and did not answer. Each one means the analysis
+# did not finish, so it may neither retire a finding nor be reported as a
+# completed investigation — even when other candidates published successfully.
+COMPLETION_GAPS = (
+    "candidates_not_examined",   # the deadline arrived mid-list
+    "candidate_undecided",       # no usable verdict came back
+    "candidate_uncomposed",      # nothing composable from the evidence
+    "wording_withheld",          # assessment unusable, or no supported rewrite
+    "validation_rejected",       # the deterministic validator refused the draft
 )
 
 MODEL = "claude-opus-5"
@@ -492,23 +523,52 @@ def investigate(
         "retire_previous": True,
         "publication": {"records": [], "keep_keys": [], "retire": False},
     }
-    # Reasons this run did not cover its slice. Any one of them means the
-    # findings it did not republish are not retired: the run did not look at
-    # them, which is not the same as looking and finding them gone.
-    incomplete: list[str] = []
+    # Questions this run raised and did not answer. Any one of them means the
+    # run did not finish, which is not the same as looking and finding nothing.
+    gaps: list[str] = []
 
-    def _finish(outcome: str) -> dict[str, Any]:
-        report["analysis_outcome"] = outcome
+    def _finish(outcome: str | None = None) -> dict[str, Any]:
+        """Settle the run's own verdict on itself.
+
+        The outcome is DERIVED, not asserted. Both terminal paths used to
+        return `ANALYSIS_COMPLETE` unconditionally, so a run whose only
+        candidate was rejected by the validator reported itself complete with
+        no gaps and retired the standing finding it had failed to replace.
+
+        Two different questions, deliberately kept apart:
+
+          COMPLETION   did the run answer everything it raised? A skipped
+                       candidate, an undecided verdict, an uncomposed draft, a
+                       withheld rewrite or a rejected draft all say no. It may
+                       still have published other candidates.
+          COVERAGE     could the run have seen the whole slice? Completion gaps
+                       count, and so does an incomplete RETRIEVAL — a bounded
+                       search cannot establish that a condition is gone.
+
+        Retirement needs coverage. Reporting `current` needs completion. A
+        partial search that answered its questions is a completed analysis
+        whose findings carry `coverage.retrieval_complete: false`; it publishes
+        and reads as current, and it still does not retire anything.
+        """
         report["retrieval"] = session.retrieval_report()
         report["budget"] = session.budget.report()
         report["deadline_hit"] = deadline.hit
-        if outcome != ANALYSIS_COMPLETE:
-            incomplete.append(outcome)
+
+        completion_gaps = sorted({g for g in gaps if g in COMPLETION_GAPS})
+        coverage_gaps = list(completion_gaps)
         if not report["retrieval"]["complete"]:
-            incomplete.append("retrieval_incomplete")
-        retire = not incomplete
+            coverage_gaps.append("retrieval_incomplete")
+
+        if outcome is None:
+            outcome = ANALYSIS_INCOMPLETE if completion_gaps else ANALYSIS_COMPLETE
+        elif outcome != ANALYSIS_COMPLETE:
+            coverage_gaps.append(outcome)
+
+        report["analysis_outcome"] = outcome
+        report["completion_gaps"] = completion_gaps
+        report["coverage_gaps"] = sorted(set(coverage_gaps))
+        retire = outcome == ANALYSIS_COMPLETE and not report["coverage_gaps"]
         report["retire_previous"] = retire
-        report["coverage_gaps"] = sorted(set(incomplete))
         report["publication"]["retire"] = retire
         report["published"] = len(report["publication"]["records"])
         if not defer_publication:
@@ -537,14 +597,14 @@ def investigate(
     for candidate in candidates[:MAX_CANDIDATES]:
         if not deadline.ok():
             report["deadline_hit"] = True
-            incomplete.append("candidates_not_examined")
+            gaps.append("candidates_not_examined")
             break
         outcome = _investigate_one(candidate, brief, snapshot, session, deadline)
         if outcome is None:
             report["abstained"].append(f"{candidate.get('topic')}: no usable verdict")
             # The candidate was raised and never decided. Anything standing
             # that it might have covered stays standing.
-            incomplete.append("candidate_undecided")
+            gaps.append("candidate_undecided")
             continue
         if outcome.get("verdict") == "refuted":
             # Examined and answered. This is a real result, not a gap.
@@ -553,7 +613,7 @@ def investigate(
         draft = _compose(candidate, outcome, brief, snapshot, session, deadline)
         if draft is None:
             report["abstained"].append(f"{candidate.get('topic')}: nothing composable")
-            incomplete.append("candidate_uncomposed")
+            gaps.append("candidate_uncomposed")
             continue
         settled = _settle(candidate, draft, outcome, brief, snapshot, session, deadline)
         if settled is None:
@@ -561,7 +621,7 @@ def investigate(
                 "topic": candidate.get("topic"),
                 "reason": "no wording the evidence supports",
             })
-            incomplete.append("wording_withheld")
+            gaps.append("wording_withheld")
             continue
         if settled.get("withheld"):
             report["rejected"].append({
@@ -569,12 +629,14 @@ def investigate(
             })
             # A rewrite that could not be narrowed says the WORDING failed, not
             # that the condition ended.
-            incomplete.append("wording_withheld")
+            gaps.append("wording_withheld")
             continue
         composed.append(settled["draft"])
 
     if not composed:
-        return _finish(ANALYSIS_COMPLETE)
+        # Nothing to publish. Whether that is a completed investigation or an
+        # unfinished one is decided by the gaps, not asserted here.
+        return _finish()
 
     ordered = _rank(composed, brief, deadline)
     # Coverage the validator will derive from. The SESSION's report, not the
@@ -595,6 +657,13 @@ def investigate(
             report["rejected"].append({
                 "topic": draft.get("topic"), "reason": exc.reasons,
             })
+            # THE GAP THAT WAS MISSING. A draft the deterministic validator
+            # refused is a replacement that failed, and a failed replacement
+            # is not evidence that the condition it was replacing ended. The
+            # handler recorded the rejection and said nothing about coverage,
+            # so the run still reported itself complete with no gaps and
+            # retired the valid standing finding it had just failed to renew.
+            gaps.append("validation_rejected")
             continue
         key = findings_mod.finding_key(
             validated["category"], validated["entities"], draft.get("topic", "")
@@ -622,7 +691,7 @@ def investigate(
         report["publication"]["records"].append(record)
         report["publication"]["keep_keys"].append(key)
 
-    return _finish(ANALYSIS_COMPLETE)
+    return _finish()
 
 
 def commit_publication(

@@ -247,11 +247,13 @@ class InvestigationSession:
         self.financial_visible = financial_visible
         self.budget = budget or ToolBudget()
         self.now = now or datetime.now(timezone.utc)
-        # kind:ref -> the payload as retrieved
+        # kind:ref -> the payload AS DELIVERED to the model. Only ever written
+        # by `_settle_delivery`, and only for rows the model actually received.
+        # A retrieval that was trimmed away never reaches this dict, so what is
+        # citable and what was seen are the same set of bytes.
         self.evidence: dict[str, dict[str, Any]] = {}
-        # Keys the model was ACTUALLY SHOWN. A key in `evidence` but not here
-        # was retrieved and then trimmed away before delivery — it is not
-        # citable, and it is not evidence.
+        # Keys the model was ACTUALLY SHOWN. Same membership as `evidence`;
+        # kept separate because callers assert on it.
         self.delivered: set[str] = set()
         # calculation id -> {value, ...}
         self.calculations: dict[str, dict[str, Any]] = {}
@@ -274,30 +276,43 @@ class InvestigationSession:
     # -- ledger ---------------------------------------------------------
     def _record(
         self, kind: str, ref: Any, payload: dict[str, Any],
-        *, listed: tuple[str, Any] | None = None,
+        *, listed: tuple[str, Any] | None = None, is_list_item: bool = False,
     ) -> None:
-        """Record one retrieved row, with the provenance delivery needs.
+        """STAGE one retrieved row. It is not evidence until it is delivered.
+
+        `_record` used to write straight into `self.evidence`, which meant a
+        re-retrieval overwrote the delivered payload the moment it was fetched.
+        Keeping the *key* through trimming did not keep what the model saw: a
+        run delivered with its original title, re-fetched with a changed title
+        and outcome, and then trimmed out of the later response, left the
+        ledger holding the version nobody had been shown — and every claim,
+        digest and assessment downstream read that.
+
+        So a response's rows are staged here and promoted by
+        `_settle_delivery` only once delivery is confirmed. A staged row that
+        is trimmed away simply never lands, and whatever was delivered before
+        stays exactly as it was.
 
         `listed` names the payload list this row travels in (`("runs", 41)`),
-        so when `fit` shortens that list we can tell which ledger entries this
-        response failed to deliver — WITHOUT touching entries an earlier
-        response already delivered. Dropping every entry of a kind was the bug
-        (`forget_beyond`): a run delivered by call 1 vanished when call 3's run
-        list was trimmed, and a finding legitimately citing it was then
-        rejected as a fabrication.
+        so trimming that list tells us which rows this response failed to
+        deliver. `is_list_item` says the row IS that list entry, so the
+        promoted payload can be taken from the sent list — the clipped object
+        the model actually received — rather than from the pre-clip original.
         """
         key = f"{kind}:{ref}"
-        first_time = key not in self.evidence
-        self.evidence[key] = payload
-        if self._response is not None:
-            if first_time and key not in self.delivered:
-                self._response["introduced"].add(key)
-            if listed is not None:
-                self._response["listed"].setdefault(listed[0], []).append(
-                    (str(listed[1]), key)
-                )
-            else:
-                self._response["unlisted"].add(key)
+        if self._response is None:
+            # No response context (a direct caller, not the tool loop). Record
+            # defensively rather than losing the row.
+            self.evidence[key] = _clip_deep(payload)
+            self.delivered.add(key)
+            return
+        self._response["staged"][key] = payload
+        if listed is not None:
+            self._response["listed"].setdefault(listed[0], []).append(
+                (str(listed[1]), key, is_list_item)
+            )
+        else:
+            self._response["unlisted"].add(key)
 
     def _calc(self, calc_id: str, value: Any, detail: dict[str, Any]) -> str:
         self.calculations[calc_id] = {"value": value, **detail}
@@ -316,7 +331,7 @@ class InvestigationSession:
     # -- dispatch -------------------------------------------------------
     def run(self, name: str, raw_input: dict[str, Any]) -> dict[str, Any]:
         """Execute one allowlisted tool. Never raises into the model loop."""
-        self._response = {"introduced": set(), "listed": {}, "unlisted": set(),
+        self._response = {"staged": {}, "listed": {}, "unlisted": set(),
                           "tool": name}
         if not self.budget.can_call():
             self.note_limitation(
@@ -470,54 +485,76 @@ class InvestigationSession:
     ) -> None:
         """Reconcile the ledger with what this response actually delivered.
 
-        Two rules, and the second is the one the old `forget_beyond` broke:
+        PROMOTION, not deletion. Staged rows become evidence only here, and
+        only the ones that reached the model:
 
-          * A record this response INTRODUCED and did not deliver is removed.
-            It was retrieved but never shown, so citing it would be citing
-            something the investigation never received. If the whole result was
-            dropped, that is every record it introduced.
-          * A record delivered by an EARLIER response is kept, even when this
-            response also mentioned it and then trimmed it away. Overlapping
-            results are normal — the same run comes back from a run list and
-            from an inspection — and losing evidence already put in front of
-            the model would invalidate findings that legitimately rest on it.
+          * A staged row that was delivered is promoted, overwriting any
+            earlier version of the same key — the model has now seen the newer
+            payload, so that is what may be cited and digested.
+          * A staged row that was trimmed away is simply dropped from the
+            staging area. If an earlier response delivered that key, its
+            payload stays untouched; if nothing ever delivered it, it never
+            becomes citable at all.
+          * If the whole result was dropped, nothing it staged is promoted —
+            including an update to a row delivered earlier, which keeps its
+            delivered value.
 
-        So removal is scoped to what this one response newly introduced, never
-        to a kind.
+        The promoted payload is taken from the SENT list entry for list rows,
+        because that is the clipped object the model actually received, and is
+        deep-copied on the way in so a later retrieval mutating a shared dict
+        cannot change evidence already delivered.
         """
         if resp is None:
             return
-        introduced: set[str] = set(resp["introduced"])
+        staged: dict[str, Any] = resp["staged"]
         if whole_result_dropped:
-            # Nothing reached the model. Anything this response was the first
-            # to retrieve is unseen content and must not become citable.
-            for key in introduced:
-                self.evidence.pop(key, None)
+            # Nothing reached the model. Promote nothing; every previously
+            # delivered payload stands exactly as it was.
             return
 
-        delivered_now: set[str] = set(resp["unlisted"])
+        # key -> the payload as delivered
+        promote: dict[str, Any] = {k: staged[k] for k in resp["unlisted"] if k in staged}
         for list_name, entries in resp["listed"].items():
             items = sent.get(list_name)
-            kept_refs = set()
+            sent_by_ref: dict[str, Any] = {}
             if isinstance(items, list):
                 for item in items:
-                    if isinstance(item, dict):
-                        for field in ("run_id", "event_id", "ref", "id"):
-                            if item.get(field) is not None:
-                                kept_refs.add(str(item[field]))
-            for ref, key in entries:
-                if ref in kept_refs:
-                    delivered_now.add(key)
-        self.delivered |= delivered_now
-        for key in introduced - delivered_now:
-            # Retrieved by this response, trimmed before it was sent, and not
-            # delivered by any earlier response either.
-            if key not in self.delivered:
-                self.evidence.pop(key, None)
+                    if not isinstance(item, dict):
+                        continue
+                    for field in ("run_id", "event_id", "ref", "id"):
+                        if item.get(field) is not None:
+                            sent_by_ref.setdefault(str(item[field]), item)
+            for ref, key, is_item in entries:
+                if ref not in sent_by_ref or key not in staged:
+                    continue
+                # The list entry the model received for a row that IS one;
+                # the staged payload for a reference that merely rides along
+                # with it (a job or agent named by a run).
+                promote[key] = sent_by_ref[ref] if is_item else staged[key]
+
+        for key, payload in promote.items():
+            # `_clip_deep` rebuilds every dict and list, so this is also the
+            # de-aliasing step: nothing in the ledger shares structure with a
+            # payload a later tool call could mutate.
+            self.evidence[key] = _clip_deep(payload)
+            self.delivered.add(key)
 
     def result_text(self, result: dict[str, Any]) -> str:
         """The serialized, size-bounded result. Always valid JSON."""
         return self.fit(result)[1]
+
+    def retrieve(self, name: str, raw_input: dict[str, Any] | None = None
+                 ) -> dict[str, Any]:
+        """Run a tool AND deliver its result. Returns the payload as sent.
+
+        `run` retrieves and `fit` delivers, and evidence only becomes citable
+        at the second step — which is right, because a result that was never
+        sent is not something the model saw. It also means a caller that only
+        calls `run` gets no evidence at all, silently. The production loop
+        needs both halves (it sends the fitted payload and keeps the blob), so
+        this is the pairing for everyone else.
+        """
+        return self.fit(self.run(name, raw_input or {}))[0]
 
     # -- tools ----------------------------------------------------------
     def _tool_list_comparable_runs(self, inp: dict[str, Any]) -> dict[str, Any]:
@@ -532,7 +569,8 @@ class InvestigationSession:
             limit=int(inp.get("limit") or 25),
         )
         for run in res["runs"]:
-            self._record("run", run["run_id"], run, listed=("runs", run["run_id"]))
+            self._record("run", run["run_id"], run, listed=("runs", run["run_id"]),
+                         is_list_item=True)
             if run.get("job_id") is not None:
                 self._record("job", run["job_id"], {"job_id": run["job_id"]},
                              listed=("runs", run["run_id"]))
@@ -570,14 +608,14 @@ class InvestigationSession:
         })
         for ev in detail["events"]:
             self._record("run_event", ev["event_id"], ev,
-                         listed=("events", ev["event_id"]))
+                         listed=("events", ev["event_id"]), is_list_item=True)
         for i, span in enumerate(detail["failed_spans"]):
             # Stamp the citable ref onto the row the model is shown, so the
             # reference it may quote and the entry delivery reconciles against
             # are the same string.
             span["ref"] = f"{run_id}.{i}"
             self._record("failed_span", span["ref"], span,
-                         listed=("failed_spans", span["ref"]))
+                         listed=("failed_spans", span["ref"]), is_list_item=True)
         self.budget.spend_events(len(detail["events"]))
         if detail.get("events_truncated"):
             self.note_limitation(
@@ -639,7 +677,8 @@ class InvestigationSession:
         )
         by_holder: dict[str, int] = {}
         for w in res["waits"]:
-            self._record("run", w["run_id"], w, listed=("waits", w["run_id"]))
+            self._record("run", w["run_id"], w, listed=("waits", w["run_id"]),
+                         is_list_item=True)
             holder = w.get("waiting_on") or w.get("state") or "unknown"
             by_holder[holder] = by_holder.get(holder, 0) + 1
         for holder, n in by_holder.items():

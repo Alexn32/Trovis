@@ -1654,7 +1654,11 @@ def home_findings(
     # flight is never presented as the answer it has not produced yet.
     newest = max((r.get("analyzed_at") or "" for r in rows), default=None) or None
     status = analysis_jobs.ensure_analysis(
-        req, findings_count=len(rows), newest_analyzed_at=newest
+        req, findings_count=len(rows), newest_analyzed_at=newest,
+        # Per-row provenance. A refresh that published one finding and left
+        # another standing is showing output from two analyses; the ids are
+        # what let the status say so instead of implying one origin.
+        finding_analysis_ids=[r.get("analysis_id") for r in rows],
     )
     return FindingsResponse(
         findings=[FindingSummary(**f) for f in visible],
