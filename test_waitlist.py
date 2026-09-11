@@ -92,6 +92,9 @@ with TestClient(main.app) as c:
         check(f"GET {path} has tools field", 'name="tools"' in body)
         check(f"GET {path} has honeypot", 'name="website"' in body)
         check(f"GET {path} title is waitlist", "Founding waitlist" in body)
+        check(f"GET {path} has locked headline", "See the Work" in body)
+        check(f"GET {path} has Home desk bullet", "Home desk: what needs you" in body)
+        check(f"GET {path} has honesty line", "we’re not pitching them as live yet" in body)
         low = body.lower()
         check(f"GET {path} does not claim Connect is live", "connect is live" not in low)
         check(f"GET {path} does not lead with Cost", "cost tracking" not in low)
@@ -99,8 +102,8 @@ with TestClient(main.app) as c:
         check(f"GET {path} is not Monday-of-AI", "monday of" not in low)
         check(f"GET {path} is not create-account hero", "create your account" not in low)
         check(f"GET {path} mentions handoffs", "handoff" in low)
-        check(f"GET {path} mentions waiting work", "waiting" in low)
-        check(f"GET {path} mentions Home desk live", "home desk is live" in low)
+        check(f"GET {path} mentions waiting", "waiting" in low)
+        check(f"GET {path} is not recording pitch", "record themselves" not in low)
 
     print("\nsignup persist:")
     r = c.post("/waitlist", json={

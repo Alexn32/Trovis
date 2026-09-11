@@ -4,7 +4,7 @@ import { api } from "./api.js";
 /* ─────────────────────────────────────────────
    TROVIS — Public founding waitlist
    Logged-out front door (SPA) and /waitlist.
-   Copy is the Work desk / hybrid handoffs pitch.
+   Copy is the locked Home/Work founding-list pitch.
    Styling is self-contained (inline + own fonts)
    so it stays isolated from the app theme.
    ───────────────────────────────────────────── */
@@ -22,25 +22,16 @@ const F = {
 const GRAIN =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E\")";
 
-const TITLE = "Trovis — Founding waitlist for the Work desk";
+const TITLE = "Trovis — Founding waitlist";
 const DESCRIPTION =
-  "Founding access to Trovis — the operating layer for hybrid work. See handoffs and waiting work across people and agents.";
+  "Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s stuck, and where handoffs die.";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const BENEFITS = [
-  {
-    title: "Handoffs you can actually see",
-    body: "When work moves between a person, an internal agent, and a third-party agent, you can tell who holds it — not reconstruct it from a trace dump.",
-  },
-  {
-    title: "Who’s waiting, what’s stuck",
-    body: "Open work sitting on someone — or something — shows up on one desk. Built for teams already running agents who can’t see across the loop.",
-  },
-  {
-    title: "For teams already in the loop",
-    body: "You already run OpenClaw, OpenAI Agents, Claude, Cursor, or ChatGPT Actions. Trovis is for the work that creates, not another dashboard to babysit.",
-  },
+  "Home desk: what needs you, not another dashboard",
+  "Work as jobs you can see and judge — people + agents + SaaS in one loop",
+  "Built for eng/founder teams with agents already in production",
 ];
 
 function TMark({ size = 26, color = C.teal }) {
@@ -179,7 +170,7 @@ function WaitlistForm({ onJoined }) {
       </div>
       <div style={{ marginBottom: 14 }}>
         <label htmlFor="wl-tools" style={label}>
-          What agents / tools are already in your loop? <span style={optional}>(optional)</span>
+          What agents/tools are already in your loop? <span style={optional}>(optional)</span>
         </label>
         <textarea
           id="wl-tools"
@@ -266,26 +257,24 @@ export default function TrovisLanding({ onSignIn = () => {} }) {
               fontSize: 12, fontWeight: 600, letterSpacing: "0.08em",
               textTransform: "uppercase", color: C.muted, marginBottom: 18,
             }}>
-              Founding waitlist · Work desk
+              Founding seats
             </div>
             <h1 style={{
               fontFamily: F.disp, fontWeight: 700, fontSize: "clamp(34px, 5vw, 52px)",
               lineHeight: 1.06, letterSpacing: "-0.02em", color: C.ink, margin: "0 0 20px",
             }}>
-              See the handoff.<br />
-              <span style={{ color: C.teal }}>See who’s waiting.</span>
+              See the Work<br />
+              <span style={{ color: C.teal }}>across humans, agents, and tools.</span>
             </h1>
             <p style={{ fontFamily: F.body, fontSize: 17.5, lineHeight: 1.6, color: C.body, maxWidth: 520, margin: "0 0 28px" }}>
-              Trovis is the operating layer for hybrid work — humans, internal agents,
-              third-party agents, and the SaaS around them. Work is the noun. Judgment
-              is the product. Founding access is the Work desk: visibility into hybrid
-              handoffs and waiting work — not a place to watch agents record themselves.
+              Trovis is the operating layer for hybrid work — the desk that shows what’s
+              waiting on you, what’s stuck, and where handoffs die. Founding seats for
+              teams already running agents.
             </p>
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 16 }}>
               {BENEFITS.map((b) => (
-                <li key={b.title} style={{ background: C.cream, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px" }}>
-                  <strong style={{ display: "block", fontFamily: F.disp, fontSize: 16, letterSpacing: "-0.01em", marginBottom: 4 }}>{b.title}</strong>
-                  <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.55, color: C.body }}>{b.body}</p>
+                <li key={b} style={{ background: C.cream, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px 18px" }}>
+                  <strong style={{ display: "block", fontFamily: F.disp, fontSize: 16, letterSpacing: "-0.01em", lineHeight: 1.35 }}>{b}</strong>
                 </li>
               ))}
             </ul>
@@ -309,18 +298,15 @@ export default function TrovisLanding({ onSignIn = () => {} }) {
                     You’re on the founding list.
                   </h2>
                   <p style={{ fontSize: 15.5, lineHeight: 1.6, color: C.body, margin: 0 }}>
-                    We’ll write when the Work desk is ready for you. Same address —
+                    We’ll write when a founding seat is ready for you. Same address —
                     nothing else in the meantime.
                   </p>
                 </div>
               ) : (
                 <>
-                  <h2 style={{ fontFamily: F.disp, fontSize: 20, letterSpacing: "-0.02em", margin: "0 0 6px" }}>
-                    Request founding access
-                  </h2>
                   <p style={{ fontSize: 14, color: C.muted, margin: "0 0 20px", lineHeight: 1.5 }}>
-                    A short note so we know how work already runs on your team.
-                    The Home desk is live today for teams already in Trovis.
+                    Desk and Work visibility first. Connect adapters and deeper SaaS loops
+                    come next — we’re not pitching them as live yet.
                   </p>
                   <WaitlistForm onJoined={() => setJoined(true)} />
                 </>
@@ -334,7 +320,7 @@ export default function TrovisLanding({ onSignIn = () => {} }) {
           gap: 16, flexWrap: "wrap", padding: "26px 0 44px", borderTop: `1px solid ${C.border}`,
         }}>
           <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
-            The operating layer for hybrid work. Judgment, not chrome.
+            The operating layer for hybrid work.
           </p>
           <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
             <a href="/terms" style={{ fontFamily: F.body, fontSize: 13, color: C.muted, textDecoration: "none" }}>Terms</a>
