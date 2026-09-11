@@ -390,8 +390,8 @@ with TestClient(main.app) as c:
 
 PROMPT = asker.SYSTEM_CONNECT
 
-check("the guide knows the Cursor Grok Bot door",
-      "Cursor Grok Bot" in PROMPT)
+check("the guide knows the Grok Bot door",
+      "Grok Bot" in PROMPT)
 check("with the MCP URL as a substitutable placeholder, not a hardcoded host",
       "TROVIS_MCP_URL" in PROMPT
       and "https://api.trovisai.com/mcp/grok" not in PROMPT)
@@ -404,19 +404,30 @@ check("the guide is told the title IS the job name",
       "title IS the job name" in PROMPT)
 check("the guide tells the truth: nothing lands unless the Bot calls in",
       "nothing is recorded unless the Bot calls these tools" in PROMPT)
+# The path that worked on the first real connection: hand the whole setup to
+# the Bot, which adds its own MCP server. Hand-editing MCP settings is the
+# fallback — a guide that leads with it teaches the slower route.
+check("the guide leads with giving the setup to the Bot itself",
+      "Give the setup TO THE BOT" in PROMPT
+      and "fallback, not the headline" in PROMPT)
+check("and warns about the placeholder-in-the-header failure",
+      "PLACEHOLDER in the auth header" in PROMPT
+      and "remove and re-add" in PROMPT)
+check("the guide asks the bot for its role, not just its jobs",
+      "bot_role" in PROMPT and "what the bot is FOR" in PROMPT)
 
 # The ambiguity that makes this door dangerous to guess at: "Grok" alone.
 check("the guide must ask WHICH Grok before answering",
       '"Grok" is ambiguous' in PROMPT and "Never guess" in PROMPT)
 check("and it has both chip labels to offer",
-      "Grok (xAI SDK)" in PROMPT and "Cursor Grok Bot" in PROMPT)
+      "Grok (xAI SDK)" in PROMPT and "Grok Bot" in PROMPT)
 check("the xai-sdk door is still there, unconfused with the Bot one",
       "trovis-agents[xai]" in PROMPT and 'platform="xai"' in PROMPT)
 
 # Every door the picker offers should be reachable through the guide too.
 _wizard = pathlib.Path("frontend/src/AddAgent.jsx").read_text()
 _chips = pathlib.Path("frontend/src/ConnectGuide.jsx").read_text()
-for label in ("Cursor Grok Bot", "Grok (xAI SDK)", "ChatGPT", "OpenClaw"):
+for label in ("Grok Bot", "Grok (xAI SDK)", "ChatGPT", "OpenClaw"):
     check(f"the guide's opening chips offer {label}", label in _chips)
     check(f"and the manual picker offers {label}", label in _wizard)
 

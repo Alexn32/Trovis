@@ -31,7 +31,7 @@ const OPENING_TURN = {
     'OpenClaw',
     'ChatGPT (custom GPT)',
     'Grok (xAI SDK)',
-    'Cursor Grok Bot',
+    'Grok Bot',
     'Cursor (OpenTelemetry)',
     'Custom Python / other',
   ],

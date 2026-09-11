@@ -1,4 +1,4 @@
-"""Trovis MCP server for Cursor Grok Bots — the report door.
+"""Trovis MCP server for Grok Bots — the report door.
 
 A Grok Bot is a desktop assistant a customer runs in Cursor. It does NOT
 export telemetry, and Trovis cannot pull from it: there is no OTLP exporter,
@@ -8,7 +8,8 @@ this MCP server to their Bot, and the Bot's instructions tell it to report
 when a job starts, when it needs a human, and when it's done.
 
 That is what this module is: four report tools over MCP, mounted on the main
-FastAPI app at /mcp/grok (Streamable HTTP) and /mcp/grok/sse (SSE).
+FastAPI app at /mcp/grok (Streamable HTTP only — see the transport note at
+the bottom of this file).
 
   report_job_started(title, …)   → opens a NAMED job
   report_job_waiting(reason, …)  → the job is waiting on a human
@@ -45,8 +46,10 @@ import database
 
 logger = logging.getLogger("trovis.mcp_grok")
 
-# The platform stamp that makes these land on Agents as "Cursor Grok Bot"
-# rather than an unlabeled service (see database._detect_platform).
+# The platform stamp that makes these land on Agents as "Grok Bot" rather
+# than an unlabeled service (see database._detect_platform). The value is
+# wire identity, not a label: it stays as-is so spans already reported keep
+# resolving (see database._PLATFORM_LABELS).
 PLATFORM = "cursor-grok-bot"
 
 # Fallback display name when a Bot reports without naming itself. Deliberately
@@ -132,20 +135,52 @@ def _resolve_account_id(ctx: Context | None, api_key: str | None = None) -> int 
 # ---------------------------------------------------------------------------
 
 
-def _remember_job(account_id: int, bot_name: str, job_id: str | None) -> None:
-    database.save_insight(
-        account_id, _SENTINEL, "main", "current_job",
-        {"bot_name": bot_name, "job_id": job_id or ""},
-    )
+def _remember_job(
+    account_id: int, bot_name: str, job_id: str | None, role: str | None = None
+) -> None:
+    payload = {"bot_name": bot_name, "job_id": job_id or ""}
+    # Keep the last role we registered so we only re-register when it changes.
+    payload["role"] = role if role is not None else (_recall_role(account_id) or "")
+    database.save_insight(account_id, _SENTINEL, "main", "current_job", payload)
 
 
 def _recall_job(account_id: int) -> tuple[str, str | None]:
     """(bot_name, job_id) for this account's last started job."""
-    row = database.get_insight(account_id, _SENTINEL, "main", "current_job")
-    data = row.get("data") if row else None
-    if isinstance(data, dict):
+    data = _recall(account_id)
+    if data:
         return (data.get("bot_name") or DEFAULT_BOT_NAME, data.get("job_id") or None)
     return (DEFAULT_BOT_NAME, None)
+
+
+def _recall(account_id: int) -> dict[str, Any] | None:
+    row = database.get_insight(account_id, _SENTINEL, "main", "current_job")
+    data = row.get("data") if row else None
+    return data if isinstance(data, dict) else None
+
+
+def _recall_role(account_id: int) -> str | None:
+    data = _recall(account_id)
+    return (data or {}).get("role") or None
+
+
+def _register_identity(account_id: int, bot_name: str, role: str) -> bool:
+    """Record what this Bot is FOR, when it tells us. Returns True when this
+    is new information.
+
+    Without it a Grok Bot has no identity at all, and its description gets
+    inferred from whatever it happened to do first — which, for a Bot someone
+    just connected, is a smoke test. `describe_agent` treats a registration as
+    the PRIMARY source, so one line here outranks a hundred spans of
+    "verified the reporting works".
+    """
+    if not role or role == _recall_role(account_id):
+        return False
+    database.save_registration(
+        service_name=bot_name, agent_id="main", soul=role, identity=role,
+        operating_manual="", user_context="", memory="", workspace_path="",
+        model="grok", account_id=account_id,
+    )
+    return True
 
 
 def _clean(value: Any, limit: int = 500) -> str:
@@ -219,6 +254,7 @@ def _report_span(
 async def report_job_started(
     title: str,
     bot_name: str = "",
+    bot_role: str = "",
     job_id: str = "",
     note: str = "",
     api_key: str = "",
@@ -229,6 +265,7 @@ async def report_job_started(
     Args:
         title: What you're doing, in plain English, as you'd say it to a colleague — e.g. "Draft the Q3 board update". Not an id or a slug.
         bot_name: This bot's name, so Trovis can tell your bots apart (e.g. "Trovis PM"). Send the same name every time.
+        bot_role: One line on what YOU are for, in general — e.g. "Chief of staff for the founder: drafts updates, chases follow-ups, keeps the week organised". Send it on your first report so Trovis describes you by your actual job rather than guessing from whatever task it sees first. Harmless to send every time.
         job_id: Optional id for this job. Omit it and Trovis returns one — pass that back on the later calls for this job.
         note: Optional one-line detail about the job.
         api_key: Only if this MCP server has no Authorization header.
@@ -241,6 +278,8 @@ async def report_job_started(
         return "Trovis needs a plain-English title for the job — what are you doing?"
     name = _bot_name(bot_name, account_id)
     jid = _clean(job_id, 120) or f"grok-{uuid.uuid4().hex[:12]}"
+    role = _clean(bot_role, 600)
+    _register_identity(account_id, name, role)
     _report_span(
         account_id, name, jid, "job_started",
         {
@@ -250,7 +289,7 @@ async def report_job_started(
             "trovis.step.description": _clean(note),
         },
     )
-    _remember_job(account_id, name, jid)
+    _remember_job(account_id, name, jid, role=role or None)
     return f"Tracking job {jid} in Trovis: {clean_title}"
 
 

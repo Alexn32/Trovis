@@ -357,7 +357,11 @@ def _utcnow() -> datetime:
 # the doors that have no SDK to infer from (an assistant reporting over MCP
 # carries no telemetry.sdk.* attributes, so without this it shows as nothing).
 _PLATFORM_LABELS = {
-    "cursor-grok-bot": "Cursor Grok Bot",
+    # The stamp on the wire stays "cursor-grok-bot" — it is already on every
+    # span a Grok Bot has reported, and a resource attribute is not a label.
+    # Only the words a person reads changed.
+    "cursor-grok-bot": "Grok Bot",
+    "grok-bot": "Grok Bot",
     "chatgpt": "ChatGPT Agent",
 }
 
