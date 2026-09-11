@@ -1876,6 +1876,191 @@ class HomeSnapshot(BaseModel):
     navigation: HomeNavigation
 
 
+# ---------------------------------------------------------------------------
+# GET /home/findings — Trovis's evidence-backed investigation of this account
+#
+# A finding is not a rendering of a metric. The metrics live in
+# /home/snapshot; a finding exists only where investigation established
+# something the reader would otherwise miss, and every material claim points
+# at evidence that can be re-opened. Contract: HOME_FINDINGS.md.
+# ---------------------------------------------------------------------------
+
+
+class FindingEntity(BaseModel):
+    """A canonical thing the finding is about. Existing ids only — this layer
+    invents no taxonomy and no relationships."""
+
+    kind: str  # run | job | agent | person
+    id: Any
+    label: str | None = None
+
+
+class FindingClaim(BaseModel):
+    """One statement inside a finding, with its kind and its backing.
+
+    `kind` is load-bearing: `observation` is what the record says, `calculation`
+    is what the server computed, `hypothesis` is a proposed explanation. A
+    hypothesis rendered as an observation is how an analytics product stops
+    being trustworthy.
+
+    A claim carrying a number must carry `metric_ref` too — `snapshot:<path>`
+    or `calc:<id>` — and the value is checked against it. The model never does
+    arithmetic.
+    """
+
+    text: str
+    kind: str  # observation | calculation | hypothesis
+    value: float | None = None
+    metric_ref: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+
+
+class FindingEvidence(BaseModel):
+    """A re-openable reference. `digest` pins what the record said when the
+    finding was written, so a later read can report the basis as CHANGED
+    rather than silently showing today's row as the original reason."""
+
+    kind: str  # run | run_event | failed_span | calculation | snapshot | agent_context
+    ref: str
+    note: str | None = None
+    digest: str | None = None
+    status: str | None = None  # set on detail reads: changed | missing
+
+
+class FindingNextStep(BaseModel):
+    """Something a PERSON does. This layer executes nothing — no agent edits,
+    no retries, no messages, no external tasks — and the closed `kind` set is
+    how that stays true."""
+
+    kind: str
+    text: str | None = None
+
+
+class FindingGraphicPoint(BaseModel):
+    label: str
+    metric_ref: str
+    value: float | None = None  # always the server's number, never the model's
+
+
+class FindingGraphic(BaseModel):
+    kind: str  # none | run_outcome_split | period_comparison | wait_concentration
+    series: list[FindingGraphicPoint] = Field(default_factory=list)
+
+
+class FindingSummary(BaseModel):
+    """One finding as a list shows it."""
+
+    id: int
+    category: str  # attention | opportunity | positive_change
+    claim_kind: str
+    confidence: str  # supported | qualified
+    title: str
+    explanation: str
+    consequence: str | None = None
+    entities: list[FindingEntity] = Field(default_factory=list)
+    next_step: FindingNextStep | None = None
+    graphic: FindingGraphic | None = None
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    state: str  # open | acknowledged | dismissed | resolved | superseded
+    analyzed_at: str | None = None
+    evidence_cutoff: str | None = None
+    period_start_utc: str | None = None
+    period_end_utc: str | None = None
+    timezone: str | None = None
+    evidence_count: int = 0
+    requires_financial: bool = False
+
+
+class AnalysisStatus(BaseModel):
+    """Whether more analysis is coming, and why not when it is not.
+
+    `unavailable` with `no_model_configured` is a real product state: the
+    snapshot stays fully usable and analysis is explicitly absent. There is no
+    deterministic fallback copy presented as an AI finding.
+    """
+
+    # current | queued | running | debounced | incomplete | failed | unavailable
+    #
+    # `current` means one specific thing: a COMPLETED analysis read the records
+    # the reader is looking at now. `incomplete` is its opposite number — the
+    # job finished but the analysis did not (an unreadable discovery reply, an
+    # expired deadline, a failed retrieval), so what is on screen came from an
+    # earlier analysis and this one established nothing.
+    state: str
+    reason: str | None = None
+    # What that last analysis concluded about itself. `complete` covers a real
+    # abstention ("we looked, there is nothing"); the unsuccessful values never
+    # stand in for one.
+    analysis_outcome: str | None = None
+    # The questions the last run raised and did not answer — a skipped
+    # candidate, an undecided verdict, an uncomposed draft, a withheld rewrite,
+    # a draft the validator refused. Non-empty means `analysis_outcome` is
+    # `incomplete`, whether or not the run also published something.
+    completion_gaps: list[str] = Field(default_factory=list)
+    # How many findings the last completed analysis actually published. With
+    # `findings_from_previous_analysis`, this is what distinguishes "all of
+    # this is new" from "one is new and one is standing from before".
+    published_this_analysis: int | None = None
+    enqueued: bool = False
+    job_id: int | None = None
+    stale_findings: bool = False
+    # True when the findings served alongside this status came from an EARLIER
+    # analysis than the one now queued, running, or failed. A refresh in flight
+    # must not read as the answer it has not produced yet, and a failed refresh
+    # must not read as a successful investigation that found nothing.
+    findings_from_previous_analysis: bool = False
+    previous_analysis_at: str | None = None
+    completed_at: str | None = None
+    # How long this audience waits before another investigation may start,
+    # whatever evidence arrives meanwhile. Set only on `debounced`.
+    debounce_seconds: int | None = None
+    # What the record hashes to RIGHT NOW.
+    evidence_version: str | None = None
+    # What the last completed analysis actually read. When these differ,
+    # findings on screen do not cover everything that has arrived — which is
+    # acceptable, and is the thing that must be said rather than hidden behind
+    # `state: current`.
+    analyzed_evidence_version: str | None = None
+    newer_evidence_available: bool = False
+    # True when this read joined a pending analysis queued under a different
+    # scheduling key for the same audience, instead of starting a second one.
+    joined_pending_analysis: bool = False
+    prompt_version: str | None = None
+
+
+class FindingsResponse(BaseModel):
+    """GET /home/findings. Returns what is authorized and already known,
+    promptly; it may enqueue analysis but never waits for it."""
+
+    findings: list[FindingSummary] = Field(default_factory=list)
+    analysis: AnalysisStatus
+    scope: HomeScope
+    generated_at: str
+
+
+class FindingDetail(BaseModel):
+    """GET /home/findings/{id}. What was observed, why it matters, what backs
+    it, what cuts against it, what is still unknown, and one supported step."""
+
+    finding: FindingSummary
+    claims: list[FindingClaim] = Field(default_factory=list)
+    evidence: list[FindingEvidence] = Field(default_factory=list)
+    uncertainty: list[str] = Field(default_factory=list)
+    stale_evidence: list[FindingEvidence] = Field(default_factory=list)
+    navigation: dict[str, Any] = Field(default_factory=dict)
+    prompt_version: str | None = None
+    model: str | None = None
+    evidence_version: str | None = None
+
+
+class FindingStateUpdate(BaseModel):
+    """What a PERSON did with a finding. Deliberately cannot say `resolved` —
+    dismissing something is not evidence the condition ended."""
+
+    state: str  # open | acknowledged | dismissed
+    reason: str | None = None
+
+
 class WorkItemHolder(BaseModel):
     kind: str  # human | agent | tool | unassigned
     name: str

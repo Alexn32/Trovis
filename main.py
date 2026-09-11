@@ -43,9 +43,12 @@ import database
 import saas_hubspot
 import saas_shopify
 import saas_stripe
+import analysis_jobs
 import describer
 import email_send
+import findings as findings_mod
 import home_snapshot
+import investigator
 import pulse
 import loops
 import pricing_sync
@@ -102,7 +105,12 @@ from models import (
     AcceptInviteRequest,
     ActivityItem,
     AttentionItem,
+    AnalysisStatus,
     BriefingResponse,
+    FindingDetail,
+    FindingStateUpdate,
+    FindingSummary,
+    FindingsResponse,
     HomeSnapshot,
     PulseInsightRequest,
     PulseInsightResponse,
@@ -353,12 +361,34 @@ async def _loop_sweep_loop() -> None:
             logger.warning("[Trovis] loop sweep failed: %s", e)
 
 
+# How often the analysis worker looks for queued investigations. The queue is
+# durable, so a missed tick costs latency, never work.
+async def _analysis_worker_loop() -> None:
+    """Drain the findings queue on an interval.
+
+    Sleep-first and fail-soft like the other sweeps. Investigation is model-
+    bound and must never share a thread with the event loop, so the drain runs
+    in a worker thread; `analysis_jobs.run_one` enforces the concurrency
+    ceiling and claims each job with a conditional UPDATE, so two replicas
+    racing produce one winner rather than two analyses.
+    """
+    while True:
+        await asyncio.sleep(analysis_jobs.poll_interval_s())
+        try:
+            done = await asyncio.to_thread(analysis_jobs.drain, 3)
+            if done:
+                logger.info("[Trovis] analysis: %s", done)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[Trovis] analysis worker failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
     refresh_task: asyncio.Task | None = None
     alert_task: asyncio.Task | None = None
     loop_sweep_task: asyncio.Task | None = None
+    analysis_task: asyncio.Task | None = None
     # TROVIS_DISABLE_PRICING_SYNC=1 (legacy: OVERSEE_DISABLE_PRICING_SYNC) turns
     # off the network pull (offline dev, tests) — seeded prices cover common models.
     if (database.env("DISABLE_PRICING_SYNC", "") or "").lower() not in (
@@ -383,6 +413,17 @@ async def lifespan(app: FastAPI):
         "yes",
     ):
         loop_sweep_task = asyncio.create_task(_loop_sweep_loop())
+    # Home's investigation worker. TROVIS_DISABLE_ANALYSIS=1 turns it off
+    # (deterministic tests drive analysis_jobs.drain directly). With no model
+    # key configured the loop still runs and finds nothing to do — the read
+    # path reports analysis unavailable rather than queueing work nobody can
+    # execute.
+    if (database.env("DISABLE_ANALYSIS", "") or "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        analysis_task = asyncio.create_task(_analysis_worker_loop())
     try:
         # Run the MCP Streamable-HTTP session manager for the app's lifetime so
         # the /mcp mount can serve ChatGPT agents — only when MCP is available.
@@ -409,6 +450,8 @@ async def lifespan(app: FastAPI):
             alert_task.cancel()
         if loop_sweep_task is not None:
             loop_sweep_task.cancel()
+        if analysis_task is not None:
+            analysis_task.cancel()
         database.shutdown_db()
 
 
@@ -1550,6 +1593,251 @@ def home_snapshot_endpoint(
     except database.QueryTimeout as exc:
         raise HTTPException(status_code=504, detail="home snapshot timed out") from exc
     return HomeSnapshot(**snap)
+
+
+# ---------------------------------------------------------------------------
+# Home findings — Trovis's investigation of this account, served read-only
+# ---------------------------------------------------------------------------
+# These endpoints NEVER run a model. Analysis is queued (analysis_jobs.py) and
+# published by a worker; a read returns what is already authorized and known,
+# plus a status saying whether more is coming. Routing only — the policy is in
+# findings.py and the flow is in investigator.py.
+
+
+def _findings_context(
+    request: Request, days: int, tz: str | None, whose: str | None,
+    person_id: int | None,
+) -> dict[str, Any]:
+    """Resolve the reader the same way the snapshot does, then key on it.
+
+    Everything a finding may be served under is re-derived HERE, per request:
+    the seat, the whose-work intersection, the period, and the scope key built
+    from all three. A permission change therefore makes the previous slice
+    unreachable on the very next read — there is no cache to invalidate,
+    because the key simply stops matching.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    viewer_user_id = user["id"] if user else None
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="sign in to read findings")
+    try:
+        period = home_snapshot.resolve_period(days, tz)
+    except home_snapshot.SnapshotInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    selection = _resolve_whose_selection(request, whose, person_id)
+    seat = selection.get("seat")
+    financial_visible = bool(
+        seat and home_snapshot.FINANCIAL_SURFACE in (seat.get("surfaces") or [])
+    )
+    req = analysis_jobs.analysis_request(
+        account_id=account_id,
+        viewer_user_id=viewer_user_id,
+        seat=seat,
+        selection=selection,
+        period=period,
+    )
+    return {
+        "account_id": account_id,
+        "viewer_user_id": viewer_user_id,
+        "seat": seat,
+        "selection": selection,
+        "period": period,
+        "financial_visible": financial_visible,
+        "request": req,
+    }
+
+
+@app.get("/home/findings", response_model=FindingsResponse)
+def home_findings(
+    request: Request,
+    days: int = Query(
+        default=home_snapshot.DEFAULT_PERIOD_DAYS,
+        ge=home_snapshot.MIN_PERIOD_DAYS,
+        le=home_snapshot.MAX_PERIOD_DAYS,
+    ),
+    tz: str | None = Query(default=None),
+    whose: str | None = Query(default=None),
+    person_id: int | None = Query(default=None),
+    include_dismissed: bool = Query(default=False),
+) -> FindingsResponse:
+    """Evidence-backed findings for this reader, plus the analysis status.
+
+    Returns promptly with whatever is authorized and already published. It may
+    ENQUEUE analysis; it never waits for one. Same scope and period query as
+    `/home/snapshot`, so a Home that shows both shows one consistent view.
+
+    Sync `def` so SQLite stays off the event loop, matching the snapshot.
+    """
+    ctx = _findings_context(request, days, tz, whose, person_id)
+    req = ctx["request"]
+    rows = database.get_findings(
+        ctx["account_id"], req["scope_key"], include_dismissed=include_dismissed
+    )
+    visible = [
+        f for f in (
+            findings_mod.serve_finding(
+                r, scope_key_now=req["scope_key"],
+                financial_visible=ctx["financial_visible"],
+            )
+            for r in rows
+        )
+        if f is not None
+    ]
+    # The newest analysis behind what is being served. Feeds both the debounce
+    # floor and the "these came from a previous analysis" flag, so a refresh in
+    # flight is never presented as the answer it has not produced yet.
+    newest = max((r.get("analyzed_at") or "" for r in rows), default=None) or None
+    status = analysis_jobs.ensure_analysis(
+        req, findings_count=len(rows), newest_analyzed_at=newest,
+        # Per-row provenance. A refresh that published one finding and left
+        # another standing is showing output from two analyses; the ids are
+        # what let the status say so instead of implying one origin.
+        finding_analysis_ids=[r.get("analysis_id") for r in rows],
+    )
+    return FindingsResponse(
+        findings=[FindingSummary(**f) for f in visible],
+        analysis=AnalysisStatus(**status),
+        scope=home_snapshot.describe_scope(
+            selection=ctx["selection"],
+            viewer_user_id=ctx["viewer_user_id"],
+            account_id=ctx["account_id"],
+            membership_complete=True,
+        ),
+        generated_at=home_snapshot._now_utc().isoformat(),
+    )
+
+
+@app.get("/home/findings/{finding_id}", response_model=FindingDetail)
+def home_finding_detail(
+    finding_id: int,
+    request: Request,
+    days: int = Query(
+        default=home_snapshot.DEFAULT_PERIOD_DAYS,
+        ge=home_snapshot.MIN_PERIOD_DAYS,
+        le=home_snapshot.MAX_PERIOD_DAYS,
+    ),
+    tz: str | None = Query(default=None),
+    whose: str | None = Query(default=None),
+    person_id: int | None = Query(default=None),
+) -> FindingDetail:
+    """One finding's evidence: what was observed, why it matters, what backs it
+    and what cuts against it, what is still unknown, and one supported step.
+
+    Evidence is RE-READ here and compared against the digest taken when the
+    finding was written, so a record that moved shows as stale rather than
+    being presented as the original basis.
+
+    Access is re-checked, not assumed from the list: a finding outside this
+    reader's current slice, or a financial one after the Cost surface went
+    away, is a 404 — the same answer an id that never existed gets.
+    """
+    ctx = _findings_context(request, days, tz, whose, person_id)
+    req = ctx["request"]
+    row = database.get_finding(ctx["account_id"], finding_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    served = findings_mod.serve_finding(
+        row, scope_key_now=req["scope_key"],
+        financial_visible=ctx["financial_visible"], detail=True,
+    )
+    if served is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+
+    reread = _reread_evidence(ctx, row)
+    return FindingDetail(
+        finding=FindingSummary(**{
+            k: v for k, v in served.items()
+            if k not in ("claims", "evidence", "uncertainty", "prompt_version",
+                         "model", "evidence_version")
+        }),
+        claims=served.get("claims") or [],
+        evidence=served.get("evidence") or [],
+        uncertainty=served.get("uncertainty") or [],
+        stale_evidence=findings_mod.stale_evidence(row, reread),
+        navigation=findings_mod.navigation_for(
+            row,
+            {
+                "days": ctx["period"]["days"],
+                "tz": ctx["period"]["timezone"],
+                "whose": ctx["selection"].get("choice"),
+                **({"person_id": ctx["selection"]["person_id"]}
+                   if ctx["selection"].get("person_id") is not None else {}),
+            },
+        ),
+        prompt_version=served.get("prompt_version"),
+        model=served.get("model"),
+        evidence_version=served.get("evidence_version"),
+    )
+
+
+def _reread_evidence(ctx: dict[str, Any], row: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Re-read the runs this finding cites, under the reader's CURRENT scope.
+
+    Bounded on purpose: only `run` references are re-read, and only the ones
+    this finding names. That is enough to tell a reader whether the thing they
+    are about to look at still says what it said.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    run_ids = [
+        ref.get("ref") for ref in (row.get("evidence") or [])
+        if isinstance(ref, dict) and ref.get("kind") == "run"
+    ][:12]
+    for raw in run_ids:
+        try:
+            run_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        detail = database.investigation_run_detail(
+            ctx["account_id"], run_id,
+            only_user_ids=ctx["selection"].get("user_ids"),
+            event_cap=1,
+        )
+        if detail is None:
+            continue
+        out[f"run:{run_id}"] = {
+            k: detail[k] for k in
+            ("run_id", "title", "agent", "job_id", "outcome", "state",
+             "span_count", "error_span_count")
+        }
+    return out
+
+
+@app.patch("/home/findings/{finding_id}", response_model=FindingSummary)
+def update_finding_state(
+    finding_id: int, request: Request, body: FindingStateUpdate,
+    days: int = Query(default=home_snapshot.DEFAULT_PERIOD_DAYS),
+    tz: str | None = Query(default=None),
+    whose: str | None = Query(default=None),
+    person_id: int | None = Query(default=None),
+) -> FindingSummary:
+    """Acknowledge or dismiss a finding.
+
+    A person can say "I've seen this" or "stop showing me this". Neither is
+    evidence the condition ended — only re-analysis may call something
+    resolved, and `database.set_finding_state` refuses the word outright.
+    """
+    ctx = _findings_context(request, days, tz, whose, person_id)
+    row = database.get_finding(ctx["account_id"], finding_id)
+    if row is None or findings_mod.serve_finding(
+        row, scope_key_now=ctx["request"]["scope_key"],
+        financial_visible=ctx["financial_visible"],
+    ) is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    try:
+        updated = database.set_finding_state(
+            ctx["account_id"], finding_id, body.state,
+            ctx["viewer_user_id"], body.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    served = findings_mod.serve_finding(
+        updated, scope_key_now=ctx["request"]["scope_key"],
+        financial_visible=ctx["financial_visible"],
+    )
+    if served is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    return FindingSummary(**served)
 
 
 def _parse_suggestion_id(raw: str) -> int:
