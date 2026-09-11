@@ -1480,6 +1480,143 @@ CREATE TABLE IF NOT EXISTS saas_oauth_states (
 
 # Idempotency for inbound SaaS webhooks. Stripe event ids are globally
 # unique; UNIQUE(provider, event_id) makes retries a no-op.
+# ---------------------------------------------------------------------------
+# Findings + analysis jobs (Home's investigative layer)
+# ---------------------------------------------------------------------------
+# A FINDING is a published, evidence-backed statement about this account's
+# work. It is deliberately NOT a rendering of a metric: the metrics live in the
+# Home snapshot, and a finding exists only when investigation established
+# something a reader would otherwise miss.
+#
+# Two identities, and they are not the same thing:
+#   finding_key  the CONDITION's identity (what is going on). Stable across
+#                re-analysis, so tomorrow's run updates today's finding rather
+#                than stacking a duplicate.
+#   scope_key    the AUDIENCE's identity (who this was investigated for:
+#                account + effective visibility + work scope + period). Serving
+#                re-derives it, so a finding produced under one permission set
+#                can never be handed to a different one.
+#
+# `state` tracks what a PERSON did (acknowledged / dismissed). `resolved` is a
+# different claim — that the condition itself stopped — and only re-analysis
+# may set it. Conflating them would let a dismissal read as a fix.
+_FINDINGS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS findings (
+    id                 SERIAL    PRIMARY KEY,
+    account_id         INTEGER   NOT NULL,
+    finding_key        TEXT      NOT NULL,
+    scope_key          TEXT      NOT NULL,
+    viewer_user_id     INTEGER,
+    analysis_id        TEXT      NOT NULL,
+    category           TEXT      NOT NULL,
+    claim_kind         TEXT      NOT NULL,
+    confidence         TEXT      NOT NULL,
+    title              TEXT      NOT NULL,
+    explanation        TEXT      NOT NULL,
+    consequence        TEXT,
+    entities           TEXT      NOT NULL DEFAULT '[]',
+    claims             TEXT      NOT NULL DEFAULT '[]',
+    evidence           TEXT      NOT NULL DEFAULT '[]',
+    uncertainty        TEXT      NOT NULL DEFAULT '[]',
+    next_step          TEXT,
+    graphic            TEXT,
+    coverage           TEXT      NOT NULL DEFAULT '{}',
+    requires_financial BOOLEAN   NOT NULL DEFAULT FALSE,
+    period_start_utc   TEXT,
+    period_end_utc     TEXT,
+    timezone           TEXT,
+    evidence_version   TEXT      NOT NULL,
+    evidence_cutoff    TEXT,
+    prompt_version     TEXT      NOT NULL,
+    model              TEXT      NOT NULL,
+    rank_score         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    state              TEXT      NOT NULL DEFAULT 'open',
+    state_reason       TEXT,
+    state_actor        INTEGER,
+    state_changed_at   TIMESTAMP,
+    analyzed_at        TIMESTAMP DEFAULT NOW(),
+    created_at         TIMESTAMP DEFAULT NOW(),
+    UNIQUE (account_id, scope_key, finding_key)
+)
+"""
+
+_FINDINGS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS findings (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id         INTEGER NOT NULL,
+    finding_key        TEXT    NOT NULL,
+    scope_key          TEXT    NOT NULL,
+    viewer_user_id     INTEGER,
+    analysis_id        TEXT    NOT NULL,
+    category           TEXT    NOT NULL,
+    claim_kind         TEXT    NOT NULL,
+    confidence         TEXT    NOT NULL,
+    title              TEXT    NOT NULL,
+    explanation        TEXT    NOT NULL,
+    consequence        TEXT,
+    entities           TEXT    NOT NULL DEFAULT '[]',
+    claims             TEXT    NOT NULL DEFAULT '[]',
+    evidence           TEXT    NOT NULL DEFAULT '[]',
+    uncertainty        TEXT    NOT NULL DEFAULT '[]',
+    next_step          TEXT,
+    graphic            TEXT,
+    coverage           TEXT    NOT NULL DEFAULT '{}',
+    requires_financial INTEGER NOT NULL DEFAULT 0,
+    period_start_utc   TEXT,
+    period_end_utc     TEXT,
+    timezone           TEXT,
+    evidence_version   TEXT    NOT NULL,
+    evidence_cutoff    TEXT,
+    prompt_version     TEXT    NOT NULL,
+    model              TEXT    NOT NULL,
+    rank_score         REAL    NOT NULL DEFAULT 0,
+    state              TEXT    NOT NULL DEFAULT 'open',
+    state_reason       TEXT,
+    state_actor        INTEGER,
+    state_changed_at   TIMESTAMP,
+    analyzed_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, scope_key, finding_key)
+)
+"""
+
+# The durable queue behind analysis. Deliberately a table rather than an
+# in-process structure: the work must survive a restart, must not run twice
+# concurrently for the same audience, and must be inspectable when it fails.
+_ANALYSIS_JOBS_DDL_PG = """
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+    id            SERIAL    PRIMARY KEY,
+    account_id    INTEGER   NOT NULL,
+    job_key       TEXT      NOT NULL,
+    status        TEXT      NOT NULL DEFAULT 'queued',
+    request       TEXT      NOT NULL DEFAULT '{}',
+    attempts      INTEGER   NOT NULL DEFAULT 0,
+    error         TEXT,
+    result        TEXT,
+    enqueued_at   TIMESTAMP DEFAULT NOW(),
+    started_at    TIMESTAMP,
+    heartbeat_at  TIMESTAMP,
+    finished_at   TIMESTAMP
+)
+"""
+
+_ANALYSIS_JOBS_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id    INTEGER NOT NULL,
+    job_key       TEXT    NOT NULL,
+    status        TEXT    NOT NULL DEFAULT 'queued',
+    request       TEXT    NOT NULL DEFAULT '{}',
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    error         TEXT,
+    result        TEXT,
+    enqueued_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at    TIMESTAMP,
+    heartbeat_at  TIMESTAMP,
+    finished_at   TIMESTAMP
+)
+"""
+
 _SAAS_EVENTS_DDL_PG = """
 CREATE TABLE IF NOT EXISTS saas_events (
     id          SERIAL    PRIMARY KEY,
@@ -1599,6 +1736,20 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_saas_connections_provider_acct ON saas_connections(provider, provider_account_id)",
     "CREATE INDEX IF NOT EXISTS idx_saas_oauth_states_state ON saas_oauth_states(state)",
     "CREATE INDEX IF NOT EXISTS idx_saas_events_provider_event ON saas_events(provider, event_id)",
+    # Findings: the serve path reads one audience slice, newest-ranked first.
+    "CREATE INDEX IF NOT EXISTS idx_findings_scope ON findings(account_id, scope_key, state)",
+    "CREATE INDEX IF NOT EXISTS idx_findings_key ON findings(account_id, scope_key, finding_key)",
+    # Analysis queue: the worker claims by status, the enqueue path dedups by key.
+    "CREATE INDEX IF NOT EXISTS idx_analysis_jobs_status ON analysis_jobs(status, id)",
+    "CREATE INDEX IF NOT EXISTS idx_analysis_jobs_key ON analysis_jobs(account_id, job_key, status)",
+    # Deduplication has to be a CONSTRAINT, not a check-then-insert: Home is
+    # polled, so two readers arriving in the same instant both pass a SELECT
+    # and both queue the same investigation. A partial unique index lets the
+    # database decide the winner (supported by SQLite 3.8+ and Postgres alike),
+    # and finished rows fall out of it so the same question can be asked again
+    # once its evidence moves on.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_jobs_pending "
+    "ON analysis_jobs(account_id, job_key) WHERE status IN ('queued', 'running')",
 ]
 
 
@@ -1657,6 +1808,8 @@ def init_db() -> None:
             _SAAS_CONNECTIONS_DDL_PG,
             _SAAS_OAUTH_STATES_DDL_PG,
             _SAAS_EVENTS_DDL_PG,
+            _FINDINGS_DDL_PG,
+            _ANALYSIS_JOBS_DDL_PG,
         ]
     else:
         ddls = [
@@ -1695,6 +1848,8 @@ def init_db() -> None:
             _SAAS_CONNECTIONS_DDL_SQLITE,
             _SAAS_OAUTH_STATES_DDL_SQLITE,
             _SAAS_EVENTS_DDL_SQLITE,
+            _FINDINGS_DDL_SQLITE,
+            _ANALYSIS_JOBS_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -12508,3 +12663,765 @@ def apply_saas_loop_effect(
 
         return {"status": "ignored_unknown_effect"}
 
+
+
+# ---------------------------------------------------------------------------
+# Findings storage + the analysis queue
+# ---------------------------------------------------------------------------
+# Read paths here are deliberately dumb: they return what was stored for one
+# audience slice. Every permission decision happens before a scope_key is
+# computed and again when one is served — see findings.py. Nothing in this
+# section decides who may see what; it only refuses to mix slices.
+
+_FINDING_COLS = (
+    "id, account_id, finding_key, scope_key, viewer_user_id, analysis_id, "
+    "category, claim_kind, confidence, title, explanation, consequence, "
+    "entities, claims, evidence, uncertainty, next_step, graphic, coverage, "
+    "requires_financial, period_start_utc, period_end_utc, timezone, "
+    "evidence_version, evidence_cutoff, prompt_version, model, rank_score, "
+    "state, state_reason, state_actor, state_changed_at, analyzed_at, created_at"
+)
+
+_FINDING_JSON_FIELDS = (
+    "entities", "claims", "evidence", "uncertainty", "next_step", "graphic",
+    "coverage",
+)
+
+# States a person can set, and the one only re-analysis may set. Keeping
+# `resolved` out of the first tuple is the point: a person dismissing a finding
+# has said "stop showing me this", which is not the same claim as "the
+# condition ended", and letting one stand in for the other would turn an
+# annoyed click into evidence of a fix.
+FINDING_USER_STATES = ("open", "acknowledged", "dismissed")
+FINDING_SYSTEM_STATES = ("resolved", "superseded")
+FINDING_STATES = FINDING_USER_STATES + FINDING_SYSTEM_STATES
+
+
+def _finding_row(r: Any) -> dict[str, Any]:
+    out = dict(r)
+    for field in _FINDING_JSON_FIELDS:
+        raw = out.get(field)
+        if raw is None or raw == "":
+            out[field] = None if field in ("next_step", "graphic") else (
+                {} if field == "coverage" else []
+            )
+            continue
+        try:
+            out[field] = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            out[field] = None if field in ("next_step", "graphic") else []
+    out["requires_financial"] = bool(out.get("requires_financial"))
+    for ts in ("state_changed_at", "analyzed_at", "created_at"):
+        out[ts] = _ts_to_str(out.get(ts))
+    return out
+
+
+def upsert_finding(account_id: int, scope_key: str, finding: dict[str, Any]) -> int:
+    """Insert or refresh one finding for one audience slice.
+
+    Keyed on (account, scope, finding_key) so a repeat analysis UPDATES the
+    condition it already published instead of stacking a second copy. A
+    person's own `state` survives the update — re-analysis may sharpen the
+    evidence behind a finding somebody dismissed, but it may not un-dismiss it.
+    """
+    payload = {
+        f: json.dumps(finding.get(f)) if finding.get(f) is not None else None
+        for f in _FINDING_JSON_FIELDS
+    }
+    cols = [
+        "account_id", "finding_key", "scope_key", "viewer_user_id", "analysis_id",
+        "category", "claim_kind", "confidence", "title", "explanation",
+        "consequence", *_FINDING_JSON_FIELDS, "requires_financial",
+        "period_start_utc", "period_end_utc", "timezone", "evidence_version",
+        "evidence_cutoff", "prompt_version", "model", "rank_score",
+    ]
+    vals: list[Any] = [
+        account_id, finding["finding_key"], scope_key,
+        finding.get("viewer_user_id"), finding["analysis_id"],
+        finding["category"], finding["claim_kind"], finding["confidence"],
+        finding["title"], finding["explanation"], finding.get("consequence"),
+        *[payload[f] for f in _FINDING_JSON_FIELDS],
+        bool(finding.get("requires_financial")) if USE_POSTGRES
+        else int(bool(finding.get("requires_financial"))),
+        finding.get("period_start_utc"), finding.get("period_end_utc"),
+        finding.get("timezone"), finding["evidence_version"],
+        finding.get("evidence_cutoff"), finding["prompt_version"],
+        finding["model"], float(finding.get("rank_score") or 0.0),
+    ]
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id FROM findings WHERE account_id = {PH} AND scope_key = {PH} "
+            f"AND finding_key = {PH}",
+            (account_id, scope_key, finding["finding_key"]),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            sets = ", ".join(f"{c} = {PH}" for c in cols)
+            cur.execute(
+                f"UPDATE findings SET {sets}, analyzed_at = {now_sql} "
+                # A refreshed finding is live again unless a person parked it.
+                f", state = CASE WHEN state IN ('resolved', 'superseded') "
+                f"THEN 'open' ELSE state END "
+                f"WHERE id = {PH}",
+                tuple([*vals, row["id"]]),
+            )
+            return int(row["id"])
+        ph_list = ", ".join([PH] * len(cols))
+        cur.execute(
+            f"INSERT INTO findings ({', '.join(cols)}) VALUES ({ph_list})",
+            tuple(vals),
+        )
+        return int(_last_insert_id(cur, "findings"))
+
+
+def get_findings(
+    account_id: int,
+    scope_key: str,
+    *,
+    include_dismissed: bool = False,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """One audience slice's live findings, best first."""
+    sql = (
+        f"SELECT {_FINDING_COLS} FROM findings "
+        f"WHERE account_id = {PH} AND scope_key = {PH}"
+    )
+    args: list[Any] = [account_id, scope_key]
+    if not include_dismissed:
+        sql += " AND state NOT IN ('dismissed', 'superseded')"
+    sql += f" ORDER BY rank_score DESC, id DESC LIMIT {PH}"
+    args.append(max(1, min(100, int(limit))))
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return [_finding_row(r) for r in cur.fetchall()]
+
+
+def get_finding(account_id: int, finding_id: int) -> dict[str, Any] | None:
+    """One finding by id, account-scoped. The caller still has to check that
+    the finding's scope_key matches the reader's CURRENT slice — this only
+    guarantees it belongs to the right tenant."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_FINDING_COLS} FROM findings WHERE id = {PH} AND account_id = {PH}",
+            (finding_id, account_id),
+        )
+        row = cur.fetchone()
+        return _finding_row(row) if row else None
+
+
+def set_finding_state(
+    account_id: int, finding_id: int, state: str, actor_user_id: int | None,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    """Record what a PERSON did with a finding. Never 'resolved' — that is a
+    claim about the world, and only re-analysis may make it."""
+    if state not in FINDING_USER_STATES:
+        raise ValueError(f"{state!r} is not a state a person may set")
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE findings SET state = {PH}, state_reason = {PH}, "
+            f"state_actor = {PH}, state_changed_at = {now_sql} "
+            f"WHERE id = {PH} AND account_id = {PH}",
+            (state, reason, actor_user_id, finding_id, account_id),
+        )
+    return get_finding(account_id, finding_id)
+
+
+def mark_findings_superseded(
+    account_id: int, scope_key: str, analysis_id: str, keep_keys: list[str]
+) -> int:
+    """Retire this slice's findings that the newest analysis did NOT republish.
+
+    'superseded' says only that the latest investigation stopped standing
+    behind it — never that the condition was fixed. A dismissed finding stays
+    dismissed.
+    """
+    sql = (
+        f"UPDATE findings SET state = 'superseded' WHERE account_id = {PH} "
+        f"AND scope_key = {PH} AND analysis_id <> {PH} "
+        "AND state NOT IN ('dismissed', 'superseded')"
+    )
+    args: list[Any] = [account_id, scope_key, analysis_id]
+    if keep_keys:
+        ph_list = ", ".join([PH] * len(keep_keys))
+        sql += f" AND finding_key NOT IN ({ph_list})"
+        args.extend(keep_keys)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return cur.rowcount or 0
+
+
+def _last_insert_id(cur, table: str) -> int:
+    if USE_POSTGRES:
+        cur.execute(f"SELECT currval(pg_get_serial_sequence('{table}', 'id')) AS id")
+        return int(cur.fetchone()["id"])
+    cur.execute("SELECT last_insert_rowid() AS id")
+    return int(cur.fetchone()["id"])
+
+
+# --- the queue -------------------------------------------------------------
+
+ANALYSIS_JOB_MAX_ATTEMPTS = 3
+# A claimed job whose worker died leaves a row stuck in 'running'. Anything
+# older than this with no heartbeat is reclaimable.
+ANALYSIS_JOB_STALE_S = 900
+
+
+def enqueue_analysis_job(
+    account_id: int, job_key: str, request: dict[str, Any]
+) -> dict[str, Any]:
+    """Queue one analysis, or join the one already pending for this key.
+
+    Deduplication is the whole point: Home is polled, ingest is continuous, and
+    without this every page view and every span burst would buy another model
+    call for the same question.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT id, status FROM analysis_jobs WHERE account_id = {PH} "
+            f"AND job_key = {PH} AND status IN ('queued', 'running') "
+            "ORDER BY id DESC LIMIT 1",
+            (account_id, job_key),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return {"id": int(row["id"]), "status": row["status"], "created": False}
+        try:
+            cur.execute(
+                f"INSERT INTO analysis_jobs (account_id, job_key, status, request) "
+                f"VALUES ({PH}, {PH}, 'queued', {PH})",
+                (account_id, job_key, json.dumps(request)),
+            )
+        except Exception:  # noqa: BLE001 — the unique index fired: someone won the race
+            cur.execute(
+                f"SELECT id, status FROM analysis_jobs WHERE account_id = {PH} "
+                f"AND job_key = {PH} AND status IN ('queued', 'running') "
+                "ORDER BY id DESC LIMIT 1",
+                (account_id, job_key),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise
+            return {"id": int(row["id"]), "status": row["status"], "created": False}
+        return {
+            "id": int(_last_insert_id(cur, "analysis_jobs")),
+            "status": "queued",
+            "created": True,
+        }
+
+
+def claim_analysis_job(max_attempts: int = ANALYSIS_JOB_MAX_ATTEMPTS) -> dict[str, Any] | None:
+    """Take the oldest queued job, or reclaim one abandoned mid-flight.
+
+    Claiming is a conditional UPDATE, so two workers racing for the same row
+    produce one winner and one None rather than two investigations.
+    """
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    stale_cut = (_utcnow() - timedelta(seconds=ANALYSIS_JOB_STALE_S)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, account_id, job_key, request, attempts FROM analysis_jobs "
+            f"WHERE status = 'queued' OR (status = 'running' AND "
+            f"      COALESCE(heartbeat_at, started_at) < {PH}) "
+            "ORDER BY id ASC LIMIT 10",
+            (stale_cut,),
+        )
+        for row in cur.fetchall():
+            attempts = int(row["attempts"] or 0)
+            if attempts >= max_attempts:
+                cur.execute(
+                    f"UPDATE analysis_jobs SET status = 'failed', "
+                    f"error = COALESCE(error, 'retry limit reached'), "
+                    f"finished_at = {now_sql} WHERE id = {PH}",
+                    (row["id"],),
+                )
+                continue
+            cur.execute(
+                f"UPDATE analysis_jobs SET status = 'running', attempts = attempts + 1, "
+                f"started_at = {now_sql}, heartbeat_at = {now_sql} "
+                f"WHERE id = {PH} AND (status = 'queued' OR (status = 'running' AND "
+                f"      COALESCE(heartbeat_at, started_at) < {PH}))",
+                (row["id"], stale_cut),
+            )
+            if cur.rowcount:
+                try:
+                    request = json.loads(row["request"] or "{}")
+                except (TypeError, ValueError):
+                    request = {}
+                return {
+                    "id": int(row["id"]),
+                    "account_id": int(row["account_id"]),
+                    "job_key": row["job_key"],
+                    "request": request,
+                    "attempts": attempts + 1,
+                }
+    return None
+
+
+def finish_analysis_job(
+    job_id: int, status: str, result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE analysis_jobs SET status = {PH}, result = {PH}, error = {PH}, "
+            f"finished_at = {now_sql} WHERE id = {PH}",
+            (status, json.dumps(result) if result else None, error, job_id),
+        )
+
+
+def requeue_analysis_job(job_id: int, error: str) -> None:
+    """Hand a failed attempt back to the queue; claim_analysis_job() retires it
+    once attempts run out."""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"UPDATE analysis_jobs SET status = 'queued', error = {PH}, "
+            f"started_at = NULL, heartbeat_at = NULL WHERE id = {PH}",
+            (error, job_id),
+        )
+
+
+def analysis_job_status(account_id: int, job_key: str) -> dict[str, Any] | None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, status, attempts, error, enqueued_at, started_at, finished_at "
+            f"FROM analysis_jobs WHERE account_id = {PH} AND job_key = {PH} "
+            "ORDER BY id DESC LIMIT 1",
+            (account_id, job_key),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        for ts in ("enqueued_at", "started_at", "finished_at"):
+            out[ts] = _ts_to_str(out.get(ts))
+        out["id"] = int(out["id"])
+        return out
+
+
+def count_running_analysis_jobs() -> int:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM analysis_jobs WHERE status = 'running'")
+        return int(cur.fetchone()["n"])
+
+
+# ---------------------------------------------------------------------------
+# Evidence version — what "the record as of now" hashes to
+# ---------------------------------------------------------------------------
+# Two jobs for one value. It tells a reader whether a finding still rests on
+# the records it was drawn from, and it COALESCES: bucketing the newest
+# timestamp means a burst of ingest maps to one version, so ordinary traffic
+# does not buy an LLM call per span.
+EVIDENCE_COALESCE_WINDOW_S = int(env("EVIDENCE_COALESCE_WINDOW_S", "900") or 900)
+
+
+def evidence_version(account_id: int | None) -> dict[str, Any]:
+    """{version, cutoff_utc, latest_span_at, loop_count, event_count}.
+
+    Cheap by construction: three indexed aggregates, no scan of history.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        acct = f" WHERE account_id = {PH}" if account_id is not None else ""
+        args = [account_id] if account_id is not None else []
+        cur.execute(
+            f"SELECT MAX(start_time_unix) AS m, COUNT(*) AS n FROM spans{acct}",
+            tuple(args),
+        )
+        spans = dict(cur.fetchone() or {})
+        cur.execute(
+            f"SELECT COUNT(*) AS n, MAX(id) AS m FROM loops{acct}", tuple(args)
+        )
+        loops_row = dict(cur.fetchone() or {})
+        cur.execute(
+            f"SELECT COUNT(*) AS n, MAX(id) AS m FROM loop_events{acct}", tuple(args)
+        )
+        events = dict(cur.fetchone() or {})
+
+    newest_ns = int(spans.get("m") or 0)
+    bucket = newest_ns // (EVIDENCE_COALESCE_WINDOW_S * 1_000_000_000)
+    blob = json.dumps(
+        {
+            "account": account_id,
+            "bucket": bucket,
+            "spans": int(spans.get("n") or 0),
+            "loops": int(loops_row.get("n") or 0),
+            "loop_max": int(loops_row.get("m") or 0),
+            "events": int(events.get("n") or 0),
+            "event_max": int(events.get("m") or 0),
+        },
+        sort_keys=True,
+    )
+    return {
+        "version": hashlib.sha256(blob.encode()).hexdigest()[:32],
+        "cutoff_utc": _utcnow().replace(microsecond=0).isoformat(),
+        "latest_span_at": _ns_to_iso(newest_ns) if newest_ns else None,
+        "loop_count": int(loops_row.get("n") or 0),
+        "event_count": int(events.get("n") or 0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bounded investigation retrieval
+# ---------------------------------------------------------------------------
+# What the investigation may actually look at. Every function here takes the
+# SERVER's already-resolved scope (`only_user_ids`) and the account, and every
+# one returns explicit truncation metadata — a caller that silently got half
+# the rows would draw a confident conclusion from a fragment.
+#
+# These are read-only aggregates and bounded row reads over the SAME tables and
+# the SAME named-work definition the Home snapshot uses. There is no arbitrary
+# SQL path: the model picks WHICH of these to call, never what they do.
+
+INVESTIGATION_ROW_CAP = 50
+INVESTIGATION_EVENT_CAP = 40
+INVESTIGATION_TEXT_CAP = 700
+
+
+def _investigation_scope(
+    cur, account_id: int | None, only_user_ids: list[int] | None
+) -> tuple[str, list[Any], str, list[Any]]:
+    scope, scope_args = _work_named_scope_sql(account_id)
+    person_sql, person_args, _ = _work_person_filter(cur, account_id, only_user_ids)
+    return scope, scope_args, person_sql, person_args
+
+
+def investigation_runs(
+    account_id: int | None,
+    *,
+    only_user_ids: list[int] | None,
+    workflow_id: int | None = None,
+    service_name: str | None = None,
+    outcome: str | None = None,
+    since_utc: datetime | None = None,
+    until_utc: datetime | None = None,
+    limit: int = INVESTIGATION_ROW_CAP,
+) -> dict[str, Any]:
+    """Comparable runs (named work items) for a job or an agent.
+
+    `outcome` is the RECORD's own vocabulary — completed / abandoned / open —
+    never an invented success taxonomy. 'completed' is _WORK_COMPLETED_SQL, the
+    one definition this repo has.
+    """
+    limit = max(1, min(INVESTIGATION_ROW_CAP, int(limit)))
+    with _connect() as conn, _cursor(conn) as cur:
+        scope, scope_args, person_sql, person_args = _investigation_scope(
+            cur, account_id, only_user_ids
+        )
+        sql = (
+            "SELECT l.id, l.title, l.service_name, l.agent_id, l.workflow_id, "
+            "       l.cached_state, l.created_at, l.closed_at, l.last_event_unix "
+            f"FROM loops l WHERE {scope} {person_sql}"
+        )
+        args: list[Any] = [*scope_args, *person_args]
+        if workflow_id is not None:
+            sql += f" AND l.workflow_id = {PH}"
+            args.append(int(workflow_id))
+        if service_name:
+            sql += f" AND l.service_name = {PH}"
+            args.append(str(service_name))
+        if outcome == "completed":
+            sql += f" AND {_WORK_COMPLETED_SQL}"
+        elif outcome == "abandoned":
+            sql += (
+                f" AND {_WORK_TERMINAL_SQL} "
+                f"AND l.cached_state <> '{_WORK_COMPLETED_STATE}'"
+            )
+        elif outcome == "open":
+            sql += " AND l.closed_at IS NULL"
+        if since_utc is not None:
+            sql += f" AND l.created_at >= {PH}"
+            args.append(_home_ts(since_utc))
+        if until_utc is not None:
+            sql += f" AND l.created_at < {PH}"
+            args.append(_home_ts(until_utc, ceil=True))
+        sql += f" ORDER BY l.id DESC LIMIT {limit + 1}"
+        cur.execute(sql, tuple(args))
+        rows = [dict(r) for r in cur.fetchall()]
+        truncated = len(rows) > limit
+        rows = rows[:limit]
+
+        ids = [int(r["id"]) for r in rows]
+        errors = _investigation_span_stats(cur, account_id, ids)
+
+    out = []
+    for r in rows:
+        stats = errors.get(int(r["id"]), {})
+        out.append({
+            "run_id": int(r["id"]),
+            "title": r["title"],
+            "agent": r["service_name"],
+            "job_id": r["workflow_id"],
+            "state": r["cached_state"],
+            "outcome": (
+                "completed" if (r["closed_at"] is not None
+                                and r["cached_state"] == _WORK_COMPLETED_STATE)
+                else "abandoned" if r["closed_at"] is not None
+                else "open"
+            ),
+            "created_at": _ts_to_str(r["created_at"]),
+            "closed_at": _ts_to_str(r["closed_at"]),
+            "span_count": stats.get("spans", 0),
+            "error_span_count": stats.get("errors", 0),
+        })
+    return {
+        "runs": out,
+        "returned": len(out),
+        "truncated": truncated,
+        "row_cap": limit,
+    }
+
+
+def _investigation_span_stats(
+    cur, account_id: int | None, loop_ids: list[int]
+) -> dict[int, dict[str, int]]:
+    """Span and error counts per run, in one grouped query (never per run)."""
+    if not loop_ids:
+        return {}
+    ph_list = ", ".join([PH] * len(loop_ids))
+    acct = f" AND account_id = {PH}" if account_id is not None else ""
+    args: list[Any] = list(loop_ids)
+    if account_id is not None:
+        args.append(account_id)
+    cur.execute(
+        "SELECT loop_id, COUNT(*) AS spans, "
+        "       COALESCE(SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END), 0) AS errors "
+        f"FROM spans WHERE loop_id IN ({ph_list}){acct} GROUP BY loop_id",
+        tuple(args),
+    )
+    return {
+        int(r["loop_id"]): {"spans": int(r["spans"] or 0), "errors": int(r["errors"] or 0)}
+        for r in cur.fetchall()
+    }
+
+
+def investigation_run_detail(
+    account_id: int | None,
+    run_id: int,
+    *,
+    only_user_ids: list[int] | None,
+    event_cap: int = INVESTIGATION_EVENT_CAP,
+) -> dict[str, Any] | None:
+    """One run's lifecycle events and failing spans, bounded.
+
+    Returns None when the run is outside the caller's resolved scope — the
+    model naming an id it should not see gets nothing, not an error it could
+    read as confirmation the id exists.
+    """
+    event_cap = max(1, min(INVESTIGATION_EVENT_CAP, int(event_cap)))
+    lp = _loops_mod()
+    with _connect() as conn, _cursor(conn) as cur:
+        scope, scope_args, person_sql, person_args = _investigation_scope(
+            cur, account_id, only_user_ids
+        )
+        cur.execute(
+            "SELECT l.id, l.title, l.service_name, l.agent_id, l.workflow_id, "
+            "       l.cached_state, l.created_at, l.closed_at "
+            f"FROM loops l WHERE {scope} {person_sql} AND l.id = {PH}",
+            tuple([*scope_args, *person_args, int(run_id)]),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        row = dict(row)
+
+        cur.execute(
+            "SELECT id, type, actor_type, actor, payload, event_time_unix "
+            f"FROM loop_events WHERE loop_id = {PH} "
+            f"ORDER BY event_time_unix DESC, id DESC LIMIT {event_cap + 1}",
+            (int(run_id),),
+        )
+        raw = [dict(r) for r in cur.fetchall()]
+        events_truncated = len(raw) > event_cap
+        raw = list(reversed(raw[:event_cap]))
+
+        acct = f" AND account_id = {PH}" if account_id is not None else ""
+        args: list[Any] = [int(run_id)]
+        if account_id is not None:
+            args.append(account_id)
+        cur.execute(
+            "SELECT span_name, status_code, status_message, start_time_unix "
+            f"FROM spans WHERE loop_id = {PH}{acct} AND status_code = 2 "
+            "ORDER BY start_time_unix DESC LIMIT 15",
+            tuple(args),
+        )
+        errors = [dict(r) for r in cur.fetchall()]
+        stats = _investigation_span_stats(cur, account_id, [int(run_id)])
+
+    events = []
+    for r in raw:
+        ev = lp.normalize_loop_event(dict(r))
+        payload = ev.get("payload") or {}
+        events.append({
+            "event_id": int(r["id"]),
+            "type": ev.get("type"),
+            "actor_type": ev.get("actor_type"),
+            "at": _ns_to_iso(ev.get("ts")),
+            "sentence": lp.lifecycle_sentence(ev),
+            "direction": payload.get("direction"),
+            "reason": str(payload.get("reason"))[:120] if payload.get("reason") else None,
+        })
+    s = stats.get(int(run_id), {})
+    return {
+        "run_id": int(row["id"]),
+        "title": row["title"],
+        "agent": row["service_name"],
+        "job_id": row["workflow_id"],
+        "state": row["cached_state"],
+        "outcome": (
+            "completed" if (row["closed_at"] is not None
+                            and row["cached_state"] == _WORK_COMPLETED_STATE)
+            else "abandoned" if row["closed_at"] is not None else "open"
+        ),
+        "created_at": _ts_to_str(row["created_at"]),
+        "closed_at": _ts_to_str(row["closed_at"]),
+        "span_count": s.get("spans", 0),
+        "error_span_count": s.get("errors", 0),
+        "events": events,
+        "events_truncated": events_truncated,
+        "event_cap": event_cap,
+        "failed_spans": [
+            {
+                "operation": e["span_name"],
+                "message": (str(e["status_message"] or "")[:INVESTIGATION_TEXT_CAP]
+                            or None),
+                "at": _ns_to_iso(e["start_time_unix"]),
+            }
+            for e in errors
+        ],
+    }
+
+
+def investigation_outcome_mix(
+    account_id: int | None,
+    *,
+    only_user_ids: list[int] | None,
+    start_utc: datetime,
+    end_utc: datetime,
+    workflow_id: int | None = None,
+    service_name: str | None = None,
+) -> dict[str, Any]:
+    """Server-CALCULATED outcome counts for a window. The model may cite these;
+    it may not compute its own."""
+    with _connect() as conn, _cursor(conn) as cur:
+        scope, scope_args, person_sql, person_args = _investigation_scope(
+            cur, account_id, only_user_ids
+        )
+        sql = (
+            "SELECT "
+            f"  COALESCE(SUM(CASE WHEN {_WORK_COMPLETED_SQL} THEN 1 ELSE 0 END), 0) AS completed, "
+            f"  COALESCE(SUM(CASE WHEN {_WORK_TERMINAL_SQL} "
+            f"      AND l.cached_state <> '{_WORK_COMPLETED_STATE}' THEN 1 ELSE 0 END), 0) "
+            "      AS abandoned, "
+            "  COALESCE(SUM(CASE WHEN l.closed_at IS NULL THEN 1 ELSE 0 END), 0) AS still_open, "
+            "  COUNT(*) AS started "
+            f"FROM loops l WHERE {scope} {person_sql} "
+            f"  AND l.created_at >= {PH} AND l.created_at < {PH}"
+        )
+        args: list[Any] = [
+            *scope_args, *person_args,
+            _home_ts(start_utc), _home_ts(end_utc, ceil=True),
+        ]
+        if workflow_id is not None:
+            sql += f" AND l.workflow_id = {PH}"
+            args.append(int(workflow_id))
+        if service_name:
+            sql += f" AND l.service_name = {PH}"
+            args.append(str(service_name))
+        cur.execute(sql, tuple(args))
+        r = dict(cur.fetchone() or {})
+    return {
+        "window_start_utc": start_utc.isoformat(),
+        "window_end_utc": end_utc.isoformat(),
+        "started": int(r.get("started") or 0),
+        "completed": int(r.get("completed") or 0),
+        "abandoned": int(r.get("abandoned") or 0),
+        "still_open": int(r.get("still_open") or 0),
+        "job_id": workflow_id,
+        "agent": service_name,
+    }
+
+
+def investigation_wait_profile(
+    account_id: int | None,
+    *,
+    only_user_ids: list[int] | None,
+    limit: int = INVESTIGATION_ROW_CAP,
+) -> dict[str, Any]:
+    """Where open work is waiting right now, grouped by who or what holds it.
+
+    Present tense only. The record keeps no history of waiting, so this cannot
+    and does not produce a trend.
+    """
+    limit = max(1, min(INVESTIGATION_ROW_CAP, int(limit)))
+    with _connect() as conn, _cursor(conn) as cur:
+        scope, scope_args, person_sql, person_args = _investigation_scope(
+            cur, account_id, only_user_ids
+        )
+        cur.execute(
+            "SELECT l.id, l.title, l.service_name, l.cached_state, l.last_event_unix "
+            f"FROM loops l WHERE {scope} {person_sql} AND l.closed_at IS NULL "
+            "  AND l.cached_state IN ('awaiting_human', 'awaiting_system', 'stalled') "
+            f"ORDER BY COALESCE(l.last_event_unix, 0) ASC LIMIT {limit + 1}",
+            tuple([*scope_args, *person_args]),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        truncated = len(rows) > limit
+        rows = rows[:limit]
+        targets, targets_incomplete = assigned_handoff_targets(
+            cur, account_id, named_only=True
+        )
+        names: dict[str, str | None] = {}
+        for tid in set(targets.values()):
+            names[tid] = _resolve_human_name(cur, tid, account_id)
+
+    now_ns = time.time_ns()
+    waits = []
+    for r in rows:
+        last = int(r["last_event_unix"] or 0)
+        tid = targets.get(int(r["id"]))
+        waits.append({
+            "run_id": int(r["id"]),
+            "title": r["title"],
+            "agent": r["service_name"],
+            "state": r["cached_state"],
+            "waiting_on": names.get(tid) or ("a person" if tid else None),
+            "waiting_on_target": tid,
+            "waiting_seconds": int((now_ns - last) / 1e9) if last else None,
+        })
+    return {
+        "waits": waits,
+        "returned": len(waits),
+        "truncated": truncated,
+        "row_cap": limit,
+        # The same bound the snapshot reports: a capped assignee scan means
+        # some of these rows have no resolved holder, not that they have none.
+        "assignment_resolution_complete": not targets_incomplete,
+    }
+
+
+def investigation_agent_context(
+    account_id: int | None, service_name: str, agent_id: str = "main"
+) -> dict[str, Any] | None:
+    """What an agent is FOR, as the record has it. No cost fields here — money
+    is gated separately and must not ride in on an agent lookup."""
+    agents = get_agents(account_id=account_id)
+    match = next(
+        (a for a in agents if a.get("service_name") == service_name), None
+    )
+    if match is None:
+        return None
+    desc = get_latest_description(service_name, account_id=account_id, agent_id=agent_id)
+    return {
+        "agent": service_name,
+        "display_name": match.get("display_name") or service_name,
+        "description": (desc or {}).get("description") if desc else None,
+        "first_seen": match.get("first_seen"),
+        "last_seen": match.get("last_seen"),
+        "span_count": match.get("span_count"),
+        "error_count": match.get("error_count"),
+    }
