@@ -24,6 +24,13 @@ import {
   TrashIcon,
 } from './Icons.jsx'
 import { QuietBrand } from './BrandMarks.jsx'
+import {
+  groupNeedsOwner,
+  groupsNeedingOwner,
+  unownedCount,
+  unownedEmptyCopy,
+  unownedLabel,
+} from './unowned.js'
 
 // Fleet view. The /agents response is now nested:
 //   AgentGroup { service_name, agents: AgentInstance[], total_spans, ... }
@@ -42,6 +49,9 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade, onAgentsCh
   const [error, setError] = useState(null)
   const [usage, setUsage] = useState(null) // {plan, agent_count, agent_limit, locked_count}
   const [retryKey, setRetryKey] = useState(0)
+  // Roster filtered to the agents nobody owns. Off by default: the roster is
+  // shared infrastructure and the default question is still "what's running".
+  const [onlyUnowned, setOnlyUnowned] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -122,6 +132,12 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade, onAgentsCh
   const idle = statuses.filter((s) => s === 'idle').length
   const fleetCostToday = groups.reduce((a, g) => a + (g.cost_today || 0), 0)
 
+  // Counted over sub-agents (the unit an owner is assigned to), but the list
+  // filters by card. Once the gap is closed the toggle disappears rather than
+  // sitting there reading "0" — a control that can only say nothing is noise.
+  const needOwner = unownedCount(groups)
+  const shown = onlyUnowned ? groupsNeedingOwner(groups) : groups
+
   return (
     <div className="view view-wide">
       <div>
@@ -142,20 +158,47 @@ export default function Fleet({ onSelectAgent, onAddAgent, onUpgrade, onAgentsCh
         />
         <section className="agents-section">
           <div className="agents-section-header">
+            {/* While filtered the header counts what is ON SCREEN, and says
+                what it is a subset of. Leaving it at the fleet total prints a
+                number the eye can disprove by scrolling. The sub-agent
+                parenthetical is a whole-fleet fact, so it goes with it. */}
             <h2 className="section-label">
-              Agents · {totalInstances}
-              {totalSubAgents > totalInstances && (
-                <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
-                  {' '}
-                  ({totalSubAgents} sub-agents)
-                </span>
+              {onlyUnowned ? (
+                <>
+                  Agents · {shown.length} of {totalInstances}
+                  <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+                    {' '}
+                    (no owner)
+                  </span>
+                </>
+              ) : (
+                <>
+                  Agents · {totalInstances}
+                  {totalSubAgents > totalInstances && (
+                    <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
+                      {' '}
+                      ({totalSubAgents} sub-agents)
+                    </span>
+                  )}
+                </>
               )}
             </h2>
+            {needOwner > 0 && !loading && !error && (
+              <button
+                type="button"
+                className={`unowned-toggle ${onlyUnowned ? 'is-on' : ''}`}
+                aria-pressed={onlyUnowned}
+                onClick={() => setOnlyUnowned((v) => !v)}
+              >
+                {unownedLabel(needOwner)}
+              </button>
+            )}
           </div>
           <AgentList
-            groups={groups}
+            groups={shown}
             loading={loading}
             error={error}
+            emptyCopy={onlyUnowned ? unownedEmptyCopy(groups.length) : null}
             onRetry={() => setRetryKey((k) => k + 1)}
             onSelectAgent={onSelectAgent}
             onAddAgent={onAddAgent}
@@ -242,7 +285,7 @@ function FleetSummary({ counts, usage, onUpgrade }) {
   )
 }
 
-function AgentList({ groups, loading, error, onRetry, onSelectAgent, onAddAgent, onDeleteSubAgent }) {
+function AgentList({ groups, loading, error, emptyCopy, onRetry, onSelectAgent, onAddAgent, onDeleteSubAgent }) {
   if (loading) {
     return <div className="state-card">Loading agents…</div>
   }
@@ -265,6 +308,16 @@ function AgentList({ groups, loading, error, onRetry, onSelectAgent, onAddAgent,
     )
   }
   if (groups.length === 0) {
+    // An empty FILTERED list is a different sentence: the fleet isn't empty,
+    // so "+ Add Agent" would be answering a question nobody asked.
+    if (emptyCopy) {
+      return (
+        <div className="state-card">
+          <h2>{emptyCopy.title}</h2>
+          <p>{emptyCopy.body}</p>
+        </div>
+      )
+    }
     return (
       <div className="state-card">
         <h2>No agents yet</h2>
@@ -327,6 +380,7 @@ function FleetCard({
   platform,
   ownerName,
   ownerRole,
+  unowned,
   locked,
   lockedLine,
   serviceName,
@@ -393,11 +447,15 @@ function FleetCard({
           {platform}
         </div>
       )}
-      {ownerName && (
+      {ownerName ? (
         <div className="owner-tag">
           Owner: <strong>{ownerName}</strong>
           {ownerRole && <span className="owner-tag-role"> · {ownerRole}</span>}
         </div>
+      ) : (
+        // A span, not a button: the whole card is already a <button>, and the
+        // picker lives one click away on the detail page anyway.
+        unowned && <div className="owner-tag is-unowned">No owner yet</div>
       )}
 
       <p className={`agent-description ${description ? '' : 'empty'}`}>
@@ -530,6 +588,7 @@ function AgentCard({ group, onSelect }) {
       platform={group.platform}
       ownerName={group.owner_name}
       ownerRole={group.owner_role}
+      unowned={groupNeedsOwner(group)}
       locked={group.locked}
       serviceName={group.service_name}
       onSelect={onSelect}
@@ -587,6 +646,7 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
   }
 
   const lockedCount = group.agents.filter((a) => a.locked).length
+  const unownedHere = unownedCount([group])
   const costLabel =
     group.cost_today > 0
       ? `${formatCost(group.cost_today)} today`
@@ -618,6 +678,11 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
           <span className="agent-sub-count">· {group.agents.length} agents</span>
           {lockedCount > 0 && (
             <span className="instance-band-locked">{lockedCount} locked</span>
+          )}
+          {/* Only when collapsed: expanded, every sub-agent card says it
+              itself, and repeating it on the band is just louder. */}
+          {!expanded && unownedHere > 0 && (
+            <span className="instance-band-unowned">{unownedHere} unowned</span>
           )}
           <span className="instance-band-stats">
             <span>{(group.total_spans || 0).toLocaleString()} spans</span>
@@ -672,6 +737,7 @@ function GroupCard({ group, onSelectInstance, onSelectSubAgent, onDeleteSubAgent
                 description={sa.description}
                 ownerName={sa.owner_name}
                 ownerRole={sa.owner_role}
+                unowned={!sa.owner_name && !sa.locked}
                 locked={sa.locked}
                 serviceName={group.service_name}
                 agentId={sa.agent_id}

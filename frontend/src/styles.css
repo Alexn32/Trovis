@@ -1605,6 +1605,37 @@ a:hover {
 .owner-tag-role {
   color: var(--text-dim);
 }
+/* An absent owner is a gap, not an error: it reads in the quiet warn tone
+   next to the owner line it replaces, in exactly the same slot, so a card
+   with an owner and a card without are the same height. */
+.owner-tag.is-unowned {
+  color: var(--warning);
+}
+
+.unowned-toggle {
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.unowned-toggle:hover {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+.unowned-toggle.is-on {
+  color: var(--text-primary);
+  border-color: var(--warning);
+  background: var(--warning-faint);
+}
+
+.instance-band-unowned {
+  font-size: 11px;
+  color: var(--warning);
+}
 
 .subagent-owner {
   margin-left: 8px;
