@@ -337,6 +337,9 @@
               <strong>Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.</strong>
             </li>
             <li>
+              <strong>See what your agents are actually doing — and who’s waiting / what’s stuck — without drowning in traces</strong>
+            </li>
+            <li>
               <strong>Built for eng/founder teams with agents already in production</strong>
             </li>
           </ul>
@@ -352,6 +355,10 @@
               <div class="hp" aria-hidden="true">
                 <label for="website">Website</label>
                 <input id="website" name="website" type="text" tabindex="-1" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="name">Name <span style="font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)">(optional)</span></label>
+                <input id="name" name="name" type="text" autocomplete="name" placeholder="Your name" />
               </div>
               <div class="field">
                 <label for="email">Work email</label>
@@ -405,6 +412,8 @@
         form.addEventListener("submit", function (e) {
           e.preventDefault();
           err.style.display = "none";
+          var nameInput = form.elements.namedItem("name");
+          var name = ((nameInput && nameInput.value) || "").trim();
           var email = (form.email.value || "").trim();
           if (!emailRe.test(email)) {
             err.textContent = "Please enter a valid email address.";
@@ -418,6 +427,7 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              name: name,
               email: email,
               company: (form.company.value || "").trim() || null,
               role: (form.role.value || "").trim() || null,

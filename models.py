@@ -291,6 +291,7 @@ class WaitlistRequest(BaseModel):
     is the older name and is still accepted.
     """
 
+    name: str | None = None
     email: str
     company: str | None = None
     role: str | None = None

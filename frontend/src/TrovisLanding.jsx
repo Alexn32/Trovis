@@ -31,6 +31,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BENEFITS = [
   "Home desk: what needs you, not another dashboard",
   "Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.",
+  "See what your agents are actually doing — and who’s waiting / what’s stuck — without drowning in traces",
   "Built for eng/founder teams with agents already in production",
 ];
 
@@ -46,6 +47,7 @@ function TMark({ size = 26, color = C.teal }) {
 }
 
 function WaitlistForm({ onJoined }) {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [role, setRole] = useState("");
@@ -57,6 +59,7 @@ function WaitlistForm({ onJoined }) {
   async function onSubmit(e) {
     e.preventDefault();
     setError("");
+    const cleanName = name.trim();
     const cleanEmail = email.trim();
     if (!EMAIL_RE.test(cleanEmail)) {
       setError("Please enter a valid email address.");
@@ -65,6 +68,7 @@ function WaitlistForm({ onJoined }) {
     setBusy(true);
     try {
       await api.joinWaitlist({
+        name: cleanName || null,
         email: cleanEmail,
         company: company.trim() || null,
         role: role.trim() || null,
@@ -123,6 +127,21 @@ function WaitlistForm({ onJoined }) {
           autoComplete="off"
           value={website}
           onChange={(e) => setWebsite(e.target.value)}
+        />
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label htmlFor="wl-name" style={label}>
+          Name <span style={optional}>(optional)</span>
+        </label>
+        <input
+          id="wl-name"
+          name="name"
+          type="text"
+          autoComplete="name"
+          placeholder="Your name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={input}
         />
       </div>
       <div style={{ marginBottom: 14 }}>

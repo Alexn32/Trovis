@@ -12,6 +12,13 @@ function visible(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
 }
 
+const LOCKED_BULLETS = [
+  'Home desk: what needs you, not another dashboard',
+  'Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.',
+  'See what your agents are actually doing — and who’s waiting / what’s stuck — without drowning in traces',
+  'Built for eng/founder teams with agents already in production',
+]
+
 for (const [name, src] of [
   ['TrovisLanding.jsx', visible(landing)],
   ['static/waitlist.html', html],
@@ -24,18 +31,36 @@ for (const [name, src] of [
     assert.match(src, /what’s blocked/)
     assert.match(src, /where handoffs get stuck/)
     assert.match(src, /Founding seats for\s+teams already running agents/)
-    assert.match(src, /Home desk: what needs you, not another dashboard/)
-    assert.match(src, /people, agents, and the tools already in the loop/)
-    assert.match(src, /one place to see and judge the Work/)
-    assert.match(src, /eng\/founder teams with agents already in production/)
+    for (const bullet of LOCKED_BULLETS) {
+      assert.ok(src.includes(bullet), `missing locked bullet: ${bullet}`)
+    }
     assert.match(src, /Join the founding list/)
     assert.match(src, /Desk and Work visibility first/)
     assert.match(src, /we’re not pitching them as live yet/)
+    assert.match(src, /name=["']name["']|id=["']wl-name["']/)
     assert.match(src, /name=["']email["']|id=["']wl-email["']/)
     assert.match(src, /name=["']company["']|id=["']wl-company["']/)
     assert.match(src, /name=["']role["']|id=["']wl-role["']/)
     assert.match(src, /name=["']tools["']|id=["']wl-tools["']/)
     assert.match(src, /What agents\/tools are already in your loop\?/)
+  })
+
+  test(`${name} keeps agent visibility as support, not the hero`, () => {
+    assert.match(src, /See what your agents are actually doing/)
+    const hero = src.split(/Home desk: what needs you/)[0]
+    assert.doesNotMatch(hero, /actually doing/)
+    assert.doesNotMatch(hero, /\bfleet\b/i)
+    assert.doesNotMatch(hero, /cost tracking/i)
+    assert.doesNotMatch(hero, /drift/)
+  })
+
+  test(`${name} keeps name optional and before email`, () => {
+    const nameAt = src.search(/name=["']name["']|id=["']wl-name["']/)
+    const emailAt = src.search(/name=["']email["']|id=["']wl-email["']/)
+    assert.ok(nameAt >= 0 && emailAt > nameAt, 'name field should precede email')
+    const nameBlock = src.slice(nameAt, emailAt)
+    assert.doesNotMatch(nameBlock, /\srequired(\s|>|\/)/)
+    assert.match(src, /Name[\s\S]{0,160}\(optional\)/)
   })
 
   test(`${name} does not sell the old landing`, () => {
@@ -54,6 +79,7 @@ for (const [name, src] of [
 test('index.html SEO describes the waitlist', () => {
   assert.match(index, /Founding waitlist/)
   assert.match(index, /operating layer for hybrid work/)
+  assert.match(index, /what’s waiting on you/)
+  assert.match(index, /what’s blocked/)
   assert.match(index, /where handoffs get stuck/)
-  assert.doesNotMatch(index, /See what your agents are actually doing/)
 })

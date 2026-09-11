@@ -953,6 +953,7 @@ _WAITLIST_DDL_PG = """
 CREATE TABLE IF NOT EXISTS waitlist_signups (
     id               SERIAL    PRIMARY KEY,
     email            TEXT      NOT NULL UNIQUE,
+    name             TEXT,
     source           TEXT,
     runtime_interest TEXT,
     company          TEXT,
@@ -965,6 +966,7 @@ _WAITLIST_DDL_SQLITE = """
 CREATE TABLE IF NOT EXISTS waitlist_signups (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     email            TEXT    NOT NULL UNIQUE,
+    name             TEXT,
     source           TEXT,
     runtime_interest TEXT,
     company          TEXT,
@@ -1911,10 +1913,12 @@ def init_db() -> None:
         # no matter what SCOPE_LEVEL_PRESETS says.
         _migrate_scope_level_presets(cur)
         _try_add_column(cur, "agent_owners", "user_id", "INTEGER DEFAULT NULL")
-        # Founding waitlist: optional company / role on the public signup form.
-        # Existing rows stay NULL. Added after launch of email-only capture.
+        # Founding waitlist: optional company / role / name on the public
+        # signup form. Existing rows stay NULL. Name is optional on POST;
+        # the column stays nullable so older signups migrate cleanly.
         _try_add_column(cur, "waitlist_signups", "company", "TEXT")
         _try_add_column(cur, "waitlist_signups", "role", "TEXT")
+        _try_add_column(cur, "waitlist_signups", "name", "TEXT")
 
         # Backfill by email, within the account. A team_members row whose
         # email matches a login IS that person; one with no email, or no
@@ -8574,6 +8578,7 @@ def add_waitlist_signup(
     runtime_interest: str | None = None,
     company: str | None = None,
     role: str | None = None,
+    name: str | None = None,
 ) -> str:
     """Record a waitlist signup. Email is lowercased + trimmed before insert.
 
@@ -8584,6 +8589,7 @@ def add_waitlist_signup(
     clean_email = (email or "").strip().lower()
     if not clean_email:
         raise ValueError("email is required")
+    clean_name = (name or "").strip() or None
     clean_source = (source or "").strip() or None
     clean_interest = (runtime_interest or "").strip() or None
     clean_company = (company or "").strip() or None
@@ -8592,28 +8598,42 @@ def add_waitlist_signup(
     if USE_POSTGRES:
         sql = """
             INSERT INTO waitlist_signups
-                (email, source, runtime_interest, company, role)
-            VALUES (%s, %s, %s, %s, %s)
+                (email, name, source, runtime_interest, company, role)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """
         try:
             with _connect() as conn, _cursor(conn) as cur:
                 cur.execute(
                     sql,
-                    (clean_email, clean_source, clean_interest, clean_company, clean_role),
+                    (
+                        clean_email,
+                        clean_name,
+                        clean_source,
+                        clean_interest,
+                        clean_company,
+                        clean_role,
+                    ),
                 )
         except psycopg2.errors.UniqueViolation:
             return "already_joined"
     else:
         sql = """
             INSERT INTO waitlist_signups
-                (email, source, runtime_interest, company, role)
-            VALUES (?, ?, ?, ?, ?)
+                (email, name, source, runtime_interest, company, role)
+            VALUES (?, ?, ?, ?, ?, ?)
         """
         try:
             with _connect() as conn, _cursor(conn) as cur:
                 cur.execute(
                     sql,
-                    (clean_email, clean_source, clean_interest, clean_company, clean_role),
+                    (
+                        clean_email,
+                        clean_name,
+                        clean_source,
+                        clean_interest,
+                        clean_company,
+                        clean_role,
+                    ),
                 )
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
