@@ -162,15 +162,18 @@ check("bound SQL keeps a LIKE wildcard, not a leftover %s",
 print("\n--- home snapshot totals (same named-work predicate) ---")
 # GET /home/snapshot reuses _work_named_scope_sql, so it inherits the same
 # LIKE wildcards and the same way to get them wrong. Bind it the way psycopg2
-# would: five timestamp/cutoff binds plus account_id, and not one slot more.
+# would: seven timestamp/cutoff binds plus account_id, and not one slot more.
 snap_sql, snap_args = database.home_snapshot_totals_sql(1)
 snap_pg = snap_sql if database.USE_POSTGRES else snap_sql.replace("%", "%%")
 snap_pg = snap_pg.replace("?", "%s")
 bound = _pg_mogrify(
     snap_pg,
     (
+        # period start/end, previous start/end, abandoned start/end,
+        # history-floor cutoff — in the order the SELECT list binds them.
         "2026-01-01 00:00:00", "2026-01-08 00:00:00",
         "2025-12-25 00:00:00", "2026-01-01 00:00:00",
+        "2026-01-01 00:00:00", "2026-01-08 00:00:00",
         "2025-12-25 00:00:00",
         *snap_args,
     ),
@@ -183,8 +186,11 @@ check("snapshot totals SQL keeps a real LIKE wildcard after binding",
 crashed = False
 try:
     _pg_mogrify(snap_pg.replace("%%", "%"), (
+        # period start/end, previous start/end, abandoned start/end,
+        # history-floor cutoff — in the order the SELECT list binds them.
         "2026-01-01 00:00:00", "2026-01-08 00:00:00",
         "2025-12-25 00:00:00", "2026-01-01 00:00:00",
+        "2026-01-01 00:00:00", "2026-01-08 00:00:00",
         "2025-12-25 00:00:00", *snap_args))
 except IndexError:
     crashed = True

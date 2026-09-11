@@ -487,7 +487,7 @@ with TestClient(main.app) as c:
         epochs.append(s.astimezone(timezone.utc).timestamp() + 60)
         epochs.append(s.astimezone(timezone.utc).timestamp() + 3600)
     rows = {"completed_epochs": epochs}
-    series = home_snapshot._completion_series(rows, p, len(epochs))
+    series = home_snapshot._completion_series(rows, p, len(epochs), True)
     check("completions across a DST boundary reconcile with the total",
           series["reconciles"] is True
           and [pt["completed"] for pt in series["points"]] == [2, 2, 2, 2, 2])

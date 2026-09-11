@@ -1342,33 +1342,73 @@ def work_items(
 _WHOSE_CHOICES = ("everyone", "me", "team", "person")
 
 
-def _resolve_whose_work(
+def _resolve_whose_selection(
     request: Request, whose: str | None, person_id: int | None
-) -> list[int] | None:
-    """Return the user ids the list may show, or None for no filter.
+) -> dict[str, Any]:
+    """Resolve a whose-work request into the selection the server APPLIED.
 
-    None (company breadth, unfiltered) and [] (nobody) are different answers
-    and both are real: a company seat sees work held by people who have no
-    login at all, which an id list would silently drop.
+    Returns everything a caller needs to describe the result honestly:
+
+      choice        the selector actually applied ('everyone'|'me'|'team'|
+                    'person'). The server never substitutes a DIFFERENT
+                    selector for a readable one — it only intersects the
+                    resulting id set with the seat — so this is the request
+                    unless the request was unreadable.
+      unreadable    the raw value was not a known selector; it narrowed
+                    nothing (existing behavior) and `choice` is 'everyone'.
+      user_ids      the ids the list may show, or None for no filter.
+      clamped       the seat removed people the selector asked for.
+      seat          the resolved seat, or None for a machine session.
+
+    `user_ids` None (company breadth, unfiltered) and [] (nobody) are
+    different answers and both are real: a company seat sees work held by
+    people who have no login at all, which an id list would silently drop.
+
+    Reporting must be derived from THIS, never re-guessed downstream — most
+    of all not from whether a selector appears in the UI's choice list. A
+    company-breadth person with no reports who asks for `team` gets their own
+    work, and calling that 'everyone' because the control would not have
+    offered 'team' describes the opposite of the filter that ran.
     """
+    raw = (whose or "").strip().lower()
+    choice = raw or "everyone"
+    unreadable = bool(raw) and raw not in _WHOSE_CHOICES
+    if unreadable:
+        # An unreadable choice narrows nothing rather than 400-ing a client
+        # that guessed — same instinct as the status filter above.
+        choice = "everyone"
+
     user = getattr(request.state, "user", None)
     account_id = getattr(request.state, "account_id", None)
     if not user or account_id is None:
         # API-key auth has no person and therefore no seat. It keeps the
         # account-wide view it has always had; the account scope still binds.
-        return None
+        return {
+            "choice": "everyone",
+            "requested": choice,
+            "unreadable": unreadable,
+            "person_id": None,
+            "user_ids": None,
+            "clamped": False,
+            "seat": None,
+        }
+
     seat = database.resolve_seat(account_id, user["id"])
     allowed = seat["visible_user_ids"]  # None = company-wide
-
-    choice = (whose or "").strip().lower() or "everyone"
-    if choice not in _WHOSE_CHOICES:
-        # An unreadable choice narrows nothing rather than 400-ing a client
-        # that guessed — same instinct as the status filter above.
-        choice = "everyone"
+    me = user["id"]
 
     if choice == "everyone":
-        return allowed
-    me = user["id"]
+        return {
+            "choice": "everyone",
+            "requested": choice,
+            "unreadable": unreadable,
+            "person_id": None,
+            "user_ids": allowed,
+            "clamped": False,
+            "seat": seat,
+        }
+
+    resolved_person: int | None = None
     if choice == "me":
         wanted = [me]
     elif choice == "team":
@@ -1384,12 +1424,31 @@ def _resolve_whose_work(
                 status_code=403, detail="that person is not in your reporting line"
             )
         wanted = [person_id]
+        resolved_person = person_id
 
     if allowed is None:
-        return wanted
-    # Intersect: a narrower choice is honored, a wider one is clamped back to
-    # the seat rather than refused. The seat decides what exists.
-    return sorted(set(wanted) & set(allowed))
+        user_ids, clamped = wanted, False
+    else:
+        # Intersect: a narrower choice is honored, a wider one is clamped back
+        # to the seat rather than refused. The seat decides what exists.
+        user_ids = sorted(set(wanted) & set(allowed))
+        clamped = len(user_ids) < len(wanted)
+    return {
+        "choice": choice,
+        "requested": choice,
+        "unreadable": unreadable,
+        "person_id": resolved_person,
+        "user_ids": user_ids,
+        "clamped": clamped,
+        "seat": seat,
+    }
+
+
+def _resolve_whose_work(
+    request: Request, whose: str | None, person_id: int | None
+) -> list[int] | None:
+    """The id list alone — the shape /work/items and /work/overview take."""
+    return _resolve_whose_selection(request, whose, person_id)["user_ids"]
 
 
 @app.get("/home/snapshot", response_model=HomeSnapshot)
@@ -1431,15 +1490,6 @@ def home_snapshot_endpoint(
     account_id = getattr(request.state, "account_id", None)
     user = getattr(request.state, "user", None)
     viewer_user_id = user["id"] if user else None
-    # A machine credential has no person, so it has no seat. We do not invent
-    # one: it keeps the account-wide work view it has always had, and the
-    # person-shaped parts of the snapshot (attention, money) come back
-    # explicitly unavailable rather than as a confident zero.
-    seat = (
-        database.resolve_seat(account_id, viewer_user_id)
-        if (user and account_id is not None)
-        else None
-    )
     try:
         period = home_snapshot.resolve_period(days, tz)
     except home_snapshot.SnapshotInputError as exc:
@@ -1447,16 +1497,19 @@ def home_snapshot_endpoint(
 
     # The one enforcement point, shared with GET /work/items and
     # /work/overview. It 403s a person_id outside the caller's reporting line
-    # and clamps anything wider than the seat.
-    effective_ids = _resolve_whose_work(request, whose, person_id)
+    # and clamps anything wider than the seat. The snapshot DESCRIBES this
+    # result — it never re-derives the scope from the seat's display choices.
+    #
+    # A machine credential has no person, so `selection["seat"]` is None. We do
+    # not invent one: it keeps the account-wide work view it has always had,
+    # and the person-shaped parts of the snapshot (attention, money) come back
+    # explicitly unavailable rather than as a confident zero.
+    selection = _resolve_whose_selection(request, whose, person_id)
     try:
         snap = home_snapshot.build_snapshot(
             account_id=account_id,
             viewer_user_id=viewer_user_id,
-            seat=seat,
-            effective_user_ids=effective_ids,
-            requested_whose=whose,
-            person_id=person_id,
+            selection=selection,
             period=period,
         )
     except database.QueryTimeout as exc:

@@ -78,6 +78,17 @@ class SnapshotInputError(ValueError):
     """Malformed query input. The endpoint turns this into a 400."""
 
 
+def _now_utc() -> datetime:
+    """The one clock this module reads.
+
+    A single seam so a fixture can pin the clock for BOTH the period it
+    queries and the timestamps it reports. Overwriting response timestamps
+    after the fact would make a documented example that no query ever
+    produced.
+    """
+    return datetime.now(timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # Period + timezone
 # ---------------------------------------------------------------------------
@@ -124,7 +135,7 @@ def resolve_period(
     except (ZoneInfoNotFoundError, ValueError, KeyError):
         raise SnapshotInputError(f"unknown IANA timezone: {raw_tz}") from None
 
-    now_utc = now.astimezone(timezone.utc) if now else datetime.now(timezone.utc)
+    now_utc = now.astimezone(timezone.utc) if now else _now_utc()
     now_local = now_utc.astimezone(tz)
 
     # Local calendar-day boundaries. Built from dates, not by subtracting 24h,
@@ -162,12 +173,20 @@ def resolve_period(
 
 
 def scope_choices(seat: dict[str, Any] | None) -> list[str]:
-    """The whose-work selectors this seat may actually use.
+    """The whose-work selectors a CONTROL should offer this seat.
 
     Mirrors the client's `whoseOptions` rule without importing its labels:
-    team/person only exist for someone with reports. A machine session has no
-    seat and therefore exactly one choice — the account-wide view it has
-    always had.
+    team/person are only worth offering to someone with reports, because
+    otherwise they would resolve to the same list as `me`. A machine session
+    has no seat and therefore exactly one choice — the account-wide view it
+    has always had.
+
+    This is a DISPLAY affordance, not the permission ceiling and not the
+    effective selection. A selector missing from this list is one the control
+    would not draw; it is not one the server refuses. The ceiling is
+    `breadth` + the seat's visible people, and what actually ran is
+    `effective`. Deriving any of the three from either of the others is how
+    the metadata ends up describing a different query than the one that ran.
     """
     if not seat:
         return ["everyone"]
@@ -179,42 +198,60 @@ def scope_choices(seat: dict[str, Any] | None) -> list[str]:
 
 def describe_scope(
     *,
-    seat: dict[str, Any] | None,
-    requested: str | None,
-    person_id: int | None,
-    effective_user_ids: list[int] | None,
+    selection: dict[str, Any],
     viewer_user_id: int | None,
     account_id: int | None,
+    membership_complete: bool,
 ) -> dict[str, Any]:
-    """The scope block: what was asked for, what was granted, what is possible.
+    """The scope block: what ran, what was allowed, what a control may offer.
 
-    `effective_user_ids` is the ALREADY-INTERSECTED answer from
-    `main._resolve_whose_work` — this function reports it, it does not
-    re-derive it, so there is exactly one place where a request can narrow
-    (and never widen) what a person sees.
+    Every field comes from `main._resolve_whose_selection` — the one place a
+    request is intersected with the seat. Nothing here re-derives the
+    selection, so the metadata cannot describe a different query than the one
+    that produced the numbers beside it.
 
-    `people_in_scope` is `null` for a company-breadth seat because the filter
-    is skipped entirely there. That is not "nobody": work can be held by a
-    person with no login, and an id list would silently drop those rows.
+    Four distinct things, deliberately not collapsed:
+
+      requested / effective  the selector asked for, and the one applied. They
+                             differ only when the raw value was unreadable, in
+                             which case it narrowed nothing (`everyone`) and
+                             `request_unreadable` says so.
+      breadth + people       the permission CEILING. `clamped_by_seat` means
+                             the selector asked for people the seat does not
+                             include and they were dropped.
+      choices                what a control should offer. Advisory only.
+      people_in_scope        the actual resolved membership. `null` for a
+                             company-breadth seat, because the filter is
+                             skipped entirely there — that is NOT "nobody":
+                             work can be held by a person with no login, and
+                             an id list would silently drop those rows.
     """
-    choices = scope_choices(seat)
-    asked = (requested or "").strip().lower() or "everyone"
-    if asked not in WHOSE_CHOICES:
-        asked = "everyone"
-    effective = asked if asked in choices else "everyone"
+    seat = selection.get("seat")
+    user_ids = selection.get("user_ids")
+    effective = selection.get("choice") or "everyone"
     return {
-        "requested": asked,
+        "requested": selection.get("requested") or effective,
         "effective": effective,
-        "person_id": person_id if effective == "person" else None,
-        "choices": choices,
-        "narrowed_from_request": effective != asked,
+        "request_unreadable": bool(selection.get("unreadable")),
+        "person_id": selection.get("person_id"),
+        "choices": scope_choices(seat),
+        # True when the selector is one the control would not offer this seat
+        # (e.g. `team` for someone with no reports). It still ran, and the
+        # numbers describe it.
+        "selector_offered": effective in scope_choices(seat),
+        "clamped_by_seat": bool(selection.get("clamped")),
         # Seat atoms, never the scope level's name or a role title.
         "breadth": (seat or {}).get("breadth"),
         "scope_level_id": (seat or {}).get("scope_level_id"),
         "role_id": (seat or {}).get("role_id"),
-        "filtered": effective_user_ids is not None,
-        "people_in_scope": (
-            None if effective_user_ids is None else len(effective_user_ids)
+        "filtered": user_ids is not None,
+        "people_in_scope": None if user_ids is None else len(user_ids),
+        # False when the waiting-on leg of the scope filter hit its scan cap:
+        # the membership is then a subset and every count over it is a lower
+        # bound, not a total.
+        "membership_complete": bool(membership_complete),
+        "membership_incomplete_reason": (
+            None if membership_complete else "assignment_scan_truncated"
         ),
         "account_id": account_id,
         "viewer_user_id": viewer_user_id,
@@ -240,17 +277,22 @@ def build_snapshot(
     *,
     account_id: int | None,
     viewer_user_id: int | None,
-    seat: dict[str, Any] | None,
-    effective_user_ids: list[int] | None,
-    requested_whose: str | None,
-    person_id: int | None,
+    selection: dict[str, Any],
     period: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble the snapshot. One DB round trip, no model call, no cache.
 
     Every count below is over the COMPLETE permitted dataset — these are SQL
-    aggregates, never a fold over the first page of `/work/items`.
+    aggregates, never a fold over the first page of `/work/items` — with one
+    named exception: when the whose-work filter's waiting-on leg hits its scan
+    cap the scope's membership is a subset, and every count built on it is
+    reported as an explicitly labeled LOWER BOUND rather than a total.
+
+    `selection` is `main._resolve_whose_selection`'s output: the enforcement
+    already happened, this only describes and uses it.
     """
+    seat = selection.get("seat")
+    effective_user_ids = selection.get("user_ids")
     financial_visible = bool(seat) and FINANCIAL_SURFACE in (seat or {}).get(
         "surfaces", []
     )
@@ -276,10 +318,15 @@ def build_snapshot(
         series_cap=SERIES_ROW_CAP,
     )
 
+    # The whose-work filter's waiting-on leg is a capped scan. When it caps,
+    # the scope's membership is a subset of the truth and nothing computed over
+    # it may be called a total.
+    membership_complete = not bool(rows.get("scope_membership_truncated"))
+
     completed = int(rows["completed_total"])
-    series = _completion_series(rows, period, completed)
-    jobs = _job_breakdown(rows, completed)
-    comparison = _comparison(rows, period, completed)
+    series = _completion_series(rows, period, completed, membership_complete)
+    jobs = _job_breakdown(rows, completed, membership_complete)
+    comparison = _comparison(rows, period, completed, membership_complete)
     attention = _attention(rows, viewer_user_id, seat)
     financial = _financial(
         rows, period, visible=financial_visible, reason=financial_reason
@@ -287,14 +334,12 @@ def build_snapshot(
 
     has_any_work = bool(rows["has_any_work"])
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": _now_utc().isoformat(),
         "scope": describe_scope(
-            seat=seat,
-            requested=requested_whose,
-            person_id=person_id,
-            effective_user_ids=effective_user_ids,
+            selection=selection,
             viewer_user_id=viewer_user_id,
             account_id=account_id,
+            membership_complete=membership_complete,
         ),
         "period": {
             "start": period["start"],
@@ -303,13 +348,21 @@ def build_snapshot(
             "end_utc": _iso(period["end_utc"]),
             "timezone": period["timezone"],
             "days": period["days"],
-            # Recorded completions whose close timestamp falls in the window.
-            # A "completion" is one closed work item — never a span, a tool
-            # call, a nested child run, or an agent registration.
+            # Recorded completions whose COMPLETION timestamp falls in the
+            # window. A completion is one work item the record says finished
+            # (lifecycle state 'done') — never a span, a tool call, a nested
+            # child run, an agent registration, and never a terminal close
+            # that was an abandonment or an ingestion artifact.
             "completed": completed,
+            # Terminal closes in the window that were NOT completions. Reported
+            # so abandoned work stays visible as itself rather than being
+            # rewritten as success or silently vanishing.
+            "abandoned": int(rows.get("abandoned_total") or 0),
+            "exact": membership_complete,
+            "qualifier": "exact" if membership_complete else "at_least",
             "comparison": comparison,
         },
-        "current_state": _current_state(rows),
+        "current_state": _current_state(rows, membership_complete),
         "completions_series": series,
         "by_job": jobs,
         "attention": attention,
@@ -331,20 +384,21 @@ def build_snapshot(
             "job_breakdown_complete": not jobs["truncated"],
             "comparison_available": comparison["available"],
             "financial_available": financial["visible"],
+            "scope_membership_complete": membership_complete,
+            "counts_exact": membership_complete,
             "unavailable": _unavailable_reasons(
-                series, jobs, comparison, financial, attention
+                series, jobs, comparison, financial, attention, membership_complete
             ),
         },
         "navigation": _navigation(
             account_id=account_id,
-            whose=requested_whose,
-            person_id=person_id,
+            selection=selection,
             period=period,
         ),
     }
 
 
-def _current_state(rows: dict[str, Any]) -> dict[str, Any]:
+def _current_state(rows: dict[str, Any], membership_complete: bool) -> dict[str, Any]:
     """Work as it stands RIGHT NOW. Not a period measure, and never mixed
     with one.
 
@@ -365,23 +419,34 @@ def _current_state(rows: dict[str, Any]) -> dict[str, Any]:
         "moving": int(by_state.get("moving", 0)),
         "waiting_on_person": int(by_state.get("waiting_on_person", 0)),
         "blocked": int(by_state.get("blocked", 0)),
+        "exact": membership_complete,
+        "qualifier": "exact" if membership_complete else "at_least",
         "trend_available": False,
         "trend_unavailable_reason": "current_state_is_not_retained_historically",
     }
 
 
 def _completion_series(
-    rows: dict[str, Any], period: dict[str, Any], completed: int
+    rows: dict[str, Any],
+    period: dict[str, Any],
+    completed: int,
+    membership_complete: bool,
 ) -> dict[str, Any]:
     """Recorded completions per local calendar day.
 
-    Bucketed on the COMPLETION timestamp (`loops.closed_at`), never on when
-    the work started or was last touched. Buckets are local days in the
-    requested zone, so a DST day is one bucket.
+    Bucketed on the COMPLETION timestamp (`loops.closed_at` of work whose
+    lifecycle state is 'done'), never on when the work started or was last
+    touched, and never on an abandonment's close. Buckets are local days in
+    the requested zone, so a DST day is one bucket.
 
     `reconciles` is asserted, not assumed: the bucket sum is compared against
     the independent aggregate COUNT, and a mismatch is reported rather than
     smoothed over.
+
+    `reconciles` is NOT a completeness claim. When the scope's membership is a
+    subset (`exact: false`) the buckets and the aggregate are both drawn from
+    the same subset, so they agree with each other while both under-count —
+    which is exactly why `exact` is reported separately.
     """
     starts = period["bucket_starts_local"]
     edges = [s.astimezone(timezone.utc).timestamp() for s in starts]
@@ -405,6 +470,8 @@ def _completion_series(
             "total": None,
             "reconciles": None,
             "aggregate_total": completed,
+            "exact": membership_complete,
+            "qualifier": "exact" if membership_complete else "at_least",
         }
 
     for e in epochs:
@@ -425,10 +492,14 @@ def _completion_series(
         "total": bucket_sum,
         "aggregate_total": completed,
         "reconciles": bucket_sum == completed,
+        "exact": membership_complete,
+        "qualifier": "exact" if membership_complete else "at_least",
     }
 
 
-def _job_breakdown(rows: dict[str, Any], completed: int) -> dict[str, Any]:
+def _job_breakdown(
+    rows: dict[str, Any], completed: int, membership_complete: bool
+) -> dict[str, Any]:
     """Recorded completions by the job (declared workflow) the run belongs to.
 
     Uses the EXISTING job identity — `loops.workflow_id` and the workflow's
@@ -470,18 +541,36 @@ def _job_breakdown(rows: dict[str, Any], completed: int) -> dict[str, Any]:
         "total_job_count": len(named),
         "aggregate_total": completed,
         "reconciles": accounted == completed,
+        "exact": membership_complete,
+        "qualifier": "exact" if membership_complete else "at_least",
     }
 
 
 def _comparison(
-    rows: dict[str, Any], period: dict[str, Any], completed: int
+    rows: dict[str, Any],
+    period: dict[str, Any],
+    completed: int,
+    membership_complete: bool,
 ) -> dict[str, Any]:
     """Equal-duration previous window, or an honest unavailable.
 
     Unavailable when the record holds no work at all from before that window:
     a zero previous period in a workspace that did not exist yet is not a
     decline, and drawing it as one would be the page's first lie.
+
+    Also unavailable when the scope's membership is incomplete. A delta
+    between two lower bounds is not a lower bound on the delta — the missing
+    rows could sit on either side — so there is no honest way to report it.
     """
+    if not membership_complete:
+        return {
+            "available": False,
+            "unavailable_reason": "scope_membership_incomplete",
+            "previous_start_utc": _iso(period["previous_start_utc"]),
+            "previous_end_utc": _iso(period["previous_end_utc"]),
+            "previous_completed": None,
+            "delta": None,
+        }
     if not rows["has_history_before_previous"]:
         return {
             "available": False,
@@ -515,19 +604,40 @@ def _attention(
     A machine session has no person, so the count is unavailable rather than
     zero: zero would read as "nothing needs you", which is a claim about a
     person who does not exist here.
+
+    The assignee scan is capped. When the cap is hit the matched set is a
+    SUBSET, and its length is not the answer — an org with 501 open handoffs
+    where the one waiting on you is the oldest would report a confident
+    "0 needs you" while a person waits. So a truncated scan is `available:
+    false` with `needs_you: null`, and what we did find is offered separately
+    as `needs_you_at_least`: a labeled lower bound is useful, a wrong total is
+    not.
     """
     if viewer_user_id is None:
         return {
             "available": False,
             "unavailable_reason": "no_personal_identity_for_machine_session",
             "needs_you": None,
+            "needs_you_at_least": None,
             "viewer_user_id": None,
             "scoped_to": "session_identity",
+        }
+    found = int(rows["needs_you"] or 0)
+    if rows.get("needs_you_truncated"):
+        return {
+            "available": False,
+            "unavailable_reason": "assignment_scan_truncated",
+            "needs_you": None,
+            "needs_you_at_least": found,
+            "viewer_user_id": viewer_user_id,
+            "scoped_to": "session_identity",
+            "unplaced_viewer": bool(seat and seat.get("role_id") is None),
         }
     return {
         "available": True,
         "unavailable_reason": None,
-        "needs_you": int(rows["needs_you"] or 0),
+        "needs_you": found,
+        "needs_you_at_least": found,
         "viewer_user_id": viewer_user_id,
         "scoped_to": "session_identity",
         "unplaced_viewer": bool(seat and seat.get("role_id") is None),
@@ -612,10 +722,19 @@ def _unavailable_reasons(
     comparison: dict[str, Any],
     financial: dict[str, Any],
     attention: dict[str, Any],
+    membership_complete: bool,
 ) -> list[dict[str, str]]:
     """Every thing this snapshot could not establish, named in one place, so a
     renderer can decide what to hide without re-inspecting each block."""
     out: list[dict[str, str]] = []
+    if not membership_complete:
+        out.append({
+            "field": "scope.membership",
+            "reason": "assignment_scan_truncated",
+        })
+        for field in ("period.completed", "current_state", "completions_series",
+                      "by_job"):
+            out.append({"field": field, "reason": "lower_bound_not_a_total"})
     if not series["available"]:
         out.append({"field": "completions_series", "reason": series["unavailable_reason"]})
     elif not series["reconciles"]:
@@ -636,8 +755,7 @@ def _unavailable_reasons(
 def _navigation(
     *,
     account_id: int | None,
-    whose: str | None,
-    person_id: int | None,
+    selection: dict[str, Any],
     period: dict[str, Any],
 ) -> dict[str, Any]:
     """Canonical identifiers a later Home UI needs to click one level deeper
@@ -646,13 +764,21 @@ def _navigation(
     Home links must carry these through verbatim. A drill-in that silently
     resets to "everyone, last 7 days" turns an investigation into a different
     question.
+
+    What is carried is the EFFECTIVE selection, not the raw query string. An
+    unreadable selector is not echoed back (it would re-resolve to `everyone`
+    and read as a deliberate widening); a selector that ran is carried exactly
+    as it ran, so following the link reproduces this snapshot's filter. It can
+    never widen the view in any case — the destination re-resolves it against
+    the same seat.
     """
     carry: dict[str, Any] = {
         "days": period["days"],
         "tz": period["timezone"],
     }
-    if whose:
-        carry["whose"] = whose
+    effective = selection.get("choice") or "everyone"
+    carry["whose"] = effective
+    person_id = selection.get("person_id")
     if person_id is not None:
         carry["person_id"] = person_id
     return {

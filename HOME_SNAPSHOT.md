@@ -14,7 +14,8 @@ re-derive its own numbers.
 - Orchestration, period math, policy: `home_snapshot.py`
 - SQL: `database.get_home_snapshot_rows` / `database.home_snapshot_totals_sql`
 - Response shape: `models.HomeSnapshot`
-- Tests: `test_home_snapshot.py`
+- Tests: `test_home_snapshot.py` (contract), `test_home_snapshot_integrity.py`
+  (completion semantics, truncation, query shape, scope metadata)
 
 ## Three rules the shape encodes
 
@@ -51,13 +52,31 @@ Full field list is `models.HomeSnapshot`; each model there carries its own
 docstring. Summary:
 
 ### `scope`
-What was asked for (`requested`), what the seat permitted (`effective`), and
-what this seat *could* ask for (`choices`). `breadth`, `scope_level_id` and
-`role_id` are seat **atoms** — nothing here branches on a scope level's name or
-a role title, so a custom level behaves exactly like a preset composed the same
-way. `filtered: false` with `people_in_scope: null` means company breadth: no
-person filter is applied at all. That is **not** "nobody" — work can be held by
-a person with no login, and an id list would silently drop those rows.
+Four distinct things, deliberately not collapsed into each other:
+
+| field | meaning |
+|---|---|
+| `requested` / `effective` | the selector asked for, and the one the server **applied**. They differ only when the raw value was unreadable (`request_unreadable: true`), which narrows nothing. |
+| `breadth`, `people_in_scope`, `clamped_by_seat` | the permission **ceiling** and what it removed. |
+| `choices`, `selector_offered` | what a **control** should offer. Advisory display affordance only. |
+| `membership_complete` | whether the resolved membership is the whole truth. |
+
+Everything comes from `main._resolve_whose_selection`, the one place a request
+is intersected with the seat; nothing is re-derived here, so the metadata
+cannot describe a different query than the one that produced the numbers beside
+it. In particular **`effective` is never inferred from `choices`**. A
+company-breadth person with no reports who asks for `team` gets their own work:
+`effective` is `team`, `filtered` is true, `people_in_scope` is 1, and
+`selector_offered` is false because a control would not have drawn that option.
+Reporting `everyone` there — as an earlier version did, because `team` was
+absent from `choices` — describes the opposite of the filter that ran.
+
+`breadth`, `scope_level_id` and `role_id` are seat **atoms**; nothing branches
+on a scope level's name or a role title, so a custom level behaves exactly like
+a preset composed the same way. `filtered: false` with `people_in_scope: null`
+means company breadth: no person filter is applied at all. That is **not**
+"nobody" — work can be held by a person with no login, and an id list would
+silently drop those rows.
 
 ### `period`
 `start`/`end` (local, with offset), `start_utc`/`end_utc`, `timezone`, `days`,
@@ -66,11 +85,33 @@ and `completed`.
 **`completed` counts recorded work completions**: rows in `loops` that are
 *named work* (`title_source = 'provided'`, non-empty, not a `Task from …` or
 template shell — the same `_work_named_scope_sql` predicate `/work/overview`
-and `/work/items` use) whose `closed_at` falls in `[start_utc, end_utc)`. It is
-counted once per work item. Spans, tool calls, nested child activity inside an
-item, and agent registrations are **not** rows in that table and are never
-counted. There is deliberately no second definition of completed work in this
-repo.
+and `/work/items` use), whose lifecycle state is `done`, and whose `closed_at`
+falls in `[start_utc, end_utc)`. It is counted once per work item. Spans, tool
+calls, nested child activity inside an item, and agent registrations are
+**not** rows in that table and are never counted.
+
+The lifecycle-state half is load-bearing. `closed_at IS NOT NULL` is a
+**terminal close**, not a completion, and two kinds of terminal close are the
+opposite of work getting done:
+
+| close | written by | `cached_state` |
+|---|---|---|
+| operator / agent close | `close_loop`, `trovis.loop.close` | `done` |
+| sweep gave up (idle past ABANDON_THRESHOLD) | `abandon_loop` | `abandoned` |
+| phantom loop from straggler telemetry | `artifact_close_loop` | `abandoned` |
+
+`loops.compute_loop_state` rules 1–2 keep both abandonment shapes at
+`abandoned` through any recompute (`reason='ingestion_artifact'` maps there on
+purpose), so the state is authoritative and the timestamp is not. Counting the
+timestamp credits an org for work it abandoned.
+
+The predicate is written once, as `database._WORK_COMPLETED_SQL`, and shared.
+`period.abandoned` reports the terminal-but-not-completed closes in the window
+so abandoned work stays visible as itself rather than being dropped or
+rewritten as success. Abandoned records are never modified.
+
+`period.exact` is False (and `qualifier` becomes `at_least`) when the scope's
+membership is incomplete — see **Incompleteness** below.
 
 `period.comparison` is the **equal-duration** window immediately preceding
 (`[start - (end - start), start)`), anchored to the period start rather than to
@@ -120,9 +161,23 @@ a chart built from `rows` still adds up; `reconciles` asserts it.
 person**. It answers to the session identity and nothing else: changing the
 whose-work selection changes the work counts and leaves this one exactly where
 it was. Same rule `/work/overview` keeps for `needs_you`, same bounded assignee
-scan (`_loops_assigned_to`, `named_only=True`). For a machine session it is
-`null` with `no_personal_identity_for_machine_session` — zero would be a claim
-about a person who does not exist here.
+scan (`_loops_assigned_to`, `named_only=True`), same handoff semantics
+(`loops._unresolved_handoffs`, so accepted / completed / declined handoffs
+resolve exactly as everywhere else).
+
+`needs_you` is `null` — never 0 — whenever the exact count cannot be
+established:
+
+| case | `unavailable_reason` |
+|---|---|
+| machine session, no person | `no_personal_identity_for_machine_session` |
+| assignee scan hit its cap | `assignment_scan_truncated` |
+
+`needs_you_at_least` carries what the (possibly capped) scan did find, as an
+explicitly labeled lower bound. The distinction matters: with 501 open
+handoffs where yours is the oldest, the id-DESC candidate scan fills entirely
+with other people's work, and a confident "0 needs you" would be the single
+worst thing this endpoint could say.
 
 ### `financial`
 Present only when the **resolved seat carries the `Cost` surface atom**.
@@ -155,15 +210,47 @@ implying "live". `null` when the record holds nothing of that kind.
 
 ### `completeness`
 `workspace_state` (`empty` | `populated`) distinguishes an empty workspace from
-a quiet period, plus per-block completeness flags and an `unavailable` list of
-`{field, reason}` so a renderer can hide a visual without re-inspecting every
-block.
+a quiet period, plus per-block completeness flags, `counts_exact`, and an
+`unavailable` list of `{field, reason}` so a renderer can hide a visual without
+re-inspecting every block.
+
+### Incompleteness: lower bounds vs totals
+
+The whose-work filter has two legs. Ownership is a plain column join and is
+always complete. The waiting-on leg is a stream fold over a **capped** scan
+(`_ASSIGNEE_SCAN_LIMIT`, 500 candidate loops). When that cap is hit the scope's
+membership is a SUBSET of the truth, and every count built on it is a lower
+bound rather than a total. The snapshot says so rather than presenting a
+partial count as exact:
+
+- `scope.membership_complete: false` + `membership_incomplete_reason`.
+- `period`, `current_state`, `completions_series` and `by_job` each carry
+  `exact: false` and `qualifier: "at_least"`.
+- `period.comparison` becomes **unavailable** with
+  `scope_membership_incomplete`. A delta between two lower bounds is not a
+  lower bound on the delta — the missing rows could sit on either side.
+- `completeness.unavailable` names every affected field.
+
+**`completions_series.reconciles` is not a completeness claim.** When `exact`
+is false the buckets and the aggregate are drawn from the same subset, so they
+agree with each other while both under-count. That is exactly why `exact` is
+reported separately.
+
+A company-breadth seat applies no person filter at all, so its membership is
+always complete regardless of the assignee cap. `attention` is separate: it is
+capped independently of the scope, and reports its own truncation.
 
 ### `navigation`
 `account_id`, and `carry_query` — the query params a Home link **must** carry
 into a drill-in so the scope and period survive the click. A drill-in that
 silently resets to "everyone, last 7 days" turns an investigation into a
-different question. `/work/items` today accepts `whose`, `person_id`,
+different question.
+
+`carry_query.whose` is the **effective** selector, not the raw query string: an
+unreadable selector is not echoed back (it would re-resolve to `everyone` and
+read as a deliberate widening), and a selector that ran is carried exactly as
+it ran. It cannot widen the view in any case — the destination re-resolves it
+against the same seat. `/work/items` today accepts `whose`, `person_id`,
 `workflow_id` and `status`; it has no period filter yet (see gaps).
 
 ## Query sources and performance
@@ -176,14 +263,42 @@ One connection, a fixed number of bounded aggregates, no N+1:
 | 2 | `GROUP BY cached_state` over open named work | same prefix |
 | 3 | `GROUP BY workflow_id` over the period's completions | same prefix; `workflows` PK for the join |
 | 4 | The period's `closed_at` values, `LIMIT 50_001`, for the local-day fold | same prefix |
-| 5 | `_loops_assigned_to` — the bounded assignee scan for `needs_you` | `idx_loops_account_state`, `idx_loop_events_loop_type` |
+| 5 | The whose-work filter's waiting-on leg and `needs_you`, from **one** shared assignee resolution (below) | `idx_loops_account_state`, `idx_loop_events_loop_type` |
 | 6 | Newest telemetry; and, when the seat allows, the period's cost aggregate | `idx_spans_account_started` (new, idempotent, both backends) |
+
+**Assignee resolution** (`database.assigned_handoff_targets`) answers "who is
+this waiting on?" once for the whole account, not once per person and once per
+loop:
+
+1. One candidate query, capped at `_ASSIGNEE_SCAN_LIMIT` (500 open
+   attention-state loops that have a handoff).
+2. Those candidates' **handoff events only**, fetched
+   `_ASSIGNEE_EVENT_CHUNK` (200) loops at a time and folded through the same
+   `loops._unresolved_handoffs` the state machine uses. Fetching only the four
+   handoff types keeps the retrieved volume proportional to handoffs rather
+   than to every activity event a busy loop accumulated; the fold ignores every
+   other type, so the answer is identical. Only the resolved target survives
+   each chunk, so memory is bounded by one chunk, not by the whole scan.
+3. One identity lookup per **distinct target**, however many people are asked
+   about.
+
+The result is cached for the life of the request, so the whose-work filter and
+the personal attention count share it. Measured on the reported fixture (500
+candidate handoffs, two people): **1,006 statements before, 6 after**; a whole
+team-scope snapshot request over that fixture stays under 40 statements. The
+statement count does not grow with the number of people and grows only per
+200-loop chunk with the number of candidates — see
+`test_home_snapshot_integrity.py`, which counts them rather than asserting a
+docstring. The 500-candidate cap remains, and is reported (see
+**Incompleteness**).
 
 - Nothing scans full trace histories, and nothing loops over open work items.
 - `GET /work/board` and `GET /work/summary` are **not** called (asserted in
   `test_home_snapshot.py`).
 - Statement timeout `_HOME_SNAPSHOT_TIMEOUT_MS` (8s) → 504, matching
-  `/work/overview`.
+  `/work/overview`. The statement count is small and bounded, but it is not a
+  fixed number: it varies with the number of candidate chunks and distinct
+  handoff targets.
 - **No LLM.** Nothing on this path calls or waits on a model; the test
   booby-traps the Anthropic SDK constructors so a call would raise.
 - **No cache.** The queries are cheap enough and a cache is the easiest way to
@@ -267,7 +382,23 @@ endpoint is correct on its own terms; the rest is a follow-up.
 6. **Named work only.** Untitled OTel loops are excluded, matching the rest of
    Work home. An org whose agents emit no `trovis.loop.title` sees an honest
    zero here and a populated Agents tab — confusing, but not wrong.
-7. **Postgres is not runtime-verified.** See Testing below.
+7. **The assignee scan is still capped at 500 candidates.** Past that, scoped
+   counts and personal attention are reported as incomplete rather than exact.
+   Removing the cap needs the "latest unresolved handoff" fold to become a
+   SQL-expressible predicate (a materialized per-loop assignee column,
+   maintained at ingest) — a schema change, not a query change.
+8. **`/work/items` rows still carry the locked five-value `status` enum**, so a
+   terminal close that was an abandonment arrives as `status: "done"`. Its
+   `whats_next` now reads "Closed — not completed" rather than "Done", and
+   `status=done` filters it out, so the count, the filter and the visible label
+   agree; only the wire enum value does not. Adding a sixth value touches
+   `board.js`, `home.js`, `workBoard.js`, `jobDetail.js` and `loops.js` — a
+   product change, deliberately not made in a data-foundation PR.
+9. **`/work/overview` has no incompleteness channel.** Its response keys are a
+   locked contract (`test_work_lean.py`), so a truncated assignee scan there is
+   logged rather than returned. `/home/snapshot` is the surface that reports it
+   structurally.
+10. **Postgres is not runtime-verified.** See Testing below.
 
 ## Next PR: evidence-backed AI findings
 
@@ -288,21 +419,36 @@ The analysis layer that reads this snapshot must:
 
 ## Testing
 
-`test_home_snapshot.py` covers company / reporting-branch / personal / custom
-scopes, broadening attempts, cross-account access, attention staying personal
-across scope selections, >50 items proving totals are not preview-derived,
-bucket/total and job/total reconciliation, registrations and nested activity
-not inflating completions, period boundaries, a DST boundary, missing history
-vs a real zero, financial surface present vs absent, org-wide cost alongside a
-narrower work scope, unpriced cost, an empty workspace, malformed input, and
-the absence of any model call.
+`test_home_snapshot.py` (contract) covers company / reporting-branch /
+personal / custom scopes, broadening attempts, cross-account access, attention
+staying personal across scope selections, >50 items proving totals are not
+preview-derived, bucket/total and job/total reconciliation, registrations and
+nested activity not inflating completions, period boundaries, a DST boundary,
+missing history vs a real zero, financial surface present vs absent, org-wide
+cost alongside a narrower work scope, unpriced cost, an empty workspace,
+malformed input, and the absence of any model call.
 
-**Backends exercised: SQLite only.** No Postgres server was available in this
-environment, so Postgres behaviour is verified *statically* by
-`test_work_pg_placeholders.py`, which binds the snapshot's totals SQL the way
-psycopg2 would and asserts the LIKE-wildcard escaping. That is not a runtime
-Postgres verification and should not be described as one.
+`test_home_snapshot_integrity.py` covers the four semantic defects this
+document describes: completion vs abandonment vs ingestion-artifact vs open
+work from one fixture (checking every completion-related field, plus
+`/work/overview` and `/work/items` as affected consumers); the assignee cap at
+501 items with the matching one oldest, for both personal attention and scoped
+membership; **counted** statements proving no per-person or per-item fan-out,
+including a team-scope request end to end; and scope metadata across
+company-breadth-without-reports, person-is-self, personal-breadth-asking-
+everyone, reporting-branch, custom levels, machine sessions and malformed
+selectors.
+
+**Backend exercised: SQLite 3.45.1 on CPython 3.11.15.** No Postgres server
+was available in this environment, so Postgres behaviour is verified
+*statically* by `test_work_pg_placeholders.py`, which binds the snapshot's
+totals SQL the way psycopg2 would and asserts the LIKE-wildcard escaping. That
+is **not** a runtime Postgres verification and should not be described as one.
 
 The example response in this repo's PR description is generated by
 `example_home_snapshot.py` from a throwaway seeded database — fixture data, not
-production data.
+production data. Its clock is pinned **before** anything runs (`_FrozenClock`
+installed into `database`, `loops` and `home_snapshot`), so the seeding, the
+lifecycle states, the period arithmetic and `generated_at` all read the same
+instant and the output is byte-identical on every run. Nothing is overwritten
+after querying.

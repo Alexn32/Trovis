@@ -1560,16 +1560,32 @@ class WorkOverview(BaseModel):
 class HomeScope(BaseModel):
     """Work scope: what was asked for, what was granted, what is possible."""
 
-    requested: str  # everyone | me | team | person (unreadable input -> everyone)
-    effective: str  # what the seat actually permitted
+    requested: str  # everyone | me | team | person
+    # The selector the server ACTUALLY applied. Derived from the resolution,
+    # never from whether the selector appears in `choices` — a company-breadth
+    # person with no reports who asks for `team` gets their own work, and
+    # calling that `everyone` would describe the opposite of the filter.
+    effective: str
+    # The raw value was not a known selector. It narrowed nothing (existing
+    # API behavior) and `effective` is `everyone`.
+    request_unreadable: bool = False
     person_id: int | None = None
-    choices: list[str] = Field(default_factory=list)  # selectors this seat may use
-    narrowed_from_request: bool = False
+    # What a CONTROL should offer. Advisory display affordance — not the
+    # permission ceiling, and not what ran.
+    choices: list[str] = Field(default_factory=list)
+    selector_offered: bool = True  # is `effective` one a control would draw?
+    # The seat removed people the selector asked for (requests narrow, never
+    # widen).
+    clamped_by_seat: bool = False
     breadth: str | None = None  # seat atom: self | subtree | company
     scope_level_id: int | None = None
     role_id: int | None = None
     filtered: bool = False  # False = company-wide, no person filter at all
     people_in_scope: int | None = None  # null when unfiltered, NOT "nobody"
+    # False when the whose-work filter's waiting-on leg hit its scan cap. Every
+    # count over this scope is then a LOWER BOUND, not a total.
+    membership_complete: bool = True
+    membership_incomplete_reason: str | None = None
     account_id: int | None = None
     viewer_user_id: int | None = None
 
@@ -1600,6 +1616,14 @@ class HomePeriod(BaseModel):
     timezone: str  # IANA zone the boundaries and buckets were computed in
     days: int
     completed: int = 0
+    # Terminal closes in the window that were NOT completions (abandoned by
+    # the sweep, or an ingestion artifact). Reported so abandoned work stays
+    # visible as itself instead of being rewritten as success or dropped.
+    abandoned: int = 0
+    # False when the scope's membership is incomplete: `completed` is then an
+    # explicitly labeled lower bound, and `qualifier` says "at_least".
+    exact: bool = True
+    qualifier: str = "exact"  # exact | at_least
     comparison: HomeComparison
 
 
@@ -1615,6 +1639,8 @@ class HomeCurrentState(BaseModel):
     moving: int = 0
     waiting_on_person: int = 0
     blocked: int = 0
+    exact: bool = True
+    qualifier: str = "exact"  # exact | at_least
     # There is no history of these values in the record, so no trend is
     # offered. Manufacturing one from today's numbers would be a chart of
     # nothing.
@@ -1642,7 +1668,12 @@ class HomeCompletionSeries(BaseModel):
     points: list[HomeSeriesPoint] = Field(default_factory=list)
     total: int | None = None  # sum of the buckets
     aggregate_total: int = 0  # the period COUNT, computed separately
+    # Buckets agree with the aggregate. NOT a completeness claim: when `exact`
+    # is False both are drawn from the same subset, so they agree while both
+    # under-count.
     reconciles: bool | None = None
+    exact: bool = True
+    qualifier: str = "exact"  # exact | at_least
 
 
 class HomeJobRow(BaseModel):
@@ -1666,6 +1697,8 @@ class HomeJobBreakdown(BaseModel):
     total_job_count: int = 0
     aggregate_total: int = 0
     reconciles: bool = True
+    exact: bool = True
+    qualifier: str = "exact"  # exact | at_least
 
 
 class HomeAttention(BaseModel):
@@ -1677,7 +1710,14 @@ class HomeAttention(BaseModel):
 
     available: bool = True
     unavailable_reason: str | None = None
+    # The exact count, or None when it cannot be established: a machine
+    # session (no person), or a truncated assignee scan. Never a confident 0
+    # standing in for either — "nothing needs you" is the worst thing this
+    # endpoint could get wrong.
     needs_you: int | None = None
+    # What the (possibly capped) scan did find: an explicitly labeled lower
+    # bound, useful even when the total is unavailable.
+    needs_you_at_least: int | None = None
     viewer_user_id: int | None = None
     scoped_to: str = "session_identity"
     unplaced_viewer: bool | None = None
@@ -1744,6 +1784,10 @@ class HomeCompleteness(BaseModel):
     job_breakdown_complete: bool = True
     comparison_available: bool = False
     financial_available: bool = False
+    # False when the whose-work scan capped: every work count in the snapshot
+    # is then a lower bound rather than a total.
+    scope_membership_complete: bool = True
+    counts_exact: bool = True
     unavailable: list[HomeUnavailable] = Field(default_factory=list)
 
 
