@@ -273,12 +273,102 @@ class InvestigationSession:
         self.transcript.append({"tool": name, "input": raw_input, "ok": "error" not in result})
         return result
 
-    def result_text(self, result: dict[str, Any]) -> str:
-        """The tool result as the model sees it, hard-capped."""
-        blob = json.dumps(result, default=str)
+    def forget_beyond(self, kind: str, keep_refs: set[str]) -> None:
+        """Drop ledger entries of one kind that the model was not shown.
+
+        Called when `fit` trims a result: a finding may only cite what the
+        investigation actually received, so evidence that fell to the size
+        budget must not stay quotable.
+        """
+        for key in [
+            k for k in self.evidence
+            if k.startswith(f"{kind}:") and k.split(":", 1)[1] not in keep_refs
+        ]:
+            self.evidence.pop(key, None)
+
+    # Lists that may be shortened to make a result fit, in the order they are
+    # sacrificed. Rows first: dropping the 20th comparable run costs less than
+    # dropping the events that explain the one run we opened.
+    _TRIMMABLE = ("runs", "waits", "events", "failed_spans")
+
+    def fit(self, result: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Shrink a result to the size budget WITHOUT breaking its JSON.
+
+        The bug this replaces: `result_text` serialized the payload and then
+        sliced the string at 6,000 characters, so a permitted 25-row result
+        with long titles produced invalid JSON — and the investigation loop
+        called `json.loads` on it and raised `JSONDecodeError`.
+
+        So the STRUCTURE is trimmed before serialization, not the text after
+        it. Whole list entries are dropped (never half an object), the first
+        entries are kept so identifiers and the earliest records survive, and
+        what was dropped is stated in `size_truncated` rather than implied.
+
+        The payload is serialized at most a handful of times — once per trim
+        round, halving the list each time — and the returned string is the one
+        the caller sends, so nothing is re-serialized downstream.
+
+        Returns (payload_as_sent, serialized) so the evidence ledger can be
+        reconciled with what the model actually received.
+        """
+        trimmed = dict(result)
+        dropped: dict[str, int] = {}
+        blob = json.dumps(trimmed, default=str)
+        for key in self._TRIMMABLE:
+            if len(blob) <= MAX_TOOL_RESULT_CHARS:
+                break
+            items = trimmed.get(key)
+            if not isinstance(items, list) or not items:
+                continue
+            while len(blob) > MAX_TOOL_RESULT_CHARS and items:
+                # Halve rather than peel one at a time: a 25-row result with
+                # long titles would otherwise cost 20 serializations.
+                keep = max(1, len(items) // 2) if len(items) > 1 else 0
+                dropped[key] = dropped.get(key, 0) + (len(items) - keep)
+                items = items[:keep]
+                trimmed[key] = items
+                blob = json.dumps(trimmed, default=str)
+        if dropped:
+            # The ledger must match what the model was shown. Evidence that
+            # fell to the size budget is not quotable — citing it would be
+            # citing something never received.
+            if "runs" in dropped and isinstance(trimmed.get("runs"), list):
+                self.forget_beyond(
+                    "run", {str(r.get("run_id")) for r in trimmed["runs"]}
+                )
+            if "waits" in dropped and isinstance(trimmed.get("waits"), list):
+                self.forget_beyond(
+                    "run", {str(r.get("run_id")) for r in trimmed["waits"]}
+                )
+            if "events" in dropped and isinstance(trimmed.get("events"), list):
+                self.forget_beyond(
+                    "run_event", {str(e.get("event_id")) for e in trimmed["events"]}
+                )
+            trimmed["size_truncated"] = {
+                "dropped": dropped,
+                "reason": "result exceeded the per-call size budget",
+                "budget_chars": MAX_TOOL_RESULT_CHARS,
+                "note": (
+                    "Entries were dropped from the END of these lists. What "
+                    "remains is a subset; do not read it as the whole set."
+                ),
+            }
+            blob = json.dumps(trimmed, default=str)
         if len(blob) > MAX_TOOL_RESULT_CHARS:
-            blob = blob[:MAX_TOOL_RESULT_CHARS] + '…","truncated_for_size":true}'
-        return blob
+            # Nothing left to drop — the scalar fields alone are over budget.
+            # Replace rather than slice: a valid small object beats a large
+            # broken one.
+            trimmed = {
+                "error": "result_too_large_to_send",
+                "tool_result_dropped": True,
+                "budget_chars": MAX_TOOL_RESULT_CHARS,
+            }
+            blob = json.dumps(trimmed)
+        return trimmed, blob
+
+    def result_text(self, result: dict[str, Any]) -> str:
+        """The serialized, size-bounded result. Always valid JSON."""
+        return self.fit(result)[1]
 
     # -- tools ----------------------------------------------------------
     def _tool_list_comparable_runs(self, inp: dict[str, Any]) -> dict[str, Any]:

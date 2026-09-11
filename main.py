@@ -1649,6 +1649,9 @@ def home_findings(
         )
         if f is not None
     ]
+    # The newest analysis behind what is being served. Feeds both the debounce
+    # floor and the "these came from a previous analysis" flag, so a refresh in
+    # flight is never presented as the answer it has not produced yet.
     newest = max((r.get("analyzed_at") or "" for r in rows), default=None) or None
     status = analysis_jobs.ensure_analysis(
         req, findings_count=len(rows), newest_analyzed_at=newest

@@ -98,6 +98,7 @@ two sets of instructions.
 | `DISCOVERY_PROMPT` | what deserves a question at all; returns `[]` freely |
 | `INVESTIGATION_PROMPT` | seek evidence for **and against**; drives the tool loop |
 | `ASSESSMENT_PROMPT` | does the evidence carry the wording? narrow or reject |
+| `REVISION_PROMPT` | rewrite with the flagged assertions removed, or withdraw |
 | `RANKING_PROMPT` | order for this reader; merge duplicate symptoms |
 | `COMPOSITION_PROMPT` | write it; add meaning rather than repeat metrics |
 | `OPTIMIZATION_PROMPT` | composition's stricter sibling for `opportunity` |
@@ -142,8 +143,24 @@ cannot supply an account, widen a scope, write SQL, or fetch a URL.
 
 Exhausting a budget is a **reportable outcome**, not an error: the assessment
 step is told what could not be seen, and the finding carries
-`coverage.retrieval`. If the limits prevent a conclusion, the flow abstains or
-publishes a qualified observation — never a guessed diagnosis.
+`coverage.retrieval_complete` / `retrieval_exhausted`. If the limits prevent a
+conclusion, the flow abstains or publishes a qualified observation — never a
+guessed diagnosis.
+
+### Result size
+
+A tool result is bounded by trimming the **structure** before serializing, not
+by slicing the string after. `InvestigationSession.fit` drops whole list
+entries (never half an object), keeps the earliest entries so identifiers
+survive, states what it dropped in `size_truncated`, and serializes at most a
+handful of times by halving rather than peeling. The previous version sliced
+serialized JSON at 6,000 characters and appended text, and the investigation
+loop then called `json.loads` on it — a permitted 25-row result with long
+titles raised `JSONDecodeError`.
+
+Evidence dropped for size is also **removed from the ledger**, so a finding
+cannot cite a row the model was never shown. What the investigation and the
+assessment received is exactly what may be published.
 
 ## Validation before publishing
 
@@ -167,9 +184,21 @@ anything reaches the database.
 - **Verdicts are not observations** — "wasteful", "redundant", "inefficient"
   are judgements about whether work was worth doing. The record cannot hold
   them, so they may not be `observation` claims.
-- **Coverage** — when the snapshot's counts are a lower bound, a percentage or
-  an exhaustive claim ("none", "only", "all of") is rejected, and confidence
-  drops to `qualified`.
+- **Coverage** — SERVER-DERIVED by `findings.derive_coverage`, never merged
+  with what the model supplied. An earlier version used `setdefault`, so a
+  draft asserting `counts_exact: true` over an incomplete snapshot published
+  "No other job is affected" as supported. Two independent sources feed it: the
+  snapshot's own completeness, and the investigation's **retrieval budget** — a
+  capped search did not see everything either. When either is short, a
+  percentage or an exhaustive claim ("none", "only", "all of") is rejected, a
+  chart label implying a whole is rejected and its points are marked
+  `partial`, and confidence drops to `qualified`.
+
+  The distinction this preserves: *"these four runs stopped at the same step"*
+  is an exact observation about records we actually read and stays publishable;
+  *"no other job is affected"* is an exhaustive claim about a scope we did not
+  finish searching and does not. `coverage.supports_exhaustive_claims` is the
+  single flag that separates them.
 - **Financial gate** — decided by what the reader would *see*, not by a flag
   the model sets.
 - **Anti-restatement** — a finding that repeats a count the reader can already
@@ -229,8 +258,8 @@ one consistent view. The list returns findings + `analysis` status; the detail
 returns what was observed, why it matters, supporting **and** contradicting
 evidence, what is uncertain, and one supported next step.
 
-`analysis.state` is one of `current`, `queued`, `running`, `failed`,
-`unavailable`. **`unavailable` / `no_model_configured` is a real product
+`analysis.state` is one of `current`, `queued`, `running`, `debounced`,
+`failed`, `unavailable`. **`unavailable` / `no_model_configured` is a real product
 state**: the snapshot stays fully usable and analysis is explicitly absent.
 There is no deterministic fallback copy presented as an AI finding.
 
@@ -252,6 +281,16 @@ refuted hypothesis, and on an assessment refusal; budgets; scope isolation;
 revoked financial visibility; lifecycle; stale evidence; and the no-model-key
 path.
 
+`test_home_findings_review.py` — **73 checks** for the six review findings:
+narrowing that actually narrows (including withdrawal, repeated overstatement,
+unusable assessments and deadline expiry); server-derived coverage with
+deliberately wrong, omitted and partial-retrieval inputs; JSON-safe truncation
+of oversized run lists, run details, events, long Unicode strings and nested
+payloads through the real tool loop; stale recovery **through `run_one()`**
+with concurrency, competing recovery, claim fencing and exhausted-job
+retirement; freshness under a controlled clock; and scheduling coalescence with
+interleaved ingestion and reads.
+
 `test_home_findings_eval.py` — **a 9-case rubric** with must-claim,
 must-not-claim and abstention expectations, scoring support, relevance,
 specificity, actionability, false positives and missed meaningful findings.
@@ -269,8 +308,16 @@ Two of the eval cases were written before the checks that catch them and
 initially **failed**, which is how the recovered-error and
 repetition-is-not-waste rules got written.
 
-**Backend exercised: SQLite only**, on CPython 3.11.15. Postgres is not
-runtime-verified here.
+**Backend exercised: SQLite 3.45.1 only, on CPython 3.11.15.** Postgres is
+**not** runtime-verified here; the schema and queries use the shared dual-backend
+helpers (`PH`, `_connect`, `_cursor`, `_try_add_column`) and the new partial
+unique index and `scope_key` column are written for both, but no Postgres server
+was available to run against.
+
+Scripted pipeline validation and live-model quality evaluation stay separate:
+`test_home_findings*.py` script every model response and measure the machinery;
+the eval rubric scores canned candidates and measures the guard. Neither runs a
+live model, and neither is evidence that the real model is insightful.
 
 ## Known limitations
 
@@ -290,8 +337,15 @@ runtime-verified here.
 6. **One analysis per process at a time** by default. Sufficient for a single
    replica; a multi-replica deployment would want the concurrency ceiling
    raised and the claim query's behaviour re-checked under real contention.
-7. **The evidence version is coarse** (15-minute buckets). A burst of ingest
-   inside one bucket will not trigger re-analysis until the bucket rolls.
+7. **Scheduling is coarse on purpose.** A burst of ingest inside one 15-minute
+   bucket does not trigger re-analysis until the bucket rolls, and the debounce
+   floor can hold a further window on top of that. The exact evidence version
+   is always reported, so a reader can see the records have moved even while
+   the analysis behind them has not caught up.
+8. **Revision is bounded at two attempts.** A model that keeps overstating has
+   its candidate withheld rather than getting unlimited tries to find wording
+   that slips through — which means a real finding can be lost to a persistently
+   bad first draft.
 
 ## Next: what execution would need
 

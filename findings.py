@@ -99,6 +99,63 @@ _EMPTY_PHRASES = re.compile(
 )
 
 
+# Wording that claims a WHOLE. Rejected on a chart label, and on a claim, when
+# the search behind it did not finish.
+_EXHAUSTIVE_RE = re.compile(
+    r"\b(all|every|total|overall|entire|complete|none|no other|only)\b", re.I
+)
+
+
+def derive_coverage(
+    snapshot: dict[str, Any], *, retrieval: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """What this analysis could actually establish. SERVER-DERIVED, always.
+
+    Two independent ways a search comes up short, and both belong here:
+
+      the SCOPE          the snapshot's own completeness — whether the counts
+                         are exact, whether the scope's membership is whole,
+                         whether an absence was established at all.
+      the RETRIEVAL      whether the investigation's own budget ran out. A
+                         capped scan saw a subset, and a claim about what is
+                         NOT there cannot rest on a subset.
+
+    Nothing a model says is merged in. An earlier version used `setdefault`,
+    which let a draft assert `counts_exact: true` over an incomplete snapshot
+    and publish "No other job is affected" as supported. Completeness is a fact
+    about the search, and the model did not perform the search.
+    """
+    completeness = snapshot.get("completeness") or {}
+    retrieval = retrieval or {}
+    retrieval_complete = bool(retrieval.get("complete", True))
+    return {
+        "counts_exact": bool(completeness.get("counts_exact", True)),
+        "scope_membership_complete": bool(
+            completeness.get("scope_membership_complete", True)
+        ),
+        "absence_established": bool(completeness.get("absence_established", True)),
+        "scope_state": completeness.get("scope_state"),
+        # The investigation's own bound, carried onto the finding so a reader
+        # (and a later analysis) can see the search was partial.
+        "retrieval_complete": retrieval_complete,
+        "retrieval_exhausted": sorted(retrieval.get("exhausted") or []),
+        "retrieval": {
+            k: retrieval.get(k) for k in
+            ("tool_calls", "rows_retrieved", "events_retrieved")
+            if k in retrieval
+        },
+        # The distinction that has to survive: we may say exactly what the
+        # records we READ show, and we may not say what the whole scope
+        # contains unless both halves are complete.
+        "supports_exhaustive_claims": bool(
+            completeness.get("counts_exact", True)
+            and completeness.get("scope_membership_complete", True)
+            and completeness.get("absence_established", True)
+            and retrieval_complete
+        ),
+    }
+
+
 class FindingRejected(Exception):
     """A finding failed a deterministic check. Carries every reason."""
 
@@ -217,6 +274,7 @@ def validate_finding(
     evidence_index: dict[str, dict[str, Any]],
     calculations: dict[str, dict[str, Any]],
     financial_visible: bool,
+    retrieval: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Check a model-proposed finding against the record. Raises on rejection.
 
@@ -226,6 +284,11 @@ def validate_finding(
 
     `calculations` holds the server-side computations performed this analysis.
     Numeric claims must resolve to one of these or to a snapshot path.
+
+    `retrieval` is the investigation's budget report. It is part of coverage
+    for the same reason the snapshot's completeness is: a search that stopped
+    at a cap did not see everything, and a claim about what is NOT there
+    cannot rest on it.
 
     Returns the finding with normalized fields and a `validation` block. A
     finding that survives may still be narrowed: a `hypothesis` whose evidence
@@ -413,22 +476,22 @@ def validate_finding(
             )
 
     # --- coverage and exactness ----------------------------------------
-    completeness = snapshot.get("completeness") or {}
-    coverage = out.get("coverage")
-    if not isinstance(coverage, dict):
-        coverage = {}
-    coverage.setdefault("counts_exact", bool(completeness.get("counts_exact", True)))
-    coverage.setdefault(
-        "scope_membership_complete",
-        bool(completeness.get("scope_membership_complete", True)),
-    )
-    coverage.setdefault(
-        "absence_established", bool(completeness.get("absence_established", True))
-    )
+    # DERIVED, never merged. `setdefault` used to let a model-supplied
+    # `coverage` stand, so a draft that simply asserted `counts_exact: true`
+    # over an incomplete snapshot got "No other job is affected" published as
+    # supported. Completeness is a fact about the SEARCH, and the only things
+    # that know it are the snapshot and the retrieval budget.
+    coverage = derive_coverage(snapshot, retrieval=retrieval)
     out["coverage"] = coverage
-    if not coverage["counts_exact"]:
-        # The snapshot's counts are a floor. A percentage or a "no X at all"
-        # built on a floor is not a weaker statement, it is a wrong one.
+    if not coverage["counts_exact"] or not coverage["retrieval_complete"]:
+        # The counts are a floor — either because the scope's membership is
+        # incomplete, or because retrieval stopped before the end. A percentage
+        # or a "no X at all" built on a floor is not a weaker statement, it is
+        # a wrong one. Note the distinction this preserves: "these four runs
+        # stopped at the same step" is an exact observation about records we
+        # actually read, and stays publishable; "no other job is affected" is
+        # an exhaustive claim about a scope we did not finish searching, and
+        # does not.
         for claim in claims:
             if not isinstance(claim, dict):
                 continue
@@ -437,8 +500,10 @@ def validate_finding(
                 r"\b(none|no other|never|only|all of)\b", text, re.I
             ):
                 reasons.append(
-                    "a lower-bound count cannot support a percentage or an "
-                    f"exhaustive claim: {text[:60]!r}"
+                    "an incomplete search cannot support a percentage or an "
+                    f"exhaustive claim: {text[:60]!r} "
+                    f"(counts_exact={coverage['counts_exact']}, "
+                    f"retrieval_complete={coverage['retrieval_complete']})"
                 )
 
     # --- financial gate ------------------------------------------------
@@ -484,6 +549,16 @@ def validate_finding(
                         # The server's number wins. The model labels; it does
                         # not supply chart values.
                         point["value"] = resolved
+                    # A label that says "all" or "total" over an incomplete
+                    # search reads as a whole where the data is a floor.
+                    if not coverage["counts_exact"] or not coverage["retrieval_complete"]:
+                        label = str(point.get("label") or "")
+                        if _EXHAUSTIVE_RE.search(label):
+                            reasons.append(
+                                f"chart label {label[:40]!r} implies a complete "
+                                "picture the evidence does not cover"
+                            )
+                        point["partial"] = True
 
     if reasons:
         raise FindingRejected(reasons)
@@ -503,7 +578,11 @@ def validate_finding(
         confidence = "qualified"
     if claim_kind == "hypothesis":
         confidence = "qualified"
-    if not coverage["counts_exact"] or not coverage["scope_membership_complete"]:
+    if not (
+        coverage["counts_exact"]
+        and coverage["scope_membership_complete"]
+        and coverage["retrieval_complete"]
+    ):
         confidence = "qualified"
     out["confidence"] = confidence
     out["validation"] = {

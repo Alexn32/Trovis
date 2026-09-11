@@ -1963,13 +1963,21 @@ class AnalysisStatus(BaseModel):
     deterministic fallback copy presented as an AI finding.
     """
 
-    state: str  # current | queued | running | failed | unavailable
+    state: str  # current | queued | running | debounced | failed | unavailable
     reason: str | None = None
     enqueued: bool = False
     job_id: int | None = None
     stale_findings: bool = False
+    # True when the findings served alongside this status came from an EARLIER
+    # analysis than the one now queued, running, or failed. A refresh in flight
+    # must not read as the answer it has not produced yet, and a failed refresh
+    # must not read as a successful investigation that found nothing.
+    findings_from_previous_analysis: bool = False
     previous_analysis_at: str | None = None
     completed_at: str | None = None
+    # How long this audience waits before another investigation may start,
+    # whatever evidence arrives meanwhile. Set only on `debounced`.
+    debounce_seconds: int | None = None
     evidence_version: str | None = None
     prompt_version: str | None = None
 

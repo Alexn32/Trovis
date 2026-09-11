@@ -66,6 +66,11 @@ COMPOSE_TOKENS = 3000
 MAX_CANDIDATES = 4
 MAX_INVESTIGATION_TURNS = 6
 MAX_FINDINGS_PUBLISHED = 5
+# How many times one candidate may be rewritten after a narrowing verdict.
+# Bounded and charged to the same wall-clock and token budgets as everything
+# else: a model that keeps overstating does not get unlimited attempts to
+# find wording that slips through.
+MAX_REVISIONS = 2
 
 
 def _f(name: str, default: float) -> float:
@@ -267,6 +272,32 @@ Return JSON only:
 Omit `value` and `metric_ref` on a claim that carries no number.
 """
 
+REVISION_PROMPT = """You are Trovis, rewriting a finding the assessment would not publish as written.
+
+The evidence did not change. The WORDING did more than the evidence carries, \
+and your job is to say only the part that stands up.
+
+Remove every assertion the assessment flagged. In particular remove:
+- a CAUSE the evidence does not establish ("X caused Y", "because of X",
+  "due to X", "an outage") when all you have is that things happened together
+- a scale or a scope the evidence does not cover ("all", "every", "none",
+  "always", a percentage over an incomplete count)
+- a consequence nobody measured ("this is costing you", "customers are
+  affected")
+
+Keep the observation. "Four runs stopped at the same step" is worth publishing \
+without "because the approval service is down". If removing the unsupported \
+parts leaves nothing worth a reader's time, say so and return \
+{"withdraw": true} — withdrawing is a correct answer and much better than a \
+softened version of the same overreach.
+
+Rewrite the TITLE, the EXPLANATION, the CONSEQUENCE, every CLAIM and the \
+NEXT STEP text. An unsupported assertion left in any one of those is still \
+published to a reader.
+""" + _SHARED_RULES + """
+Return JSON only — the same shape as composition, or {"withdraw": true}.
+"""
+
 OPTIMIZATION_PROMPT = """You are Trovis, proposing one improvement to how this work runs.
 
 Propose a specific, testable improvement tied to an OBSERVED MECHANISM — not a \
@@ -440,25 +471,19 @@ def investigate(
         if draft is None:
             report["abstained"].append(f"{candidate.get('topic')}: nothing composable")
             continue
-        assessed = _assess(draft, outcome, session, deadline)
-        if assessed is None or assessed.get("decision") == "reject":
+        settled = _settle(candidate, draft, outcome, brief, snapshot, session, deadline)
+        if settled is None:
             report["rejected"].append({
                 "topic": candidate.get("topic"),
-                "reason": (assessed or {}).get("reason", "assessment refused it"),
+                "reason": "no wording the evidence supports",
             })
             continue
-        draft["claim_kind"] = assessed.get("claim_kind") or draft.get("claim_kind") \
-            or outcome.get("claim_kind") or "observation"
-        draft["confidence"] = (
-            "qualified" if assessed.get("decision") == "narrow"
-            else assessed.get("confidence") or outcome.get("verdict") or "qualified"
-        )
-        draft["category"] = candidate.get("category") or "attention"
-        draft["topic"] = candidate.get("topic") or "finding"
-        draft["uncertainty"] = list(draft.get("uncertainty") or []) + list(
-            outcome.get("unknown") or []
-        )
-        composed.append(draft)
+        if settled.get("withheld"):
+            report["rejected"].append({
+                "topic": candidate.get("topic"), "reason": settled["withheld"],
+            })
+            continue
+        composed.append(settled["draft"])
 
     if not composed:
         report["budget"] = session.budget.report()
@@ -475,6 +500,9 @@ def investigate(
                 evidence_index=session.evidence,
                 calculations=session.calculations,
                 financial_visible=financial_visible,
+                # The investigation's own bound is part of coverage: a capped
+                # search cannot support a claim about what is not there.
+                retrieval=session.budget.report(),
             )
         except findings_mod.FindingRejected as exc:
             report["rejected"].append({
@@ -498,11 +526,10 @@ def investigate(
             "timezone": (snapshot.get("period") or {}).get("timezone"),
             "rank_score": float(draft.get("rank_score") or (1.0 - rank_index * 0.1)),
         }
-        # Coverage rides along so the reader can see what the analysis could
-        # and could not establish, alongside the claim itself.
+        # Coverage was derived by the validator from the snapshot and the
+        # retrieval budget; only the deadline is news to it.
         record["coverage"] = {
             **(record.get("coverage") or {}),
-            "retrieval": session.budget.report(),
             "deadline_hit": deadline.hit,
         }
         database.upsert_finding(account_id, scope_key, record)
@@ -625,12 +652,16 @@ def _investigate_one(
             if getattr(block, "type", None) != "tool_use":
                 continue
             payload = session.run(block.name, dict(block.input or {}))
+            # `fit` bounds the STRUCTURE and serializes once. The payload it
+            # returns is exactly what the model is shown, so the evidence it
+            # may later cite matches what it actually received — and the
+            # string is never re-parsed, which is what used to raise
+            # JSONDecodeError on a sliced result.
+            sent, _blob = session.fit(payload)
             results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
-                "content": _untrusted(json.loads(session.result_text(payload))
-                                      if session.result_text(payload).startswith("{")
-                                      else payload),
+                "content": _untrusted(sent),
             })
         convo.append({"role": "user", "content": results})
         if not session.budget.can_call():
@@ -650,6 +681,142 @@ def _investigate_one(
     parsed["evidence_available"] = sorted(session.evidence)[:60]
     parsed["calculations_available"] = sorted(session.calculations)[:60]
     return parsed
+
+
+def _settle(
+    candidate: dict[str, Any],
+    draft: dict[str, Any],
+    outcome: dict[str, Any],
+    brief: dict[str, Any],
+    snapshot: dict[str, Any],
+    session: investigation_tools.InvestigationSession,
+    deadline: Deadline,
+) -> dict[str, Any] | None:
+    """Assess, and REWRITE if the assessment narrows. Returns a publishable
+    draft, a `withheld` reason, or None.
+
+    The bug this exists to close: `narrow` used to change the confidence label
+    and keep the sentence. A finding that said "the approval service outage
+    caused these runs to stop" was published as `qualified` over an assessment
+    that had explicitly found no evidence of an outage or of causation — the
+    reader saw the causal claim, and "qualified" does not unsay it. Softening a
+    label is not the same as removing an assertion.
+
+    So a narrowing verdict now sends the draft back to be REWRITTEN with the
+    flagged assertions removed, and the rewrite is assessed again. Bounded at
+    MAX_REVISIONS attempts, charged to the same wall clock as everything else.
+    If no revision survives assessment, the candidate is withheld.
+
+    Three failure modes all end in withholding rather than publishing:
+      * the assessment could not be parsed or named no decision — an
+        unassessed draft is not a publishable one;
+      * the deadline expired before a verdict — same;
+      * the reviser gave up (`withdraw`) or produced nothing composable.
+    """
+    attempt = 0
+    current = draft
+    while True:
+        if not deadline.ok():
+            # An unassessed draft never becomes publishable by running out of
+            # time. Publishing here would mean the deadline decided the
+            # editorial question.
+            return {"withheld": "deadline reached before the finding was assessed"}
+        assessed = _assess(current, outcome, session, deadline)
+        decision = (assessed or {}).get("decision")
+        if assessed is None or decision not in ("publish", "narrow", "reject"):
+            return {"withheld": "assessment returned no usable decision"}
+        if decision == "reject":
+            return {"withheld": (assessed.get("reason") or "assessment refused it")[:200]}
+        if decision == "publish":
+            return {"draft": _finalize(current, candidate, outcome, assessed,
+                                       narrowed=attempt > 0)}
+
+        # narrow
+        attempt += 1
+        if attempt > MAX_REVISIONS:
+            return {"withheld": "wording could not be narrowed to what the evidence carries"}
+        revised = _revise(current, assessed, outcome, brief, snapshot, session, deadline)
+        if revised is None:
+            return {"withheld": (
+                "narrowing required, and no supported rewording was produced: "
+                + (assessed.get("reason") or "")[:120]
+            )}
+        current = revised
+
+
+def _finalize(
+    draft: dict[str, Any],
+    candidate: dict[str, Any],
+    outcome: dict[str, Any],
+    assessed: dict[str, Any],
+    *,
+    narrowed: bool,
+) -> dict[str, Any]:
+    """Stamp the settled draft with what the assessment concluded."""
+    out = dict(draft)
+    out["claim_kind"] = (
+        assessed.get("claim_kind") or out.get("claim_kind")
+        or outcome.get("claim_kind") or "observation"
+    )
+    # A draft that needed rewriting is qualified even if the rewrite reads
+    # cleanly: the first attempt overstated, and that is information about how
+    # far the evidence goes.
+    out["confidence"] = (
+        "qualified" if narrowed
+        else assessed.get("confidence") or outcome.get("verdict") or "qualified"
+    )
+    out["category"] = candidate.get("category") or "attention"
+    out["topic"] = candidate.get("topic") or "finding"
+    out["uncertainty"] = list(out.get("uncertainty") or []) + list(
+        outcome.get("unknown") or []
+    )
+    if narrowed:
+        out["revised"] = True
+    return out
+
+
+def _revise(
+    draft: dict[str, Any],
+    assessed: dict[str, Any],
+    outcome: dict[str, Any],
+    brief: dict[str, Any],
+    snapshot: dict[str, Any],
+    session: investigation_tools.InvestigationSession,
+    deadline: Deadline,
+) -> dict[str, Any] | None:
+    """Rewrite a finding with the flagged assertions removed.
+
+    No new evidence is retrieved — the evidence did not change, the wording
+    did. `withdraw` is an explicitly allowed answer and comes back as None,
+    because a finding that is nothing once the overreach is gone should not be
+    published as a softened version of the overreach.
+    """
+    if not deadline.ok():
+        return None
+    user = (
+        "SCOPE:\n" + json.dumps(brief, indent=2)
+        + "\n\nTHE FINDING AS WRITTEN:\n" + json.dumps(draft, indent=2, default=str)
+        + "\n\nWHY IT CANNOT BE PUBLISHED AS WRITTEN:\n"
+        + json.dumps({
+            "reason": assessed.get("reason"),
+            "overstated_phrases": assessed.get("overstated_phrases") or [],
+        }, indent=2, default=str)
+        + "\n\nWHAT THE EVIDENCE ACTUALLY SHOWED:\n"
+        + json.dumps(outcome, indent=2, default=str)
+        + "\n\nEVIDENCE KEYS YOU MAY CITE (anything else will be rejected):\n"
+        + json.dumps(sorted(session.evidence), indent=2)
+        + "\n\nSERVER CALCULATIONS YOU MAY CITE AS calc:<id>:\n"
+        + json.dumps(session.calculations, indent=2, default=str)
+        + "\n\nRewrite it, or withdraw it."
+    )
+    parsed = _ask(REVISION_PROMPT, user, COMPOSE_TOKENS)
+    if not isinstance(parsed, dict) or parsed.get("withdraw") or not parsed.get("title"):
+        return None
+    # Carry forward what the reviser is not responsible for, so a rewrite that
+    # omits `uncertainty` does not quietly drop what was unknown.
+    merged = dict(draft)
+    merged.update(parsed)
+    return merged
 
 
 def _compose(

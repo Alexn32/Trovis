@@ -483,7 +483,7 @@ with TestClient(main.app) as c:
                                "evidence": [f"run:{STUCK_IDS[0]}"]}]}
     _, reasons = try_validate(pct, snapshot=lower_bound_snap)
     check("a lower-bound count cannot become a percentage",
-          reasons and any("lower-bound" in r for r in reasons))
+          reasons and any("incomplete search" in r for r in reasons))
     exhaustive = {**base, "claims": [{"text": "No other job is affected.",
                                       "kind": "observation",
                                       "evidence": [f"run:{STUCK_IDS[0]}"]}]}

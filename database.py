@@ -1588,6 +1588,7 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     id            SERIAL    PRIMARY KEY,
     account_id    INTEGER   NOT NULL,
     job_key       TEXT      NOT NULL,
+    scope_key     TEXT,
     status        TEXT      NOT NULL DEFAULT 'queued',
     request       TEXT      NOT NULL DEFAULT '{}',
     attempts      INTEGER   NOT NULL DEFAULT 0,
@@ -1605,6 +1606,7 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id    INTEGER NOT NULL,
     job_key       TEXT    NOT NULL,
+    scope_key     TEXT,
     status        TEXT    NOT NULL DEFAULT 'queued',
     request       TEXT    NOT NULL DEFAULT '{}',
     attempts      INTEGER NOT NULL DEFAULT 0,
@@ -1742,6 +1744,7 @@ _INDEXES = [
     # Analysis queue: the worker claims by status, the enqueue path dedups by key.
     "CREATE INDEX IF NOT EXISTS idx_analysis_jobs_status ON analysis_jobs(status, id)",
     "CREATE INDEX IF NOT EXISTS idx_analysis_jobs_key ON analysis_jobs(account_id, job_key, status)",
+    "CREATE INDEX IF NOT EXISTS idx_analysis_jobs_scope ON analysis_jobs(account_id, scope_key, status)",
     # Deduplication has to be a CONSTRAINT, not a check-then-insert: Home is
     # polled, so two readers arriving in the same instant both pass a SELECT
     # and both queue the same investigation. A partial unique index lets the
@@ -1939,6 +1942,11 @@ def init_db() -> None:
         # permanently records what it matched when it closed. Never the
         # source of truth.
         _try_add_column(cur, "loops", "workflow_id", "INTEGER DEFAULT NULL")
+        # Debounce asks "when was this AUDIENCE last analysed?", which is a
+        # scope question, not a job-key question: the key changes whenever
+        # evidence moves buckets, and the whole point is to hold the floor
+        # across those changes.
+        _try_add_column(cur, "analysis_jobs", "scope_key", "TEXT")
         _try_add_column(cur, "loops", "workflow_version", "INTEGER DEFAULT NULL")
         _try_add_column(cur, "loops", "workflow_confidence", "REAL DEFAULT NULL")
         # THE DECLARED EXPECTATION. Until now a workflow declared how to
@@ -12870,7 +12878,8 @@ ANALYSIS_JOB_STALE_S = 900
 
 
 def enqueue_analysis_job(
-    account_id: int, job_key: str, request: dict[str, Any]
+    account_id: int, job_key: str, request: dict[str, Any],
+    scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Queue one analysis, or join the one already pending for this key.
 
@@ -12890,9 +12899,12 @@ def enqueue_analysis_job(
             return {"id": int(row["id"]), "status": row["status"], "created": False}
         try:
             cur.execute(
-                f"INSERT INTO analysis_jobs (account_id, job_key, status, request) "
-                f"VALUES ({PH}, {PH}, 'queued', {PH})",
-                (account_id, job_key, json.dumps(request)),
+                f"INSERT INTO analysis_jobs "
+                f"(account_id, job_key, scope_key, status, request) "
+                f"VALUES ({PH}, {PH}, {PH}, 'queued', {PH})",
+                (account_id, job_key,
+                 scope_key or (request or {}).get("scope_key"),
+                 json.dumps(request)),
             )
         except Exception:  # noqa: BLE001 — the unique index fired: someone won the race
             cur.execute(
@@ -12957,22 +12969,53 @@ def claim_analysis_job(max_attempts: int = ANALYSIS_JOB_MAX_ATTEMPTS) -> dict[st
                     "account_id": int(row["account_id"]),
                     "job_key": row["job_key"],
                     "request": request,
+                    # The claim's fence. `attempts` increments on every claim,
+                    # so a reclaimed job has a higher one — and the original
+                    # worker, if it wakes up, cannot finish or publish over the
+                    # top of the worker that superseded it.
                     "attempts": attempts + 1,
+                    "claim_token": attempts + 1,
                 }
     return None
 
 
 def finish_analysis_job(
     job_id: int, status: str, result: dict[str, Any] | None = None,
-    error: str | None = None,
-) -> None:
+    error: str | None = None, claim_token: int | None = None,
+) -> bool:
+    """Close a job out. Returns whether this worker's write actually landed.
+
+    `claim_token` fences the write: a worker that was superseded (its job
+    reclaimed as stale and re-claimed by someone else) finds its attempt number
+    stale and writes nothing. Without this, a slow worker waking after its
+    replacement finished would overwrite the newer result with its own.
+    """
     now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    sql = (
+        f"UPDATE analysis_jobs SET status = {PH}, result = {PH}, error = {PH}, "
+        f"finished_at = {now_sql} WHERE id = {PH}"
+    )
+    args: list[Any] = [status, json.dumps(result) if result else None, error, job_id]
+    if claim_token is not None:
+        sql += f" AND attempts = {PH}"
+        args.append(int(claim_token))
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return bool(cur.rowcount)
+
+
+def analysis_claim_is_current(job_id: int, claim_token: int) -> bool:
+    """Is this worker still the one that owns the job?
+
+    Checked before publishing, so a superseded worker cannot write findings for
+    an analysis someone else has already redone.
+    """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            f"UPDATE analysis_jobs SET status = {PH}, result = {PH}, error = {PH}, "
-            f"finished_at = {now_sql} WHERE id = {PH}",
-            (status, json.dumps(result) if result else None, error, job_id),
+            f"SELECT attempts, status FROM analysis_jobs WHERE id = {PH}", (job_id,)
         )
+        row = cur.fetchone()
+        return bool(row) and int(row["attempts"]) == int(claim_token)
 
 
 def requeue_analysis_job(job_id: int, error: str) -> None:
@@ -13004,19 +13047,71 @@ def analysis_job_status(account_id: int, job_key: str) -> dict[str, Any] | None:
         return out
 
 
-def count_running_analysis_jobs() -> int:
+def last_completed_analysis(account_id: int, scope_key: str) -> dict[str, Any] | None:
+    """The most recent analysis that FINISHED for this audience, whatever the
+    evidence key was at the time.
+
+    Debounce needs this rather than the job key: the key changes every time
+    evidence moves into a new bucket, and holding a floor under re-analysis is
+    exactly a question about the audience across those changes.
+    """
     with _connect() as conn, _cursor(conn) as cur:
-        cur.execute("SELECT COUNT(*) AS n FROM analysis_jobs WHERE status = 'running'")
+        cur.execute(
+            "SELECT id, status, finished_at, result FROM analysis_jobs "
+            f"WHERE account_id = {PH} AND scope_key = {PH} "
+            "AND status IN ('done', 'failed') AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC, id DESC LIMIT 1",
+            (account_id, scope_key),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["id"] = int(out["id"])
+        out["finished_at"] = _ts_to_str(out.get("finished_at"))
+        return out
+
+
+def count_running_analysis_jobs(include_stale: bool = False) -> int:
+    """How many analyses are running.
+
+    By default this counts only LIVE ones. A worker that died leaves its row in
+    'running' forever, and counting it against the concurrency ceiling meant a
+    single crashed job permanently consumed the only slot — `run_one()` would
+    return None and never reach the recovery path that would have reclaimed it.
+    A row with no heartbeat past ANALYSIS_JOB_STALE_S is not occupying a
+    worker; it is waiting to be reclaimed.
+    """
+    stale_cut = (_utcnow() - timedelta(seconds=ANALYSIS_JOB_STALE_S)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    sql = "SELECT COUNT(*) AS n FROM analysis_jobs WHERE status = 'running'"
+    args: list[Any] = []
+    if not include_stale:
+        sql += f" AND COALESCE(heartbeat_at, started_at) >= {PH}"
+        args.append(stale_cut)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
         return int(cur.fetchone()["n"])
 
 
 # ---------------------------------------------------------------------------
 # Evidence version — what "the record as of now" hashes to
 # ---------------------------------------------------------------------------
-# Two jobs for one value. It tells a reader whether a finding still rests on
-# the records it was drawn from, and it COALESCES: bucketing the newest
-# timestamp means a burst of ingest maps to one version, so ordinary traffic
-# does not buy an LLM call per span.
+# TWO VALUES, for two different jobs, and conflating them was a real bug.
+#
+#   `version`          EXACT. Changes when any span, loop or event is added, so
+#                      a finding can say truthfully whether the records behind
+#                      it have moved. Never coarsened.
+#   `schedule_bucket`  COARSE. The newest span's timestamp floored to a
+#                      15-minute window. This is what the job key uses, so a
+#                      burst of ingest inside one window queues ONE analysis
+#                      rather than one per span.
+#
+# The first version of this hashed the exact counts and the bucket together,
+# which meant the bucket did nothing: three spans in one window produced three
+# job keys. Change detection has to stay exact; scheduling has to coalesce; a
+# single hash cannot do both.
 EVIDENCE_COALESCE_WINDOW_S = int(env("EVIDENCE_COALESCE_WINDOW_S", "900") or 900)
 
 
@@ -13043,25 +13138,33 @@ def evidence_version(account_id: int | None) -> dict[str, Any]:
         events = dict(cur.fetchone() or {})
 
     newest_ns = int(spans.get("m") or 0)
+    counts = {
+        "spans": int(spans.get("n") or 0),
+        "loops": int(loops_row.get("n") or 0),
+        "loop_max": int(loops_row.get("m") or 0),
+        "events": int(events.get("n") or 0),
+        "event_max": int(events.get("m") or 0),
+    }
+    # The EXACT version. Truthful by construction: one more span changes it,
+    # which is what lets a finding say whether it still rests on the records it
+    # was drawn from.
+    version = hashlib.sha256(
+        json.dumps({"account": account_id, **counts}, sort_keys=True).encode()
+    ).hexdigest()[:32]
+    # The SCHEDULING bucket, deliberately coarse and deliberately NOT the
+    # version. Mixing the two was the bug: the exact counts rode along inside
+    # the bucketed hash, so every inserted span produced a new job key and the
+    # bucketing bought nothing. Keeping them apart lets change detection stay
+    # exact while scheduling coalesces — see `schedule_bucket` below.
     bucket = newest_ns // (EVIDENCE_COALESCE_WINDOW_S * 1_000_000_000)
-    blob = json.dumps(
-        {
-            "account": account_id,
-            "bucket": bucket,
-            "spans": int(spans.get("n") or 0),
-            "loops": int(loops_row.get("n") or 0),
-            "loop_max": int(loops_row.get("m") or 0),
-            "events": int(events.get("n") or 0),
-            "event_max": int(events.get("m") or 0),
-        },
-        sort_keys=True,
-    )
     return {
-        "version": hashlib.sha256(blob.encode()).hexdigest()[:32],
+        "version": version,
+        "schedule_bucket": str(bucket),
         "cutoff_utc": _utcnow().replace(microsecond=0).isoformat(),
         "latest_span_at": _ns_to_iso(newest_ns) if newest_ns else None,
-        "loop_count": int(loops_row.get("n") or 0),
-        "event_count": int(events.get("n") or 0),
+        "loop_count": counts["loops"],
+        "event_count": counts["events"],
+        "span_count": counts["spans"],
     }
 
 
