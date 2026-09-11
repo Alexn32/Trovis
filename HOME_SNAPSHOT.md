@@ -15,7 +15,9 @@ re-derive its own numbers.
 - SQL: `database.get_home_snapshot_rows` / `database.home_snapshot_totals_sql`
 - Response shape: `models.HomeSnapshot`
 - Tests: `test_home_snapshot.py` (contract), `test_home_snapshot_integrity.py`
-  (completion semantics, truncation, query shape, scope metadata)
+  (completion semantics, truncation, query shape, scope metadata),
+  `test_home_snapshot_bounds.py` (completeness coherence, batched identity,
+  the event budget)
 
 ## Three rules the shape encodes
 
@@ -209,19 +211,44 @@ first recorded work — so Home can say how current the picture is rather than
 implying "live". `null` when the record holds nothing of that kind.
 
 ### `completeness`
-`workspace_state` (`empty` | `populated`) distinguishes an empty workspace from
-a quiet period, plus per-block completeness flags, `counts_exact`, and an
-`unavailable` list of `{field, reason}` so a renderer can hide a visual without
-re-inspecting every block.
+Every flag here is derived from **all** of its conditions — membership
+completeness, retrieval completeness, and reconciliation — not from whichever
+one its own block happened to notice. A chart that reconciles with an aggregate
+drawn from the same incomplete membership is not a complete chart.
+
+Two different "empty" questions, deliberately kept apart:
+
+| field | scope | values |
+|---|---|---|
+| `workspace_state`, `has_any_recorded_work` | the **account**, from an unfiltered `EXISTS` | `empty` \| `populated` — always establishable |
+| `scope_state`, `has_any_work_in_scope` | the **selected scope** | `populated` \| `empty` \| `unknown` (`true` / `false` / `null`) |
+
+The asymmetry is the point: **finding rows establishes their existence;
+finding none establishes nothing when the search was partial.** So
+`scope_state` is `populated` when rows were found (even under a capped scan),
+`empty` only when none were found *and* the search was complete, and `unknown`
+otherwise. A manager who filters to one report inside a busy org gets
+`workspace_state: populated` with `scope_state: empty` — "nothing here for this
+selection", never "this company has no work", which is what an onboarding
+screen would otherwise conclude.
+
+`absence_established` is the single flag that says whether a `null` or a `0`
+anywhere in the response may be read as "none exists". `freshness` carries its
+own copy, because a `null` timestamp there means "not found", not "never
+happened", whenever membership is incomplete. `latest_telemetry_at` is
+account-wide and membership-independent, so it stays exact regardless.
+
+`unavailable` lists `{field, reason}` for everything the snapshot could not
+establish, so a renderer can hide a visual without re-inspecting every block.
 
 ### Incompleteness: lower bounds vs totals
 
 The whose-work filter has two legs. Ownership is a plain column join and is
-always complete. The waiting-on leg is a stream fold over a **capped** scan
-(`_ASSIGNEE_SCAN_LIMIT`, 500 candidate loops). When that cap is hit the scope's
-membership is a SUBSET of the truth, and every count built on it is a lower
-bound rather than a total. The snapshot says so rather than presenting a
-partial count as exact:
+always complete. The waiting-on leg is a stream fold over a **bounded**
+resolution — 500 candidate loops and 20,000 handoff event rows. When either
+bound is hit the scope's membership is a SUBSET of the truth, and every count
+built on it is a lower bound rather than a total. The snapshot says so rather
+than presenting a partial count as exact:
 
 - `scope.membership_complete: false` + `membership_incomplete_reason`.
 - `period`, `current_state`, `completions_series` and `by_job` each carry
@@ -229,7 +256,9 @@ partial count as exact:
 - `period.comparison` becomes **unavailable** with
   `scope_membership_incomplete`. A delta between two lower bounds is not a
   lower bound on the delta — the missing rows could sit on either side.
-- `completeness.unavailable` names every affected field.
+- `completeness` derives `completion_series_complete`, `job_breakdown_complete`
+  and `absence_established` from this too, and `unavailable` names every
+  affected field (including `freshness`).
 
 **`completions_series.reconciles` is not a completeness claim.** When `exact`
 is false the buckets and the aggregate are drawn from the same subset, so they
@@ -237,8 +266,14 @@ agree with each other while both under-count. That is exactly why `exact` is
 reported separately.
 
 A company-breadth seat applies no person filter at all, so its membership is
-always complete regardless of the assignee cap. `attention` is separate: it is
-capped independently of the scope, and reports its own truncation.
+always complete regardless of the assignment bounds. `attention` is separate:
+it is bounded independently of the scope and reports its own
+`resolution_complete`.
+
+Reason codes: `assignment_resolution_incomplete` (either bound),
+`scope_membership_incomplete` (a block that depends on complete membership),
+`lower_bound_not_a_total` (a count that is now a floor),
+`absence_not_established` (a "none" we cannot assert).
 
 ### `navigation`
 `account_id`, and `carry_query` — the query params a Home link **must** carry
@@ -267,30 +302,54 @@ One connection, a fixed number of bounded aggregates, no N+1:
 | 6 | Newest telemetry; and, when the seat allows, the period's cost aggregate | `idx_spans_account_started` (new, idempotent, both backends) |
 
 **Assignee resolution** (`database.assigned_handoff_targets`) answers "who is
-this waiting on?" once for the whole account, not once per person and once per
-loop:
+this waiting on?" once for the whole account, not once per person, per loop or
+per target. Three explicit limits:
 
-1. One candidate query, capped at `_ASSIGNEE_SCAN_LIMIT` (500 open
-   attention-state loops that have a handoff).
-2. Those candidates' **handoff events only**, fetched
-   `_ASSIGNEE_EVENT_CHUNK` (200) loops at a time and folded through the same
-   `loops._unresolved_handoffs` the state machine uses. Fetching only the four
-   handoff types keeps the retrieved volume proportional to handoffs rather
-   than to every activity event a busy loop accumulated; the fold ignores every
-   other type, so the answer is identical. Only the resolved target survives
-   each chunk, so memory is bounded by one chunk, not by the whole scan.
-3. One identity lookup per **distinct target**, however many people are asked
-   about.
+| limit | constant | value | what happens at it |
+|---|---|---|---|
+| candidate work items | `_ASSIGNEE_SCAN_LIMIT` | 500 | resolution marked incomplete |
+| handoff event rows per request | `_ASSIGNEE_EVENT_BUDGET` | 20,000 | resolution marked incomplete |
+| loops per event query | `_ASSIGNEE_EVENT_CHUNK` | 200 | (batching, not a limit) |
+| targets per identity query | `_IDENTITY_BATCH` | 400 | (batching, not a limit) |
 
-The result is cached for the life of the request, so the whose-work filter and
-the personal attention count share it. Measured on the reported fixture (500
-candidate handoffs, two people): **1,006 statements before, 6 after**; a whole
-team-scope snapshot request over that fixture stays under 40 statements. The
-statement count does not grow with the number of people and grows only per
-200-loop chunk with the number of candidates — see
-`test_home_snapshot_integrity.py`, which counts them rather than asserting a
-docstring. The 500-candidate cap remains, and is reported (see
-**Incompleteness**).
+1. One candidate query, capped at 500 open attention-state loops that have a
+   handoff.
+2. Those candidates' **handoff events only** (the four types the fold reads),
+   fetched 200 loops at a time under the request-wide 20,000-row budget, and
+   folded through the same `loops._unresolved_handoffs` the state machine uses.
+   Only the resolved target survives each chunk, so memory is bounded by one
+   chunk rather than by the whole scan.
+3. **Batched identity**: distinct numeric ids and distinct lowercased emails
+   resolved in `IN` queries of 400, account-scoped and case-insensitive exactly
+   as the single-target path is.
+
+Capping work items does **not** cap events — one long-running item can carry
+thousands of handoffs by itself — which is why the event budget exists
+separately. When it bites, the loop whose history may have been clipped
+contributes **nothing**: a truncated history is not a weaker answer but a
+potentially *inverted* one, because the row that would have resolved a pending
+handoff is exactly the row that got cut. Only positively established matches
+are kept, and the result is flagged incomplete (see **Incompleteness**).
+Retrieval stops at the budget; it never pages on until an unbounded history is
+loaded.
+
+The resolution and the identity map are both cached for the life of the
+request, so the whose-work filter and the personal attention count share them.
+
+Measured statement counts for `_work_person_filter` with 500 candidate
+handoffs and two people:
+
+| target shape | before | after |
+|---|---|---|
+| repeated targets (2 distinct) | 1,006 | 5 |
+| 500 distinct numeric ids | 2,002 | 6 |
+| 500 distinct emails | 2,002 | 6 |
+
+A whole team-scope snapshot request over such a fixture stays under 40
+statements. The count does not grow with the number of people or with the
+number of distinct targets; it grows only per 200-loop chunk and per 400-target
+identity batch. `test_home_snapshot_integrity.py` and
+`test_home_snapshot_bounds.py` count them rather than asserting a docstring.
 
 - Nothing scans full trace histories, and nothing loops over open work items.
 - `GET /work/board` and `GET /work/summary` are **not** called (asserted in
@@ -427,6 +486,19 @@ nested activity not inflating completions, period boundaries, a DST boundary,
 missing history vs a real zero, financial surface present vs absent, org-wide
 cost alongside a narrower work scope, unpriced cost, an empty workspace,
 malformed input, and the absence of any model call.
+
+`test_home_snapshot_bounds.py` covers what the bounds do when they bite:
+completeness flags derived from every condition rather than one (including a
+reconciling chart that is still not a complete chart, and `scope_state:
+unknown` where an empty incomplete scope used to read `empty`); workspace vs
+scope emptiness; freshness absence claims; batched identity across hundreds of
+distinct numeric ids, hundreds of distinct emails, mixed ids and email aliases
+for the same user, repeats, nonexistent, no-login and cross-account targets,
+many people in scope, and a full snapshot; and the handoff-event budget — a
+normal complete history, accepted / completed / declined resolutions, one item
+with many events, multiple items over the combined budget, and a resolution
+event beyond the retrieval boundary, asserting that a clipped history yields no
+assignment rather than a stale pending one.
 
 `test_home_snapshot_integrity.py` covers the four semantic defects this
 document describes: completion vs abandonment vs ingestion-artifact vs open

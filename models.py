@@ -1721,6 +1721,9 @@ class HomeAttention(BaseModel):
     viewer_user_id: int | None = None
     scoped_to: str = "session_identity"
     unplaced_viewer: bool | None = None
+    # False when the candidate cap or the handoff-event budget bit, so the
+    # matched set is a subset of positively established matches.
+    resolution_complete: bool = True
 
 
 class HomeCostCoverage(BaseModel):
@@ -1760,13 +1763,22 @@ class HomeFinancial(BaseModel):
 
 
 class HomeFreshness(BaseModel):
-    """How current the underlying record is. All UTC ISO-8601, null when the
-    record holds nothing of that kind."""
+    """How current the underlying record is. All UTC ISO-8601.
+
+    A timestamp is positively established. A `null` is NOT its mirror image:
+    when `absence_established` is False (the scope's membership is incomplete)
+    a null means "no such record was found", not "no such record exists" — the
+    row carrying a later timestamp may be one the capped scan never read.
+    `latest_telemetry_at` is account-wide and membership-independent, so it is
+    always exact.
+    """
 
     latest_recorded_completion_at: str | None = None
     latest_work_activity_at: str | None = None
     latest_telemetry_at: str | None = None
     first_recorded_work_at: str | None = None
+    absence_established: bool = True
+    unavailable_reason: str | None = None
 
 
 class HomeUnavailable(BaseModel):
@@ -1776,17 +1788,43 @@ class HomeUnavailable(BaseModel):
 
 class HomeCompleteness(BaseModel):
     """Everything the snapshot could not establish, in one place, so a
-    renderer can hide a visual without re-inspecting each block."""
+    renderer can hide a visual without re-inspecting each block.
 
+    Every flag here is derived from ALL of its conditions — membership
+    completeness, retrieval completeness, and reconciliation — not from
+    whichever one its own block happened to notice. A chart that reconciles
+    with an aggregate drawn from the same incomplete membership is not a
+    complete chart.
+
+    Two different "empty" questions, deliberately kept apart:
+
+      workspace_state  the ACCOUNT, from an unfiltered EXISTS. Always `empty`
+                       or `populated`, never `unknown`. This is what an
+                       onboarding / connect-your-first-agent screen keys off.
+      scope_state      the SELECTED SCOPE. `populated` when rows were found,
+                       `empty` when none were found and the search was
+                       complete, `unknown` when none were found by a partial
+                       search — finding nothing in an incomplete scope does not
+                       establish that nothing exists.
+    """
+
+    # The account. Membership-independent, so always establishable.
     has_any_recorded_work: bool = False
     workspace_state: str = "empty"  # empty | populated
+    # The selected scope.
+    scope_state: str = "empty"  # empty | populated | unknown
+    has_any_work_in_scope: bool | None = None  # None = not established
+    # May a null or a zero anywhere in this response be read as "none exists"?
+    absence_established: bool = True
     completion_series_complete: bool = True
     job_breakdown_complete: bool = True
     comparison_available: bool = False
     financial_available: bool = False
-    # False when the whose-work scan capped: every work count in the snapshot
-    # is then a lower bound rather than a total.
+    # False when the whose-work filter's assignment resolution hit a bound:
+    # every work count in the snapshot is then a lower bound, not a total.
     scope_membership_complete: bool = True
+    # False when the candidate cap or the handoff-event budget bit.
+    assignment_resolution_complete: bool = True
     counts_exact: bool = True
     unavailable: list[HomeUnavailable] = Field(default_factory=list)
 

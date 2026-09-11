@@ -298,7 +298,7 @@ with TestClient(main.app) as c:
     att = over["attention"]
     check("past the cap: attention is UNAVAILABLE, never a confident 0",
           att["available"] is False and att["needs_you"] is None
-          and att["unavailable_reason"] == "assignment_scan_truncated")
+          and att["unavailable_reason"] == "assignment_resolution_incomplete")
     check("past the cap: what was found is offered as a labeled lower bound",
           att["needs_you_at_least"] == 0)
     check("past the cap: attention still answers to session identity",
@@ -310,7 +310,7 @@ with TestClient(main.app) as c:
     check("past the cap: scope membership is reported incomplete",
           over["scope"]["membership_complete"] is False
           and over["scope"]["membership_incomplete_reason"]
-          == "assignment_scan_truncated")
+          == "assignment_resolution_incomplete")
     check("past the cap: every scoped count is labeled a lower bound",
           over["period"]["exact"] is False
           and over["period"]["qualifier"] == "at_least"
@@ -326,7 +326,7 @@ with TestClient(main.app) as c:
           == "scope_membership_incomplete")
     reasons = {u["field"]: u["reason"] for u in over["completeness"]["unavailable"]}
     check("past the cap: completeness names every affected field",
-          reasons.get("scope.membership") == "assignment_scan_truncated"
+          reasons.get("scope.membership") == "assignment_resolution_incomplete"
           and reasons.get("period.completed") == "lower_bound_not_a_total"
           and reasons.get("by_job") == "lower_bound_not_a_total")
 

@@ -4233,6 +4233,14 @@ _ASSIGNEE_SCAN_LIMIT = 500
 # holding only one chunk's events in memory at a time.
 _ASSIGNEE_EVENT_CHUNK = 200
 
+# Handoff event rows read per resolution, across all chunks. Capping the
+# number of WORK ITEMS does not cap the number of EVENTS: 500 items is a
+# bounded scan only if each carries a bounded history, and one long-running
+# conversation can carry thousands of handoffs by itself. 20k rows is far
+# above any real account's live attention set and still a fixed ceiling on
+# what one request pulls into memory.
+_ASSIGNEE_EVENT_BUDGET = 20_000
+
 # The only event types _unresolved_handoffs reads. Fetching just these keeps
 # the retrieved volume proportional to handoffs rather than to every span-
 # derived activity event a busy loop accumulated — the fold's answer is
@@ -4288,16 +4296,30 @@ def assigned_handoff_targets(
     once per person and once per loop. Two bounded steps:
 
       1. One candidate query (`_assignee_candidate_ids`), capped at
-         _ASSIGNEE_SCAN_LIMIT.
-      2. The candidates' handoff events, fetched _ASSIGNEE_EVENT_CHUNK loops at
-         a time, folded through the SAME `loops._unresolved_handoffs` the state
-         machine uses. The fold is never reimplemented here, so accepted,
-         completed and declined handoffs keep resolving exactly as they always
-         did; this only changes how the events are fetched.
+         _ASSIGNEE_SCAN_LIMIT loops.
+      2. Those candidates' handoff events, fetched _ASSIGNEE_EVENT_CHUNK loops
+         at a time under a request-wide budget of _ASSIGNEE_EVENT_BUDGET rows,
+         folded through the SAME `loops._unresolved_handoffs` the state machine
+         uses. The fold is never reimplemented here, so accepted, completed and
+         declined handoffs keep resolving exactly as they always did; this only
+         changes how the events are fetched.
 
-    Returns (targets, truncated). `truncated` is the candidate cap being hit —
-    the answer is then a SUBSET of the truth, and every caller must say so
-    rather than presenting its count as exact.
+    TWO separate bounds, because capping the number of WORK ITEMS does not cap
+    the number of EVENTS — one long-running item can carry thousands of
+    handoffs on its own.
+
+    The event budget is why a loop is only resolved when its handoff history
+    was read WHOLE. A truncated history is not a weaker answer, it is a
+    potentially INVERTED one: the row that would have resolved the pending
+    handoff is exactly the row that got cut, so a partial read can invent a
+    live assignment that no longer exists. Loops whose history may be clipped
+    therefore contribute NOTHING — not a guess, not a maybe — and the result is
+    flagged incomplete instead.
+
+    Returns (targets, incomplete). `incomplete` is either bound being hit: the
+    candidate cap, or the event budget. Either way the answer is a SUBSET of
+    positively established matches, and every caller must say so rather than
+    presenting its count as exact.
 
     `cache` lets one request resolve this once and reuse it (the Home snapshot
     needs the same answer for the whose-work filter and for the personal
@@ -4308,27 +4330,51 @@ def assigned_handoff_targets(
         return cache[key]
 
     lp = _loops_mod()
-    candidates, truncated = _assignee_candidate_ids(
+    candidates, incomplete = _assignee_candidate_ids(
         cur, account_id, named_only=named_only
     )
     targets: dict[int, str] = {}
     type_ph = ", ".join([PH] * len(_HANDOFF_EVENT_TYPES))
+    remaining = _ASSIGNEE_EVENT_BUDGET
+
     for start in range(0, len(candidates), _ASSIGNEE_EVENT_CHUNK):
+        if remaining <= 0:
+            # Budget gone. The rest of the candidates are simply unread — we
+            # stop rather than page on, and say the answer is partial.
+            incomplete = True
+            break
         chunk = candidates[start:start + _ASSIGNEE_EVENT_CHUNK]
         loop_ph = ", ".join([PH] * len(chunk))
+        # ORDER BY loop_id first so a LIMIT cuts BETWEEN loops rather than
+        # scattering holes through every loop's history; the secondary keys
+        # keep each loop's own events in stream order for the fold.
         cur.execute(
             "SELECT id, loop_id, type, actor_type, actor, payload, event_time_unix "
             f"FROM loop_events WHERE loop_id IN ({loop_ph}) "
             f"  AND type IN ({type_ph}) "
-            "ORDER BY loop_id, event_time_unix, id",
+            f"ORDER BY loop_id, event_time_unix, id LIMIT {remaining + 1}",
             tuple([*chunk, *_HANDOFF_EVENT_TYPES]),
         )
+        rows = cur.fetchall()
+        over = len(rows) > remaining
+        if over:
+            rows = rows[:remaining]
+        remaining -= len(rows)
+
         by_loop: dict[int, list[dict]] = {}
-        for r in cur.fetchall():
+        for r in rows:
             ev = lp.normalize_loop_event(dict(r))
             ev["_row_id"] = r["id"]
             by_loop.setdefault(r["loop_id"], []).append(ev)
+
+        # When the limit bit, the HIGHEST loop_id we read may have had its tail
+        # cut — including the resolution that would have closed its handoff. It
+        # is dropped, not guessed at. Loops in the chunk we never reached are
+        # absent from by_loop and contribute nothing by construction.
+        clipped = max(by_loop) if (over and by_loop) else None
         for loop_id, events in by_loop.items():
+            if loop_id == clipped:
+                continue
             pending = lp._unresolved_handoffs(events)
             to_human = [
                 h for h in pending
@@ -4339,11 +4385,119 @@ def assigned_handoff_targets(
             tid = (to_human[-1].get("payload") or {}).get("target_id")
             if tid:
                 targets[int(loop_id)] = str(tid)
-        # by_loop drops out of scope here: only the resolved target survives.
+        # by_loop drops out of scope here: only the resolved target survives,
+        # so memory stays bounded by one chunk rather than by the whole scan.
+        if over:
+            incomplete = True
+            break
 
-    out = (targets, truncated)
+    out = (targets, incomplete)
     if cache is not None:
         cache[key] = out
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Handoff target -> user identity, in batches
+# ---------------------------------------------------------------------------
+# A handoff target_id is either a numeric users.id or an email address. The
+# per-target lookup below is fine for a page of rows; resolving hundreds of
+# DISTINCT targets one at a time is not, so the bulk paths resolve the whole
+# set in a couple of IN queries.
+#
+# Batch size is deliberately conservative: SQLite's default
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on builds before 3.32, and the account
+# filter takes a slot of its own.
+_IDENTITY_BATCH = 400
+
+
+def _normalize_target(target_id: Any) -> tuple[str, Any] | None:
+    """('id', int) | ('email', lowercased str) | None.
+
+    One place decides what a target IS, so the batched and single-target
+    resolvers cannot disagree. Everything else — a bare name, a tool label, a
+    team_members row with no login — is None: it can never BE an authenticated
+    user. Emails are lowercased here so two spellings of one address
+    deduplicate to a single lookup and still match case-insensitively.
+    """
+    tid = str(target_id or "").strip()
+    if not tid:
+        return None
+    if tid.isdigit():
+        try:
+            return ("id", int(tid))
+        except ValueError:
+            return None
+    if "@" in tid:
+        return ("email", tid.lower())
+    return None
+
+
+def resolve_target_user_ids(
+    cur,
+    targets: Any,
+    account_id: int | None,
+    cache: dict[str, int | None] | None = None,
+) -> dict[str, int | None]:
+    """{raw target_id: users.id | None} for a whole set of targets at once.
+
+    Account-scoped and case-insensitive on email, exactly like the
+    single-target path — another org's user with the same address never
+    matches, and an unknown target resolves to None rather than being dropped
+    (the caller needs to know it was looked at).
+
+    Two bounded IN queries per _IDENTITY_BATCH of distinct ids and of distinct
+    emails, so the statement count scales with batches, not with targets.
+    """
+    raw_list = [str(t) for t in targets]
+    out: dict[str, int | None] = {}
+    pending = [t for t in raw_list if not (cache is not None and t in cache)]
+    for t in raw_list:
+        if cache is not None and t in cache:
+            out[t] = cache[t]
+
+    by_id: dict[int, list[str]] = {}
+    by_email: dict[str, list[str]] = {}
+    for t in pending:
+        norm = _normalize_target(t)
+        if norm is None:
+            out[t] = None
+            continue
+        kind, value = norm
+        (by_id if kind == "id" else by_email).setdefault(value, []).append(t)
+
+    acct_sql, acct_args = _loop_account_clause(account_id)
+
+    ids = sorted(by_id)
+    for start in range(0, len(ids), _IDENTITY_BATCH):
+        batch = ids[start:start + _IDENTITY_BATCH]
+        ph_list = ", ".join([PH] * len(batch))
+        cur.execute(
+            f"SELECT id FROM users WHERE id IN ({ph_list}) {acct_sql}",
+            tuple([*batch, *acct_args]),
+        )
+        found = {int(r["id"]) for r in cur.fetchall()}
+        for value in batch:
+            for t in by_id[value]:
+                out[t] = value if value in found else None
+
+    emails = sorted(by_email)
+    for start in range(0, len(emails), _IDENTITY_BATCH):
+        batch = emails[start:start + _IDENTITY_BATCH]
+        ph_list = ", ".join([PH] * len(batch))
+        cur.execute(
+            f"SELECT id, LOWER(email) AS le FROM users "
+            f"WHERE LOWER(email) IN ({ph_list}) {acct_sql}",
+            tuple([*batch, *acct_args]),
+        )
+        found = {str(r["le"]): int(r["id"]) for r in cur.fetchall()}
+        for value in batch:
+            uid = found.get(value)
+            for t in by_email[value]:
+                out[t] = uid
+
+    if cache is not None:
+        cache.update(out)
     return out
 
 
@@ -4352,35 +4506,13 @@ def _target_user_id(
 ) -> int | None:
     """users.id a handoff target_id identifies, org-scoped, or None.
 
-    Same identity path as _resolve_human_name (numeric -> users.id, email ->
-    users.email) minus the team_members leg: a team_member row has no login, so
-    it can never BE an authenticated user. Account-scoped like every other
-    lookup — another org's user with the same email never matches.
+    Single-target convenience over `resolve_target_user_ids`, kept for the
+    page-local callers (the work-item decorator memoizes a page's handful of
+    targets). Bulk paths must use the batched resolver directly.
     """
-    tid = str(target_id or "").strip()
-    if not tid:
-        return None
-    if cache is not None and tid in cache:
-        return cache[tid]
-    acct_sql, acct_args = _loop_account_clause(account_id)
-    found: int | None = None
-    if tid.isdigit():
-        cur.execute(
-            f"SELECT id FROM users WHERE id = {PH} {acct_sql}",
-            tuple([int(tid), *acct_args]),
-        )
-        row = cur.fetchone()
-        found = int(row["id"]) if row else None
-    elif "@" in tid:
-        cur.execute(
-            f"SELECT id FROM users WHERE LOWER(email) = LOWER({PH}) {acct_sql}",
-            tuple([tid, *acct_args]),
-        )
-        row = cur.fetchone()
-        found = int(row["id"]) if row else None
-    if cache is not None:
-        cache[tid] = found
-    return found
+    return resolve_target_user_ids(cur, [target_id], account_id, cache).get(
+        str(target_id)
+    )
 
 
 def _loops_assigned_to_any(
@@ -4392,24 +4524,39 @@ def _loops_assigned_to_any(
     cache: dict[Any, Any] | None = None,
 ) -> tuple[list[int], bool]:
     """Loop ids whose latest unresolved to_human handoff targets ANY of these
-    people, plus whether the candidate scan was truncated.
+    people, plus whether the resolution was incomplete.
 
-    One candidate scan and one identity lookup per DISTINCT target, however
-    many people are asked about — not one full scan per person.
+    One candidate scan and a couple of batched identity queries, however many
+    people are asked about and however many distinct targets they hold — not
+    one scan per person and not one lookup per target.
     """
     if not user_ids:
         return [], False
-    targets, truncated = assigned_handoff_targets(
+    targets, incomplete = assigned_handoff_targets(
         cur, account_id, named_only=named_only, cache=cache
     )
     wanted = {int(u) for u in user_ids}
-    seen: dict[str, int | None] = {}
+    identities = _shared_identity_map(cur, account_id, targets.values(), cache)
     matched = [
         loop_id
         for loop_id, tid in targets.items()
-        if (_target_user_id(cur, tid, account_id, seen) in wanted)
+        if identities.get(str(tid)) in wanted
     ]
-    return sorted(set(matched)), truncated
+    return sorted(set(matched)), incomplete
+
+
+def _shared_identity_map(
+    cur, account_id: int | None, targets: Any, cache: dict[Any, Any] | None
+) -> dict[str, int | None]:
+    """Resolve targets to users, reusing one map for the whole request.
+
+    The whose-work filter and the personal attention count look at the same
+    targets; without this they would each pay for the same lookups.
+    """
+    sub: dict[str, int | None] | None = None
+    if cache is not None:
+        sub = cache.setdefault(("identities", account_id), {})
+    return resolve_target_user_ids(cur, targets, account_id, sub)
 
 
 def _work_person_filter(
@@ -4498,20 +4645,21 @@ def _loops_assigned_to(
     so a 75k untitled OTel flood is not scanned for assignee. The board path
     keeps named_only=False (every open attention loop).
 
-    Returns (ids, truncated). `truncated` means the candidate cap was hit and
-    the list is a SUBSET — a caller that reports its length as an exact count
-    is reporting a number it does not have.
+    Returns (ids, incomplete). `incomplete` means a bound was hit — the
+    candidate cap or the event budget — and the list is a SUBSET of positively
+    established matches. A caller that reports its length as an exact count is
+    reporting a number it does not have.
     """
-    targets, truncated = assigned_handoff_targets(
+    targets, incomplete = assigned_handoff_targets(
         cur, account_id, named_only=named_only, cache=cache
     )
-    seen: dict[str, int | None] = {}
+    identities = _shared_identity_map(cur, account_id, targets.values(), cache)
     matched = [
         loop_id
         for loop_id, tid in targets.items()
-        if _target_user_id(cur, tid, account_id, seen) == int(user_id)
+        if identities.get(str(tid)) == int(user_id)
     ]
-    return sorted(matched), truncated
+    return sorted(matched), incomplete
 
 
 # ---------------------------------------------------------------------------
@@ -5191,7 +5339,10 @@ def get_home_snapshot_rows(
             out["abandoned_total"] = int(row.get("abandoned_n") or 0)
             out["open_total"] = int(row.get("open_n") or 0)
             out["has_history_before_previous"] = int(row.get("before_prev_n") or 0) > 0
-            out["has_any_work"] = int(row.get("all_n") or 0) > 0
+            # Named work inside the SELECTED SCOPE. When the scope's membership
+            # is incomplete, `False` here means "none found", not "none
+            # exists" — the caller must not read it as an established absence.
+            out["has_any_work_in_scope"] = int(row.get("all_n") or 0) > 0
             out["first_work_epoch"] = _ts_to_epoch(row.get("first_created"))
             out["latest_completion_epoch"] = _ts_to_epoch(row.get("last_closed"))
             last_event = row.get("last_event")
@@ -5258,6 +5409,20 @@ def get_home_snapshot_rows(
             else:
                 out["needs_you"] = None
                 out["needs_you_truncated"] = False
+
+            # Does the ACCOUNT hold any named work at all? Deliberately
+            # UNFILTERED by the person scope, and therefore always
+            # establishable: "this person's view is empty" and "this workspace
+            # has nothing in it" are different facts, and an onboarding screen
+            # that appears because a manager filtered to one report would be
+            # the page telling the org it does not exist. EXISTS over the same
+            # index prefix the counts use.
+            exists_scope, exists_args = _work_named_scope_sql(account_id)
+            cur.execute(
+                f"SELECT 1 AS x FROM loops l WHERE {exists_scope} LIMIT 1",
+                tuple(exists_args),
+            )
+            out["has_any_work_in_account"] = cur.fetchone() is not None
 
             # Source freshness: the newest telemetry this account has, so Home
             # can say how current the picture is instead of implying "live".

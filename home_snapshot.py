@@ -251,7 +251,7 @@ def describe_scope(
         # bound, not a total.
         "membership_complete": bool(membership_complete),
         "membership_incomplete_reason": (
-            None if membership_complete else "assignment_scan_truncated"
+            None if membership_complete else "assignment_resolution_incomplete"
         ),
         "account_id": account_id,
         "viewer_user_id": viewer_user_id,
@@ -332,7 +332,13 @@ def build_snapshot(
         rows, period, visible=financial_visible, reason=financial_reason
     )
 
-    has_any_work = bool(rows["has_any_work"])
+    # Absence is a claim, and an incomplete scope cannot make it. Finding rows
+    # PROVES they exist; finding none proves nothing when the search was
+    # partial. Everything below that reads as "there is none of this" is gated
+    # on this one flag.
+    found_in_scope = bool(rows["has_any_work_in_scope"])
+    absence_established = membership_complete
+    freshness = _freshness(rows, absence_established)
     return {
         "generated_at": _now_utc().isoformat(),
         "scope": describe_scope(
@@ -367,29 +373,18 @@ def build_snapshot(
         "by_job": jobs,
         "attention": attention,
         "financial": financial,
-        "freshness": {
-            "latest_recorded_completion_at": _epoch_iso(
-                rows["latest_completion_epoch"]
-            ),
-            "latest_work_activity_at": _epoch_iso(rows["latest_work_event_epoch"]),
-            "latest_telemetry_at": _epoch_iso(rows["latest_span_epoch"]),
-            "first_recorded_work_at": _epoch_iso(rows["first_work_epoch"]),
-        },
-        "completeness": {
-            # An empty workspace and a workspace with a quiet week are
-            # different answers, and Home must be able to tell them apart.
-            "has_any_recorded_work": has_any_work,
-            "workspace_state": "empty" if not has_any_work else "populated",
-            "completion_series_complete": series["available"],
-            "job_breakdown_complete": not jobs["truncated"],
-            "comparison_available": comparison["available"],
-            "financial_available": financial["visible"],
-            "scope_membership_complete": membership_complete,
-            "counts_exact": membership_complete,
-            "unavailable": _unavailable_reasons(
-                series, jobs, comparison, financial, attention, membership_complete
-            ),
-        },
+        "freshness": freshness,
+        "completeness": _completeness(
+            series=series,
+            jobs=jobs,
+            comparison=comparison,
+            financial=financial,
+            attention=attention,
+            membership_complete=membership_complete,
+            absence_established=absence_established,
+            found_in_scope=found_in_scope,
+            account_has_work=bool(rows.get("has_any_work_in_account")),
+        ),
         "navigation": _navigation(
             account_id=account_id,
             selection=selection,
@@ -605,12 +600,14 @@ def _attention(
     zero: zero would read as "nothing needs you", which is a claim about a
     person who does not exist here.
 
-    The assignee scan is capped. When the cap is hit the matched set is a
-    SUBSET, and its length is not the answer — an org with 501 open handoffs
-    where the one waiting on you is the oldest would report a confident
-    "0 needs you" while a person waits. So a truncated scan is `available:
-    false` with `needs_you: null`, and what we did find is offered separately
-    as `needs_you_at_least`: a labeled lower bound is useful, a wrong total is
+    Assignment resolution is bounded twice — a candidate cap and an event
+    budget (see `database.assigned_handoff_targets`). When either bites, the
+    matched set is a SUBSET of positively established matches and its length is
+    not the answer: an org with 501 open handoffs where the one waiting on you
+    is the oldest would otherwise report a confident "0 needs you" while a
+    person waits. So an incomplete resolution is `available: false` with
+    `needs_you: null`, and what we did find is offered separately as
+    `needs_you_at_least` — a labeled lower bound is useful, a wrong total is
     not.
     """
     if viewer_user_id is None:
@@ -621,17 +618,19 @@ def _attention(
             "needs_you_at_least": None,
             "viewer_user_id": None,
             "scoped_to": "session_identity",
+            "resolution_complete": not rows.get("needs_you_truncated"),
         }
     found = int(rows["needs_you"] or 0)
     if rows.get("needs_you_truncated"):
         return {
             "available": False,
-            "unavailable_reason": "assignment_scan_truncated",
+            "unavailable_reason": "assignment_resolution_incomplete",
             "needs_you": None,
             "needs_you_at_least": found,
             "viewer_user_id": viewer_user_id,
             "scoped_to": "session_identity",
             "unplaced_viewer": bool(seat and seat.get("role_id") is None),
+            "resolution_complete": False,
         }
     return {
         "available": True,
@@ -641,6 +640,7 @@ def _attention(
         "viewer_user_id": viewer_user_id,
         "scoped_to": "session_identity",
         "unplaced_viewer": bool(seat and seat.get("role_id") is None),
+        "resolution_complete": True,
     }
 
 
@@ -716,24 +716,89 @@ def _financial(
     }
 
 
-def _unavailable_reasons(
+def _freshness(rows: dict[str, Any], absence_established: bool) -> dict[str, Any]:
+    """How current the record is. All UTC ISO-8601.
+
+    A timestamp here is positively established: something was found and this is
+    when. A `null` is not the mirror image of that. When the scope's membership
+    is incomplete, `null` means "no such record was FOUND", which is not "no
+    such record exists" — the row that would have carried a later timestamp may
+    be one of the ones the capped scan never read. `absence_established` says
+    which reading applies, so a renderer never turns a partial search into
+    "this has never happened".
+    """
+    return {
+        "latest_recorded_completion_at": _epoch_iso(rows["latest_completion_epoch"]),
+        "latest_work_activity_at": _epoch_iso(rows["latest_work_event_epoch"]),
+        # Account-wide and membership-independent: telemetry arrives per
+        # account, so this one is always exact.
+        "latest_telemetry_at": _epoch_iso(rows["latest_span_epoch"]),
+        "first_recorded_work_at": _epoch_iso(rows["first_work_epoch"]),
+        "absence_established": absence_established,
+        "unavailable_reason": (
+            None if absence_established else "scope_membership_incomplete"
+        ),
+    }
+
+
+def _completeness(
+    *,
     series: dict[str, Any],
     jobs: dict[str, Any],
     comparison: dict[str, Any],
     financial: dict[str, Any],
     attention: dict[str, Any],
     membership_complete: bool,
-) -> list[dict[str, str]]:
-    """Every thing this snapshot could not establish, named in one place, so a
-    renderer can decide what to hide without re-inspecting each block."""
+    absence_established: bool,
+    found_in_scope: bool,
+    account_has_work: bool,
+) -> dict[str, Any]:
+    """One place that decides what this snapshot did and did not establish.
+
+    Every summary flag is derived from ALL of its conditions — membership
+    completeness, retrieval completeness, and reconciliation — rather than
+    from whichever one the block happened to notice. A chart that reconciles
+    with an aggregate drawn from the same incomplete membership is not a
+    complete chart, and a block that returned successfully over a partial scope
+    is not a complete block.
+
+    Two different "empty" questions, kept apart:
+
+      workspace_state   the ACCOUNT. Answered by an unfiltered EXISTS, so it is
+                        always `empty` or `populated`, never `unknown`. This is
+                        what an onboarding / connect-your-first-agent screen
+                        should key off.
+      scope_state       the SELECTED SCOPE. `populated` when rows were found
+                        (existence is established by finding one), `empty` when
+                        none were found AND the search was complete, and
+                        `unknown` when none were found by a partial search.
+
+    A person whose filtered view is empty inside a populated workspace gets
+    `workspace_state: populated` with `scope_state: empty` — "nothing here for
+    this selection", never "this company has no work".
+    """
+    if found_in_scope:
+        scope_state = "populated"
+    elif absence_established:
+        scope_state = "empty"
+    else:
+        scope_state = "unknown"
+
+    series_complete = bool(
+        series["available"] and series.get("reconciles") and membership_complete
+    )
+    jobs_complete = bool(
+        not jobs["truncated"] and jobs.get("reconciles") and membership_complete
+    )
+
     out: list[dict[str, str]] = []
     if not membership_complete:
         out.append({
             "field": "scope.membership",
-            "reason": "assignment_scan_truncated",
+            "reason": "assignment_resolution_incomplete",
         })
         for field in ("period.completed", "current_state", "completions_series",
-                      "by_job"):
+                      "by_job", "freshness"):
             out.append({"field": field, "reason": "lower_bound_not_a_total"})
     if not series["available"]:
         out.append({"field": "completions_series", "reason": series["unavailable_reason"]})
@@ -749,7 +814,29 @@ def _unavailable_reasons(
         out.append({"field": "financial.coverage", "reason": "no_cost_bearing_spans_in_period"})
     if not attention["available"]:
         out.append({"field": "attention", "reason": attention["unavailable_reason"]})
-    return out
+    if scope_state == "unknown":
+        out.append({"field": "completeness.scope_state", "reason": "absence_not_established"})
+
+    return {
+        # The account, membership-independent.
+        "workspace_state": "populated" if account_has_work else "empty",
+        "has_any_recorded_work": account_has_work,
+        # The selected scope.
+        "scope_state": scope_state,
+        # True / False / None — None is "not established", never "no".
+        "has_any_work_in_scope": True if found_in_scope else (
+            False if absence_established else None
+        ),
+        "absence_established": absence_established,
+        "completion_series_complete": series_complete,
+        "job_breakdown_complete": jobs_complete,
+        "comparison_available": comparison["available"],
+        "financial_available": financial["visible"],
+        "scope_membership_complete": membership_complete,
+        "assignment_resolution_complete": bool(attention.get("resolution_complete", True)),
+        "counts_exact": membership_complete,
+        "unavailable": out,
+    }
 
 
 def _navigation(

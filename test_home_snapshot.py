@@ -200,7 +200,13 @@ with TestClient(main.app) as c:
           e["period"]["comparison"]["available"] is False
           and e["period"]["comparison"]["previous_completed"] is None)
     check("empty: freshness is null everywhere, not epoch 0",
-          all(v is None for v in e["freshness"].values()))
+          all(e["freshness"][k] is None for k in (
+              "latest_recorded_completion_at", "latest_work_activity_at",
+              "latest_telemetry_at", "first_recorded_work_at")))
+    check("empty: the absence IS established, so null means 'none'",
+          e["freshness"]["absence_established"] is True
+          and e["completeness"]["scope_state"] == "empty"
+          and e["completeness"]["workspace_state"] == "empty")
     check("empty: no raw traces or work records in the payload",
           "items" not in e and "spans" not in e and "loops" not in e)
 
