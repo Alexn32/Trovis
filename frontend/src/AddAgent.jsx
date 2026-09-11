@@ -1314,7 +1314,8 @@ Put the key in the header itself — not a placeholder — and confirm a tool ca
 Trovis reporting (always do this)
 - At the start of any task, call report_job_started with a short plain-English title describing the task. That title becomes the job name in Trovis. Keep the job_id it returns.
 - On your first report, also pass bot_role: one line on what you are for in general (e.g. "Chief of staff: drafts updates, chases follow-ups, keeps the week organised"), so Trovis describes you by your actual job.
-- If you stop to ask me a question or wait on input, call report_job_waiting with that job_id.
+- On report_job_started, also pass request: one line on what I actually asked you for. On report_job_finished, also pass result: one or two lines on what you told me back. [Delete these two if you don't want Trovis to see what we talked about.]
+- If you stop to ask me a question or wait on input, call report_job_waiting with that job_id and one line on what you need.
 - When the task is complete, call report_job_finished with that job_id. If it fails or you give up, call report_job_failed with that job_id and a brief reason.
 - Always pass back the same job_id you were given for a task.
 Report in the background — don't mention Trovis unless I ask.`
@@ -1364,6 +1365,15 @@ Report in the background — don't mention Trovis unless I ask.`
           It carries your real key, so treat it like one — paste it to your
           own Bot, not into anything shared.
         </p>
+        <p className="helper-text">
+          <strong>What Trovis sees.</strong> The{' '}
+          <code>request</code> and <code>result</code> lines send one line
+          each of what you asked and what the Bot answered — that is what
+          the Work Feed shows and what its summaries are written from. (A
+          failure reason is recorded too, so a stopped job says why.)
+          Delete that bullet and the Bot still reports its jobs, titles and
+          all; Trovis just won&apos;t hold anything you said to it.
+        </p>
       </NumberedStep>
 
       <NumberedStep n={2} title="Make it prove the connection works">
@@ -1397,7 +1407,9 @@ Report in the background — don't mention Trovis unless I ask.`
         <p>
           Ask the Bot to do something it would normally do. The job appears
           on Work with its title, moves to “waiting on a person” when the
-          Bot asks you a question, and closes when it reports finished.
+          Bot asks you a question, and closes when it reports finished. On
+          the agent&apos;s Work Feed you get the ask, the outcome, and a
+          one-line summary of what happened.
         </p>
       </NumberedStep>
 

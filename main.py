@@ -2845,8 +2845,13 @@ def agent_records(
         elif is_report:
             summary = r.get("title") or "Reported a job"
         else:
-            # Cache permanently by the immutable record id (trace_id).
-            cache_kind = f"record:{r['id']}"
+            # Cache by record id AND span count. Records used to be immutable,
+            # so the id alone was a safe permanent key. A reported job is not:
+            # its record grows as the agent reports waiting, then finished. Key
+            # it by id alone and the feed keeps showing the summary written
+            # when only the opening report had landed — "started checking the
+            # inbox", forever, with the outcome sitting right there unread.
+            cache_kind = f"record:{r['id']}:{len(r.get('spans') or [])}"
             cached = database.get_insight(
                 account_id, service_name, agent_id or "main", cache_kind
             )

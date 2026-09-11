@@ -117,7 +117,11 @@ test('every live door explains how its jobs get named', () => {
   ]) {
     const start = addAgent.indexOf(`function ${fn}`)
     assert.ok(start > 0, `${fn} exists`)
-    const body = addAgent.slice(start, start + 4000)
+    // Bound by the next function, not a fixed character count: a door that
+    // grows a section should not fail this, and a door that genuinely stops
+    // explaining titles still must.
+    const after = addAgent.indexOf('\nfunction ', start + 1)
+    const body = addAgent.slice(start, after > 0 ? after : addAgent.length)
     assert.match(body, /loop\.title|set_loop_title|NamedWorkGuidance/, fn)
   }
   // OpenClaw teaches it inside its setup tabs.
