@@ -7851,6 +7851,29 @@ def _extract_exchange(span_attrs: list[dict[str, Any]]) -> dict[str, str] | None
     return {"user": user or "", "agent": agent or ""}
 
 
+def _record_title(
+    span_attrs: list[dict[str, Any]], span_rows: list[Any]
+) -> str | None:
+    """What this record was, in the agent's own words, when there is no
+    transcript to summarize.
+
+    Order: the job title the agent reported (`trovis.loop.title` — the same
+    attribute Work names jobs from), then a step description, then a step
+    name, then the first non-system operation. None when the record says
+    nothing about itself.
+    """
+    for key in ("loop.title", "step.description", "step.name", "task.summary"):
+        for attrs in span_attrs:
+            value = attr(attrs, key)
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())[:200]
+    for sr in span_rows:
+        name = sr["span_name"]
+        if name and name not in _SYSTEM_SPAN_NAMES:
+            return str(name)
+    return None
+
+
 def count_agent_records(
     service_name: str,
     account_id: int | None = None,
@@ -7974,7 +7997,13 @@ def get_agent_records(
                 }
             )
         exchange = None if only_system else _extract_exchange(attrs_list)
-        is_registration = only_system or exchange is None
+        # A record with no exchange is NOT a registration. Report-door agents
+        # (a Grok Bot calling report_job_*) and any agent running with output
+        # capture off do real work and carry no transcript — calling those
+        # "registered with the fleet" told an operator their agent had done
+        # nothing but announce itself, which is the opposite of true.
+        is_registration = only_system
+        title = None if only_system else _record_title(attrs_list, srows)
         rec_start = prow["rec_start_ns"]
         records.append(
             {
@@ -7989,6 +8018,7 @@ def get_agent_records(
                 "tokens": int(prow["tokens"] or 0),
                 "error": (prow["error_spans"] or 0) > 0,
                 "is_registration": bool(is_registration),
+                "title": title,
                 "exchange": exchange,
                 "spans": span_list,
                 "_start_ns": rec_start,  # internal: cursor source

@@ -2544,9 +2544,18 @@ def agent_records(
     out: list[AgentRecord] = []
     for r in rows:
         exchange = r.get("exchange")
-        is_system = bool(r.get("is_registration")) or exchange is None
+        is_system = bool(r.get("is_registration"))
+        # Three kinds, not two. A record with no exchange used to be filed as a
+        # registration, so an agent that reports its work without sending a
+        # transcript — a Grok Bot calling report_job_*, or anything running
+        # with capture off — read as nothing but "registered with the fleet",
+        # over and over. It IS work; we just have no conversation for it, and
+        # the job's own title says more than a Claude summary of nothing.
+        is_report = not is_system and exchange is None
         if is_system:
             summary = _REGISTRATION_SUMMARY
+        elif is_report:
+            summary = r.get("title") or "Reported a job"
         else:
             # Cache permanently by the immutable record id (trace_id).
             cache_kind = f"record:{r['id']}"
@@ -2581,7 +2590,7 @@ def agent_records(
                 cost_usd=r.get("cost_usd"),
                 duration_ms=r.get("duration_ms", 0.0),
                 tokens=r.get("tokens", 0),
-                kind="system" if is_system else "interaction",
+                kind="system" if is_system else "report" if is_report else "interaction",
                 error=bool(r.get("error")),
                 exchange=(None if is_system else exchange),
                 spans=r.get("spans", []),

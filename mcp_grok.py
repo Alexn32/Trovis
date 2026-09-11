@@ -34,6 +34,7 @@ item with a real title, a waiting state, and a close.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import logging
 import time
 import uuid
@@ -211,6 +212,14 @@ def _report_span(
     """Write one report as a span through the loop-aware ingest path, so it
     creates or updates a real Work job (not just an activity row)."""
     now = time.time_ns()
+    # Every report for one job shares one trace. The Work Feed groups records
+    # by trace_id, so a fresh id per report turned a single job into four rows
+    # — "started", "waiting", "finished" each reading as its own interaction.
+    # Derived, not stored: same job id, same trace, no bookkeeping. Scoped by
+    # account so two orgs using the same job id never share a record.
+    trace_id = hashlib.sha256(
+        f"{account_id}:{job_id}".encode()
+    ).hexdigest()[:32]
     attrs: dict[str, Any] = {
         "trovis.agent.id": "main",
         "trovis.loop.external_id": job_id,
@@ -220,7 +229,7 @@ def _report_span(
     database.ingest_spans_with_loops(
         [
             {
-                "trace_id": uuid.uuid4().hex,
+                "trace_id": trace_id,
                 "span_id": uuid.uuid4().hex[:16],
                 "parent_span_id": None,
                 "service_name": bot_name,

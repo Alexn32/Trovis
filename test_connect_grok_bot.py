@@ -348,6 +348,41 @@ try:
           other_span_count < our_span_count,
           f"theirs={other_span_count} ours={our_span_count}")
 
+    print("\n[8b] One job is ONE record in the Work Feed, named by its title")
+    # The first real Grok Bot produced a feed of nothing but "Registered with
+    # the fleet and declared its identity": every report minted its own trace
+    # (so one job read as four interactions), and a record with no transcript
+    # was filed as a registration. Both are what this section pins.
+    run(call_tool("report_job_started", {
+        "title": "Reconcile the September invoices again",
+        "bot_name": "Trovis PM", "job_id": "grok-feed-1",
+    }, KEY))
+    run(call_tool("report_job_waiting", {
+        "reason": "Needs the export re-run", "job_id": "grok-feed-1",
+    }, KEY))
+    run(call_tool("report_job_finished", {
+        "summary": "Reconciled", "job_id": "grok-feed-1",
+    }, KEY))
+
+    feed = requests.get(f"{BASE}/agents/Trovis PM/records", headers=H, timeout=30).json()
+    records = feed.get("records") or []
+    titled = [x for x in records
+              if x.get("summary") == "Reconcile the September invoices again"]
+    check("the job is one record, under its own title", len(titled) == 1,
+          f"summaries={[x.get('summary') for x in records]}")
+    if titled:
+        rec = titled[0]
+        check("its three reports are spans of that one record",
+              len(rec.get("spans") or []) == 3, f"spans={rec.get('spans')}")
+        check("it is not filed as a registration",
+              rec.get("kind") == "report", f"kind={rec.get('kind')!r}")
+        check("and it carries no invented transcript",
+              rec.get("exchange") is None)
+    check("no reported job is labelled as a registration",
+          all(x.get("summary") != "Registered with the fleet and declared its identity"
+              or x.get("kind") == "system" for x in records),
+          f"records={[(x.get('kind'), x.get('summary')) for x in records]}")
+
     print("\n[9] A bot's stated role beats what it happened to do first")
     # The first-impression problem, which the first real Grok Bot hit: its
     # opening jobs were connection smoke tests, so it was described forever as
