@@ -31,7 +31,7 @@ dependencies = [
 # Per-platform extras so users only install what they need:
 #   pip install trovis-agents[openai]      → OpenAI Agents SDK support
 #   pip install trovis-agents[anthropic]   → Claude Managed Agents support
-#   pip install trovis-agents[xai]         → xAI Grok bot support
+#   pip install trovis-agents[xai]         → Grok (xAI SDK) support
 #   pip install trovis-agents[all]         → every SUPPORTED platform's extras
 #
 # [hermes] is retained only so existing install commands keep resolving. Hermes
@@ -49,7 +49,7 @@ anthropic = [
 claude-agent-sdk = [
     "claude-agent-sdk>=0.1.0",
 ]
-# Grok bots. The base SDK is enough: its spans go through the global
+# Grok (xAI SDK). The base SDK is enough: its spans go through the global
 # TracerProvider that init() sets. Deliberately NOT xai-sdk[telemetry-http] —
 # that extra exists to install xAI's own OTLP exporter, which sends protobuf,
 # and Trovis ingest speaks OTLP/JSON.

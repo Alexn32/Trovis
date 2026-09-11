@@ -241,7 +241,7 @@ try:
     check("named work appears in lean GET /work/items",
           "Plan the Q3 rollout" in titles, f"titles={titles}")
 
-    print("\n[8] Grok bots — an xAI-scoped span lands, titled, over the same wire")
+    print("\n[8] Grok (xAI SDK) — an xAI-scoped span lands, titled, over the wire")
     # The xAI SDK opens its spans through the GLOBAL provider (the one init()
     # just set), from tracers named after modules inside `xai_sdk`. So a
     # tracer with that scope name is exactly what a Grok call produces — no

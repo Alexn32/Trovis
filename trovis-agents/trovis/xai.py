@@ -1,10 +1,10 @@
-"""xAI (Grok) support for Trovis — connecting Grok bots.
+"""xAI (Grok) support for Trovis — connecting Grok (xAI SDK) agents.
 
 The xAI Python SDK (`xai-sdk`) is already OpenTelemetry-instrumented: every
 `chat.sample()` / `chat.stream()` / image / tokenizer call opens a span via
 `xai_sdk.telemetry.get_tracer`, which resolves the GLOBAL TracerProvider
 lazily. `init()` sets that global provider — pointed at Trovis, speaking
-OTLP/JSON, authenticated with the org's key — so a Grok bot's spans reach
+OTLP/JSON, authenticated with the org's key — so a Grok agent's spans reach
 Trovis with no wrapping at all.
 
 So this adapter does the three things that are NOT automatic:
@@ -13,11 +13,11 @@ So this adapter does the three things that are NOT automatic:
      (`XAI_SDK_DISABLE_TRACING`) isn't silently swallowing every span.
   2. Warns when something else got to the global provider first — usually
      `xai_sdk.telemetry.Telemetry()`, which installs its OWN provider with
-     `service.name="xai-sdk"`. That collapses every Grok bot in an org into
-     one indistinguishable agent AND exports protobuf, which Trovis ingest
+     `service.name="xai-sdk"`. That collapses every Grok agent in an org
+     into one indistinguishable agent AND exports protobuf, which Trovis ingest
      (OTLP/JSON) rejects. OTEL refuses to override an already-set global
      provider, so the only fix is ordering: `init()` first.
-  3. Stamps workloop attrs onto the first xAI span of a run, so a Grok bot
+  3. Stamps workloop attrs onto the first xAI span of a run, so a Grok run
      lands as *named* Work (`trovis.loop.title`) instead of an untitled
      trace. Use `trovis.set_loop_title("Triage refund #4821")` before the
      call; handoffs queued with `trovis.mark_handoff()` ride along too.
@@ -67,7 +67,7 @@ class GrokLoopProcessor(SpanProcessor):
             if not name.startswith(_XAI_SCOPE_PREFIX):
                 return
             apply_loop_attrs(span)
-        except Exception as e:  # noqa: BLE001 — telemetry never breaks the bot
+        except Exception as e:  # noqa: BLE001 — telemetry never breaks the agent
             logger.debug("[Trovis] could not stamp loop attrs on a Grok span: %s", e)
 
     def on_end(self, span):  # noqa: ARG002 — nothing to do; export is elsewhere
@@ -100,7 +100,7 @@ def setup_xai() -> bool:
     Returns True when Grok spans will flow to Trovis, False when something
     is in the way (SDK missing, tracing disabled, or another provider owns
     the global). Never raises — a telemetry problem must not take down the
-    bot.
+    agent.
     """
     global _INSTALLED
 
@@ -116,7 +116,7 @@ def setup_xai() -> bool:
     if _tracing_disabled():
         logger.warning(
             "[Trovis] XAI_SDK_DISABLE_TRACING is set — the xAI SDK is "
-            "emitting no spans at all, so this Grok bot will never appear "
+            "emitting no spans at all, so this Grok agent will never appear "
             "in Trovis. Unset it to connect."
         )
         ok = False
@@ -125,7 +125,7 @@ def setup_xai() -> bool:
     if not _is_trovis_provider(provider):
         logger.warning(
             "[Trovis] Another OpenTelemetry TracerProvider is already global "
-            "(commonly xai_sdk.telemetry.Telemetry(), which names every bot "
+            "(commonly xai_sdk.telemetry.Telemetry(), which names every agent "
             "'xai-sdk' and exports protobuf). OTEL will not let Trovis "
             "replace it, so Grok spans may not reach Trovis. Call "
             "trovis.init() BEFORE creating a Telemetry() — and don't create "

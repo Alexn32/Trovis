@@ -126,8 +126,8 @@ test('every live door explains how its jobs get named', () => {
 test('the Grok door is the SDK path, not xai-sdk\'s own OTLP exporter', () => {
   // xai_sdk.telemetry.Telemetry().setup_otlp_exporter() looks like the
   // obvious recipe and fails three ways at once: protobuf against a JSON
-  // ingest, no API key header, and service.name "xai-sdk" on every bot in
-  // the org. The door must teach trovis-agents instead, and say why.
+  // ingest, no API key header, and service.name "xai-sdk" on every agent
+  // in the org. The door must teach trovis-agents instead, and say why.
   const g = addAgent.slice(addAgent.indexOf('function GrokSdkSetup'))
   assert.match(g, /pip install trovis-agents\[xai\]/)
   assert.match(g, /platform="xai"/)
@@ -140,6 +140,18 @@ test('the Grok door is the SDK path, not xai-sdk\'s own OTLP exporter', () => {
   // The provider picker's xAI branch renders the same steps — one recipe.
   const px = addAgent.slice(addAgent.indexOf('function PythonXaiInstructions'))
   assert.match(px.slice(0, px.indexOf('\n}')), /<GrokSdkSetup/)
+})
+
+test('the Grok door is called "Grok (xAI SDK)" — never a "bot"', () => {
+  // Locked copy. "Grok Bot" is the wrong name for the thing being connected:
+  // what arrives in Trovis is an agent, and the tile is named for the SDK
+  // that emits the telemetry.
+  assert.match(addAgent, /label: 'Grok \(xAI SDK\)'/)
+  assert.match(addAgent, /Connect Grok \(xAI SDK\)/)
+  assert.match(guide, /'Grok \(xAI SDK\)'/)
+  for (const [name, src] of [['AddAgent', addAgent], ['ConnectGuide', guide]]) {
+    assert.doesNotMatch(src, /\bGrok bots?\b/i, `${name} calls a Grok agent a bot`)
+  }
 })
 
 test('the Actions door admits it cannot produce named jobs yet', () => {

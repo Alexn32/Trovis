@@ -44,7 +44,7 @@ test('resolveBrand maps platform / holder / tool text; unknown is silent', () =>
   assert.equal(resolveBrand('Claude Agent SDK / Claude Code'), 'claude')
   assert.equal(resolveBrand('openai-agents'), 'chatgpt')
   assert.equal(resolveBrand('ChatGPT (custom GPT)'), 'chatgpt')
-  assert.equal(resolveBrand('Grok bots (xAI)'), 'grok')
+  assert.equal(resolveBrand('Grok (xAI SDK)'), 'grok')
   assert.equal(resolveBrand('xai-sdk'), 'grok')
   assert.equal(resolveBrand('Cursor (OpenTelemetry)'), 'cursor')
   assert.equal(resolveBrand('Stripe'), 'stripe')

@@ -198,7 +198,7 @@ def init(
             - "openai" — only the OpenAI Agents SDK.
             - "anthropic" — only the Anthropic Claude Managed Agents SDK.
             - "claude-agent-sdk" — only the Claude Agent SDK.
-            - "xai" (alias "grok") — only the xAI SDK (Grok bots).
+            - "xai" (alias "grok") — only the xAI SDK (Grok).
             - "all" — every adapter, regardless of what's installed (will
               warn for each missing one).
     """
@@ -294,7 +294,7 @@ def init(
         active.append("claude-agent-sdk")
 
     if do_xai:
-        # Grok bots. The xAI SDK traces itself through the global provider
+        # Grok (xAI SDK). The SDK traces itself through the global provider
         # we just set, so this only checks the path is clear and attaches
         # the processor that turns a Grok run into named Work.
         from trovis.xai import setup_xai

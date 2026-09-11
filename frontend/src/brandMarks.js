@@ -56,7 +56,7 @@ export const BRANDS = {
     label: 'Grok',
     role: 'live',
     color: null, // currentColor — the xAI mark is monochrome
-    aliases: ['grok', 'xai', 'x ai', 'grok bot'],
+    aliases: ['grok', 'xai', 'x ai'],
   },
   slack: {
     id: 'slack',

@@ -9,7 +9,7 @@ Supports these platforms today:
   - Anthropic Claude     — `init(platform="anthropic")` or "auto"
     Managed Agents
   - Claude Agent SDK     — `init(platform="claude-agent-sdk")` or "auto"
-  - xAI Grok bots        — `init(platform="xai")` / "grok", or "auto"
+  - Grok (xAI SDK)       — `init(platform="xai")` / "grok", or "auto"
 
 `init(platform="auto")` (the default) detects which SDK(s) are
 installed and hooks into both when present.

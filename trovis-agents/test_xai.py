@@ -2,7 +2,7 @@
 
 No network and no xai-sdk install: the SDK is faked where detection matters,
 and the span path is driven through a real OTEL TracerProvider with an
-in-memory exporter. What's asserted is what a Grok bot actually depends on:
+in-memory exporter. What's asserted is what a Grok agent actually depends on:
 
   1. platform="grok" resolves to the xai adapter (and "auto" finds it).
   2. The loop processor stamps set_loop_title() onto xAI-scoped spans only,

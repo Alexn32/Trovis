@@ -60,9 +60,9 @@ const PLATFORMS = [
   // A custom GPT built in ChatGPT: via GPT Actions (OAuth) it both reports its
   // own activity to Trovis AND can ask about the fleet (askFleet). No code.
   { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor + query a GPT via Actions — no code',    needsProvider: false },
-  // Grok bots built on the xAI SDK. The SDK traces itself through the global
+  // Agents built on the xAI SDK. The SDK traces itself through the global
   // OTEL provider, so trovis.init() is the whole integration.
-  { id: 'grok',           label: 'Grok bots (xAI)',           subtitle: 'xAI SDK — already OpenTelemetry-instrumented',   needsProvider: false },
+  { id: 'grok',           label: 'Grok (xAI SDK)',            subtitle: 'Already OpenTelemetry-instrumented — two lines', needsProvider: false },
 ]
 
 // Recipe path — real OTEL ingest, not a first-party Cursor integration.
@@ -577,7 +577,7 @@ function CustomPythonInstructions({ provider, agentName, endpoint }) {
 // The xAI (Grok) branch of the provider picker. Same setup as the Grok tile —
 // deliberately NOT xai-sdk's own `Telemetry().setup_otlp_exporter()`, which
 // sends protobuf (Trovis ingest is OTLP/JSON), carries no API key, and names
-// every bot "xai-sdk".
+// every agent "xai-sdk".
 function PythonXaiInstructions({ agentName, endpoint }) {
   return (
     <>
@@ -1163,7 +1163,7 @@ async for message in query(
 }
 
 // ---------------------------------------------------------------------------
-// Instructions page — Grok bots (xAI SDK)
+// Instructions page — Grok (xAI SDK)
 // ---------------------------------------------------------------------------
 //
 // The xAI SDK is already OTEL-instrumented: every chat.sample()/stream() opens
@@ -1172,15 +1172,15 @@ async for message in query(
 //
 // Two things this page must say out loud, because both fail silently:
 //   - xai_sdk.telemetry.Telemetry() takes the global provider first, names
-//     every bot "xai-sdk", and exports protobuf (Trovis ingest is OTLP/JSON).
+//     every agent "xai-sdk", and exports protobuf (Trovis ingest is OTLP/JSON).
 //   - XAI_SDK_DISABLE_TRACING=1 silences the SDK entirely.
 
 function GrokInstructions({ agentName, endpoint }) {
   return (
     <>
-      <h2 className="instructions-title">Connect a Grok bot</h2>
+      <h2 className="instructions-title">Connect Grok (xAI SDK)</h2>
       <p className="instructions-subtitle">
-        For bots built on the <code>xai-sdk</code> package. The xAI SDK
+        For agents built on the <code>xai-sdk</code> package. The xAI SDK
         emits OpenTelemetry spans already, so there's nothing to wrap —{' '}
         <code>init()</code> is the whole integration.
       </p>
@@ -1238,7 +1238,7 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
         <NamedWorkGuidance />
       </NumberedStep>
 
-      <NumberedStep n={4} title="Run your bot as you normally would">
+      <NumberedStep n={4} title="Run your agent as you normally would">
         <p>
           Every Grok call becomes a span — the model, the token usage, and
           the cost — grouped into one job per run.
@@ -1248,8 +1248,8 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
       <Callout variant="warning">
         <strong>Don't call <code>Telemetry()</code> yourself.</strong>{' '}
         <code>xai_sdk.telemetry.Telemetry()</code> installs its own tracer
-        provider: it names every bot <code>xai-sdk</code> (so they all
-        collapse into one agent here) and exports protobuf, which the
+        provider: it names every agent <code>xai-sdk</code> (so they all
+        collapse into one here) and exports protobuf, which the
         Trovis JSON ingest rejects. <code>init()</code> does that job, and
         OpenTelemetry won't let a second provider take over — if one got
         there first, <code>init()</code> says so in the logs.
@@ -1258,7 +1258,7 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
       <Callout variant="info">
         <strong>Seeing nothing at all?</strong> Check{' '}
         <code>XAI_SDK_DISABLE_TRACING</code> — with it set to{' '}
-        <code>1</code>, the xAI SDK emits no spans, so the bot never
+        <code>1</code>, the xAI SDK emits no spans, so the agent never
         appears. Calling Grok through the OpenAI-compatible endpoint
         (<code>base_url="https://api.x.ai/v1"</code>) instead? That's the
         OpenAI path — use{' '}

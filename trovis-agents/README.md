@@ -2,7 +2,7 @@
 
 Connect your AI agents to Trovis in two lines of code. Supports
 the OpenAI Agents SDK, Anthropic Claude Managed Agents, the
-Claude Agent SDK, and xAI Grok bots. Extras pick which dependencies
+Claude Agent SDK, and Grok (xAI SDK). Extras pick which dependencies
 install.
 
 ## Install
@@ -17,7 +17,7 @@ pip install trovis-agents[anthropic]
 # Claude Agent SDK (query() + ClaudeSDKClient)
 pip install trovis-agents[claude-agent-sdk]
 
-# xAI Grok bots (xai-sdk)
+# Grok (xAI SDK)
 pip install trovis-agents[xai]
 
 # All Python-SDK platforms
@@ -127,9 +127,9 @@ run's token usage + cost (from the SDK's `ResultMessage`).
 `ClaudeSDKClient`'s streaming (`receive_response`) is instrumented the
 same way.
 
-## Grok bots (xAI)
+## Grok (xAI SDK)
 
-For bots built on the `xai-sdk` package. The xAI SDK is already
+For agents built on the `xai-sdk` package. The xAI SDK is already
 OpenTelemetry-instrumented, so there is nothing to wrap — `init()` points
 the global tracer provider at Trovis and every Grok call lands there.
 
@@ -156,12 +156,12 @@ up whenever `xai-sdk` is installed.
 Two things to know:
 
 - **Don't create an `xai_sdk.telemetry.Telemetry()`.** It installs its own
-  tracer provider, which names *every* Grok bot `xai-sdk` (so they collapse
-  into one agent in Trovis) and exports protobuf, which the Trovis JSON
+  tracer provider, which names *every* Grok agent `xai-sdk` (so they all
+  collapse into one in Trovis) and exports protobuf, which the Trovis JSON
   ingest rejects. `init()` already does that job, and OTEL won't let a
   second provider take over — if one got there first, `init()` warns.
 - **`XAI_SDK_DISABLE_TRACING=1` silences the SDK entirely.** With it set, a
-  Grok bot emits no spans at all and never appears; `init()` warns about
+  Grok agent emits no spans at all and never appears; `init()` warns about
   this too.
 
 Calling Grok through the OpenAI-compatible endpoint

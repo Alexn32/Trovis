@@ -2,7 +2,7 @@
 
 ## 0.5.0
 
-**Grok bots (xAI).** `init(platform="xai")` — alias `"grok"`, and picked up
+**Grok (xAI SDK).** `init(platform="xai")` — alias `"grok"`, and picked up
 by `platform="auto"` when `xai-sdk` is installed — connects a bot built on
 the xAI SDK.
 
@@ -12,10 +12,10 @@ the xAI SDK.
   calls land in Trovis with token usage and cost.
 - `set_loop_title()` / `mark_handoff()` now reach Grok runs: a span
   processor stamps the queued workloop attrs onto the first xAI span, so a
-  Grok bot lands as *named* Work instead of an untitled trace.
+  Grok run lands as *named* Work instead of an untitled trace.
 - Warns on the two silent-failure modes instead of shipping nothing:
   `xai_sdk.telemetry.Telemetry()` having taken the global provider first
-  (every bot named "xai-sdk", protobuf to a JSON endpoint), and
+  (every agent named "xai-sdk", protobuf to a JSON endpoint), and
   `XAI_SDK_DISABLE_TRACING` being set.
 
 ## 0.4.6
