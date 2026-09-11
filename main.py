@@ -2796,6 +2796,7 @@ def join_waitlist(body: WaitlistRequest, request: Request) -> WaitlistResponse:
     _check_waitlist_rate_limit(request)
     if (body.website or "").strip():
         return WaitlistResponse(status="joined")
+    name = _clip_waitlist_field(body.name, 200)
     email = (body.email or "").strip()
     if not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail="Please enter a valid email address.")
@@ -2804,6 +2805,7 @@ def join_waitlist(body: WaitlistRequest, request: Request) -> WaitlistResponse:
     )
     status = database.add_waitlist_signup(
         email=email,
+        name=name,
         source=_clip_waitlist_field(body.source, 80) or "founding-waitlist",
         runtime_interest=tools,
         company=_clip_waitlist_field(body.company, 200),

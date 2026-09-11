@@ -6,14 +6,14 @@
     <title>Trovis — Founding waitlist</title>
     <meta
       name="description"
-      content="Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s blocked, and where handoffs get stuck."
+      content="Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what your agents are actually doing, and where handoffs get stuck."
     />
     <link rel="icon" type="image/svg+xml" href="/trovis-favicon.svg" />
     <meta property="og:title" content="Trovis — Founding waitlist" />
     <meta property="og:site_name" content="Trovis" />
     <meta
       property="og:description"
-      content="Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what’s blocked, and where handoffs get stuck."
+      content="Trovis is the operating layer for hybrid work — the desk that shows what’s waiting on you, what your agents are actually doing, and where handoffs get stuck."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://trovisai.com/" />
@@ -25,7 +25,7 @@
     <meta name="twitter:title" content="Trovis — Founding waitlist" />
     <meta
       name="twitter:description"
-      content="Founding seats for teams already running agents. See what’s waiting, what’s blocked, and where handoffs get stuck."
+      content="Founding seats for teams already running agents. See what’s waiting, what agents are actually doing, and where handoffs get stuck."
     />
     <meta name="twitter:image" content="https://trovisai.com/og.png" />
     <link rel="canonical" href="https://trovisai.com/" />
@@ -326,7 +326,8 @@
           <h1>See the Work<br /><em>across humans, agents, and tools.</em></h1>
           <p class="lede">
             Trovis is the operating layer for hybrid work — the desk that shows what’s
-            waiting on you, what’s blocked, and where handoffs get stuck. Founding seats for
+            waiting on you, what’s blocked, and where handoffs get stuck. You can see
+            what agents are actually doing — in plain English, not traces. Founding seats for
             teams already running agents.
           </p>
           <ul class="benefits">
@@ -334,7 +335,10 @@
               <strong>Home desk: what needs you, not another dashboard</strong>
             </li>
             <li>
-              <strong>Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work.</strong>
+              <strong>Work as jobs — people, agents, and the tools already in the loop — one place to see and judge.</strong>
+            </li>
+            <li>
+              <strong>See what your agents are actually doing — and who’s waiting / what’s stuck — without drowning in traces</strong>
             </li>
             <li>
               <strong>Built for eng/founder teams with agents already in production</strong>
@@ -352,6 +356,10 @@
               <div class="hp" aria-hidden="true">
                 <label for="website">Website</label>
                 <input id="website" name="website" type="text" tabindex="-1" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="name">Name <span style="font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)">(optional)</span></label>
+                <input id="name" name="name" type="text" autocomplete="name" placeholder="Your name" />
               </div>
               <div class="field">
                 <label for="email">Work email</label>
@@ -405,6 +413,8 @@
         form.addEventListener("submit", function (e) {
           e.preventDefault();
           err.style.display = "none";
+          var nameInput = form.elements.namedItem("name");
+          var name = ((nameInput && nameInput.value) || "").trim();
           var email = (form.email.value || "").trim();
           if (!emailRe.test(email)) {
             err.textContent = "Please enter a valid email address.";
@@ -418,6 +428,7 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              name: name,
               email: email,
               company: (form.company.value || "").trim() || null,
               role: (form.role.value || "").trim() || null,
