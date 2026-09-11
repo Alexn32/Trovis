@@ -4,7 +4,7 @@ import { Spinner } from './ui.jsx'
 import { PlusIcon, TrashIcon, UserIcon } from './Icons.jsx'
 import GraduateCard from './Graduate.jsx'
 import {
-  buildTree,
+  buildForest,
   emptyChartCopy,
   peopleInRole,
   personLabel,
@@ -106,7 +106,7 @@ export default function Org({ seat, org, onGraduated }) {
   const roles = chart?.roles || []
   const members = chart?.members || []
   const levels = chart?.scope_levels || []
-  const tree = buildTree(roles)
+  const forest = buildForest(roles)
   const selected = roles.find((r) => r.id === selectedId) || null
   const unplaced = unplacedMembers(roles, members)
   const empty = emptyChartCopy(chart?.can_edit_chart)
@@ -142,7 +142,7 @@ export default function Org({ seat, org, onGraduated }) {
         />
       )}
 
-      {tree.length === 0 ? (
+      {forest.length === 0 ? (
         <div className="state-card">
           <h2>{empty.title}</h2>
           <p>{empty.body}</p>
@@ -157,39 +157,35 @@ export default function Org({ seat, org, onGraduated }) {
         </div>
       ) : (
         <div className="org-body">
-          <div className="org-tree" role="tree" aria-label="Org chart">
-            {tree.map(({ role, depth }) => (
-              <button
-                key={role.id}
-                type="button"
-                role="treeitem"
-                aria-selected={role.id === selectedId}
-                aria-level={depth + 1}
-                className={`org-node ${role.id === selectedId ? 'is-selected' : ''}`}
-                style={{ paddingLeft: `${12 + depth * 18}px` }}
-                onClick={() => setSelectedId(role.id)}
-              >
-                <span className="org-node-title">{role.title}</span>
-                <span className="org-node-people">
-                  {peopleInRole(role, members).map((m) => (
-                    <span key={m.id} className="org-chip">
-                      {personLabel(m)}
-                    </span>
-                  ))}
-                  {role.user_ids?.length === 0 && (
-                    <span className="org-chip org-chip-empty">Vacant</span>
-                  )}
-                </span>
-              </button>
-            ))}
+          {/* A real chart, not an indented list: the shape of the company is
+              the information, and reporting lines only read as lines when
+              they are drawn. Pure CSS — nested lists with connector
+              pseudo-elements — because a layout engine would be a dependency
+              and a lot of canvas for a diagram people mostly read. */}
+          <div className="org-chart-wrap">
+            <div className="org-chart" role="tree" aria-label="Org chart">
+              <ul className="oc-level is-root">
+                {forest.map((node) => (
+                  <ChartNode
+                    key={node.role.id}
+                    node={node}
+                    members={members}
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
+                  />
+                ))}
+              </ul>
+            </div>
             {chart?.can_edit_chart && (
-              <AddRoleForm
-                parentId={null}
-                levels={levels}
-                onSubmit={(payload) => act(() => api.createRole(payload), 'Role added.')}
-                label="Add a top-level role"
-                compact
-              />
+              <div className="org-chart-foot">
+                <AddRoleForm
+                  parentId={null}
+                  levels={levels}
+                  onSubmit={(payload) => act(() => api.createRole(payload), 'Role added.')}
+                  label="Add a top-level role"
+                  compact
+                />
+              </div>
             )}
           </div>
 
@@ -245,6 +241,60 @@ export default function Org({ seat, org, onGraduated }) {
         </section>
       )}
     </div>
+  )
+}
+
+// One box on the chart, plus the branch under it.
+//
+// Two layouts, one rule: children fan out HORIZONTALLY, except when every
+// one of them is a leaf — then they stack vertically off an elbow. Without
+// that exception a manager with twelve reports makes the chart wider than
+// any screen, and the shape of the company is the thing the chart exists to
+// show. With it, the wide part stays the org's real branching and the long
+// tail runs down the page, which is how org charts are drawn on paper.
+function ChartNode({ node, members, selectedId, onSelect }) {
+  const { role, children } = node
+  const people = peopleInRole(role, members)
+  const stacked = children.length > 0 && children.every((c) => c.children.length === 0)
+
+  return (
+    <li className="oc-node">
+      <div className="oc-cell">
+        <button
+          type="button"
+          role="treeitem"
+          aria-selected={role.id === selectedId}
+          aria-level={node.depth + 1}
+          className={`oc-box ${role.id === selectedId ? 'is-selected' : ''}`}
+          onClick={() => onSelect(role.id)}
+        >
+          <span className="oc-box-title">{role.title}</span>
+          <span className="oc-box-people">
+            {people.map((m) => (
+              <span key={m.id} className="oc-person">{personLabel(m)}</span>
+            ))}
+            {/* An empty box is a real state and worth seeing: it is a role
+                nobody is doing. Saying nothing would read as a rendering
+                gap rather than a vacancy. */}
+            {people.length === 0 && <span className="oc-person is-vacant">Open</span>}
+          </span>
+        </button>
+      </div>
+
+      {children.length > 0 && (
+        <ul className={`oc-level ${stacked ? 'is-stacked' : ''}`}>
+          {children.map((child) => (
+            <ChartNode
+              key={child.role.id}
+              node={child}
+              members={members}
+              selectedId={selectedId}
+              onSelect={onSelect}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
   )
 }
 

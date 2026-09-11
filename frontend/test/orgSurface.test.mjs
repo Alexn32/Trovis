@@ -19,7 +19,9 @@ import { ALL_SURFACES, FULL_SEAT, hasReports, hasSurface, seatOf, showsTechnical
 import { resolveTab, visibleTabs } from '../src/tabs.js'
 import { TAB_PATHS, parsePath } from '../src/route.js'
 import {
-  buildTree,
+  buildForest,
+  flattenForest,
+  widestRow,
   emptyChartCopy,
   peopleInRole,
   personLabel,
@@ -132,11 +134,44 @@ const MEMBERS = [
   { id: 13, name: 'Dee', email: 'dee@acme.test' },
 ]
 
-test('the tree renders parents above their reports', () => {
+test('the chart is a real hierarchy, not a flat list with indents', () => {
+  // Nested nodes, because the page draws connectors between a parent and
+  // its children — an indented list cannot express a reporting line, which
+  // is the one thing an org chart exists to show.
+  const forest = buildForest(ROLES)
+  assert.equal(forest.length, 1)
+  assert.equal(forest[0].role.title, 'CEO')
+  assert.equal(forest[0].children[0].role.title, 'Support Manager')
+  assert.equal(forest[0].children[0].children[0].role.title, 'Support IC')
+  assert.deepEqual(forest[0].children[0].children[0].children, [])
   assert.deepEqual(
-    buildTree(ROLES).map(({ role, depth }) => [role.title, depth]),
+    flattenForest(forest).map(({ role, depth }) => [role.title, depth]),
     [['CEO', 0], ['Support Manager', 1], ['Support IC', 2]],
   )
+})
+
+test('siblings are ordered by title, so boxes do not move between reloads', () => {
+  const roles = [
+    { id: 1, title: 'Root', parent_role_id: null, user_ids: [] },
+    { id: 2, title: 'Zeta', parent_role_id: 1, user_ids: [] },
+    { id: 3, title: 'Alpha', parent_role_id: 1, user_ids: [] },
+  ]
+  assert.deepEqual(
+    buildForest(roles)[0].children.map((c) => c.role.title),
+    ['Alpha', 'Zeta'],
+  )
+})
+
+test('the widest row is known, so the chart can scroll instead of squeezing', () => {
+  assert.equal(widestRow(buildForest(ROLES)), 1)
+  const wide = [
+    { id: 1, title: 'Root', parent_role_id: null, user_ids: [] },
+    { id: 2, title: 'A', parent_role_id: 1, user_ids: [] },
+    { id: 3, title: 'B', parent_role_id: 1, user_ids: [] },
+    { id: 4, title: 'C', parent_role_id: 1, user_ids: [] },
+  ]
+  assert.equal(widestRow(buildForest(wide)), 3)
+  assert.equal(widestRow([]), 0)
 })
 
 test('a role whose parent is not visible still renders, at the top', () => {
@@ -145,8 +180,11 @@ test('a role whose parent is not visible still renders, at the top', () => {
   // silently vanished because its parent was filtered out would be worse
   // than one shown at the wrong indent.
   const subtreeOnly = ROLES.slice(1) // Support Manager's parent (CEO) missing
+  const forest = buildForest(subtreeOnly)
+  assert.equal(forest.length, 1)
+  assert.equal(forest[0].role.title, 'Support Manager')
   assert.deepEqual(
-    buildTree(subtreeOnly).map(({ role, depth }) => [role.title, depth]),
+    flattenForest(forest).map(({ role, depth }) => [role.title, depth]),
     [['Support Manager', 0], ['Support IC', 1]],
   )
 })
@@ -156,13 +194,13 @@ test('a cycle in the data does not hang the page', () => {
     { id: 1, title: 'A', parent_role_id: 2, user_ids: [] },
     { id: 2, title: 'B', parent_role_id: 1, user_ids: [] },
   ]
-  const out = buildTree(cyclic)
+  const out = flattenForest(buildForest(cyclic))
   assert.ok(out.length <= 2)
 })
 
 test('empty and unknown inputs render nothing rather than throwing', () => {
-  assert.deepEqual(buildTree(undefined), [])
-  assert.deepEqual(buildTree([]), [])
+  assert.deepEqual(buildForest(undefined), [])
+  assert.deepEqual(buildForest([]), [])
   assert.deepEqual(peopleInRole(null, MEMBERS), [])
   // An id with no member row is dropped, not drawn as a blank chip.
   assert.deepEqual(
@@ -386,4 +424,42 @@ test('nothing in the product writes the old directory', () => {
     const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
     assert.doesNotMatch(src, /createTeamMember|post\(.\/team/, `${f} writes team_members`)
   }
+})
+
+// --- the chart is drawn, not indented ---------------------------------------
+
+test('reporting lines are drawn, and the old indented list is gone', () => {
+  // An indented list cannot show a reporting line. The chart is nested
+  // <ul>/<li> with connector pseudo-elements — no layout library, because a
+  // diagram people mostly read does not need a canvas engine.
+  assert.match(org, /className="oc-level is-root"/)
+  assert.match(org, /<ChartNode/)
+  assert.doesNotMatch(org, /paddingLeft: `\$\{12 \+ depth \* 18\}px`/)
+  const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8')
+  for (const rule of ['.oc-level::before', '.oc-node::before', '.oc-cell::before']) {
+    assert.ok(css.includes(rule), `missing connector rule ${rule}`)
+  }
+})
+
+test('a long tail of leaves runs down the page instead of off the side', () => {
+  // One rule: children fan out horizontally UNLESS every one of them is a
+  // leaf. Without it a manager with twelve reports makes the chart wider
+  // than any screen, and the shape of the org is what the chart is for.
+  assert.match(org, /children\.every\(\(c\) => c\.children\.length === 0\)/)
+  assert.match(org, /is-stacked/)
+})
+
+test('the chart gets the page width, with the role detail under it', () => {
+  const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8')
+  // Side by side, the chart was squeezed into a column narrow enough to
+  // clip whole branches.
+  assert.doesNotMatch(css, /\.org-body \{[^}]*grid-template-columns/s)
+  assert.match(css, /\.org-body \{[^}]*flex-direction: column/s)
+  // And it scrolls sideways rather than shrinking boxes past readability.
+  assert.match(css, /\.org-chart-wrap \{[^}]*overflow-x: auto/s)
+})
+
+test('a role nobody is in says so', () => {
+  // A vacancy is a real state. Rendering nothing would read as a bug.
+  assert.match(org, /people\.length === 0 && <span className="oc-person is-vacant">Open<\/span>/)
 })
