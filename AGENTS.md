@@ -113,7 +113,13 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   name is their **chart role title** (`org_roles.title`) — never `users.role`, which is an account
   permission. Every owner read goes through the one shared resolver (`_OWNER_JOIN_SQL` /
   `_OWNER_COLS_SQL`), which prefers `users` and falls back to `team_members` for legacy rows;
-  don't hand-roll that join again.
+  don't hand-roll that join again. The roster **names the gap**: agents are derived from
+  telemetry, so they arrive owned by nobody, and Whose work's team view stays thin until
+  someone assigns them. `unowned.js` decides what counts — per **sub-agent** (the unit an
+  owner is assigned to, so a gateway with five gaps reads as five), and **locked agents are
+  excluded** because their card won't open, so the count would never reach zero. The toggle
+  filters the grid and hides itself once the gap is closed; it never touches the summary
+  counts, which describe the fleet.
 - **Naming a person with no login.** `_resolve_human_name` resolves an email to: `users` → a
   **named pending invite** (`invites.display_name`, account-scoped, read regardless of
   `accepted_at`/`expires_at` — the token expires, the name is just a record) → the legacy

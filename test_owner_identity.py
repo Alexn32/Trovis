@@ -205,6 +205,57 @@ check(
 r = client.get("/org/members/%d/agents" % sarah_id, headers=auth(FOUNDER)).json()
 check("their agents list back", [a["service_name"] for a in r] == ["billing-agent"])
 
+# The roster marks which agents nobody owns, and it counts per SUB-AGENT
+# because that is the unit an owner is assigned to. That only works if
+# /agents carries owner_name down at the sub-agent level, not just on the
+# instance — an instance-only field would collapse a gateway with five gaps
+# into one, and the count would stop moving as they were filled.
+# The sub-agent id rides on the span's attributes (`trovis.agent.id`), not on
+# a top-level field — seed_agent's agent_id argument names the row, not the
+# grouping key, so set the attribute the ingest path actually reads.
+def seed_sub_agent(account_id, service, sub):
+    _seq[0] += 1
+    now = time.time_ns()
+    database.insert_spans(
+        [
+            {
+                "trace_id": f"t{_seq[0]}",
+                "span_id": f"s{_seq[0]}",
+                "parent_span_id": None,
+                "service_name": service,
+                "agent_id": sub,
+                "span_name": "run",
+                "kind": 1,
+                "start_time_unix": now - 60 * NS,
+                "end_time_unix": now,
+                "status_code": 0,
+                "status_message": "",
+                "attributes": {"trovis.agent.id": sub},
+                "resource_attributes": {},
+            }
+        ],
+        account_id=account_id,
+    )
+
+
+seed_sub_agent(acme_id, "gateway", "router")
+seed_sub_agent(acme_id, "gateway", "scorer")
+client.put(
+    "/agents/gateway/owner",
+    json={"agent_id": "router", "user_id": sarah_id},
+    headers=auth(FOUNDER),
+)
+gw = {
+    g["service_name"]: g for g in client.get("/agents", headers=auth(FOUNDER)).json()
+}["gateway"]
+subs = {a["agent_id"]: a for a in gw["agents"]}
+check("a sub-agent carries its own owner", subs["router"]["owner_name"] == "Sarah Chen")
+check("...and its unowned sibling carries none", subs["scorer"]["owner_name"] is None)
+check(
+    "a sub-agent also reports whether it is locked",
+    "locked" in subs["scorer"],
+)
+
 # Moving them on the chart moves the label with them.
 client.post(
     "/org/roles/%d/members" % ceo["id"], json={"user_id": sarah_id}, headers=auth(FOUNDER)
