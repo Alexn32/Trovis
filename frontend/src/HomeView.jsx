@@ -73,8 +73,14 @@ function localZone() {
  *
  * `reload` is the one same-context refresh: it re-runs the same question and
  * is represented as loading beside the data it is refreshing.
+ *
+ * `epoch` is the SHARED version of that: one counter held by Home and passed
+ * to every read that answers the same question, so a successful mutation can
+ * refresh all of them without any of them knowing about each other. An
+ * inactive read does not fetch on a bump — `active` still gates the effect —
+ * but it carries the new epoch, so the next time it does run it is fresh.
  */
-function useHomeRead(load, context, { active = true } = {}) {
+function useHomeRead(load, context, { active = true, epoch = 0 } = {}) {
   const [state, setState] = useState({
     data: null, error: null, loading: true, context: null,
   })
@@ -109,7 +115,7 @@ function useHomeRead(load, context, { active = true } = {}) {
       controller.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, active, attempt])
+  }, [context, active, attempt, epoch])
 
   // THE RENDER-TIME GATE. A body stamped with another context is not this
   // context's data, whatever the effects have or have not done yet.
@@ -163,7 +169,31 @@ export default function HomeView({
   const [days, setDays] = useState(7)
   const [openFinding, setOpenFinding] = useState(null)
   const [expanded, setExpanded] = useState({})
-  const [mutating, setMutating] = useState(null)
+  // In-flight acknowledgements, keyed the same way failures are: by the context
+  // that authorized them and by finding id, with the value being the id of the
+  // one operation that owns that card. A scalar could only hold one card at a
+  // time, and — worse — it was cleared only when the context had not moved, so
+  // leaving a scope mid-save stranded the card on "Saving…" for as long as the
+  // reader stayed away.
+  const [mutating, setMutating] = useState({ context: null, byId: {} })
+  // A synchronous mirror. The handler has to read the map BEFORE it schedules
+  // its write (to reject a duplicate click on a card already saving) and again
+  // after its await, and React state is neither current at either point.
+  const mutatingRef = useRef(mutating)
+  const writeMutating = useCallback((fn) => {
+    const next = fn(mutatingRef.current)
+    if (next === mutatingRef.current) return
+    mutatingRef.current = next
+    setMutating(next)
+  }, [])
+  const opSeq = useRef(0)
+  // One shared invalidation signal for every view of the findings collection.
+  // Bumping it re-reads the active groups AND an open dismissed list, which is
+  // the whole fix: those two are separate reads of one collection, and a
+  // dismissal that refreshed only the first left a finding missing from the
+  // active cards while the dismissed view still said "Nothing dismissed".
+  const [findingsEpoch, setFindingsEpoch] = useState(0)
+  const invalidateFindings = useCallback(() => setFindingsEpoch((n) => n + 1), [])
   // Acknowledgement failures, keyed by finding id AND by the context they
   // happened in, so an error from a scope the reader has left never decorates
   // a card in the new one.
@@ -203,7 +233,7 @@ export default function HomeView({
   const findings = useHomeRead(
     useCallback((signal) => api.getHomeFindings({ ...query, signal }), [query]),
     contextKey,
-    { active },
+    { active, epoch: findingsEpoch },
   )
 
   // Close a detail panel whenever the context changes. A finding opened under
@@ -223,6 +253,12 @@ export default function HomeView({
     setExpanded({})
     setShowDismissed(false)
     setAckError({ context: contextKey, byId: {} })
+    // Busy state belongs to the context it was started in. Dropping it here —
+    // rather than leaving it to each completion — is what stops a card being
+    // disabled on a return visit: the operation's own `finally` may never run
+    // under this context, and may not run at all before the reader comes back.
+    writeMutating(() => ({ context: contextKey, byId: {} }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contextKey])
   const panelFinding = openContext.current === contextKey ? openFinding : null
 
@@ -263,11 +299,27 @@ export default function HomeView({
   //     silently did nothing;
   //   * the finding and its prior state survive a failure untouched;
   //   * a completion that lands after the context moved changes nothing,
-  //     because it belongs to a scope the reader has left.
+  //     because it belongs to a scope the reader has left — and, the part that
+  //     was missing, it does not leave the card it started on pending either.
+  //
+  // Each save takes an operation id. Everything it does afterwards — clearing
+  // busy, writing an error — is conditional on that id still owning the card,
+  // so a slow completion can never speak for a newer save of the same finding,
+  // and saves on two different cards never see each other's state at all.
   const acknowledge = useCallback(
     async (finding) => {
       const inContext = contextKey
-      setMutating(finding.id)
+      const held = mutatingRef.current
+      const inFlight = held.context === inContext ? held.byId : {}
+      // A second click on a card already saving is the same request twice.
+      // The button is disabled, but a keyboard repeat or a stale render must
+      // not be able to start a rival operation for the same finding.
+      if (inFlight[finding.id]) return
+      const op = (opSeq.current += 1)
+      writeMutating(() => ({
+        context: inContext,
+        byId: { ...inFlight, [finding.id]: op },
+      }))
       setAckError((e) => ({
         context: inContext,
         byId: { ...(e.context === inContext ? e.byId : {}), [finding.id]: null },
@@ -275,7 +327,8 @@ export default function HomeView({
       try {
         await api.setFindingState(finding.id, 'acknowledged', query)
         if (contextRef.current !== inContext) return
-        findings.reload()
+        // Every view of the findings collection, not just the active groups.
+        invalidateFindings()
       } catch (err) {
         if (contextRef.current !== inContext) return
         setAckError((e) => ({
@@ -286,13 +339,26 @@ export default function HomeView({
           },
         }))
       } finally {
-        if (contextRef.current === inContext) setMutating(null)
+        writeMutating((m) => {
+          // The context moved on: the map was already emptied for this
+          // context, and re-adding or re-deleting here would speak for a
+          // scope this operation no longer belongs to.
+          if (m.context !== inContext) return m
+          // A newer save owns this card. It will clear itself.
+          if (m.byId[finding.id] !== op) return m
+          const byId = { ...m.byId }
+          delete byId[finding.id]
+          return { context: m.context, byId }
+        })
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [contextKey, query],
+    [contextKey, query, invalidateFindings, writeMutating],
   )
   const ackErrors = ackError.context === contextKey ? ackError.byId : {}
+  // The same render-time gate the reads use: busy state stamped with another
+  // context is not this context's busy state, whatever any effect has done.
+  const mutatingIds = mutating.context === contextKey ? mutating.byId : {}
 
   // ---- navigation ---------------------------------------------------------
   // Home's work sections are scoped; their destinations must arrive scoped
@@ -378,7 +444,7 @@ export default function HomeView({
         onGoMyWork={goMyWork}
         onOpen={setOpenFinding}
         onAcknowledge={acknowledge}
-        mutating={mutating}
+        mutating={mutatingIds}
         ackErrors={ackErrors}
         expanded={Boolean(expanded.attention)}
         onExpand={() => setExpanded((e) => ({ ...e, attention: true }))}
@@ -396,7 +462,7 @@ export default function HomeView({
         loading={findings.loading && !finds}
         onOpen={setOpenFinding}
         onAcknowledge={acknowledge}
-        mutating={mutating}
+        mutating={mutatingIds}
         ackErrors={ackErrors}
         expanded={Boolean(expanded.opportunity)}
         onExpand={() => setExpanded((e) => ({ ...e, opportunity: true }))}
@@ -410,7 +476,7 @@ export default function HomeView({
         loading={findings.loading && !finds}
         onOpen={setOpenFinding}
         onAcknowledge={acknowledge}
-        mutating={mutating}
+        mutating={mutatingIds}
         ackErrors={ackErrors}
         expanded={Boolean(expanded.positive_change)}
         onExpand={() => setExpanded((e) => ({ ...e, positive_change: true }))}
@@ -422,6 +488,7 @@ export default function HomeView({
         query={query}
         context={contextKey}
         active={active}
+        epoch={findingsEpoch}
         onOpen={setOpenFinding}
       />
 
@@ -438,7 +505,7 @@ export default function HomeView({
             const q = askQuestionFor(f)
             if (q) openAsk(q)
           }}
-          onStateChanged={() => findings.reload()}
+          onStateChanged={invalidateFindings}
         />
       ) : null}
     </div>
@@ -663,7 +730,7 @@ function Attention({
                         finding={f}
                         onOpen={onOpen}
                         onAcknowledge={onAcknowledge}
-                        busy={mutating === f.id}
+                        busy={Boolean(mutating?.[f.id])}
                         ackError={ackErrors?.[f.id] || null}
                       />
                     ))}
@@ -738,14 +805,19 @@ function CostContext({ snapshot, onOpenCost, locale }) {
  * It fetches only when opened, and it is stamped with the same context as
  * everything else — so a permission change empties it during render.
  */
-function DismissedFindings({ open, onToggle, query, context, active, onOpen }) {
+function DismissedFindings({ open, onToggle, query, context, active, epoch, onOpen }) {
+  // It takes Home's shared findings epoch, so a dismissal made while this list
+  // is open refreshes it in place — a finding that has just left the active
+  // cards must not be missing from both views at once. While the disclosure is
+  // closed the read is inactive and a bump costs nothing: no background
+  // request, and the next open reads fresh anyway.
   const read = useHomeRead(
     useCallback(
       (signal) => api.getHomeFindings({ ...query, includeDismissed: true, signal }),
       [query],
     ),
     context,
-    { active: active && open },
+    { active: active && open, epoch },
   )
   const items = useMemo(
     () => (read.data?.findings || []).filter((f) => f.state === 'dismissed'),
@@ -819,7 +891,7 @@ function FindingGroup({
                 finding={f}
                 onOpen={onOpen}
                 onAcknowledge={onAcknowledge}
-                busy={mutating === f.id}
+                busy={Boolean(mutating?.[f.id])}
                 ackError={ackErrors?.[f.id] || null}
               />
             ))}

@@ -35,6 +35,21 @@ export default function HomeFindingPanel({
   const [mutationError, setMutationError] = useState(null)
   const closeRef = useRef(null)
   const guard = useRef(createRaceGuard()).current
+  // A SECOND guard, for mutations, and deliberately not the one above.
+  //
+  // The read guard's generation only moves when the detail effect re-runs, so
+  // it cannot see a panel closed and reopened on the same finding with the same
+  // query — the deps never changed. This one is created per panel instance and
+  // invalidated on every identity change AND on unmount, which is what "this
+  // panel" actually means.
+  //
+  // It is not an abort. A PATCH that has left the browser may already have been
+  // applied by the server, and pretending otherwise would be a lie about the
+  // record. The server operation stands; what this decides is only whether its
+  // completion may still touch THIS panel's state or call THIS panel's
+  // callbacks. `onClose` in particular belongs to whatever panel is open now,
+  // so a stale completion calling it closes somebody else's panel.
+  const mutation = useRef(createRaceGuard()).current
 
   useEffect(() => {
     const mine = guard.next()
@@ -69,21 +84,41 @@ export default function HomeFindingPanel({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // Identity change or unmount ends every mutation this panel owns, and clears
+  // the state those mutations were driving. Without the reset, a completion
+  // skipped as stale would leave `busy` true for ever and the panel's own
+  // buttons disabled — the same stuck-pending bug, one component down.
+  useEffect(() => {
+    setBusy(false)
+    setMutationError(null)
+    return () => {
+      mutation.invalidate()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findingId, query.days, query.tz, query.whose, query.personId])
+
   const setState = useCallback(
     async (state) => {
+      const mine = mutation.next()
       setBusy(true)
       setMutationError(null)
       try {
         await api.setFindingState(findingId, state, query)
+        // The PATCH stands either way. This only asks whether the panel that
+        // started it is still the panel on screen.
+        if (!mutation.isCurrent(mine)) return
         onStateChanged && onStateChanged()
         if (state === 'dismissed') onClose()
       } catch (err) {
         // The finding stays on screen with its evidence intact. A mutation
         // that failed has changed nothing, and hiding the row would suggest
         // otherwise.
+        if (!mutation.isCurrent(mine)) return
         setMutationError(err?.message || 'That did not save. Try again.')
       } finally {
-        setBusy(false)
+        // A newer mutation, or a newer panel, owns `busy` now. Clearing it
+        // here would re-enable buttons in the middle of that operation.
+        if (mutation.isCurrent(mine)) setBusy(false)
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
