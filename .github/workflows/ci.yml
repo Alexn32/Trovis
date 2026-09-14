@@ -34,6 +34,11 @@ jobs:
       # is present BEFORE running anything: deleting a door test would
       # otherwise just shrink the loop below and still go green.
       #
+      # `recipe` is the cross-cutting one: it runs the copy-paste commands the
+      # Connect page prints, reading them out of the page. The other door
+      # tests post hand-built JSON, which is how three separate breakages sat
+      # in those recipes with every test green.
+      #
       # Hermes is deliberately NOT in this list — it was delisted as an
       # unverified integration, not merely left untested. Adding
       # test_connect_hermes.py here is the correct way to bring it back, and
@@ -41,7 +46,7 @@ jobs:
       - name: Every claimed ingest door has a test
         run: |
           missing=()
-          for door in otlp sdk plugin actions grok_bot; do
+          for door in otlp sdk plugin actions grok_bot recipe; do
             [ -f "test_connect_$door.py" ] || missing+=("test_connect_$door.py")
           done
           if [ ${#missing[@]} -gt 0 ]; then

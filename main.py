@@ -937,6 +937,92 @@ def _extract_registrations(
     return described
 
 
+# OTLP over HTTP has two wire formats and every SDK picks its own default:
+# Python's exporter sends protobuf, JavaScript's sends JSON. Accepting only one
+# meant the recipe on the Connect page — copy-pasted, unmodified — posted
+# protobuf and got a 400 per batch, silently, forever. "Anything that emits
+# OTEL spans should work out of the box" is the first architectural principle
+# in this repo; these two helpers are what make that true.
+_PROTOBUF_CONTENT_TYPES = frozenset(
+    {"application/x-protobuf", "application/protobuf", "application/x-google-protobuf"}
+)
+
+
+def _decompress_ingest_body(raw: bytes, content_encoding: str | None) -> bytes:
+    """Undo Content-Encoding. OTEL exporters gzip when configured to, and a
+    gzipped body read as UTF-8 fails with a decode error that tells the sender
+    nothing about what was wrong.
+
+    The decompressed size is capped too: the compressed cap upstream is no
+    protection on its own, since a few KB of gzip expands to gigabytes.
+    """
+    encoding = (content_encoding or "").strip().lower()
+    if not encoding or encoding == "identity":
+        return raw
+    if encoding != "gzip":
+        raise HTTPException(
+            status_code=415, detail=f"unsupported Content-Encoding: {encoding}"
+        )
+    import zlib
+
+    try:
+        decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
+        out = decompressor.decompress(raw, _INGEST_MAX_BODY_BYTES + 1)
+    except Exception as e:  # noqa: BLE001 — a malformed body is a 400, not a 500
+        raise HTTPException(status_code=400, detail=f"invalid gzip body: {e}")
+    if len(out) > _INGEST_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large (decompressed)")
+    return out
+
+
+def _otlp_protobuf_to_json(raw: bytes) -> dict:
+    """Decode an OTLP/protobuf ExportTraceServiceRequest into the same dict
+    shape `_parse_otlp_json` already reads.
+
+    protobuf-JSON differs from OTLP/JSON in exactly one way that matters here:
+    ids are base64 rather than hex. Everything else — camelCase keys, numeric
+    strings, string enum names — the JSON parser already tolerates.
+    """
+    try:
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+            ExportTraceServiceRequest,
+        )
+        from google.protobuf.json_format import MessageToDict
+    except ImportError as e:  # pragma: no cover — dependency is in requirements
+        logger.error("[Trovis] OTLP/protobuf ingest unavailable: %s", e)
+        raise HTTPException(
+            status_code=415,
+            detail="this server cannot read OTLP/protobuf; send OTLP/JSON",
+        )
+    try:
+        message = ExportTraceServiceRequest()
+        message.ParseFromString(raw)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid OTLP/protobuf body: {e}")
+    payload = MessageToDict(message)
+    for resource_span in payload.get("resourceSpans") or []:
+        for scope_span in resource_span.get("scopeSpans") or []:
+            for span in scope_span.get("spans") or []:
+                for key in ("traceId", "spanId", "parentSpanId"):
+                    value = span.get(key)
+                    if isinstance(value, str) and value:
+                        span[key] = _b64_id_to_hex(value)
+    return payload
+
+
+def _b64_id_to_hex(value: str) -> str:
+    """base64 id -> hex. Returns the input untouched when it is already hex,
+    so a body that mixes the two (or a future protobuf lib that emits hex)
+    still lands."""
+    import base64
+    import binascii
+
+    try:
+        return base64.b64decode(value, validate=True).hex()
+    except (binascii.Error, ValueError):
+        return value
+
+
 @app.post(
     "/v1/traces",
     response_model=IngestResponse,
@@ -945,7 +1031,12 @@ def _extract_registrations(
     response_model_exclude_none=True,
 )
 async def ingest_traces(request: Request) -> IngestResponse:
-    """OTLP/JSON trace ingestion.
+    """OTLP trace ingestion — JSON or protobuf, gzipped or not.
+
+    The wire format follows Content-Type: `application/x-protobuf` is decoded
+    as an ExportTraceServiceRequest, anything else is read as OTLP/JSON. Both
+    converge on the same parse, so a sender never has to care which one this
+    server "prefers" — it accepts what its SDK already sends.
 
     Workloop attributes (all optional; span attributes are the carrier since
     the wire format is OTLP. Every key is read with the trovis./oversee.
@@ -1023,10 +1114,15 @@ async def ingest_traces(request: Request) -> IngestResponse:
     raw_body = await request.body()
     if len(raw_body) > _INGEST_MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="payload too large")
-    try:
-        payload = json.loads(raw_body)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"invalid JSON body: {e}")
+    raw_body = _decompress_ingest_body(raw_body, request.headers.get("content-encoding"))
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type in _PROTOBUF_CONTENT_TYPES:
+        payload = _otlp_protobuf_to_json(raw_body)
+    else:
+        try:
+            payload = json.loads(raw_body)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"invalid JSON body: {e}")
 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
