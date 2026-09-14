@@ -517,6 +517,59 @@ export function readFinancial(snapshot) {
         : null,
     periodStart: fin.period_start_utc || null,
     periodEnd: fin.period_end_utc || null,
+    // The server's own buckets, over the same period and the same local days
+    // as the completion series. Read only when it says they reconcile with the
+    // total beside them: a chart that disagrees with the number printed above
+    // it is worse than no chart, so a mismatch drops the chart and keeps the
+    // number. Points are never synthesised here — a day the server did not
+    // send is not a day that cost nothing.
+    daily: readCostSeries(fin.daily),
+    monthly: readCostMonth(fin.monthly),
+  }
+}
+
+/** The daily spend series, or null when it cannot be trusted or is absent. */
+export function readCostSeries(daily) {
+  if (!daily || daily.available !== true) return null
+  if (daily.reconciles === false) return null
+  const points = Array.isArray(daily.points) ? daily.points : []
+  if (points.length < 2) return null
+  return {
+    points: points.map((p) => ({
+      bucket_start: p.bucket_start,
+      spend_usd: typeof p.spend_usd === 'number' ? p.spend_usd : 0,
+      unpriced_token_spans:
+        typeof p.unpriced_token_spans === 'number' ? p.unpriced_token_spans : 0,
+    })),
+    timezone: daily.timezone || 'UTC',
+    total: typeof daily.total === 'number' ? daily.total : null,
+  }
+}
+
+/**
+ * Month-to-date against the monthly budget — a DIFFERENT window from the
+ * period above, kept separate and labelled by the caller.
+ *
+ * Null when the server could not establish it, and null when the only budget
+ * on offer is the deployment default: a bar against a number nobody in this
+ * org chose would read as a limit they set. The month-to-date figure itself
+ * still stands without one.
+ */
+export function readCostMonth(monthly) {
+  if (!monthly || monthly.available !== true) return null
+  const mtd = monthly.month_to_date_usd
+  if (typeof mtd !== 'number') return null
+  const chosen = monthly.budget_source === 'account'
+  const budget = chosen && typeof monthly.budget_usd === 'number' && monthly.budget_usd > 0
+    ? monthly.budget_usd
+    : null
+  return {
+    monthToDate: mtd,
+    monthStart: monthly.month_start_utc || null,
+    timezone: monthly.timezone || 'UTC',
+    budget,
+    budgetPct: budget ? monthly.budget_pct : null,
+    overBudget: budget ? monthly.over_budget === true : false,
   }
 }
 

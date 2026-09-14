@@ -12,6 +12,9 @@
 import {
   bucketLabel, findingQualifier, formatCount, formatMoney, relTime,
 } from './homeView.js'
+// The Cost page's own chart primitives, so Home's compact version is the same
+// visual and the two cannot drift.
+import { DailySpendChart, projectMonth } from './costChart.jsx'
 
 /* ── small shared bits ─────────────────────────────────────────────── */
 
@@ -326,40 +329,146 @@ export function AnalysisNote({ read, onRefresh }) {
 
 /* ── cost ──────────────────────────────────────────────────────────── */
 
-export function CostCard({ fin, period, onOpenCost, locale }) {
+/**
+ * A compact cost summary, in the Cost page's visual language.
+ *
+ * It used to be a text box: an amount, a paragraph of scope prose, two
+ * metadata pairs and a button. Four things a reader actually wants here, in
+ * this order:
+ *
+ *   1. what the period cost,
+ *   2. how recorded spend is moving,
+ *   3. whether the month is heading somewhere worrying,
+ *   4. where to go to investigate.
+ *
+ * The scope label stays VISIBLE — this is organization-wide money and hiding
+ * that in a tooltip beside a narrowed work scope would be the one dishonest
+ * thing this card could do. The methodology paragraph moves into a disclosure,
+ * which is a different decision from deleting it.
+ *
+ * The full breakdowns (per agent, per model) and budget editing stay on the
+ * Cost page. Nothing here is generated, projected or estimated by a model.
+ */
+export function CostCard({
+  fin, period, periodDays, onOpenCost, locale, destinationNote,
+}) {
   const pct = fin.coverageRatio == null ? null : Math.round(fin.coverageRatio * 100)
+  const open = onOpenCost ? () => onOpenCost(periodDays ?? null) : null
   return (
     <div className="hv-cost">
+      <div className="hv-cost-head">
+        <div className="hv-cost-head-l">
+          <span className="hv-cost-title">Cost</span>
+          {fin.orgWide ? (
+            <span className="hv-cost-scope">Organization-wide</span>
+          ) : null}
+        </div>
+        {open ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm hv-cost-open"
+            onClick={open}
+            title={destinationNote || undefined}
+          >
+            View costs
+          </button>
+        ) : null}
+      </div>
+
       <div className="hv-cost-main">
         <span className="hv-cost-value">{formatMoney(fin.spend, fin.currency, locale)}</span>
-        <span className="hv-cost-label">
-          recorded spend
-          {fin.orgWide ? ' · organization-wide' : ''}
+        <span className="hv-cost-label">recorded spend · {period}</span>
+      </div>
+
+      {fin.daily ? (
+        <DailySpendChart
+          points={fin.daily.points}
+          timezone={fin.daily.timezone}
+          label={`Daily spend, ${period}`}
+        />
+      ) : null}
+
+      <MonthlyBudget month={fin.monthly} currency={fin.currency} locale={locale} />
+
+      <div className="hv-cost-foot">
+        {pct != null && pct < 100 ? (
+          <span className="hv-cost-cov">Some calls are unpriced · {pct}% priced</span>
+        ) : pct == null ? (
+          <span className="hv-cost-cov">Pricing coverage not established</span>
+        ) : null}
+        <details className="hv-cost-about">
+          <summary>How this is counted</summary>
+          <p>
+            {fin.orgWide
+              ? 'Spend is recorded per account and agent, not per work scope, so this figure covers the whole organization in this period regardless of the work scope selected above. It is not what the selected work cost.'
+              : fin.scopeNote || ''}
+          </p>
+          <p>
+            Costs are computed when telemetry arrives, from stored model prices.
+            {fin.unpricedNote ? ` ${fin.unpricedNote}` : ''}
+          </p>
+          {destinationNote ? <p>{destinationNote}</p> : null}
+        </details>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Month-to-date against the org's monthly budget.
+ *
+ * A DIFFERENT window from the card's period, so it says "month to date" and
+ * names the month rather than sitting silently under a 7-day figure. Omitted
+ * entirely when no budget has been set or the month cannot be established —
+ * the honest omission, not a bar against a placeholder.
+ */
+function MonthlyBudget({ month, currency, locale }) {
+  if (!month) return null
+  const money = (v) => formatMoney(v, currency, locale)
+  if (!month.budget) {
+    return (
+      <p className="hv-cost-month">
+        <b>{money(month.monthToDate)}</b> month to date
+        <span className="hv-cost-month-note"> (UTC calendar month)</span>
+      </p>
+    )
+  }
+  const proj = projectMonth(month.monthToDate)
+  const projOver = proj && proj.projected > month.budget
+  const pct = Math.min(100, Math.max(0, month.budgetPct ?? 0))
+  return (
+    <div className={`hv-cost-month ${month.overBudget ? 'over' : ''}`}>
+      <div className="hv-cost-month-row">
+        <span>
+          <b>{money(month.monthToDate)}</b> month to date
+          <span className="hv-cost-month-note"> of {money(month.budget)} budget</span>
+        </span>
+        <span className="hv-cost-month-pct">
+          {Math.round(month.budgetPct ?? 0)}%
+          {month.overBudget ? ' · over budget' : ''}
         </span>
       </div>
-      <p className="hv-cost-note">
-        {fin.orgWide
-          ? 'Spend is recorded per account and agent, not per work scope — this figure covers the whole organization regardless of the work scope selected above.'
-          : fin.scopeNote || ''}
+      <div
+        className="hv-cost-bar"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(month.budgetPct ?? 0)}
+        aria-label="Month-to-date spend against the monthly budget"
+      >
+        <div
+          className={`hv-cost-bar-fill ${month.overBudget ? 'over' : ''}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <p className="hv-cost-month-note">
+        UTC calendar month, not the period above.
+        {proj
+          ? ` Projected ${money(proj.projected)} by month end at this pace${
+              projOver ? ' — over budget' : ''
+            } (day ${proj.dayOfMonth} of ${proj.daysInMonth}).`
+          : ''}
       </p>
-      <dl className="hv-cost-meta">
-        <div>
-          <dt>Period</dt>
-          <dd>{period}</dd>
-        </div>
-        <div>
-          <dt>Priced coverage</dt>
-          <dd>
-            {pct == null ? 'Not established' : `${pct}% of cost-bearing calls`}
-          </dd>
-        </div>
-      </dl>
-      {fin.unpricedNote ? <Caveat>{fin.unpricedNote}</Caveat> : null}
-      {onOpenCost ? (
-        <button type="button" className="btn btn-secondary btn-sm" onClick={onOpenCost}>
-          Open Cost
-        </button>
-      ) : null}
     </div>
   )
 }

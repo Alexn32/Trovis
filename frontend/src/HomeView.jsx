@@ -791,15 +791,38 @@ function CostContext({ snapshot, onOpenCost, locale }) {
       </Section>
     )
   }
-  const period =
-    fin.periodStart && fin.periodEnd
-      ? `${fin.periodStart.slice(0, 10)} → ${fin.periodEnd.slice(0, 10)}`
-      : `${snap.period?.days || 7} days`
+  const days = snap.period?.days || 7
+  const period = `last ${days} ${days === 1 ? 'day' : 'days'}`
+  // The Cost page's trend is a fixed 7/30/90 ladder over UTC calendar days, so
+  // it cannot reproduce an arbitrary Home period in the reader's own zone. Say
+  // what the destination will show instead of implying the filter travelled.
+  const dest = costDestinationDays(days)
+  const destinationNote =
+    dest === days
+      ? `Opens the Cost page on its ${dest}-day window.`
+      : `The Cost page shows 7, 30 or 90 UTC days, so it opens on ${dest} days rather than this view's ${days}.`
   return (
-    <Section title="Cost" sub="What the recorded work cost to run." id="hv-cost">
-      <CostCard fin={fin} period={period} onOpenCost={onOpenCost} locale={locale} />
+    <Section
+      title="Cost"
+      sub="Organization-wide recorded spend, and where it is going."
+      id="hv-cost"
+    >
+      <CostCard
+        fin={fin}
+        period={period}
+        periodDays={days}
+        onOpenCost={onOpenCost}
+        locale={locale}
+        destinationNote={destinationNote}
+      />
     </Section>
   )
+}
+
+/** The narrowest window the Cost page can actually show for `days`. */
+export function costDestinationDays(days) {
+  const n = Number(days) || 7
+  return [7, 30, 90].find((r) => r >= n) ?? 90
 }
 
 /* ── dismissed findings ────────────────────────────────────────────── */

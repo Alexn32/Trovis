@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { ArrowLeftIcon } from './Icons.jsx'
 import { formatCost as fmtMoney } from './utils.js'
+// Shared with Home's compact cost card, so the two charts cannot drift apart.
+import {
+  fmtDay, fmtDayShort, fmtTokens, niceCeil, projectMonth, useElementWidth,
+} from './costChart.jsx'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RANGES = [
@@ -26,51 +30,14 @@ function agoLabel(ts) {
 // and an org-wide by-model breakdown. Costs render via the shared formatCost
 // (always dollars, rounded to the nearest cent).
 
-function fmtTokens(n) {
-  const v = Number(n) || 0
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`
-  return String(v)
-}
-
-// "2026-09-08" → "Mon, Sep 8". Parsed as UTC so the label matches the UTC day
-// the backend bucketed by, whatever the reader's timezone.
-function fmtDay(iso, withYear = false) {
-  if (!iso) return ''
-  const d = new Date(`${iso}T00:00:00Z`)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleDateString(undefined, {
-    timeZone: 'UTC',
-    weekday: withYear ? undefined : 'short',
-    month: 'short',
-    day: 'numeric',
-    year: withYear ? 'numeric' : undefined,
-  })
-}
-
-function fmtDayShort(iso) {
-  if (!iso) return ''
-  const d = new Date(`${iso}T00:00:00Z`)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleDateString(undefined, {
-    timeZone: 'UTC',
-    month: 'short',
-    day: 'numeric',
-  })
-}
-
-// Axis ceiling: the next round number above the peak, so gridline labels land
-// on whole dollars. The steps are deliberately fine (a 1/2/5 ladder would put a
-// $64 peak on a $100 axis and squash the whole series into the bottom half).
-const CEIL_STEPS = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 10]
-function niceCeil(v) {
-  if (!(v > 0)) return 1
-  const base = 10 ** Math.floor(Math.log10(v))
-  const n = v / base
-  return (CEIL_STEPS.find((s) => n <= s) ?? 10) * base
-}
-
-export default function CostPage({ onBack, onOpenAgent }) {
+/**
+ * `initialRange` lets Home open this page on a window close to the one it was
+ * showing. The Cost page's trend is a fixed 7/30/90 ladder over UTC calendar
+ * days, so it cannot reproduce an arbitrary Home period in the reader's own
+ * zone — Home therefore names the window it is sending you to rather than
+ * claiming it carried the filter across.
+ */
+export default function CostPage({ onBack, onOpenAgent, initialRange }) {
   const [data, setData] = useState(null)
   const [audit, setAudit] = useState(null)
   const [error, setError] = useState(null)
@@ -78,7 +45,9 @@ export default function CostPage({ onBack, onOpenAgent }) {
   const [savingBudget, setSavingBudget] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
-  const [range, setRange] = useState(30) // trend window in days (7 / 30 / 90)
+  const [range, setRange] = useState(
+    () => (RANGES.some((r) => r.days === initialRange) ? initialRange : 30),
+  ) // trend window in days (7 / 30 / 90)
   const [, forceTick] = useState(0) // keeps the "updated X ago" label live
   const rangeRef = useRef(range)
   rangeRef.current = range
@@ -169,13 +138,12 @@ export default function CostPage({ onBack, onOpenAgent }) {
   // Dated trend points. Older servers only send the bare `daily` cost array —
   // fall back to dating it backwards from today so the chart still works.
   const points = seriesFrom(data)
-  // Straight-line month-end projection from the month-to-date burn.
-  const now = new Date()
-  const dayOfMonth = now.getUTCDate()
-  const daysInMonth = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0),
-  ).getUTCDate()
-  const projected = (data.month_total || 0) * (daysInMonth / dayOfMonth)
+  // Straight-line month-end projection from the month-to-date burn. One
+  // definition, shared with Home's budget line.
+  const proj = projectMonth(data.month_total || 0) || {
+    projected: 0, dayOfMonth: 0, daysInMonth: 0,
+  }
+  const { projected, dayOfMonth, daysInMonth } = proj
   const projOver = data.month_budget > 0 && projected > data.month_budget
 
   return (
@@ -420,26 +388,6 @@ function seriesFrom(data) {
     d.setUTCDate(d.getUTCDate() - (daily.length - 1 - i))
     return { date: d.toISOString().slice(0, 10), cost: Number(cost) || 0, tokens: 0 }
   })
-}
-
-// Live element width, so the chart draws in real pixels (no viewBox stretching
-// of stroke widths and type) and reflows with the full-width layout.
-function useElementWidth() {
-  const ref = useRef(null)
-  const [width, setWidth] = useState(0)
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return undefined
-    setWidth(el.getBoundingClientRect().width)
-    if (typeof ResizeObserver === 'undefined') return undefined
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect?.width
-      if (w) setWidth(w)
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-  return [ref, width]
 }
 
 // Interactive daily-spend trend: area + line over a real dollar axis, with a

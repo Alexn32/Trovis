@@ -1768,6 +1768,65 @@ class HomeCostCoverage(BaseModel):
     unavailable_reason: str | None = None
 
 
+class HomeCostDayPoint(BaseModel):
+    """One local calendar day of recorded spend.
+
+    `spend_usd` is stored, priced cost only. `unpriced_token_spans` is the
+    honest other half of the same bucket: a day reading 0.00 with unpriced
+    spans had cost that is UNKNOWN, not zero.
+    """
+
+    bucket_start: str
+    bucket_start_utc: str
+    spend_usd: float = 0.0
+    unpriced_token_spans: int = 0
+
+
+class HomeCostSeries(BaseModel):
+    """Recorded spend per local calendar day, over the snapshot's own period.
+
+    Same buckets and same zone as `completions_series`. `reconciles` is
+    CHECKED against the independent aggregate SUM (to the cent, since both
+    sides sum the same stored values in a different order), never assumed — a
+    chart that disagrees with the total above it is worse than no chart.
+    """
+
+    available: bool = True
+    unavailable_reason: str | None = None
+    bucket: str = "local_day"
+    timezone: str = "UTC"
+    points: list[HomeCostDayPoint] = Field(default_factory=list)
+    total: float | None = None          # sum of the buckets
+    aggregate_total: float = 0.0        # the period SUM, computed separately
+    reconciles: bool | None = None
+
+
+class HomeCostMonth(BaseModel):
+    """Month-to-date spend against the org's monthly budget.
+
+    A DIFFERENT window from the snapshot's period, and said so here rather
+    than left to be assumed: the budget is kept and compared in UTC calendar
+    months across the rest of the product, so this is a UTC month even when
+    Home's period is in the reader's own zone. It must never be added to the
+    period's spend.
+
+    `budget_source` separates a budget somebody set from the deployment
+    default, so a surface can decline to draw a bar nobody chose.
+    """
+
+    available: bool = False
+    unavailable_reason: str | None = None
+    window: str | None = None           # 'utc_calendar_month' when available
+    timezone: str | None = None
+    note: str | None = None
+    month_start_utc: str | None = None
+    month_to_date_usd: float | None = None
+    budget_usd: float | None = None
+    budget_source: str | None = None    # account | deployment_default
+    budget_pct: float | None = None
+    over_budget: bool | None = None
+
+
 class HomeFinancial(BaseModel):
     """Money, only when the resolved seat includes the Cost surface.
 
@@ -1786,6 +1845,10 @@ class HomeFinancial(BaseModel):
     period_end_utc: str | None = None
     spend_usd: float | None = None
     coverage: HomeCostCoverage | None = None
+    # Both are money and both are behind the same seat gate: null when the
+    # reader has no financial surface, never a smaller number.
+    daily: HomeCostSeries | None = None
+    monthly: HomeCostMonth | None = None
 
 
 class HomeFreshness(BaseModel):

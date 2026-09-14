@@ -7877,20 +7877,83 @@ button.work-td-task:hover {
 @keyframes hv-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .hv-ai-pulse { animation: none; opacity: 0.7; } }
 
-/* ── cost ── */
-.hv-cost { padding: 18px; border-radius: 12px; background: var(--bg-surface);
+/* ── cost ──
+   A compact summary in the Cost page's visual language: the same --dash-spark
+   line over the same gradient, the same tabular figures, the same budget bar.
+   Theme variables only, and every state (over budget, unpriced) carries text
+   as well as color. */
+.hv-cost { padding: 16px 18px; border-radius: 12px; background: var(--bg-surface);
            border: 1px solid var(--border-default); display: flex;
-           flex-direction: column; gap: 10px; align-items: flex-start; }
+           flex-direction: column; gap: 12px; align-items: stretch; }
+.hv-cost-head { display: flex; align-items: center; justify-content: space-between;
+                gap: 10px; flex-wrap: wrap; }
+.hv-cost-head-l { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                  min-width: 0; }
+.hv-cost-title { font-size: 12px; font-weight: 700; color: var(--text-secondary);
+                 text-transform: uppercase; letter-spacing: 0.06em; }
+.hv-cost-scope { font-size: 10.5px; font-weight: 600; color: var(--text-secondary);
+                 background: var(--bg-elevated); border: 1px solid var(--border-default);
+                 border-radius: 100px; padding: 2px 8px; white-space: nowrap; }
+.hv-cost-open { flex: none; }
 .hv-cost-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.hv-cost-value { font-size: 30px; font-weight: 700; color: var(--text-primary);
-                 font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
-.hv-cost-label { font-size: 13px; color: var(--text-secondary); }
-.hv-cost-note { font-size: 11.5px; color: var(--text-muted); margin: 0; line-height: 1.55; max-width: 68ch; }
-.hv-cost-meta { display: flex; gap: 26px; margin: 0; flex-wrap: wrap; }
-.hv-cost-meta dt { font-size: 11px; color: var(--text-dim); margin: 0;
-                   text-transform: uppercase; letter-spacing: 0.04em; }
-.hv-cost-meta dd { font-size: 13px; color: var(--text-secondary); margin: 3px 0 0;
+.hv-cost-value { font-size: 32px; font-weight: 750; color: var(--text-primary);
+                 font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+                 line-height: 1.05; }
+.hv-cost-label { font-size: 12.5px; color: var(--text-secondary); }
+
+/* the compact daily-spend chart */
+.hv-cost-chart { display: flex; flex-direction: column; gap: 4px; }
+.hv-cost-plot { position: relative; outline: none; border-radius: 8px; }
+.hv-cost-plot:focus-visible { box-shadow: 0 0 0 2px var(--brand-accent); }
+.hv-cost-svg { display: block; width: 100%; touch-action: none; }
+.hv-cost-grid { stroke: var(--border-default); stroke-width: 1; }
+.hv-cost-axis { fill: var(--text-muted); font-size: 10px;
+                font-variant-numeric: tabular-nums; }
+.hv-cost-crosshair { stroke: var(--text-dim); stroke-width: 1; }
+.hv-cost-tip { position: absolute; top: 4px; pointer-events: none;
+               display: flex; flex-direction: column; gap: 1px;
+               background: var(--bg-elevated); border: 1px solid var(--border-default);
+               border-radius: 8px; padding: 6px 9px; white-space: nowrap; z-index: 2; }
+.hv-cost-tip-val { font-size: 14px; font-weight: 750; color: var(--text-primary);
                    font-variant-numeric: tabular-nums; }
+.hv-cost-tip-day { font-size: 11px; color: var(--text-secondary); }
+.hv-cost-tip-sub { font-size: 10.5px; color: var(--text-muted); }
+.hv-cost-chart-legend { margin: 0; font-size: 11.5px; color: var(--text-muted);
+                        font-variant-numeric: tabular-nums; }
+.hv-cost-chart-legend b { color: var(--text-secondary); font-weight: 700; }
+.hv-cost-chart-none { margin: 0; font-size: 12px; color: var(--text-muted); }
+
+/* month-to-date vs the monthly budget — a different window, said so */
+.hv-cost-month { display: flex; flex-direction: column; gap: 5px; margin: 0;
+                 font-size: 12.5px; color: var(--text-secondary); }
+.hv-cost-month b { color: var(--text-primary); font-weight: 700;
+                   font-variant-numeric: tabular-nums; }
+.hv-cost-month-row { display: flex; align-items: baseline;
+                     justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.hv-cost-month-pct { font-size: 11.5px; color: var(--text-muted);
+                     font-variant-numeric: tabular-nums; }
+.hv-cost-month.over .hv-cost-month-pct { color: var(--dash-warn); font-weight: 650; }
+.hv-cost-month-note { font-size: 11px; color: var(--text-muted); margin: 0;
+                      line-height: 1.5; }
+.hv-cost-bar { height: 5px; border-radius: 100px; background: var(--bg-elevated);
+               border: 1px solid var(--border-default); overflow: hidden; }
+.hv-cost-bar-fill { height: 100%; border-radius: 100px; background: var(--text-primary);
+                    transition: width 0.3s ease; }
+.hv-cost-bar-fill.over { background: var(--dash-warn); }
+
+.hv-cost-foot { display: flex; flex-direction: column; gap: 5px; }
+.hv-cost-cov { font-size: 11.5px; color: var(--dash-warn); font-weight: 600; }
+.hv-cost-about { font-size: 11.5px; color: var(--text-muted); }
+.hv-cost-about > summary { cursor: pointer; color: var(--text-muted); }
+.hv-cost-about > summary:hover { color: var(--text-secondary); }
+.hv-cost-about p { margin: 6px 0 0; line-height: 1.55; max-width: 68ch; }
+
+@media (max-width: 620px) {
+  .hv-cost-value { font-size: 27px; }
+  .hv-cost-open { align-self: flex-start; }
+  .hv-cost-chart-legend { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) { .hv-cost-bar-fill { transition: none; } }
 
 /* ── caveats, empties, errors, skeletons ── */
 .hv-caveat { display: flex; gap: 8px; align-items: flex-start; font-size: 12px;
