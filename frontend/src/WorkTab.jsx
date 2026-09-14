@@ -17,6 +17,7 @@ import {
   workUpdatedLabel,
 } from './board.js'
 import { partitionLookAt } from './home.js'
+import { WORK_FILTER_LABELS, matchesWorkFilter } from './workFilter.js'
 import {
   COLUMNS, boardSummary, cardLines, cellCards, columnOf, groupByJob, healthBadge,
   idleJobLine, jobSubline, numOrNull, touchedToday,
@@ -76,39 +77,6 @@ const OVERVIEW_PILLS = [
 // Filters Home's cards navigate in with. Kept in the same vocabulary the Home
 // tiles use; 'attention' mirrors home.js's rule (stuck + aging waits) so the
 // two surfaces show the same rows.
-const WORK_FILTER_LABELS = {
-  attention: 'Needs attention',
-  // Home's desk is only YOUR waits, so its "Open in Work" has to land on the
-  // same set — 'waiting' is everyone's, which would be a wider list than the
-  // one you just tapped away from.
-  mine: 'Waiting on you',
-  moving: 'Moving',
-  waiting: 'Waiting',
-  stuck: 'Stuck',
-  done: 'Done',
-}
-
-function matchesWorkFilter(row, filter) {
-  switch (filter) {
-    case 'moving':
-      return row.status === 'moving'
-    case 'mine':
-      return row.status === 'waiting_on_you'
-    case 'waiting':
-      return row.status === 'waiting_on_you' || row.status === 'waiting_on_other'
-    case 'stuck':
-      return row.status === 'stuck'
-    case 'done':
-      return row.status === 'done'
-    case 'attention': {
-      const { needsYou, needsAttention } = partitionLookAt([row])
-      return needsYou.length + needsAttention.length > 0
-    }
-    default:
-      return true
-  }
-}
-
 function rowClass(status) {
   if (status === 'waiting_on_you') return 'work-row is-waiting-you'
   if (status === 'stuck') return 'work-row is-stuck'
@@ -1010,6 +978,17 @@ export default function WorkTab({
   useEffect(() => {
     if (filterNonce === undefined) return
     setFilter(incomingFilter?.value || null)
+    // A navigation may carry Home's whose-work selection so the destination
+    // shows the same slice the reader tapped away from. `reconcileWhose`
+    // above still clamps it against the seat, so an arriving selection can
+    // only ever ask. Omitted (null) leaves Work's own selection alone.
+    if (incomingFilter?.whose) {
+      setWhose(
+        incomingFilter.personId
+          ? `person:${incomingFilter.personId}`
+          : incomingFilter.whose,
+      )
+    }
     // Only the nonce drives this: a Home card sets it on every navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterNonce])

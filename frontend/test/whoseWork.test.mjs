@@ -124,15 +124,22 @@ test('the overview is asked the same question as the table', () => {
 
 // --- the desk contract -----------------------------------------------------
 
-test('nothing about Whose work reaches the desk', () => {
-  // Home's desk is `waiting_on_you`, resolved server-side against the
-  // session identity. Home does not own this control and must not send it.
-  const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
-  const home = readFileSync(new URL('../src/home.js', import.meta.url), 'utf8')
-  for (const [name, src] of [['Dashboard.jsx', dash], ['home.js', home]]) {
-    assert.doesNotMatch(src, /whoseParams|whose:/, `${name} sends a Whose-work filter`)
-  }
-  // And the control lives on Work, which is where the choice belongs.
+test('personal attention stays personal however the work scope moves', () => {
+  // Home now owns a work-scope control of its own — it is a scope for the
+  // WORK sections. What it must never do is narrow the personal signal:
+  // `needs_you` is resolved server-side against the session identity, and the
+  // snapshot's own contract says it is unaffected by the selection. So Home
+  // reads it straight out of `attention` and never re-derives or filters it.
+  const hv = readFileSync(new URL('../src/HomeView.jsx', import.meta.url), 'utf8')
+  const helpers = readFileSync(new URL('../src/homeView.js', import.meta.url), 'utf8')
+  assert.match(helpers, /export function readAttention/)
+  assert.doesNotMatch(helpers, /needs_you\s*[-+*/]/, 'a personal count is never arithmetic')
+  // The AI findings are a DIFFERENT measure over possibly overlapping work.
+  // Adding them to the personal count would produce a number counting nothing.
+  assert.doesNotMatch(hv, /needs_you.*\+.*findings|findings.*\+.*needs_you/)
+  // Home says so on the surface, not just in a comment.
+  assert.match(hv, /Always yours, whatever work scope is selected above/)
+  // And the Work control is untouched, where the choice also belongs.
   assert.match(workTab, /className="work-whose"/)
 })
 

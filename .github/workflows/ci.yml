@@ -95,7 +95,11 @@ jobs:
       # build because it is the faster signal.
       - run: npm run lint
       - run: npm run build
-      - run: node --test test/*.test.mjs
+      # `npm test`, not a hand-rolled `node --test`: the script carries the
+      # esbuild `.jsx` loader the mounted-component tests need. Spelling the
+      # runner out here a second time meant CI silently skipped that whole
+      # file — it failed to load, and the run still reported hundreds green.
+      - run: npm test
 
   plugin:
     name: OpenClaw plugin tests

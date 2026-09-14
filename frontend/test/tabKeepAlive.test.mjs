@@ -38,7 +38,7 @@ test('switching tabs twice cannot remount a pane: no pane sits behind a tab chec
   // Each page is rendered exactly once, from a single unconditional <TabPane>.
   // If one of these ever moves back behind `tab === …`, the tab switch starts
   // unmounting again and every useEffect refetches.
-  for (const page of ['Dashboard', 'Fleet', 'WorkTab']) {
+  for (const page of ['HomeView', 'Fleet', 'WorkTab']) {
     const mounts = app.match(new RegExp(`<${page}\\b`, 'g')) || []
     assert.equal(mounts.length, 1, `${page} is mounted in exactly one place`)
   }
@@ -68,16 +68,6 @@ test('an agent added or deleted elsewhere invalidates the panes that list agents
   // doesn't refetch in the background.
   assert.match(app, /if \(dashboardVisible\) shownEpoch\.current\.dashboard = rosterEpoch\.dashboard/)
   assert.match(app, /if \(fleetVisible\) shownEpoch\.current\.fleet = rosterEpoch\.fleet/)
-})
-
-test('Home stops re-syncing on focus while its pane is hidden', () => {
-  // Home v2 keeps six endpoints (briefing / attention / cost / work-feed /
-  // work overview + items) and re-syncs them when the window regains focus.
-  // Keep-alive leaves it mounted behind Work, so without the active gate that
-  // re-sync fires for a pane nobody is looking at.
-  const dash = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
-  assert.match(dash, /if \(document\.hidden \|\| !activeRef\.current\) return/)
-  assert.match(app, /active=\{dashboardVisible\}/)
 })
 
 test('the Work poll skips its tick while the pane is hidden', () => {

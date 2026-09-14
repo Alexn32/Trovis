@@ -16,7 +16,6 @@ const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm,
 const work = strip(src('WorkTab.jsx'))
 const jobRaw = src('JobDetail.jsx')
 const job = strip(jobRaw)
-const dash = strip(src('Dashboard.jsx'))
 
 function run(o = {}) {
   return {
@@ -55,11 +54,9 @@ test('leaving a run returns to the job it was opened from', () => {
                       'opening or leaving a run must not disturb the page under it')
 })
 
-test('Home desk keeps the slide-over — act and be done', () => {
-  // Home is where you clear things; losing your place there to approve one
-  // row would be the wrong trade. Work is where you go to look INTO a job.
-  assert.match(dash, /<JobDetail\s+item=\{openItem\}/)
-  assert.doesNotMatch(dash, /variant="page"/)
+test('the job pane keeps its slide-over; the job PAGE has none', () => {
+  // Home no longer renders a work-item pane of its own — it navigates into
+  // Work — so the two JobDetail variants are what this pins.
   assert.match(job, /variant = 'panel'/)
   assert.match(job, /const isPage = variant === 'page'/)
   // The panel still has its scrim; the page has none.
@@ -267,7 +264,7 @@ test('no jargon in the job page chrome', () => {
 })
 
 test('still no fat endpoints', () => {
-  for (const f of ['WorkTab.jsx', 'JobDetail.jsx', 'Dashboard.jsx']) {
+  for (const f of ['WorkTab.jsx', 'JobDetail.jsx', 'HomeView.jsx']) {
     assert.doesNotMatch(src(f), /getWorkBoard|getWorkSummary/, f)
   }
 })

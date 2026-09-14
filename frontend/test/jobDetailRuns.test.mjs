@@ -126,7 +126,7 @@ test('the callback is threaded from the app, not invented in the pane', () => {
                          code.indexOf(') {', code.indexOf('export default function JobDetail')))
   assert.match(sig, /\bonOpenAgent\b/, 'JobDetail takes the callback as a prop')
   assert.match(bare, /<AgentRuns itemId=\{item\.id\} onOpenAgent=\{onOpenAgent\} \/>/)
-  for (const [file, label] of [['WorkTab.jsx', 'Work'], ['Dashboard.jsx', 'Home']]) {
+  for (const [file, label] of [['WorkTab.jsx', 'Work'], ['HomeView.jsx', 'Home']]) {
     const src = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')
     assert.match(src, /onOpenAgent=\{onOpenAgent\}/, `${label} must pass it down`)
   }

@@ -35,10 +35,11 @@ function importedFrom(code, module) {
 // Consumers that lean on a helper module heavily enough for a miss to break
 // the page rather than a corner of it.
 const PAIRS = [
-  ['Dashboard.jsx', './home.js', 'home.js'],
+  ['HomeView.jsx', './homeView.js', 'homeView.js'],
   ['WorkTab.jsx', './home.js', 'home.js'],
   ['WorkTab.jsx', './workBoard.js', 'workBoard.js'],
-  ['Dashboard.jsx', './board.js', 'board.js'],
+  ['HomeSections.jsx', './homeView.js', 'homeView.js'],
+  ['HomeFindingPanel.jsx', './homeView.js', 'homeView.js'],
   ['JobDetail.jsx', './jobDetail.js', 'jobDetail.js'],
 ]
 

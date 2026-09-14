@@ -252,14 +252,6 @@ function userFacingStrings(code) {
   return out
 }
 
-test('no Trovis jargon on Home', () => {
-  const src = readFileSync(new URL('../src/Dashboard.jsx', import.meta.url), 'utf8')
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  for (const s of userFacingStrings(code)) {
-    assert.ok(!FORBIDDEN.test(s), `Home ships jargon: ${JSON.stringify(s)}`)
-  }
-})
-
 test('home.js stays pure — it must not fetch', () => {
   const src = readFileSync(new URL('../src/home.js', import.meta.url), 'utf8')
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')

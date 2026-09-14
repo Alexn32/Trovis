@@ -92,7 +92,7 @@ test('the Fleet pane reads Agents in the nav, while the atom stays Fleet', () =>
 })
 
 test('nothing a person reads calls the surface Fleet any more', () => {
-  for (const f of ['App.jsx', 'Dashboard.jsx', 'Fleet.jsx', 'TrovisLanding.jsx']) {
+  for (const f of ['App.jsx', 'HomeView.jsx', 'HomeSections.jsx', 'HomeFindingPanel.jsx', 'Fleet.jsx', 'TrovisLanding.jsx']) {
     const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '')
