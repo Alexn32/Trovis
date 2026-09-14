@@ -13,10 +13,13 @@ Two rules make that measurable rather than a matter of taste:
    correct answer. Nothing here is adjusted after seeing an output — that is
    the whole point of writing it down first.
 
-2. **Discovery and truth are scored apart.** A run that publishes nothing and
-   a run that publishes something false are different failures, and a
-   validator that blocks a bad draft is not evidence of a good investigation.
-   `score()` returns both halves and never averages them into one number.
+2. **Discovery and truth are assessed apart, and neither is guessed.** A run
+   that publishes nothing and a run that publishes something false are
+   different failures, and a validator that blocks a bad draft is not evidence
+   of a good investigation. `home_eval_scoring.assess()` keeps deterministic
+   facts, heuristic review flags and open questions in three separate places
+   and never averages them into a score. In particular a regex hit is a
+   request that somebody READ a sentence — never a finding that it is false.
 
 Every scenario seeds REAL work records through the ordinary ingest path
 (`database.ingest_spans_with_loops`) and then lets the real snapshot, the real
@@ -524,6 +527,9 @@ SCENARIOS: list[dict[str, Any]] = [
             r"\b(down|outage|degrad)",
         ],
         "paths": ["list_comparable_runs(job)", "compare_outcome_mix(days=7, job)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:runs", "mix"],
         "financial": True,
     },
     {
@@ -551,6 +557,9 @@ SCENARIOS: list[dict[str, Any]] = [
         ],
         "paths": ["list_comparable_runs(job)", "inspect_run(each abandoned)",
                   "compare_outcome_mix(days=7, job)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:stalled", "ids:finished", "mix"],
         "financial": True,
     },
     {
@@ -573,6 +582,9 @@ SCENARIOS: list[dict[str, Any]] = [
             r"\b(abandoned|unfinished)\b",
         ],
         "paths": ["inspect_run(each)", "list_comparable_runs(job)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:runs"],
         "financial": True,
     },
     {
@@ -596,6 +608,9 @@ SCENARIOS: list[dict[str, Any]] = [
             r"\b(blocking|costing) (the|your) (business|company|team)\b",
         ],
         "paths": ["wait_concentration()", "inspect_run(each)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:waiting_on_viewer", "waits"],
         "financial": True,
     },
     {
@@ -622,6 +637,9 @@ SCENARIOS: list[dict[str, Any]] = [
         ],
         "paths": ["list_comparable_runs(agent)", "inspect_run(heavy and light)",
                   "cost_evidence(days=7)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:heavy", "ids:light", "cost"],
         "financial": True,
     },
     {
@@ -645,6 +663,9 @@ SCENARIOS: list[dict[str, Any]] = [
             r"\b(doubled|halved)\b",
         ],
         "paths": ["compare_outcome_mix(days=7, job)", "list_comparable_runs(job)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["mix"],
         "financial": True,
     },
     {
@@ -676,6 +697,9 @@ SCENARIOS: list[dict[str, Any]] = [
         ],
         "paths": ["list_comparable_runs(agent)", "compare_outcome_mix(days=7)",
                   "agent_context(quiet-agent)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:runs", "mix", "agent"],
         "financial": True,
     },
     {
@@ -698,6 +722,9 @@ SCENARIOS: list[dict[str, Any]] = [
             r"\btotal (cost|spend) (was|is) \$[\d.]+\b.*\b(exact|complete|all)\b",
         ],
         "paths": ["cost_evidence(days=7)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["cost"],
         "financial": True,
         # The same account is read a second time by a seat without Cost.
         "restricted_reader": {
@@ -729,6 +756,9 @@ SCENARIOS: list[dict[str, Any]] = [
         ],
         "paths": ["list_comparable_runs(job)", "inspect_run(each recent)",
                   "compare_outcome_mix(days=7, job)"],
+        # Ledger keys a supporting finding would have to cite. Resolved
+        # against `ids` at probe time to say what was actually DELIVERED.
+        "needs": ["ids:recent_abandoned", "ids:prev_abandoned", "mix"],
         "financial": True,
     },
 ]
@@ -746,41 +776,86 @@ def scenario(key: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def build_all(client, *, only: list[str] | None = None) -> dict[str, dict[str, Any]]:
-    """Seed every scenario into its own account. Returns {key: context}."""
-    out: dict[str, dict[str, Any]] = {}
+
+
+def fixture_version() -> str:
+    """A digest of the seed code, so a report can prove which fixtures it ran.
+
+    If a seed function changes, this changes, and results from before and
+    after stop being comparable — which is exactly what a reader needs to know
+    when two runs disagree.
+    """
+    import hashlib
+    import inspect
+    src = []
     for spec in SCENARIOS:
-        key = spec["key"]
-        if only and key not in only:
-            continue
-        email = f"owner-{key.lower()}@eval.test"
-        acct = client.post("/auth/signup", json={
-            "email": email, "password": "correct horse battery",
-            "name": f"Owner {key}", "account_type": "business",
-            "org_name": f"Eval {key}",
-        }).json()
-        token, acct_id = acct["token"], acct["org"]["id"]
-        ctx: dict[str, Any] = {
-            "key": key, "account_id": acct_id, "token": token,
-            "user_id": acct["user"]["id"], "email": email, "spec": spec,
-        }
-        if key == "D":
-            other = f"other-{key.lower()}@eval.test"
-            client.post("/org/invites", headers=auth(token),
-                        json={"email": other, "name": "Dana Otter"})
-            ctx["ids"] = seed_d(client, token, acct_id, email, other)
-        else:
-            ctx["ids"] = spec["seed"](client, token, acct_id)
-        if key == "H":
-            ctx["restricted"] = _restricted_reader(client, token, acct)
-        # Abandonment is stamped last, so align after every seed has finished
-        # opening, closing and abandoning its work.
-        align_to_spans(acct_id)
-        out[key] = ctx
-    return out
+        fn = spec.get("seed") or seed_d
+        src.append(spec["key"])
+        src.append(inspect.getsource(fn))
+        src.append(repr(sorted((k, str(v)) for k, v in spec.items()
+                               if k not in ("seed",))))
+    return hashlib.sha256("".join(src).encode()).hexdigest()[:12]
 
 
-def _restricted_reader(client, token, acct) -> dict[str, Any]:
+FIXTURE_SCHEMA = "home-eval-fixtures-v1"
+
+
+def build_instance(client, key: str, *, instance: int = 1) -> dict[str, Any]:
+    """Seed ONE fresh account for one scenario.
+
+    Every call produces a new account with equivalent-but-distinct records, so
+    the analysis it triggers has its own `scope_key` and is a genuinely
+    separate investigation. That is how repetitions stay independent WITHOUT
+    touching the product's debounce or freshness rules: the reason a second
+    read of the same account does not re-analyse is that re-analysing an
+    unchanged audience would be waste, and that behaviour is correct. A
+    repetition is a different audience, not a forced refresh.
+    """
+    spec = scenario(key)
+    tag = f"{key.lower()}{instance}"
+    email = f"owner-{tag}@eval.test"
+    acct = client.post("/auth/signup", json={
+        "email": email, "password": "correct horse battery",
+        "name": f"Owner {key}/{instance}", "account_type": "business",
+        "org_name": f"Eval {key}#{instance}",
+    }).json()
+    if "token" not in acct:
+        raise RuntimeError(f"could not seed {key}#{instance}: {acct}")
+    token, acct_id = acct["token"], acct["org"]["id"]
+    ctx: dict[str, Any] = {
+        "key": key,
+        "instance": instance,
+        "fixture_id": f"{key}#{instance}",
+        "fixture_schema": FIXTURE_SCHEMA,
+        "fixture_version": fixture_version(),
+        "account_id": acct_id,
+        "token": token,
+        "user_id": acct["user"]["id"],
+        "email": email,
+        "spec": spec,
+    }
+    if key == "D":
+        other = f"other-{tag}@eval.test"
+        client.post("/org/invites", headers=auth(token),
+                    json={"email": other, "name": "Dana Otter"})
+        ctx["ids"] = seed_d(client, token, acct_id, email, other)
+    else:
+        ctx["ids"] = spec["seed"](client, token, acct_id)
+    if key == "H":
+        ctx["restricted"] = _restricted_reader(client, token, acct, tag)
+    align_to_spans(acct_id)
+    return ctx
+
+
+def build_all(client, *, only: list[str] | None = None,
+              instance: int = 1) -> dict[str, dict[str, Any]]:
+    """One instance of every scenario. Keyed by scenario key."""
+    return {spec["key"]: build_instance(client, spec["key"], instance=instance)
+            for spec in SCENARIOS
+            if not only or spec["key"] in only}
+
+
+def _restricted_reader(client, token, acct, tag: str) -> dict[str, Any]:
     """A second person on a seat that does not carry Cost.
 
     Built through the real org API — roles, a scope level, an invite — because
@@ -796,7 +871,7 @@ def _restricted_reader(client, token, acct) -> dict[str, Any]:
         "title": "Analyst", "parent_role_id": top["id"],
         "scope_level_id": levels["ic"]["id"]}).json()
     inv = client.post("/org/invites", headers=auth(token), json={
-        "email": "analyst-h@eval.test", "name": "Ana Lyst",
+        "email": f"analyst-{tag}@eval.test", "name": "Ana Lyst",
         "role_id": ic_role["id"]}).json()
     accepted = client.post("/auth/accept-invite", json={
         "token": inv["invite_url"].split("token=")[1],
@@ -810,125 +885,174 @@ def _restricted_reader(client, token, acct) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Discoverability — model-free, and a precondition for discovery
+# Discoverability — four separate questions, and only three are measurable here
+#
+#   1. the evidence EXISTS in the records
+#   2. it is RETRIEVABLE through the allowlist at all
+#   3. it is DELIVERED within the PRODUCTION budget
+#   4. the model DISCOVERED it
+#
+# (4) needs a live model. (1)-(3) do not, and conflating (2) with (3) is what
+# the first version of this file did: it probed with 40 tool calls and 4,000
+# rows against production defaults of 14 and 400, then reported the result as
+# discoverability. A pattern reachable only with three times the production
+# allowance is not reachable in production.
 # ---------------------------------------------------------------------------
 
-PROBES: dict[str, Callable[[Any, dict[str, Any]], dict[str, Any]]] = {}
+PRODUCTION_BUDGET = "production"
+DIAGNOSTIC_BUDGET = "diagnostic"
+
+# Deliberately larger than production, and never used for a headline claim.
+DIAGNOSTIC_LIMITS = {"max_calls": 40, "max_rows": 4000, "max_events": 4000}
 
 
-def probe(ctx: dict[str, Any], *, financial_visible: bool = True) -> dict[str, Any]:
-    """Retrieve what a model WOULD be able to read, and report what it shows.
+def _budget(kind: str) -> investigation_tools.ToolBudget:
+    if kind == PRODUCTION_BUDGET:
+        # The product's own defaults, taken from the product.
+        return investigation_tools.ToolBudget()
+    return investigation_tools.ToolBudget(**DIAGNOSTIC_LIMITS)
 
-    This runs the real allowlist against the real records with no model in the
-    loop. It answers the question that has to be true before discovery is even
-    possible: is the evidence reachable, within budget, through the tools the
-    investigation actually has?
 
-    A scenario that fails here is a retrieval gap, and no amount of prompting
-    fixes it.
+def required_keys(ctx: dict[str, Any]) -> list[str]:
+    """The ledger keys a supporting finding for this scenario would have to cite."""
+    ids = ctx["ids"]
+    out: list[str] = []
+    for need in ctx["spec"].get("needs") or []:
+        if need.startswith("ids:"):
+            name = need.split(":", 1)[1]
+            value = ids.get(name)
+            if isinstance(value, list):
+                out += [f"run:{v}" for v in value]
+            elif value is not None:
+                out.append(f"run:{value}")
+        else:
+            out.append(need)  # a symbolic requirement: mix / cost / waits / agent
+    return out
+
+
+def probe(ctx: dict[str, Any], *, financial_visible: bool = True,
+          budget: str = PRODUCTION_BUDGET) -> dict[str, Any]:
+    """Retrieve what a model WOULD be able to read, under a named budget.
+
+    No model is involved. This answers the question that must be true before
+    discovery is possible at all: within the allowance the product actually
+    gives an investigation, does the evidence reach it?
+
+    Every retrieval is accounted for — calls, rows, events, truncation,
+    limitations and tool failures — because "we ran out" and "we looked and it
+    was not there" are different answers and only one of them is about the
+    model.
+
+    **The one thing this flatters.** The probe already knows which run ids
+    matter, so it spends its allowance perfectly. A real investigation has to
+    work out what to look at, and will spend calls on questions that lead
+    nowhere. So a `delivered_within_budget: true` here means "the production
+    budget is SUFFICIENT for an optimally targeted search", which is a lower
+    bound on the difficulty, not a promise that a model gets there. A
+    `false` is the stronger result: if even a perfectly targeted search cannot
+    fit, nothing can.
     """
     ids = ctx["ids"]
     session = investigation_tools.InvestigationSession(
         account_id=ctx["account_id"], only_user_ids=None,
-        financial_visible=financial_visible,
-        budget=investigation_tools.ToolBudget(max_calls=40, max_rows=4000),
+        financial_visible=financial_visible, budget=_budget(budget),
     )
     seen: dict[str, Any] = {}
+    attempted: list[dict[str, Any]] = []
+
+    def call(name: str, args: dict[str, Any]) -> Any:
+        """One retrieval, recorded — including the ones the budget refuses."""
+        if not session.budget.can_call():
+            attempted.append({"tool": name, "args": args, "ran": False,
+                              "why": "budget exhausted: "
+                                     + ",".join(sorted(set(session.budget.exhausted)))})
+            return None
+        try:
+            res = session.retrieve(name, args)
+            attempted.append({"tool": name, "args": args, "ran": True,
+                              "error": (res or {}).get("error")})
+            return res
+        except Exception as exc:  # a tool failure is data, not a crash
+            attempted.append({"tool": name, "args": args, "ran": True,
+                              "error": f"{type(exc).__name__}: {exc}"})
+            return None
+
     job = ids.get("job")
     if job:
-        seen["runs"] = session.retrieve(
-            "list_comparable_runs", {"job_id": job, "limit": 50})
-        seen["mix"] = session.retrieve(
-            "compare_outcome_mix", {"days": 7, "job_id": job})
+        seen["runs"] = call("list_comparable_runs", {"job_id": job, "limit": 50})
+        seen["mix"] = call("compare_outcome_mix", {"days": 7, "job_id": job})
     for name in ("runs", "stalled", "finished", "heavy", "recent_abandoned",
                  "waiting_on_viewer", "prev_abandoned"):
         for rid in (ids.get(name) or []):
-            seen.setdefault("inspected", {})[rid] = session.retrieve(
-                "inspect_run", {"run_id": rid})
+            res = call("inspect_run", {"run_id": rid})
+            if res is not None:
+                seen.setdefault("inspected", {})[rid] = res
     if ids.get("light"):
-        seen.setdefault("inspected", {})[ids["light"]] = session.retrieve(
-            "inspect_run", {"run_id": ids["light"]})
+        res = call("inspect_run", {"run_id": ids["light"]})
+        if res is not None:
+            seen.setdefault("inspected", {})[ids["light"]] = res
     if ctx["key"] == "D":
-        seen["waits"] = session.retrieve("wait_concentration", {"limit": 50})
+        seen["waits"] = call("wait_concentration", {"limit": 50})
     if ctx["key"] == "G":
-        seen["agent"] = session.retrieve(
-            "agent_context", {"agent": ids["quiet_agent"]})
+        seen["agent"] = call("agent_context", {"agent": ids["quiet_agent"]})
     if financial_visible and ctx["key"] in ("E", "H"):
-        seen["cost"] = session.retrieve("cost_evidence", {"days": 7})
-    return {"session": session, "seen": seen,
-            "coverage": session.retrieval_report(),
-            "budget": session.budget.report()}
+        seen["cost"] = call("cost_evidence", {"days": 7})
 
+    delivered = set(session.delivered)
+    calcs = set(session.calculations)
+    needed = required_keys(ctx)
+    missing = []
+    for key in needed:
+        if key.startswith("run:"):
+            if key not in delivered:
+                missing.append(key)
+        elif key == "mix":
+            if not any(k.startswith("mix.") for k in calcs):
+                missing.append(key)
+        elif key == "cost":
+            if not any(k.startswith("cost.") for k in calcs):
+                missing.append(key)
+        elif key == "waits":
+            if not any(k.startswith("wait.") for k in calcs):
+                missing.append(key)
+        elif key == "agent":
+            if not any(k.startswith("agent_context:") for k in delivered):
+                missing.append(key)
 
-# ---------------------------------------------------------------------------
-# Scoring a published finding set
-# ---------------------------------------------------------------------------
-
-
-def finding_text(f: dict[str, Any]) -> str:
-    parts = [str(f.get("title") or ""), str(f.get("explanation") or ""),
-             str(f.get("consequence") or "")]
-    for c in f.get("claims") or []:
-        parts.append(str(c.get("text") or ""))
-    for u in f.get("uncertainty") or []:
-        parts.append(str(u))
-    step = f.get("next_step") or {}
-    parts.append(str(step.get("text") or ""))
-    return " ".join(parts).lower()
-
-
-def score(spec: dict[str, Any], findings: list[dict[str, Any]], *,
-          restricted: bool = False) -> dict[str, Any]:
-    """Judge one scenario's published findings against its rubric.
-
-    Discovery and truth are kept apart on purpose:
-
-    * `false_claims` are things the records do not support. One is a failure
-      however good the rest of the output is.
-    * `discovered` says whether the useful pattern was found. Missing it is a
-      different failure, and on a scenario where abstention is correct it is
-      not a failure at all.
-    """
-    import re
-
-    rules = spec.get("restricted_reader") if restricted else spec
-    wrong = (rules or {}).get("wrong") or []
-    acceptable = [] if restricted else (spec.get("acceptable") or [])
-
-    result: dict[str, Any] = {
-        "key": spec["key"], "name": spec["name"],
-        "published": len(findings), "abstained": not findings,
-        "false_claims": [], "discovered": None, "notes": [],
-        "titles": [f.get("title") for f in findings],
+    coverage = session.retrieval_report()
+    report = session.budget.report()
+    return {
+        "session": session,
+        "seen": seen,
+        "budget_kind": budget,
+        "budget": report,
+        "coverage": coverage,
+        "attempted": attempted,
+        "refused_by_budget": [a for a in attempted if not a["ran"]],
+        "tool_errors": [a for a in attempted if a.get("error")],
+        "delivered_keys": sorted(delivered),
+        "calculation_ids": sorted(calcs),
+        "required_keys": needed,
+        "missing_required": missing,
+        # The headline: did the evidence this scenario turns on actually reach
+        # an investigation under this budget?
+        "delivered_within_budget": not missing,
     }
 
-    for f in findings:
-        text = finding_text(f)
-        for pat in wrong:
-            if re.search(pat, text, re.I):
-                result["false_claims"].append(
-                    {"title": f.get("title"), "matched": pat})
 
-    if not findings:
-        result["discovered"] = None if spec.get("abstention_ok") else False
-        if spec.get("abstention_ok"):
-            result["notes"].append("abstained, which this scenario allows")
-        else:
-            result["notes"].append("published nothing on a scenario with a real pattern")
-        return result
+# ---------------------------------------------------------------------------
+# Scoring lives in home_eval_scoring.py. Re-exported so callers have one import.
+# ---------------------------------------------------------------------------
 
-    if spec.get("abstention_preferred") and not result["false_claims"]:
-        result["notes"].append(
-            "published where silence was the preferred answer; not a false claim, "
-            "but check that it adds something beyond the visible totals")
+from home_eval_scoring import (  # noqa: E402
+    DISCOVERY_RUBRIC, assess, classify_execution, clauses, disposition,
+    finding_fields, review_flags,
+)
 
-    if acceptable:
-        hits = [pat for pat in acceptable
-                if any(re.search(pat, finding_text(f), re.I) for f in findings)]
-        result["discovered"] = len(hits) == len(acceptable)
-        result["matched_expectations"] = hits
-        if not result["discovered"]:
-            result["notes"].append(
-                "published, but did not state the pattern the records establish: "
-                + ", ".join(p for p in acceptable if p not in hits))
-    return result
+__all__ = [
+    "SCENARIOS", "scenario", "build_all", "build_instance", "probe",
+    "required_keys", "fixture_version", "auth", "align_to_spans",
+    "PRODUCTION_BUDGET", "DIAGNOSTIC_BUDGET",
+    "assess", "classify_execution", "clauses", "disposition",
+    "finding_fields", "review_flags", "DISCOVERY_RUBRIC",
+]

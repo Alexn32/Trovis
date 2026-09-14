@@ -44,6 +44,7 @@ import main
 from fastapi.testclient import TestClient
 
 import home_eval_scenarios as S
+import investigation_tools
 
 main._auto_describe = lambda *a, **k: False
 
@@ -238,46 +239,66 @@ with TestClient(main.app) as c:
         check(f"{k}: a scenario with no acceptable discovery allows abstention",
               bool(spec["acceptable"]) or spec["abstention_ok"])
 
-    # The scorer must actually bite. A fabricated finding of the shape a model
-    # could produce is run through it here — NOT as evidence about any model,
-    # but to prove the rubric would catch it if one did.
-    print("\n=== the scorer catches what it is meant to catch ===")
-    bad_b = [{"title": "Refunds are failing because the approval service is down",
-              "explanation": "All refunds stopped.", "claims": [], "uncertainty": []}]
-    r = S.score(S.scenario("B"), bad_b)
-    check("an asserted cause is flagged on B",
-          any("because" in f["matched"] for f in r["false_claims"]))
-    check("an over-scoped 'all refunds' is flagged on B",
-          any("all" in f["matched"] for f in r["false_claims"]))
+    # Scoring semantics live in test_home_eval_harness.py, which covers
+    # cautious language, paraphrase, misleading keywords, detail-field claims
+    # and the failed/incomplete/abstained distinction. What belongs HERE is the
+    # measurement this file is for: was the evidence delivered under the budget
+    # the product actually gives an investigation?
+    print("\n=== production-budget discoverability, per scenario ===")
+    verdicts = {}
+    for spec in S.SCENARIOS:
+        k = spec["key"]
+        pr = S.probe(CTX[k], budget=S.PRODUCTION_BUDGET)
+        verdicts[k] = pr
+        b = pr["budget"]
+        label = (f"{k}: required evidence delivered within the production "
+                 f"budget ({b['tool_calls']}/{b['tool_call_limit']} calls, "
+                 f"{b['rows_retrieved']}/{b['row_limit']} rows, "
+                 f"{b['events_retrieved']}/{b['event_limit']} events)")
+        if k == "E":
+            # E is the known retrieval gap: its `needs` are deliverable, but
+            # the PATTERN (repeated successful tool calls) is not retrievable
+            # at all. Recorded as finding 2 in EVAL_HOME_FINDINGS.md.
+            check(f"{k}: the run rows are delivered, but the repetition is not "
+                  f"retrievable at all (finding 2)",
+                  pr["delivered_within_budget"]
+                  and "web_search" not in str(pr["seen"].get("inspected")))
+            continue
+        check(label, pr["delivered_within_budget"])
+        check(f"{k}: nothing was refused for want of budget",
+              not pr["refused_by_budget"])
+        check(f"{k}: no tool errored", not pr["tool_errors"])
 
-    good_b = [{"title": "Four refunds stopped at the same approval step",
-               "explanation": "Four refund items each recorded a failing "
-                              "approval_service call and were closed unfinished.",
-               "claims": [], "uncertainty": ["why the call failed"]}]
-    r = S.score(S.scenario("B"), good_b)
-    check("a supported observation passes B", not r["false_claims"])
-    check("and counts as a discovery", r["discovered"] is True)
+    check("the production probe uses the product's own ToolBudget, not a "
+          "larger one",
+          verdicts["B"]["budget"]["tool_call_limit"]
+          == investigation_tools.ToolBudget().max_calls
+          and verdicts["B"]["budget"]["row_limit"]
+          == investigation_tools.ToolBudget().max_rows)
 
-    r = S.score(S.scenario("C"), [{
-        "title": "Three shipments failed to complete", "explanation": "",
-        "claims": [], "uncertainty": []}])
-    check("calling a recovered run failed is flagged on C", bool(r["false_claims"]))
-
-    r = S.score(S.scenario("H"), [{
-        "title": "This team spent $40", "explanation": "", "claims": [],
-        "uncertainty": []}], restricted=False)
-    check("attributing org-wide cost to a team is flagged on H",
-          bool(r["false_claims"]))
-    r = S.score(S.scenario("H"), [{
-        "title": "Spend was $40 this week", "explanation": "", "claims": [],
-        "uncertainty": []}], restricted=True)
-    check("any money at all is flagged for the restricted reader on H",
-          bool(r["false_claims"]))
-
-    r = S.score(S.scenario("A"), [])
-    check("abstention on A is not counted as a miss", r["discovered"] is None)
-    r = S.score(S.scenario("B"), [])
-    check("abstention on B IS counted as a miss", r["discovered"] is False)
+    # And the budget must genuinely be able to BITE, or "it fitted" means
+    # nothing. Squeeze it until the evidence cannot get through, and check the
+    # probe reports that honestly rather than reporting an empty result as an
+    # absence in the records.
+    print("\n=== the budget can actually prevent delivery ===")
+    original_budget = S._budget
+    S._budget = lambda kind: investigation_tools.ToolBudget(
+        max_calls=2, max_rows=1, max_events=1)
+    try:
+        blocked = S.probe(CTX["I"], budget=S.PRODUCTION_BUDGET)
+    finally:
+        S._budget = original_budget
+    check("a squeezed budget refuses retrievals", bool(blocked["refused_by_budget"]))
+    check("and the scenario's required evidence does not arrive",
+          not blocked["delivered_within_budget"])
+    check("which is reported as missing, not as absent from the records",
+          bool(blocked["missing_required"]))
+    check("the refusal names the budget as the reason",
+          all("budget" in (a.get("why") or "")
+              for a in blocked["refused_by_budget"]))
+    check("and the unsqueezed probe still delivers, so the difference is the "
+          "budget and not the fixture",
+          S.probe(CTX["I"], budget=S.PRODUCTION_BUDGET)["delivered_within_budget"])
 
 print("\n" + ("FAILED: " + "; ".join(failures) if failures else "ALL PASS"))
 raise SystemExit(1 if failures else 0)
