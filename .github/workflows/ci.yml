@@ -68,13 +68,28 @@ jobs:
           # A door test must never skip its way to green in CI.
           TROVIS_REQUIRE_SDK: '1'
         run: |
+          # pipefail, or `python … | tee` would report tee's exit status and
+          # every test would pass.
+          set -o pipefail
           failed=()
+          mkdir -p /tmp/testlogs
           for t in test_*.py; do
             echo "::group::$t"
-            if python "$t"; then echo "PASS $t"; else failed+=("$t"); echo "FAIL $t"; fi
+            if python "$t" 2>&1 | tee "/tmp/testlogs/$t.log"; then
+              echo "PASS $t"
+            else
+              failed+=("$t"); echo "FAIL $t"
+            fi
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then
+            # Reprint each failure's tail HERE, at the end. A failing check's
+            # output otherwise sits collapsed thousands of lines up, which is
+            # unreadable from the API and nearly so in the browser.
+            for t in "${failed[@]}"; do
+              echo "----- last 40 lines of $t -----"
+              tail -40 "/tmp/testlogs/$t.log"
+            done
             echo "::error::${#failed[@]} test script(s) failed: ${failed[*]}"
             exit 1
           fi
