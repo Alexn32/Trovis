@@ -209,15 +209,17 @@ test('the Grok Bot door admits the bot has to call in', () => {
   }
 })
 
-test('the Actions door admits it cannot produce named jobs yet', () => {
-  // /actions/log has no title field, so a no-code GPT lands as activity.
-  // Saying so is the point: the alternative is a builder wondering why their
-  // GPT never shows up on Work.
+test('the Actions door tells the GPT how to name its jobs', () => {
+  // /actions/log takes a job_title now, so the door produces named Work like
+  // every other one. The page used to admit it could not; what it must not do
+  // is claim titles happen by themselves — a GPT that never sends one still
+  // lands as unnamed activity, and the reader is owed that.
   const c = addAgent.slice(addAgent.indexOf('function ChatGPTInstructions'))
-  assert.match(c, /Activity, not named jobs/)
-  assert.match(c, /no field for a job title/)
-  // And offers the path that does work.
-  assert.match(c, /emit OpenTelemetry with/)
+  assert.match(c, /job_title/)
+  assert.match(c, /activity without a name/)
+  assert.doesNotMatch(c, /no field for a job title/)
+  // The instruction block is where the GPT actually learns it.
+  assert.match(c, /call logActivity with job_title set to/)
 })
 
 // --- copy ------------------------------------------------------------------

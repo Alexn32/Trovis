@@ -73,6 +73,12 @@ function fmtDur(ms) {
   if (h < 36) return `${h.toFixed(1)}h`
   return `${(h / 24).toFixed(1)}d`
 }
+// A record only shows usage it actually has. A reported job carries neither
+// tokens nor cost, and "0 tokens · —" on every row is noise that reads as a
+// measurement.
+function hasUsage(r) {
+  return Boolean(r?.tokens) || (r?.cost_usd != null && r.cost_usd > 0)
+}
 function fmtCost(usd) {
   if (usd == null) return '—'
   const n = Number(usd) || 0
@@ -410,13 +416,21 @@ function AskBar({ serviceName, agentId }) {
 }
 
 /* ── 3. This Week strip ── */
-function WeekStrip({ weekly, costDays }) {
+function WeekStrip({ weekly, costDays, reportsUsage = true }) {
+  // An agent that reports its work rather than emitting telemetry — a Grok
+  // Bot, a GPT through Actions — cannot send token counts. "$0.00 · 0 tokens"
+  // reads as "this work was free"; the truth is that nobody told us. Drop the
+  // two tiles and say so once, rather than print a number we did not measure.
+  //
+  // Not plan usage in their place either: seats-used is an account fact, not
+  // this agent's, and "0% of budget" is $0.00 wearing a hat.
   const stats = [
     ['Runs', weekly?.runs != null ? String(weekly.runs) : '0'],
     ['Success', weekly?.success_rate != null ? `${Math.round(weekly.success_rate)}%` : '—'],
     ['Avg response', weekly?.avg_duration_ms ? fmtDur(weekly.avg_duration_ms) : '—'],
-    ['Cost this week', fmtCost(weekly?.cost)],
-    ['Tokens', fmtTokens(weekly?.tokens || 0)],
+    ...(reportsUsage
+      ? [['Cost this week', fmtCost(weekly?.cost)], ['Tokens', fmtTokens(weekly?.tokens || 0)]]
+      : []),
   ]
   const max = Math.max(0.0001, ...costDays)
   const brief =
@@ -443,17 +457,27 @@ function WeekStrip({ weekly, costDays }) {
             <div style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 22, color: C.ink }}>{v}</div>
           </div>
         ))}
-        {/* 14-day cost sparkline: empty days are faint ticks, never walls */}
-        <div style={{ flex: 1, minWidth: 160, display: 'flex', alignItems: 'flex-end', gap: 3, height: 46, paddingBottom: 2 }}>
-          {costDays.map((v, i) => (
-            <div key={i} title={v > 0 ? fmtCost(v) : 'no activity'} style={{
-              flex: 1, borderRadius: 2,
-              height: v > 0 ? Math.max(8, (v / max) * 40) : 3,
-              background: v > 0 ? C.teal : C.subtle,
-            }} />
-          ))}
-        </div>
+        {/* 14-day cost sparkline: empty days are faint ticks, never walls.
+            Off entirely for an agent with no usage to chart — 14 flat ticks
+            are a picture of nothing. */}
+        {reportsUsage && (
+          <div style={{ flex: 1, minWidth: 160, display: 'flex', alignItems: 'flex-end', gap: 3, height: 46, paddingBottom: 2 }}>
+            {costDays.map((v, i) => (
+              <div key={i} title={v > 0 ? fmtCost(v) : 'no activity'} style={{
+                flex: 1, borderRadius: 2,
+                height: v > 0 ? Math.max(8, (v / max) * 40) : 3,
+                background: v > 0 ? C.teal : C.subtle,
+              }} />
+            ))}
+          </div>
+        )}
       </div>
+      {!reportsUsage && (
+        <p style={{ margin: '14px 0 0', fontSize: 13, color: C.muted, fontFamily: F.body, maxWidth: 720 }}>
+          This agent reports its work rather than its usage, so Trovis has no
+          token counts or cost for it — not zero, unmeasured.
+        </p>
+      )}
     </Card>
   )
 }
@@ -522,8 +546,8 @@ function FeedItem({ r }) {
               <div style={{ display: 'flex', gap: 18, marginTop: 10, flexWrap: 'wrap', fontFamily: F.mono, fontSize: 11.5, color: C.muted }}>
                 <span title={r.time || ''}>{fmtStamp(r.time)}</span>
                 <span>{fmtDur(r.duration_ms)}</span>
-                <span>{(r.tokens || 0).toLocaleString()} tokens</span>
-                <span>{fmtCost(r.cost_usd)}</span>
+                {hasUsage(r) && <span>{(r.tokens || 0).toLocaleString()} tokens</span>}
+                {hasUsage(r) && <span>{fmtCost(r.cost_usd)}</span>}
               </div>
             </div>
           ) : (
@@ -1068,7 +1092,11 @@ export default function AgentDetail({ serviceName, agentId, account, onBack, onD
       ) : (
         <>
           <AskBar serviceName={summary.service_name} agentId={agentId} />
-          <WeekStrip weekly={weekly} costDays={costDays} />
+          <WeekStrip
+            weekly={weekly}
+            costDays={costDays}
+            reportsUsage={summary.reports_usage !== false}
+          />
           <WorkFeed serviceName={summary.service_name} agentId={agentId} />
           <IdentityCard summary={summary} capabilities={capabilities} registration={registration} />
           <DangerZone

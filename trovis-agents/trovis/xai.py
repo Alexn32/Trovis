@@ -14,9 +14,10 @@ So this adapter does the three things that are NOT automatic:
   2. Warns when something else got to the global provider first — usually
      `xai_sdk.telemetry.Telemetry()`, which installs its OWN provider with
      `service.name="xai-sdk"`. That collapses every Grok agent in an org
-     into one indistinguishable agent AND exports protobuf, which Trovis ingest
-     (OTLP/JSON) rejects. OTEL refuses to override an already-set global
-     provider, so the only fix is ordering: `init()` first.
+     into one indistinguishable agent, and its spans carry none of the
+     workloop attrs this adapter stamps. OTEL refuses to override an
+     already-set global provider, so the only fix is ordering: `init()`
+     first.
   3. Stamps workloop attrs onto the first xAI span of a run, so a Grok run
      lands as *named* Work (`trovis.loop.title`) instead of an untitled
      trace. Use `trovis.set_loop_title("Triage refund #4821")` before the
@@ -126,8 +127,8 @@ def setup_xai() -> bool:
         logger.warning(
             "[Trovis] Another OpenTelemetry TracerProvider is already global "
             "(commonly xai_sdk.telemetry.Telemetry(), which names every agent "
-            "'xai-sdk' and exports protobuf). OTEL will not let Trovis "
-            "replace it, so Grok spans may not reach Trovis. Call "
+            "'xai-sdk'). OTEL will not let Trovis replace it, so Grok spans "
+            "may not reach Trovis, and none will carry your job titles. Call "
             "trovis.init() BEFORE creating a Telemetry() — and don't create "
             "one at all; init() does that job."
         )
