@@ -363,6 +363,11 @@ _PLATFORM_LABELS = {
     "cursor-grok-bot": "Grok Bot",
     "grok-bot": "Grok Bot",
     "chatgpt": "ChatGPT Agent",
+    # Pulled from OpenAI's Managed Agents API rather than reported by the
+    # agent itself. The stamp is "-api" because the Connect page already uses
+    # "openai-agents" for the OpenAI Agents SDK tile; the label a person reads
+    # says the product, not the direction.
+    "openai-agents-api": "OpenAI Agent",
 }
 
 
