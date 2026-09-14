@@ -25,8 +25,10 @@ fixed here, and the corrected measurements are below.
 | Does the AI discover useful patterns? | **Not measured.** No live run. |
 | Is the required evidence delivered under the **production** budget? | **Measured.** 9 of 9 — see the correction to the old claim. |
 | Is the *repetition* pattern retrievable at all? | **No** (scenario E) — finding 2. |
+| Did the model actually receive the evidence it cited? | **Verifiable now** — captured per investigation, reported `unavailable` when it cannot be. |
+| What does Home generation actually cost? | **Unmeasured.** No live run, and `claude-opus-5` has no price in the table. |
 | Do the fixtures establish what the rubric claims? | **Measured.** 120 checks. |
-| Does the harness itself behave? | **Measured.** 90 checks. |
+| Does the harness itself behave? | **Measured.** 153 checks. |
 | Does the pipeline run end to end? | **Measured**, with a scripted model. |
 
 ---
@@ -38,7 +40,8 @@ they are never mixed:
 
 | kind | what it is | can it fail a scenario? |
 |---|---|---|
-| **Deterministic** | Facts needing no interpretation: how many findings published; whether the analysis completed, failed or was unavailable; whether every cited evidence id was actually delivered; whether a numeric claim carries the `calc:`/`snapshot:` reference the contract requires; whether a monetary **figure** reached a reader whose seat excludes Cost. | **Yes** |
+| **Deterministic** | Facts needing no interpretation: how many findings published; whether the analysis completed, failed or was unavailable; whether every cited evidence id was **actually delivered to the model during that investigation**; whether a numeric claim carries the `calc:`/`snapshot:` reference the contract requires; whether a monetary **figure** reached a reader whose seat excludes Cost. | **Yes** |
+| **Unavailable** | A deterministic check that could not be run — most often because delivery instrumentation was not active. Never counted as a pass. | No |
 | **Review flag** | A regex hit, carried with the clause it matched and whether that clause **asserts**, **denies** or **hedges** the thing. An invitation to read a sentence. | No |
 | **Requires review** | Everything semantic, including *"did it discover the pattern?"*. No automated judgement is made; the rubric and the supporting evidence are attached and the question is left open. | No |
 
@@ -74,11 +77,20 @@ Every attempt carries a `diagnosis`:
 | `draft_blocked_by_validation` | A draft existed and the deterministic validator refused it. |
 | `required_evidence_unreachable` | The evidence the scenario turns on did not reach the investigation. |
 | `pipeline_failed_before_decision` | No decision was reached. **Not** an abstention. |
+| `incomplete_execution` | It did not finish what it started. **Not** an abstention. |
+| `outcome_not_reported` | No worker report carried a candidate count, so why nothing was published cannot be established. |
 | `not_run` | The harness declined to run this attempt (budget). |
+
+The candidate **count** decides `no_candidate_raised`, not the abstention
+message. The real pipeline reports `candidates: 0` *alongside*
+`abstained: ["no candidate worth investigating"]`, and reading the message
+first labelled that `investigated_and_withheld` — a candidate investigation
+that never happened. A validator rejection still outranks the count, because a
+rejection proves a draft existed.
 
 ---
 
-## Four separate questions about discoverability
+## Five separate questions about evidence and discovery
 
 The old report said "8 of 9 discoverable". That claim was **withdrawn**: it was
 measured with 40 tool calls and 4,000 rows against production defaults of 14
@@ -86,8 +98,25 @@ and 400, and it conflated levels that have to stay apart.
 
 1. **The evidence exists in the records** — asserted directly against the DB.
 2. **It is retrievable through the allowlist** at all.
-3. **It is delivered within the PRODUCTION budget** (`investigation_tools.ToolBudget()`).
-4. **The model discovered it** — needs a live run. Not measured.
+3. **It is delivered within the PRODUCTION budget** by an independent,
+   optimally-targeted probe (`investigation_tools.ToolBudget()`).
+4. **It was delivered during THIS investigation** — captured from the real
+   `InvestigationSession.delivered` by test-only instrumentation, and used to
+   check that published citations match what the model was actually shown.
+5. **The model discovered a supported finding** — requires semantic review.
+   Not measured.
+
+Levels 3 and 4 are different questions and are never substituted for each
+other. A successful probe says the budget *could* reach the evidence; it says
+nothing about what this run retrieved. Comparing citations against the
+publication's own evidence list — which the first version did — only checks
+that the publication agrees with itself.
+
+When the instrumentation is not active, the delivery check reports
+**unavailable with a reason**. It is never reported as passed, and never
+inferred from the publication. An **observed empty** delivery ledger stays
+distinct from **unavailable**: the first says the model was shown nothing, the
+second says we do not know what it was shown.
 
 ### Corrected measurement — level 3, production budget
 
@@ -100,7 +129,7 @@ allowance, with room to spare:
 | B shared failing step | 8 / 14 | 6 / 400 | 12 / 600 | ✅ |
 | C recovered errors | 5 / 14 | 3 / 400 | 6 / 600 | ✅ |
 | D waiting on a person | 5 / 14 | 6 / 400 | 4 / 600 | ✅ |
-| E optimization | 8 / 14 | 5 / 400 | 10 / 600 | ✅ rows — ❌ **pattern** |
+| E optimization | 8 / 14 | 5 / 400 | 10 / 600 | ✅ rows — ❌ **pattern** (see below) |
 | F positive change | 7 / 14 | 18 / 400 | 10 / 600 | ✅ |
 | G incomplete visibility | 6 / 14 | 3 / 400 | 6 / 600 | ✅ |
 | H cost and permission | 3 / 14 | 4 / 400 | 0 / 600 | ✅ |
@@ -109,6 +138,12 @@ allowance, with room to spare:
 Nothing was refused for want of budget and no tool errored. The expanded
 diagnostic probe still exists but is labelled separately and runs **only** when
 the production probe comes up short; it may never support a production claim.
+
+**Scenario E's rows do not mean its pattern arrived.** E's required run rows
+are delivered, and its *repeated successful tool calls* are retrievable through
+no tool at all. The scenario carries `pattern_retrievable: false` and a note
+that travels with every report, so a ✅ in the delivery column can never be read
+as "the repetition reached the investigation".
 
 **The one thing this measurement flatters, stated plainly.** The probe already
 knows which run ids matter, so it spends its allowance perfectly. A real
@@ -203,12 +238,32 @@ run.
 | candidates / turns / published | 4 / 6 / 5 | `investigator` |
 | retrieval | 14 calls / 400 rows / 600 events | `investigation_tools.ToolBudget` |
 
-Each request is priced at a conservative upper bound — a bounded estimate of
-its input at 3 characters per token, plus its full `max_tokens` of output — and
-is **not sent** if that bound would take the run past the cap. The reservation
-is then reconciled against the provider's reported usage. A response with no
-usage block **keeps its reservation** rather than counting as free. Provider
-retries are disabled, so one counted call is one request.
+Each request is bounded before it is sent:
+
+* **Input** is counted by the **provider** (`messages.count_tokens`), plus
+  documented headroom of **10% and 512 tokens** for the server-side additions
+  the caller's arguments do not show. `len(serialized)/3 + 1000` was a
+  heuristic wearing the words "upper bound" — it has no guarantee behind it and
+  under-counts exactly where it matters (dense non-English text, base64, long
+  tool schemas). A request whose tokens **cannot** be counted is **refused**,
+  not sent on the assumption the guess was close.
+* **Output** is the request's own `max_tokens`, which the server enforces, so
+  it is a true ceiling. A request with no `max_tokens` is refused.
+
+The reservation is then reconciled against the provider's reported usage —
+**but only when every field is reported**. Partial usage is unknown
+consumption and keeps its reservation: a response carrying `input_tokens=100`
+with `output_tokens` missing previously turned a $0.031 reservation into
+$0.0001 of accounted spend and left `usage_missing` at zero. Absent, partial,
+invalid and negative usage all now keep the reservation and are recorded in
+`partial_usage_responses`.
+
+A request that **raises** keeps its reservation too — it was sent, it may have
+been served and billed, and releasing it would make failures free and a retry
+storm invisible. Provider retries are disabled, so one counted call is one
+request. The report separates `of_which_measured` from
+`of_which_unreconciled_reservations`, so a reader can see how much of the
+figure is observation and how much is allowance.
 
 **Unknown pricing stops a dollar-budgeted live run outright**, and this is not
 hypothetical: **`claude-opus-5` has no row in this repository's pricing table**,
@@ -223,7 +278,39 @@ recorded as a gap rather than worked around.
 This bounds an **estimate**. It is not a statement about the provider's bill:
 the prices are this repository's, and only the provider knows what it charged.
 
-**Actual usage: 0 model calls, 0 tokens, $0.00.**
+**Actual usage: 0 model calls, 0 tokens, $0.00.** No live evaluation ran.
+
+### Usage reconciliation — SCRIPTED run, no model, no spend
+
+`python3 run_home_eval.py --mode stub --scenarios A,H --repeat 2` (scripted
+model; the call counts are real, the answers are hand-written):
+
+```
+usage:          "model_calls": 28
+reconciliation: {"global_model_calls": 28,
+                 "sum_of_attempt_totals": 28,
+                 "unattributed_model_calls": 0,
+                 "reconciles": true}
+
+A#1 total 5   (primary 5)
+A#2 total 5   (primary 5)
+H#1 total 9   (primary 5 + restricted reader 4)
+H#2 total 9   (primary 5 + restricted reader 4)
+```
+
+Before this pass the same command reported 28 global against 20 attributed:
+scenario H's restricted reader is a separate audience with its own scope key,
+its own queued job and its own model calls, and those eight calls were spent
+globally and recorded nowhere. Each attempt now carries `usage_readers` (per
+reader), `usage_attempt_total` (the sum), and a note saying to reconcile with
+the totals and **not** to add the subtotals on top. A non-zero
+`unattributed_model_calls` is printed as a harness defect.
+
+Job ownership is resolved from `analysis_jobs.account_id` — the job record —
+rather than from a `account_id` field the worker reports usually omit. The
+previous version read a missing field as "ours", so any job draining during an
+attempt was attributed to it. An id that cannot be resolved is attributed to
+**nobody**.
 
 Isolated throwaway SQLite per run; `DATABASE_URL` is unset unconditionally; no
 production records are read and nothing is written outside the temp database.
@@ -311,10 +398,12 @@ nothing saying they are different populations. **Severity: medium.**
 
 ```
 python3 test_home_eval_scenarios.py   ALL PASS (120 checks)   no network
-python3 test_home_eval_harness.py     ALL PASS (90 checks)    no network
+python3 test_home_eval_harness.py     ALL PASS (153 checks)   no network
 python3 run_home_eval.py --mode stub  9/9 reach execution=completed
 python3 run_home_eval.py --mode stub --scenarios B --repeat 2
                                       2 accounts, 2 jobs, 2 analysis ids, 5 calls each
+python3 run_home_eval.py --mode stub --scenarios A,H --repeat 2
+                                      28 global calls = 28 attributed, 0 unattributed
 
 test_home_findings.py                 PASS
 test_home_findings_eval.py            PASS
@@ -359,20 +448,32 @@ transcript carries the worker's own `candidates`, `rejected`, `abstained`,
 ## Remaining gaps and what needs human review
 
 1. **The core question is unanswered.** Nobody has watched Trovis's AI discover
-   anything. The apparatus is now trustworthy enough to find out.
+   anything, and **what Home generation actually costs is unmeasured** — there
+   has been no live run, and `claude-opus-5` has no price in the table, so even
+   an estimate has nothing to stand on. The apparatus is now trustworthy enough
+   to find out.
 2. **`claude-opus-5` has no price in the pricing table**, so a dollar-bounded
    live run is refused. This must be fixed before a live evaluation.
 3. **Every semantic judgement requires a human.** `discovery` is always
    `requires_review`; the harness supplies the finding, its claims, its
    evidence, the scenario's `establishes` / `not_established` lists and the
    review flags with their dispositions, and a person decides.
-4. **Review flags are heuristic in both directions.** Negation and hedging are
+4. **Delivery instrumentation is test-only and subclass-based.** It captures
+   `InvestigationSession.delivered` for sessions created during an attempt. If
+   the product ever constructs a session by another route, the check reports
+   `unavailable` rather than silently missing it — but a reviewer should read
+   that field rather than assume it ran.
+5. **The input bound rests on `count_tokens` plus 10% and 512 tokens.** That
+   headroom is a judgement, not a proof; it covers the server-side additions
+   observed in this pipeline's requests and has never been validated against a
+   live bill, because there has been no live run.
+6. **Review flags are heuristic in both directions.** Negation and hedging are
    read from cue words at clause granularity; sarcasm, double negatives and
    long-range scope are not handled, and a false claim phrased in unanticipated
    words raises no flag at all.
-5. **Finding 2** blocks an entire promised category.
-6. **Finding 1** silently misfiles late telemetry.
-7. **Fixture isolation and perfect probe targeting** both make the scenarios
+7. **Finding 2** blocks an entire promised category.
+8. **Finding 1** silently misfiles late telemetry.
+9. **Fixture isolation and perfect probe targeting** both make the scenarios
    easier than production.
-8. **No adversarial scenario** — nothing evaluates an agent emitting text that
+10. **No adversarial scenario** — nothing evaluates an agent emitting text that
    tries to steer the investigation.

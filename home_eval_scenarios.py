@@ -640,6 +640,14 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:heavy", "ids:light", "cost"],
+        # The run ROWS are deliverable; the PATTERN is not. Successful tool
+        # calls appear in no tool's output, so "required evidence delivered"
+        # must never be read as "the repetition was delivered" for E.
+        "pattern_retrievable": False,
+        "pattern_note": (
+            "The repeated web_search calls are not retrievable through any "
+            "tool in the allowlist (finding 2). Delivering this scenario's run "
+            "rows does NOT mean the repetition reached the investigation."),
         "financial": True,
     },
     {

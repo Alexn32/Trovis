@@ -190,7 +190,7 @@ def classify_execution(*, analysis: dict[str, Any] | None,
 
 def deterministic_checks(spec: dict[str, Any], findings: list[dict[str, Any]],
                          details: list[dict[str, Any]], *,
-                         delivered_evidence: set[str] | None = None,
+                         delivery: dict[str, Any] | None = None,
                          restricted: bool = False) -> list[dict[str, Any]]:
     """Facts about the output that need no interpretation.
 
@@ -199,7 +199,19 @@ def deterministic_checks(spec: dict[str, Any], findings: list[dict[str, Any]],
     out: list[dict[str, Any]] = []
 
     def record(name: str, ok: bool, detail: str = "") -> None:
-        out.append({"check": name, "ok": bool(ok), "detail": detail})
+        out.append({"check": name, "status": "pass" if ok else "fail",
+                    "ok": bool(ok), "detail": detail})
+
+    def unavailable(name: str, reason: str) -> None:
+        """A check that could not be run. NOT a pass, and never counted as one.
+
+        The difference matters most for evidence delivery: "we looked and every
+        citation was delivered" and "we had no way to look" are opposite
+        findings, and collapsing them into a silent skip is how an unverified
+        claim gets reported as verified.
+        """
+        out.append({"check": name, "status": "unavailable", "ok": None,
+                    "detail": reason})
 
     for i, f in enumerate(findings):
         d = details[i] if i < len(details) else None
@@ -218,12 +230,22 @@ def deterministic_checks(spec: dict[str, Any], findings: list[dict[str, Any]],
                    for c in numeric),
                f"{len(numeric)} numeric claim(s)")
 
-        if delivered_evidence is not None:
+        # Citations are checked against what the investigation ACTUALLY
+        # delivered to the model, captured by instrumentation around the real
+        # session. Checking them against the publication's own evidence list
+        # would only prove the publication agrees with itself.
+        name = f"finding[{i}] cites only evidence this investigation delivered"
+        if delivery is None or not delivery.get("available"):
+            unavailable(name, (delivery or {}).get("reason")
+                        or "no delivery instrumentation was active")
+        else:
+            keys = set(delivery.get("keys") or [])
             refs = {f"{(e or {}).get('kind')}:{(e or {}).get('ref')}"
                     for e in ((d or {}).get("evidence") or [])}
-            unknown = sorted(r for r in refs if r not in delivered_evidence)
-            record(f"finding[{i}] cites only delivered evidence",
-                   not unknown, f"unknown={unknown}")
+            unknown = sorted(r for r in refs if r not in keys)
+            record(name, not unknown,
+                   f"unknown={unknown} delivered={len(keys)}"
+                   + (" (delivery ledger was observed EMPTY)" if not keys else ""))
 
         if restricted:
             # A monetary FIGURE shown to a reader whose seat excludes the
@@ -327,6 +349,10 @@ DIAGNOSES = {
     "completed_without_publication": "It finished and published nothing, with "
                                      "no candidate, rejection or abstention "
                                      "recorded to explain it.",
+    "incomplete_execution": "It did not finish what it started; the completion "
+                            "gaps say what was left undone. Not an abstention.",
+    "outcome_not_reported": "No worker report carried a candidate count, so "
+                            "why nothing was published cannot be established.",
 }
 
 
@@ -342,7 +368,16 @@ def diagnose(*, status: dict[str, Any], worker_reports: list[dict[str, Any]] | N
     execution = status.get("execution")
     rejected = [r for r in reports if r.get("rejected")]
     abstained = [r for r in reports if r.get("abstained")]
-    candidates = sum(int(r.get("candidates") or 0) for r in reports)
+    # `candidates` is the count discovery actually proposed. It is the field
+    # that separates "nothing was worth investigating" from "something was
+    # investigated and held back", and reading the abstention MESSAGE first got
+    # that backwards: the real pipeline reports `candidates: 0` alongside
+    # `abstained: ["no candidate worth investigating"]`, so a zero-candidate
+    # run was labelled `investigated_and_withheld` — a candidate investigation
+    # that never happened.
+    reported = [r for r in reports if r.get("candidates") is not None]
+    candidates = sum(int(r.get("candidates") or 0) for r in reported)
+    candidates_known = bool(reported)
 
     if execution == "skipped":
         code = "not_run"
@@ -351,20 +386,27 @@ def diagnose(*, status: dict[str, Any], worker_reports: list[dict[str, Any]] | N
     elif published:
         code = "published"
     elif rejected:
+        # A rejection proves a draft existed, so it outranks the candidate
+        # count either way.
         code = "draft_blocked_by_validation"
+    elif candidates_known and candidates == 0:
+        code = "no_candidate_raised"
     elif evidence_delivered is False:
         code = "required_evidence_unreachable"
+    elif execution == "incomplete":
+        code = "incomplete_execution"
     elif abstained:
         code = "investigated_and_withheld"
-    elif candidates == 0:
-        code = "no_candidate_raised"
+    elif not candidates_known:
+        code = "outcome_not_reported"
     else:
         code = "completed_without_publication"
 
     return {
         "code": code,
         "meaning": DIAGNOSES[code],
-        "candidates_raised": candidates,
+        "candidates_raised": candidates if candidates_known else None,
+        "candidate_count_reported": candidates_known,
         "validator_rejections": [r.get("rejected") for r in rejected],
         "abstention_reasons": [r.get("abstained") for r in abstained],
         "required_evidence_delivered": evidence_delivered,
@@ -375,7 +417,7 @@ def assess(spec: dict[str, Any], findings: list[dict[str, Any]],
            details: list[dict[str, Any]] | None = None, *,
            analysis: dict[str, Any] | None = None,
            worker_reports: list[dict[str, Any]] | None = None,
-           delivered_evidence: set[str] | None = None,
+           delivery: dict[str, Any] | None = None,
            evidence_delivered: bool | None = None,
            restricted: bool = False) -> dict[str, Any]:
     """One scenario's result: settled facts, flags to read, and open questions."""
@@ -384,12 +426,12 @@ def assess(spec: dict[str, Any], findings: list[dict[str, Any]],
     status["abstained"] = status["execution"] == "completed" and not findings
 
     checks = deterministic_checks(spec, findings, details,
-                                  delivered_evidence=delivered_evidence,
-                                  restricted=restricted)
+                                  delivery=delivery, restricted=restricted)
     flags = review_flags(spec, findings, details, restricted=restricted)
     signals = expectation_signals(spec, findings, details)
 
-    failures = [c for c in checks if not c["ok"]]
+    failures = [c for c in checks if c["status"] == "fail"]
+    unavailable_checks = [c for c in checks if c["status"] == "unavailable"]
     affirmative = [f for f in flags if f["disposition"] == "affirmative"]
 
     # The discovery question is never answered here.
@@ -397,6 +439,15 @@ def assess(spec: dict[str, Any], findings: list[dict[str, Any]],
         discovery = "not_applicable"
         note = (f"No completed analysis to judge (execution={status['execution']}). "
                 "This is not an abstention.")
+    elif not findings and status["execution"] == "incomplete":
+        # An unfinished run that published nothing is NOT a completed
+        # abstention, and calling it one would credit restraint to a pipeline
+        # that simply stopped early.
+        discovery = "not_applicable"
+        note = ("The analysis did not finish "
+                f"(gaps: {status['completion_gaps'] or 'unreported'}), so its "
+                "empty result is not an abstention and says nothing about "
+                "discovery.")
     elif not findings:
         discovery = "requires_review"
         note = ("Nothing was published by a completed analysis. Whether that is "
@@ -415,8 +466,15 @@ def assess(spec: dict[str, Any], findings: list[dict[str, Any]],
                               evidence_delivered=evidence_delivered),
         "published": len(findings),
         "titles": [f.get("title") for f in findings],
-        "deterministic": {"checks": checks, "failures": failures,
-                          "passed": len(checks) - len(failures)},
+        # `passed` counts only checks that actually ran and passed. An
+        # unavailable check is never folded into it.
+        "deterministic": {
+            "checks": checks,
+            "failures": failures,
+            "unavailable": unavailable_checks,
+            "passed": len(checks) - len(failures) - len(unavailable_checks),
+            "ran": len(checks) - len(unavailable_checks),
+        },
         "review_flags": flags,
         "affirmative_flag_count": len(affirmative),
         "expectation_signals": signals,

@@ -174,6 +174,11 @@ def main() -> int:
     else:
         investigator._client = lambda: meter.wrap(_live_client(investigator))
 
+    # Test-only: capture what each investigation actually delivered.
+    import investigation_tools
+    recorder = DeliveryRecorder(investigation_tools)
+    recorder.install()
+
     started = time.time()
     results = []
     with TestClient(app_main.app) as c:
@@ -193,12 +198,31 @@ def main() -> int:
                     eval_stub_model.reset()
                 results.append(run_one_scenario(
                     c, S, ctx, analysis_jobs, investigator,
-                    attempt=attempt, meter=meter, usage_before=before))
+                    attempt=attempt, meter=meter, usage_before=before,
+                    database=database, recorder=recorder))
 
+    recorder.uninstall()
+    attempt_totals = _sum_usage([r.get("usage_attempt_total") or {}
+                                 for r in results])
+    usage = meter.report()
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "plan": plan,
-        "usage": meter.report(),
+        "usage": usage,
+        # Every model call must land in exactly one attempt. A non-zero
+        # `unattributed` is a harness defect, not a rounding detail.
+        "usage_reconciliation": {
+            "global_model_calls": usage["model_calls"],
+            "sum_of_attempt_totals": attempt_totals.get("model_calls", 0),
+            "unattributed_model_calls":
+                usage["model_calls"] - attempt_totals.get("model_calls", 0),
+            "reconciles": (usage["model_calls"]
+                           == attempt_totals.get("model_calls", 0)),
+            "sum_of_attempt_estimated_usd":
+                round(attempt_totals.get("estimated_usd", 0.0), 6),
+            "note": ("Attempt totals cover every reader investigated under an "
+                     "attempt. Do not also add the per-reader subtotals."),
+        },
         "elapsed_s": round(time.time() - started, 1),
         "results": results,
     }
@@ -256,8 +280,44 @@ def skipped_result(key: str, attempt: int, S, *, reason: str) -> dict:
     }
 
 
+def _read_for(c, S, database, analysis_jobs, *, token: str, account_id: int,
+              meter, recorder, q: str) -> dict:
+    """One READER's investigation: enqueue, drain, read back, with its own
+    usage subtotal, its own job set and its own observed delivery.
+
+    Every reader gets one of these — including scenario H's restricted reader,
+    whose calls were previously spent globally and recorded nowhere.
+    """
+    usage_before = meter.snapshot()
+    mark = recorder.mark() if recorder else 0
+    first = c.get(f"/home/findings?{q}", headers=S.auth(token)).json()
+    drained = analysis_jobs.drain(max_jobs=3)
+    after = c.get(f"/home/findings?{q}", headers=S.auth(token)).json()
+
+    findings = after.get("findings") or []
+    details = [c.get(f"/home/findings/{f['id']}?{q}",
+                     headers=S.auth(token)).json() for f in findings]
+
+    # Ownership comes from the job record, never from a missing field.
+    owned, foreign = [], []
+    for d in drained:
+        (owned if job_owner(database, d.get("job_id")) == account_id
+         else foreign).append(d)
+
+    return {
+        "first": first, "after": after,
+        "findings": findings, "details": details,
+        "owned": owned, "foreign": foreign,
+        "delivery": (recorder.since(mark, account_id) if recorder else
+                     {"available": False,
+                      "reason": "delivery instrumentation was not installed"}),
+        "usage": meter.delta(usage_before),
+    }
+
+
 def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
-                     attempt: int, meter, usage_before: dict) -> dict:
+                     attempt: int, meter, usage_before: dict,
+                     database=None, recorder=None) -> dict:
     """One fixture instance, through the whole real path, with its provenance."""
     key = ctx["key"]
     spec = ctx["spec"]
@@ -265,31 +325,23 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
     q = "days=7&tz=UTC"
 
     snap = c.get(f"/home/snapshot?{q}", headers=S.auth(token)).json()
-    # The read enqueues; it never runs a model itself.
-    first = c.get(f"/home/findings?{q}", headers=S.auth(token)).json()
-    drained = analysis_jobs.drain(max_jobs=3)
-    after = c.get(f"/home/findings?{q}", headers=S.auth(token)).json()
-
-    findings = after.get("findings") or []
-    details = []
-    for f in findings:
-        details.append(c.get(f"/home/findings/{f['id']}?{q}",
-                             headers=S.auth(token)).json())
-
-    # Only jobs belonging to THIS fixture's account count as this attempt's.
-    mine = [d for d in drained if _job_account(d, ctx) is not False]
-    delivered = _delivered_from(mine)
+    primary = _read_for(c, S, database, analysis_jobs, token=token,
+                        account_id=ctx["account_id"], meter=meter,
+                        recorder=recorder, q=q)
+    first, after = primary["first"], primary["after"]
+    findings, details = primary["findings"], primary["details"]
+    mine, foreign = primary["owned"], primary["foreign"]
 
     analysis = after.get("analysis") or {}
     discoverability = _discoverability(S, ctx)
     assessment = S.assess(
         spec, findings, details,
         analysis=analysis, worker_reports=mine,
-        delivered_evidence=delivered or None,
+        delivery=primary["delivery"],
         evidence_delivered=discoverability["production"]["delivered_within_budget"],
     )
 
-    usage = meter.delta(usage_before)
+    usage = dict(primary["usage"])
     out = {
         "key": key, "name": spec["name"], "attempt": attempt,
         "fixture": {
@@ -309,9 +361,11 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
             "scope_keys": sorted({d.get("scope_key") for d in mine if d.get("scope_key")}),
             "enqueued_on_first_read": (first.get("analysis") or {}).get("enqueued"),
             "jobs_drained": len(mine),
-            "jobs_drained_other_accounts": len(drained) - len(mine),
+            "jobs_drained_other_accounts": len(foreign),
+            "foreign_job_ids": [d.get("job_id") for d in foreign],
             "model_calls_this_attempt": usage["model_calls"],
         },
+        "delivery": primary["delivery"],
         "execution": assessment["status"]["execution"],
         "analysis": {
             "state": analysis.get("state"),
@@ -336,44 +390,153 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
     }
 
     if key == "H":
+        # The restricted reader is a DIFFERENT audience with its own scope key,
+        # its own queued job and its own model calls. Those calls used to be
+        # spent against the global meter and recorded nowhere, which is why the
+        # global total exceeded the sum of the attempts.
         r = ctx["restricted"]
-        c.get(f"/home/findings?{q}", headers=S.auth(r["token"]))
-        r_drained = analysis_jobs.drain(max_jobs=3)
-        r_after = c.get(f"/home/findings?{q}", headers=S.auth(r["token"])).json()
-        r_findings = r_after.get("findings") or []
-        r_details = [c.get(f"/home/findings/{f['id']}?{q}",
-                           headers=S.auth(r["token"])).json() for f in r_findings]
+        reader = _read_for(c, S, database, analysis_jobs, token=r["token"],
+                           account_id=ctx["account_id"], meter=meter,
+                           recorder=recorder, q=q)
         out["restricted_reader"] = {
             "user_id": r["user_id"],
-            "published": len(r_findings),
-            "titles": [f.get("title") for f in r_findings],
-            "worker_reports": [_worker_report(d) for d in r_drained],
+            "published": len(reader["findings"]),
+            "titles": [f.get("title") for f in reader["findings"]],
+            "worker_reports": [_worker_report(d) for d in reader["owned"]],
+            "job_ids": [d.get("job_id") for d in reader["owned"]],
+            "delivery": reader["delivery"],
+            "usage": reader["usage"],
             "assessment": S.assess(
-                spec, r_findings, r_details,
-                analysis=r_after.get("analysis") or {},
-                worker_reports=r_drained, restricted=True),
+                spec, reader["findings"], reader["details"],
+                analysis=reader["after"].get("analysis") or {},
+                worker_reports=reader["owned"],
+                delivery=reader["delivery"], restricted=True),
         }
+        out["usage_readers"] = [
+            {"reader": "primary", "user_id": ctx["user_id"], "usage": usage},
+            {"reader": "restricted", "user_id": r["user_id"],
+             "usage": reader["usage"]},
+        ]
+
+    # ATTEMPT TOTAL = the primary reader plus every other reader investigated
+    # under this attempt. `usage` above is the PRIMARY SUBTOTAL only; consumers
+    # summing the report must use `usage_attempt_total` and must not add the
+    # subtotals to it as well.
+    readers = out.get("usage_readers") or [
+        {"reader": "primary", "user_id": ctx["user_id"], "usage": usage}]
+    out["usage_readers"] = readers
+    out["usage_attempt_total"] = _sum_usage([r["usage"] for r in readers])
+    out["usage_accounting_note"] = (
+        "`usage` is the primary reader's subtotal. `usage_attempt_total` is "
+        "this attempt's total across all readers. Sum `usage_attempt_total` "
+        "across attempts to reconcile with the report's global usage; never "
+        "add the per-reader subtotals on top of it."
+    )
     return out
 
 
-def _job_account(report: dict, ctx: dict):
-    """Is this drained job this fixture's? Unknown counts as ours rather than
-    silently dropping evidence; the scope key is recorded either way."""
-    acct = report.get("account_id")
-    if acct is None:
+def _sum_usage(parts: list[dict]) -> dict:
+    total: dict[str, Any] = {}
+    for part in parts:
+        for k, v in (part or {}).items():
+            if isinstance(v, (int, float)):
+                total[k] = round(total.get(k, 0) + v, 6)
+    return total
+
+
+def job_owner(database, job_id) -> int | None:
+    """Which account a drained job belongs to, from the job record itself.
+
+    Worker reports routinely omit `account_id`, and the previous version read a
+    missing one as "ours" — so any job that happened to drain during an attempt
+    was attributed to it. `analysis_jobs.account_id` is the authoritative
+    answer; an id that cannot be resolved is attributed to NOBODY.
+    """
+    if job_id is None:
         return None
-    return acct == ctx["account_id"]
+    try:
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute(
+                f"SELECT account_id FROM analysis_jobs WHERE id = {database.PH}",
+                (int(job_id),),
+            )
+            row = cur.fetchone()
+    except Exception:
+        return None
+    return int(row["account_id"]) if row and row["account_id"] is not None else None
 
 
-def _delivered_from(reports: list[dict]) -> set[str]:
-    """Ledger keys the worker says it delivered, if it says."""
-    keys: set[str] = set()
-    for r in reports:
-        for rec in ((r.get("publication") or {}).get("records") or []):
-            for ev in (rec.get("evidence") or []):
-                if ev.get("kind") and ev.get("ref") is not None:
-                    keys.add(f"{ev['kind']}:{ev['ref']}")
-    return keys
+class DeliveryRecorder:
+    """Test-only instrumentation: what each investigation actually delivered.
+
+    `InvestigationSession.delivered` is the set of ledger keys the model was
+    really shown. Nothing in the product surfaces it after the fact, and the
+    two things that look like substitutes are not:
+
+      * `publication.records[].evidence` is what the finding CITES. Comparing
+        citations against it checks that the publication agrees with itself.
+      * the independent probe measures what COULD be retrieved by a perfectly
+        targeted search, not what this investigation did retrieve.
+
+    So this subclasses the session to register every instance, and reads
+    `delivered` off the ones created for a given account. It overrides nothing
+    and changes no retrieval behaviour — the subclass body is a single
+    registration after `super().__init__`.
+    """
+
+    def __init__(self, investigation_tools):
+        self._mod = investigation_tools
+        self._original = investigation_tools.InvestigationSession
+        self.sessions: list[Any] = []
+        self.installed = False
+
+    def install(self) -> None:
+        rec = self
+        base = self._original
+
+        class RecordingSession(base):  # type: ignore[valid-type,misc]
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                rec.sessions.append(self)
+
+        self._mod.InvestigationSession = RecordingSession
+        self.installed = True
+
+    def uninstall(self) -> None:
+        self._mod.InvestigationSession = self._original
+        self.installed = False
+
+    def mark(self) -> int:
+        return len(self.sessions)
+
+    def since(self, mark: int, account_id: int) -> dict[str, Any]:
+        """Delivery observed for one account since `mark`.
+
+        An OBSERVED EMPTY ledger (`available: True, keys: []`) and NO
+        INSTRUMENTATION (`available: False`) are different answers and stay
+        different: the first says the model was shown nothing, the second says
+        we do not know what it was shown.
+        """
+        if not self.installed:
+            return {"available": False,
+                    "reason": "delivery instrumentation was not installed"}
+        mine = [s for s in self.sessions[mark:]
+                if getattr(s, "account_id", None) == account_id]
+        if not mine:
+            return {"available": False,
+                    "reason": ("no investigation session was created for account "
+                               f"{account_id} during this attempt")}
+        keys: set[str] = set()
+        for sess in mine:
+            keys |= set(getattr(sess, "delivered", ()) or ())
+        return {
+            "available": True,
+            "sessions": len(mine),
+            "keys": sorted(keys),
+            "observed_empty": not keys,
+            "note": ("Captured from InvestigationSession.delivered — the keys "
+                     "this investigation actually put in front of the model."),
+        }
 
 
 def _worker_report(d: dict) -> dict:
@@ -445,9 +608,14 @@ def _finding_detail(d: dict) -> dict:
 def _discoverability(S, ctx) -> dict:
     """Production-budget retrieval for this fixture, plus a labelled diagnostic."""
     prod = S.probe(ctx, budget=S.PRODUCTION_BUDGET)
+    spec = ctx["spec"]
     out = {
         "production": _probe_summary(prod),
         "diagnostic": None,
+        # Separate from delivery: some scenarios turn on a pattern that no tool
+        # exposes, so their rows arriving proves nothing about the pattern.
+        "pattern_retrievable": spec.get("pattern_retrievable", True),
+        "pattern_note": spec.get("pattern_note"),
         "note": ("`production` uses the product's own ToolBudget. Only it may "
                  "support a claim about production discoverability."),
     }
@@ -515,9 +683,12 @@ class Meter:
     what it actually charged.
     """
 
-    # Conservative: ~3 characters per token under-counts tokens, so dividing by
-    # 3 over-counts them, which is the direction an upper bound must err in.
-    CHARS_PER_TOKEN = 3.0
+    # Headroom applied to the provider's own count, covering what
+    # `count_tokens` cannot see from the caller's arguments alone: the
+    # server-side system additions and the thinking configuration the product
+    # sends. 10% plus a flat 512 tokens.
+    INPUT_HEADROOM_RATIO = 1.10
+    INPUT_HEADROOM_FLAT = 512
 
     def __init__(self, *, max_calls: int, max_usd: float, database, model: str,
                  priced: bool = True):
@@ -532,6 +703,11 @@ class Meter:
         self.input_tokens = 0
         self.output_tokens = 0
         self.usage_missing = 0
+        self.counted_input_tokens = 0
+        self.count_requests = 0
+        self.failed_calls = 0
+        self.measured_calls = 0
+        self.partial_usage: list[dict] = []
         self.reserved_usd = 0.0     # for calls whose usage never came back
         self.reconciled_usd = 0.0   # for calls the provider reported
         self.refusals: list[str] = []
@@ -565,15 +741,67 @@ class Meter:
     def remaining_usd(self) -> float:
         return self.max_usd - self.spent_usd()
 
-    def preflight(self, **kw) -> float:
-        """The most this request could cost, by this repository's prices."""
-        blob = json.dumps({"system": kw.get("system"),
-                           "messages": kw.get("messages"),
-                           "tools": kw.get("tools")}, default=str)
-        est_in = int(len(blob) / self.CHARS_PER_TOKEN) + 1000  # headroom
-        est_out = int(kw.get("max_tokens") or 4096)
+    def preflight(self, client, **kw) -> float:
+        """The most this request could cost, by this repository's prices.
+
+        The input side is counted by the PROVIDER (`messages.count_tokens`),
+        not estimated from string length. `len(serialized)/3 + 1000` was a
+        heuristic wearing the words "upper bound": it has no guarantee behind
+        it, and it under-counts exactly where it matters — dense non-English
+        text, base64, and long tool schemas.
+
+        The output side is the request's own `max_tokens`, which the server
+        enforces, so it is a true ceiling.
+
+        If the count cannot be obtained, this raises. A request that cannot be
+        bounded is refused rather than sent on the assumption that a guess was
+        close enough.
+        """
+        counted = self.count_input_tokens(client, **kw)
+        est_in = int(counted * self.INPUT_HEADROOM_RATIO) + self.INPUT_HEADROOM_FLAT
+        est_out = int(kw.get("max_tokens") or 0)
+        if est_out <= 0:
+            raise BudgetExceeded(
+                "request has no max_tokens, so its output cannot be bounded")
         cost = self._cost(est_in, est_out)
-        return 0.0 if cost is None else cost
+        if cost is None:
+            raise BudgetExceeded(f"no price known for {self.model}")
+        self.counted_input_tokens += counted
+        return cost
+
+    def count_input_tokens(self, client, **kw) -> int:
+        """Ask the provider how many input tokens this request is.
+
+        One extra request per model call. It is not a Messages call and does
+        not consume output tokens, but it is a request against the same
+        account — recorded here so the count appears in the report rather than
+        being invisible overhead.
+        """
+        counter = getattr(getattr(client, "messages", None), "count_tokens", None)
+        if counter is None:
+            raise BudgetExceeded(
+                "the client cannot count tokens, so this request cannot be "
+                "bounded; refusing to send it under a dollar budget")
+        args = {"model": kw.get("model") or self.model,
+                "messages": kw.get("messages") or []}
+        for optional in ("system", "tools"):
+            if kw.get(optional) is not None:
+                args[optional] = kw[optional]
+        try:
+            counted = counter(**args)
+        except BudgetExceeded:
+            raise
+        except Exception as exc:
+            raise BudgetExceeded(
+                f"token counting failed ({type(exc).__name__}), so this request "
+                "cannot be bounded; refusing to send it") from exc
+        self.count_requests += 1
+        value = getattr(counted, "input_tokens", None)
+        if not isinstance(value, int) or value < 0:
+            raise BudgetExceeded(
+                "token counting returned no usable input_tokens; refusing to "
+                "send an unbounded request")
+        return value
 
     def spent_out(self) -> bool:
         if self.calls >= self.max_calls:
@@ -596,13 +824,16 @@ class Meter:
             def create(self, **kw):
                 if meter.calls >= meter.max_calls:
                     raise BudgetExceeded(meter.stop_reason())
-                allowance = meter.preflight(**kw)
+                allowance = 0.0
                 if meter._enforce_dollars:
                     if not meter.pricing_known():
                         meter.refusals.append("pricing unknown")
                         raise BudgetExceeded(
                             f"no price known for {meter.model}; refusing to "
                             "send a request a dollar budget cannot bound")
+                    # Raises if the request cannot be bounded — which refuses
+                    # it, rather than sending it on a heuristic.
+                    allowance = meter.preflight(client, **kw)
                     if allowance > meter.remaining_usd():
                         meter.refusals.append("would exceed remaining budget")
                         raise BudgetExceeded(
@@ -611,7 +842,14 @@ class Meter:
                             f"${meter.max_usd:.2f}")
                 meter.calls += 1
                 meter.reserved_usd += allowance
-                resp = client.messages.create(**kw)
+                try:
+                    resp = client.messages.create(**kw)
+                except Exception:
+                    # The request was made and may have been served and billed.
+                    # The reservation STAYS: releasing it would make a failed
+                    # request free, and a retry storm invisible.
+                    meter.failed_calls += 1
+                    raise
                 meter._reconcile(resp, allowance)
                 return resp
 
@@ -620,31 +858,53 @@ class Meter:
 
         return Wrapped()
 
-    def _reconcile(self, resp, allowance: float) -> None:
-        """Swap the reservation for what the provider says it actually used.
+    @staticmethod
+    def _token_field(usage, name: str) -> int | None:
+        """A usage field, or None when it is absent or not a usable count."""
+        value = getattr(usage, name, None)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if value >= 0 else None
 
-        A response with no usage block keeps the reservation. Treating it as
-        zero would make an unmeasurable call free, which is the one reading
-        that can never be justified.
+    def _reconcile(self, resp, allowance: float) -> None:
+        """Swap the reservation for what the provider says it actually used —
+        but ONLY when the provider reported all of it.
+
+        The previous version released the reservation whenever EITHER field was
+        present, treating the missing half as zero: a response carrying
+        `input_tokens=100` and no `output_tokens` turned a $0.031 reservation
+        into $0.0001 of accounted spend, and left `usage_missing` at zero so
+        nothing said the number was unreliable. Partial usage is unknown
+        consumption, and unknown consumption keeps its reservation.
         """
         usage = getattr(resp, "usage", None)
-        inp = getattr(usage, "input_tokens", None) if usage is not None else None
-        out = getattr(usage, "output_tokens", None) if usage is not None else None
-        if inp is None and out is None:
+        inp = self._token_field(usage, "input_tokens") if usage is not None else None
+        out = self._token_field(usage, "output_tokens") if usage is not None else None
+        if inp is None or out is None:
             self.usage_missing += 1
+            self.partial_usage.append({
+                "input_tokens": inp, "output_tokens": out,
+                "reservation_usd": round(allowance, 6),
+            })
             return  # reservation stands
-        inp, out = int(inp or 0), int(out or 0)
         self.input_tokens += inp
         self.output_tokens += out
         actual = self._cost(inp, out)
+        if actual is None:
+            return  # unpriced: the reservation is the only number we have
         self.reserved_usd -= allowance
-        self.reconciled_usd += 0.0 if actual is None else actual
+        self.reconciled_usd += actual
+        self.measured_calls += 1
 
     # -- reporting -----------------------------------------------------
     def snapshot(self) -> dict:
         return {"model_calls": self.calls, "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
                 "usage_missing": self.usage_missing,
+                "failed_calls": self.failed_calls,
+                "measured_calls": self.measured_calls,
+                "counted_input_tokens": self.counted_input_tokens,
+                "count_requests": self.count_requests,
                 "estimated_usd": self.spent_usd()}
 
     def delta(self, before: dict) -> dict:
@@ -659,17 +919,27 @@ class Meter:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "responses_without_usage": self.usage_missing,
+            "partial_usage_responses": self.partial_usage,
+            "failed_calls": self.failed_calls,
+            "calls_with_measured_usage": self.measured_calls,
+            "token_count_requests": self.count_requests,
+            "counted_input_tokens": self.counted_input_tokens,
             "estimated_usd": round(self.spent_usd(), 6),
+            "of_which_measured": round(self.reconciled_usd, 6),
             "of_which_unreconciled_reservations": round(self.reserved_usd, 6),
             "usd_limit": self.max_usd,
             "pricing_known": self.pricing_known(),
             "dollar_budget_enforced": self._enforce_dollars,
             "refusals": self.refusals,
-            "note": ("Token counts are the provider's own where it reported "
-                     "them. The dollar figure is an ESTIMATED BOUND from this "
-                     "repository's pricing table — not a statement about the "
-                     "provider's final bill. Calls with no usage block keep "
-                     "their pre-request reservation rather than counting zero."),
+            "note": ("An ESTIMATED-COST LIMIT based on this repository's "
+                     "pricing table — not a guarantee about the provider's "
+                     "bill. `of_which_measured` comes from usage the provider "
+                     "fully reported; `of_which_unreconciled_reservations` is "
+                     "the pre-request allowance kept for calls whose usage was "
+                     "absent, partial or unusable, and for calls that raised. "
+                     "Input bounds come from the provider's own count_tokens "
+                     f"plus {int((Meter.INPUT_HEADROOM_RATIO - 1) * 100)}% and "
+                     f"{Meter.INPUT_HEADROOM_FLAT} tokens of headroom."),
         }
 
 
@@ -724,7 +994,12 @@ def print_summary(report: dict, mode: str) -> None:
             print(f"   restricted reader: {rr['published']} published, "
                   f"{len(rd['failures'])} policy failures, "
                   f"{len(rr['assessment']['review_flags'])} review flags")
+    rec = report.get("usage_reconciliation") or {}
     print("\nusage: " + json.dumps(report["usage"]))
+    print("reconciliation: " + json.dumps(rec))
+    if not rec.get("reconciles", True):
+        print(f"  !! {rec.get('unattributed_model_calls')} model call(s) are "
+              "not attributed to any attempt — harness defect.")
 
 
 if __name__ == "__main__":
