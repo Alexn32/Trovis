@@ -40,6 +40,7 @@ import time
 from typing import Any, Callable
 
 import database
+import home_eval_delivery as HD
 import investigation_tools
 
 NS = 10**9
@@ -530,6 +531,12 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:runs", "mix"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "runs_listed", "runs": "ids:runs"},
+                     {"kind": "comparison", "job": "ids:job", "days": 7,
+                      "fields": ["started", "completed"]}],
         "financial": True,
     },
     {
@@ -560,6 +567,15 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:stalled", "ids:finished", "mix"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "runs_listed", "runs": "ids:stalled"},
+                     {"kind": "failing_step", "runs": "ids:stalled",
+                      "step": "approval_service"},
+                     {"kind": "runs_listed", "runs": "ids:finished"},
+                     {"kind": "comparison", "job": "ids:job", "days": 7,
+                      "fields": ["completed", "abandoned"]}],
         "financial": True,
     },
     {
@@ -585,6 +601,10 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:runs"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "recovery", "runs": "ids:runs", "step": "carrier_api"}],
         "financial": True,
     },
     {
@@ -611,6 +631,11 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:waiting_on_viewer", "waits"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "waits", "runs": "ids:waiting_on_viewer",
+                      "holder_required": True}],
         "financial": True,
     },
     {
@@ -648,6 +673,15 @@ SCENARIOS: list[dict[str, Any]] = [
             "The repeated web_search calls are not retrievable through any "
             "tool in the allowlist (finding 2). Delivering this scenario's run "
             "rows does NOT mean the repetition reached the investigation."),
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "runs_listed", "runs": "ids:heavy"},
+                     {"kind": "cost", "days": 7,
+                      "fields": ["spend_usd", "coverage_ratio"]},
+                     {"kind": "unretrievable", "what": "repeated successful tool calls",
+                      "why": "no tool in the allowlist returns the tool calls a "
+                             "run made when they succeeded (finding 2)"}],
         "financial": True,
     },
     {
@@ -674,6 +708,11 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["mix"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "comparison", "job": "ids:job", "days": 7,
+                      "fields": ["started", "completed", "abandoned"]}],
         "financial": True,
     },
     {
@@ -708,6 +747,13 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:runs", "mix", "agent"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "runs_listed", "runs": "ids:runs"},
+                     {"kind": "comparison", "job": "ids:job", "days": 7,
+                      "fields": ["started", "completed"]},
+                     {"kind": "agent_context", "agent": "ids:quiet_agent"}],
         "financial": True,
     },
     {
@@ -733,6 +779,12 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["cost"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "cost", "days": 7,
+                      "fields": ["spend_usd", "coverage_ratio",
+                                 "unpriced_token_spans"]}],
         "financial": True,
         # The same account is read a second time by a seat without Cost.
         "restricted_reader": {
@@ -767,6 +819,17 @@ SCENARIOS: list[dict[str, Any]] = [
         # Ledger keys a supporting finding would have to cite. Resolved
         # against `ids` at probe time to say what was actually DELIVERED.
         "needs": ["ids:recent_abandoned", "ids:prev_abandoned", "mix"],
+        # What this investigation must have been SHOWN for the pattern to be
+        # assessable. Structured, and checked against delivered contents --
+        # "the run ids arrived" is not "the failing step arrived".
+        "requires": [{"kind": "runs_listed", "runs": "ids:recent_abandoned"},
+                     # No `step`: this scenario's point is that the three
+                     # failed at DIFFERENT steps, so the investigation needs
+                     # each run's failing-step details, not a shared name.
+                     {"kind": "failing_step", "runs": "ids:recent_abandoned",
+                      "step": None},
+                     {"kind": "comparison", "job": "ids:job", "days": 7,
+                      "fields": ["started", "abandoned"]}],
         "financial": True,
     },
 ]
@@ -921,6 +984,29 @@ def _budget(kind: str) -> investigation_tools.ToolBudget:
     return investigation_tools.ToolBudget(**DIAGNOSTIC_LIMITS)
 
 
+def requirements(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    """This scenario's evidence requirements, with fixture ids resolved.
+
+    A requirement says what the investigation must have been SHOWN for the
+    pattern to be assessable at all — the failing step for B, the comparison
+    values for F, the holder for D. Checking that run ids arrived does not
+    establish that their relevant details arrived, which is how a run that
+    never called `inspect_run` reported "every requirement was delivered".
+    """
+    ids = ctx["ids"]
+    out: list[dict[str, Any]] = []
+    for req in ctx["spec"].get("requires") or []:
+        resolved = dict(req)
+        for field, value in req.items():
+            if not isinstance(value, str) or not value.startswith("ids:"):
+                continue
+            name = value.split(":", 1)[1]
+            got = ids.get(name)
+            resolved[field] = list(got) if isinstance(got, list) else got
+        out.append(resolved)
+    return out
+
+
 def required_keys(ctx: dict[str, Any]) -> list[str]:
     """The ledger keys a supporting finding for this scenario would have to cite."""
     ids = ctx["ids"]
@@ -961,7 +1047,11 @@ def probe(ctx: dict[str, Any], *, financial_visible: bool = True,
     fit, nothing can.
     """
     ids = ctx["ids"]
-    session = investigation_tools.InvestigationSession(
+    # The instrumented session: same retrieval behaviour, plus a record of what
+    # `_settle_delivery` actually sent, so the probe answers the same question
+    # the runner does.
+    session = HD.recording_session_class(
+        investigation_tools.InvestigationSession)(
         account_id=ctx["account_id"], only_user_ids=None,
         financial_visible=financial_visible, budget=_budget(budget),
     )
@@ -1006,26 +1096,10 @@ def probe(ctx: dict[str, Any], *, financial_visible: bool = True,
     if financial_visible and ctx["key"] in ("E", "H"):
         seen["cost"] = call("cost_evidence", {"days": 7})
 
-    delivered = set(session.delivered)
-    calcs = set(session.calculations)
+    delivery = HD.delivery_report([session])
+    verdict = HD.check_requirements(requirements(ctx), delivery)
     needed = required_keys(ctx)
-    missing = []
-    for key in needed:
-        if key.startswith("run:"):
-            if key not in delivered:
-                missing.append(key)
-        elif key == "mix":
-            if not any(k.startswith("mix.") for k in calcs):
-                missing.append(key)
-        elif key == "cost":
-            if not any(k.startswith("cost.") for k in calcs):
-                missing.append(key)
-        elif key == "waits":
-            if not any(k.startswith("wait.") for k in calcs):
-                missing.append(key)
-        elif key == "agent":
-            if not any(k.startswith("agent_context:") for k in delivered):
-                missing.append(key)
+    missing = [c["requirement"] for c in verdict.get("failed") or []]
 
     coverage = session.retrieval_report()
     report = session.budget.report()
@@ -1038,13 +1112,18 @@ def probe(ctx: dict[str, Any], *, financial_visible: bool = True,
         "attempted": attempted,
         "refused_by_budget": [a for a in attempted if not a["ran"]],
         "tool_errors": [a for a in attempted if a.get("error")],
-        "delivered_keys": sorted(delivered),
-        "calculation_ids": sorted(calcs),
+        "delivered_keys": delivery.get("keys") or [],
+        "calculation_ids": delivery.get("calculations") or [],
         "required_keys": needed,
+        "requirements": verdict["requirements"],
+        "requirement_checks": verdict["checked"],
         "missing_required": missing,
+        "delivery": delivery,
         # The headline: did the evidence this scenario turns on actually reach
-        # an investigation under this budget?
-        "delivered_within_budget": not missing,
+        # an investigation under this budget? `None` when something could not
+        # be established — never silently true.
+        "delivered_within_budget": verdict["value"],
+        "requirement_reason": verdict["reason"],
     }
 
 

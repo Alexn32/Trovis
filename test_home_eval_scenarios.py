@@ -256,15 +256,24 @@ with TestClient(main.app) as c:
                  f"{b['rows_retrieved']}/{b['row_limit']} rows, "
                  f"{b['events_retrieved']}/{b['event_limit']} events)")
         if k == "E":
-            # E is the known retrieval gap: its `needs` are deliverable, but
-            # the PATTERN (repeated successful tool calls) is not retrievable
-            # at all. Recorded as finding 2 in EVAL_HOME_FINDINGS.md.
-            check(f"{k}: the run rows are delivered, but the repetition is not "
-                  f"retrievable at all (finding 2)",
-                  pr["delivered_within_budget"]
-                  and "web_search" not in str(pr["seen"].get("inspected")))
+            # E is the known retrieval gap: every RETRIEVABLE requirement is
+            # delivered, and the PATTERN (repeated successful tool calls) is
+            # not retrievable at all — so the verdict is False, by way of
+            # `unretrievable` rather than anything this run failed to fetch.
+            # Recorded as finding 2 in EVAL_HOME_FINDINGS.md.
+            failed = [c for c in pr["requirement_checks"]
+                      if c["status"] == "not_delivered"
+                      and c["requirement"]["kind"] != "unretrievable"]
+            unretrievable = [c for c in pr["requirement_checks"]
+                             if c["requirement"]["kind"] == "unretrievable"]
+            check(f"{k}: every retrievable requirement IS delivered", not failed)
+            check(f"{k}: but the repetition is unretrievable, so the verdict "
+                  f"is not true (finding 2)",
+                  pr["delivered_within_budget"] is False and unretrievable)
+            check(f"{k}: and no tool exposes the repeated calls",
+                  "web_search" not in str(pr["seen"].get("inspected")))
             continue
-        check(label, pr["delivered_within_budget"])
+        check(label, pr["delivered_within_budget"] is True)
         check(f"{k}: nothing was refused for want of budget",
               not pr["refused_by_budget"])
         check(f"{k}: no tool errored", not pr["tool_errors"])

@@ -383,70 +383,41 @@ def _merge_delivery(parts: list) -> dict:
 def actual_evidence_delivered(S, ctx, delivery: dict) -> dict:
     """Did THIS investigation receive the evidence the scenario turns on?
 
-    Derived from captured delivery and the scenario's explicit requirements —
+    Derived from captured delivery and the scenario's STRUCTURED requirements —
     never from the independent probe, which answers a different question ("could
-    an optimally targeted search have reached it?").
+    an optimally targeted search have reached it?"), and never from the presence
+    of an id, which answers a smaller one ("did a summary row arrive?").
 
-    Three outcomes, and the third is the one that was missing:
-      * True  — every requirement appears in what was delivered.
-      * False — something required was not delivered by this execution. That is
-                a fact about THIS RUN, not about the tools: a model may simply
-                not have asked.
-      * None  — the instrumentation could not establish it.
+    Four outcomes:
+      * True  — every requirement was established from delivered contents.
+      * False — something required was not delivered by this execution, or the
+                scenario turns on something no tool exposes.
+      * None  — the instrumentation could not establish it, or a requirement
+                kind is not supported. An unknown never passes.
 
-    A requirement the tools cannot satisfy at all (scenario E's repeated
-    successful tool calls) is reported separately as `unretrievable`, because
-    "the model did not fetch it" and "no tool exposes it" call for opposite
-    responses.
+    "Did the evidence arrive?" and "did the model find the pattern?" stay
+    separate: only the first is answered here, and it is answered from the
+    delivered payloads rather than from any wording.
     """
+    import home_eval_delivery as HD
+    verdict = HD.check_requirements(S.requirements(ctx), delivery)
     spec = ctx["spec"]
-    required = S.required_keys(ctx)
-    unretrievable = []
-    if spec.get("pattern_retrievable") is False:
-        unretrievable.append({
-            "requirement": "pattern:" + spec["key"],
-            "reason": spec.get("pattern_note") or "no tool exposes this pattern",
-        })
-    if not delivery or not delivery.get("available"):
-        return {
-            "value": None,
-            "required": required,
-            "unretrievable": unretrievable,
-            "reason": (delivery or {}).get("reason")
-                      or "no delivery instrumentation for this investigation",
-        }
-    keys = set(delivery.get("keys") or [])
-    calcs = set(delivery.get("calculations") or [])
-    missing = []
-    for need in required:
-        if need.startswith("run:"):
-            if need not in keys:
-                missing.append(need)
-        elif need == "mix" and not any(k.startswith("mix.") for k in calcs):
-            missing.append(need)
-        elif need == "cost" and not any(k.startswith("cost.") for k in calcs):
-            missing.append(need)
-        elif need == "waits" and not any(k.startswith("wait.") for k in calcs):
-            missing.append(need)
-        elif need == "agent" and not any(k.startswith("agent_context:")
-                                         for k in keys):
-            missing.append(need)
-    satisfied = not missing and not unretrievable
     return {
-        "value": bool(satisfied),
-        "required": required,
-        "delivered_keys": len(keys),
-        "delivered_calculations": len(calcs),
-        "missing": missing,
-        "unretrievable": unretrievable,
-        "reason": (
-            "every requirement was delivered to this investigation" if satisfied
-            else ("requirements this run did not retrieve: " + ", ".join(missing)
-                  if missing else "")
-            + ("; requirements no tool can satisfy: "
-               + ", ".join(u["requirement"] for u in unretrievable)
-               if unretrievable else "")
-        ),
+        "value": verdict["value"],
+        "requirements": verdict["requirements"],
+        "checked": verdict.get("checked") or [],
+        "satisfied": [c["requirement"] for c in verdict.get("satisfied") or []],
+        "missing": [c["requirement"] for c in verdict.get("failed") or []],
+        "unknown": [c for c in verdict.get("unknown") or []],
+        "unretrievable": [
+            {"requirement": c["requirement"].get("what") or "pattern:" + spec["key"],
+             "reason": c["detail"]}
+            for c in verdict.get("unretrievable") or []
+        ],
+        "delivered_keys": verdict.get("delivered_keys", 0),
+        "delivered_calculations": verdict.get("delivered_calculations", 0),
+        "payload_capture": verdict.get("payload_capture", False),
+        "reason": verdict["reason"],
     }
 
 
@@ -831,15 +802,18 @@ class DeliveryRecorder:
         self.installed = False
 
     def install(self) -> None:
+        import home_eval_delivery as HD
         rec = self
-        base = self._original
+        # The shared instrumented subclass: it hooks `_settle_delivery` so
+        # CONTENTS are captured, not just keys. Registration is layered on top.
+        base = HD.recording_session_class(self._original)
 
-        class RecordingSession(base):  # type: ignore[valid-type,misc]
+        class RegisteringSession(base):  # type: ignore[valid-type,misc]
             def __init__(self, **kw):
                 super().__init__(**kw)
                 rec.sessions.append(self)
 
-        self._mod.InvestigationSession = RecordingSession
+        self._mod.InvestigationSession = RegisteringSession
         self.installed = True
 
     def uninstall(self) -> None:
@@ -857,35 +831,22 @@ class DeliveryRecorder:
         readers' investigations (scenario H) and, once a foreign job can drain
         inside a reader's window, two scenarios'.
 
-        Calculations are captured alongside the evidence keys because a
-        scenario can require a server calculation (`mix`, `cost`, `wait`) that
-        never appears in the evidence ledger.
+        The report comes from `home_eval_delivery`, which reads the settlement
+        path rather than the calculation registry — a registered calculation is
+        not a delivered one.
         """
+        import home_eval_delivery as HD
         if not self.installed:
             return {"available": False,
                     "reason": "delivery instrumentation was not installed"}
         mine = [s for s in self.sessions[mark:]
                 if account_id is None
                 or getattr(s, "account_id", None) == account_id]
-        if not mine:
-            return {"available": False,
-                    "reason": ("no investigation session was created"
-                               + (f" for account {account_id}" if account_id
-                                  else "") + " in this window")}
-        keys: set[str] = set()
-        calcs: set[str] = set()
-        for sess in mine:
-            keys |= set(getattr(sess, "delivered", ()) or ())
-            calcs |= set(getattr(sess, "calculations", {}) or {})
-        return {
-            "available": True,
-            "sessions": len(mine),
-            "keys": sorted(keys),
-            "calculations": sorted(calcs),
-            "observed_empty": not keys and not calcs,
-            "note": ("Captured from InvestigationSession.delivered — the keys "
-                     "this investigation actually put in front of the model."),
-        }
+        return HD.delivery_report(
+            mine,
+            reason_if_none=("no investigation session was created"
+                            + (f" for account {account_id}" if account_id else "")
+                            + " in this window"))
 
     def since(self, mark: int, account_id: int) -> dict[str, Any]:
         """Delivery observed for one account since `mark`.

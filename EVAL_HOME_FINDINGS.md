@@ -28,8 +28,8 @@ fixed here, and the corrected measurements are below.
 | Did the model actually receive the evidence it cited? | **Verifiable now** — captured per job execution, `unavailable` when it cannot be. |
 | Did this investigation receive the evidence the scenario turns on? | **Derived from actual delivery** — never from the probe. |
 | What does Home generation actually cost? | **Unmeasured.** No live run, and `claude-opus-5` has no price in the table. |
-| Do the fixtures establish what the rubric claims? | **Measured.** 120 checks. |
-| Does the harness itself behave? | **Measured.** 192 checks. |
+| Do the fixtures establish what the rubric claims? | **Measured.** 122 checks. |
+| Does the harness itself behave? | **Measured.** 217 checks. |
 | Does the pipeline run end to end? | **Measured**, with a scripted model. |
 
 ---
@@ -115,8 +115,77 @@ nothing about what this run retrieved. Comparing citations against the
 publication's own evidence list — which the first version did — only checks
 that the publication agrees with itself.
 
-`diagnosis.required_evidence_delivered` is now derived from level 4 against the
-scenario's explicit `needs`. It used to be handed the level-3 probe result,
+### Retrieved, delivered, sufficient
+
+Three things were being treated as one, and each substitution let a false
+"delivered" through:
+
+| | |
+|---|---|
+| **Retrieved** | A tool ran and the server returned rows. Says nothing about what reached the model — a response can be trimmed, or dropped whole. |
+| **Delivered** | The rows that survived fitting and were sent. The product tracks this for *evidence* (`_settle_delivery` promotes into `delivered`); it does **not** track it for *calculations*, which are registered during retrieval. |
+| **Sufficient** | The delivered contents establish the thing the scenario turns on. **Run ids arriving is not the failing step arriving.** |
+
+Two reviewer reproductions, both of which previously returned
+`value: true, reason: "every requirement was delivered to this investigation"`:
+
+**1 · Scenario B — run summaries mistaken for failing-step evidence.**
+`list_comparable_runs` + `compare_outcome_mix`, no `inspect_run`. The run ids
+were delivered; no `failed_span` was, and `approval_service` appears in no
+delivered payload. The model had not been shown the shared failing step it was
+meant to find.
+
+```
+BEFORE  value: true,  missing: [], "every requirement was delivered"
+NOW     value: false, missing: [{"kind": "failing_step", "runs": [...],
+                                 "step": "approval_service"}]
+        reason: "this run did not retrieve: runs with no delivered
+                 'approval_service' failing step: [1, 2, 3, 4]"
+```
+
+**2 · Scenario F — a generated calculation mistaken for a delivered one.**
+`session.run(...)` with no `fit`/`retrieve`. Nothing was delivered at all, and
+twelve registry entries were read as twelve delivered calculations.
+
+```
+BEFORE  value: true,  delivered_keys: 0, delivered_calculations: 12
+NOW     value: false, delivered_keys: 0, delivered_calculations: 0
+        reason: "this run did not retrieve: no delivered comparison for
+                 job 2 over 7d carrying ['started','completed','abandoned']"
+```
+
+**How.** Delivery is captured by a test-only subclass that overrides one method
+— `_settle_delivery`, the product's own decision about what reached the model —
+calls `super()` first, and changes no retrieval behaviour. A calculation counts
+only when **both its id and its supporting value** survived into the sent
+payload, so a trimmed payload whose `calculation_ids` remain establishes
+nothing. A dropped response promotes nothing and is recorded as dropped.
+
+**Requirements are structured per scenario**, resolved against fixture ids and
+checked against delivered contents — not against the presence of an id or a
+`mix.` prefix:
+
+| scenario | what must have been delivered |
+|---|---|
+| B | the four stalled runs' summaries **and** an `approval_service` failing step for each, plus the job's 7-day comparison |
+| C | for each run, the `carrier_api` failure **and** the completion |
+| D | a wait row per waiting item, each naming its holder |
+| E | run rows and cost evidence — **plus an explicitly unretrievable pattern** |
+| F | a comparison **for that job, over 7 days**, carrying started/completed/abandoned |
+| G | run summaries, the comparison, and the quiet agent's context |
+| H | cost evidence carrying spend, coverage ratio and unpriced spans |
+| I | each recent abandoned run's failing-step details (**no shared step** — its point is that they differ) and the comparison |
+
+This is **not** semantic grading: no wording is inspected. "The evidence needed
+to assess the pattern arrived" and "the model correctly discovered the pattern"
+remain separate questions, and only the first is answered.
+
+**An unknown never passes.** An unsupported requirement kind, or a session with
+no payload capture, yields `None` with a reason — never `true`. A scenario with
+one definite failure and one unknown is `false`; all-unknown is `None`.
+
+`diagnosis.required_evidence_delivered` is derived from level 4 against those
+requirements. It used to be handed the level-3 probe result,
 which is the same substitution one field further on. The scripted run shows the
 two diverging, which is the whole point:
 
@@ -452,8 +521,8 @@ nothing saying they are different populations. **Severity: medium.**
 ## Tests run, and actual results
 
 ```
-python3 test_home_eval_scenarios.py   ALL PASS (120 checks)   no network
-python3 test_home_eval_harness.py     ALL PASS (192 checks)   no network
+python3 test_home_eval_scenarios.py   ALL PASS (122 checks)   no network
+python3 test_home_eval_harness.py     ALL PASS (217 checks)   no network
 python3 run_home_eval.py --mode stub  9/9 reach execution=completed
 python3 run_home_eval.py --mode stub --scenarios B --repeat 2
                                       2 accounts, 2 jobs, 2 analysis ids, 5 calls each

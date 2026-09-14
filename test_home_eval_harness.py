@@ -52,6 +52,11 @@ import run_home_eval as R
 
 main._auto_describe = lambda *a, **k: False
 
+# The pristine class, captured before any recorder patches it. Used to prove
+# that an UNINSTRUMENTED session reports its contents as unverifiable rather
+# than letting a content-dependent requirement pass on keys alone.
+PRISTINE_SESSION = investigation_tools.InvestigationSession
+
 failures: list[str] = []
 
 # ONE client for the whole file. `main.app`'s lifespan starts a session manager
@@ -980,87 +985,194 @@ check("unknown-ownership usage is not assigned to any reader",
                            viewer_user_id=1) == [])
 
 # ===========================================================================
-# 10. Actual delivery, not probe reachability
+# 10. Delivered contents, not retrieved ids
+#
+# Both reviewer reproductions, driven through the REAL session retrieval and
+# fitting paths. No hand-built "delivered" dictionary appears here: a dict you
+# write yourself tests your own typing, not the instrumentation.
 # ===========================================================================
-print("\n=== required evidence: delivered vs merely reachable ===")
+print("\n=== reviewer case 1: run summaries are not failing-step evidence ===")
 
-class _Ctx(dict):
-    pass
+import home_eval_delivery as HD
+SESSION = HD.recording_session_class(investigation_tools.InvestigationSession)
 
+if True:
+    c = CLIENT
+    bfix = S.build_instance(c, "B", instance=700)
+    job, stalled = bfix["ids"]["job"], bfix["ids"]["stalled"]
 
-def ctx_for(key, ids):
-    return {"key": key, "spec": S.scenario(key), "ids": ids,
-            "account_id": 1, "user_id": 1}
+    # Summaries + comparison, NO inspect_run — exactly the reviewer's steps.
+    s_sum = SESSION(account_id=bfix["account_id"], only_user_ids=None,
+                    financial_visible=True)
+    s_sum.retrieve("list_comparable_runs", {"job_id": job, "limit": 50})
+    s_sum.retrieve("compare_outcome_mix", {"days": 7, "job_id": job})
+    d_sum = HD.delivery_report([s_sum])
+    v_sum = R.actual_evidence_delivered(S, bfix, d_sum)
 
+    check("the run summaries really were delivered",
+          all(f"run:{r}" in d_sum["keys"] for r in stalled))
+    check("but no failed_span was",
+          not any(k.startswith("failed_span") for k in d_sum["keys"]))
+    check("and approval_service appears in no delivered payload",
+          "approval_service" not in json.dumps(d_sum["payloads"], default=str))
+    check("so the failing-step requirement is NOT satisfied",
+          v_sum["value"] is False)
+    check("and the reason names the failing step and the runs",
+          "approval_service" in v_sum["reason"]
+          and all(str(r) in v_sum["reason"] for r in stalled))
+    check("run ids arriving no longer reads as 'every requirement delivered'",
+          "every requirement" not in v_sum["reason"])
 
-bctx_fake = ctx_for("C", {"job": 1, "runs": [11, 12, 13]})
-required = S.required_keys(bctx_fake)
-check("scenario C requires its three run rows",
-      required == ["run:11", "run:12", "run:13"])
+    print("\n=== the same scenario WITH the failing-step details delivered ===")
+    s_full = SESSION(account_id=bfix["account_id"], only_user_ids=None,
+                     financial_visible=True)
+    s_full.retrieve("list_comparable_runs", {"job_id": job, "limit": 50})
+    s_full.retrieve("compare_outcome_mix", {"days": 7, "job_id": job})
+    for rid in stalled:
+        s_full.retrieve("inspect_run", {"run_id": rid})
+    d_full = HD.delivery_report([s_full])
+    v_full = R.actual_evidence_delivered(S, bfix, d_full)
+    check("failed_span rows are now delivered",
+          any(k.startswith("failed_span") for k in d_full["keys"]))
+    check("and the requirement is satisfied", v_full["value"] is True)
+    check("with every requirement accounted for",
+          len(v_full["satisfied"]) == len(v_full["requirements"]))
 
-# (a) probe succeeded, this investigation omitted a requirement
-partial = R.actual_evidence_delivered(
-    S, bctx_fake, {"available": True, "keys": ["run:11"], "calculations": []})
-check("a probe that could reach it does not make actual delivery true",
-      partial["value"] is False)
-check("and the missing requirements are named",
-      partial["missing"] == ["run:12", "run:13"])
-check("the reason says this RUN did not retrieve it",
-      "did not retrieve" in partial["reason"])
+    print("\n=== reviewer case 2: a registered calculation is not a delivered one ===")
+    ffix = S.build_instance(c, "F", instance=700)
+    fjob = ffix["ids"]["job"]
 
-# (b) everything actually delivered
-full = R.actual_evidence_delivered(
-    S, bctx_fake, {"available": True,
-                   "keys": ["run:11", "run:12", "run:13"], "calculations": []})
-check("evidence this investigation really received is true",
-      full["value"] is True and not full["missing"])
+    s_run = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                    financial_visible=True)
+    s_run.run("compare_outcome_mix", {"days": 7, "job_id": fjob})   # no fit
+    d_run = HD.delivery_report([s_run])
+    v_run = R.actual_evidence_delivered(S, ffix, d_run)
+    check("the calculation registry is populated by retrieval alone",
+          len(s_run.calculations) >= 12)
+    check("but nothing was delivered", d_run["keys"] == []
+          and d_run["calculations"] == [])
+    check("so the comparison requirement is NOT satisfied", v_run["value"] is False)
+    check("and the report no longer counts 12 delivered calculations",
+          v_run["delivered_calculations"] == 0)
 
-# (c) instrumentation unavailable -> unknown with a reason
-unk = R.actual_evidence_delivered(
-    S, bctx_fake, {"available": False, "reason": "no session captured"})
-check("no instrumentation is unknown, not false",
-      unk["value"] is None)
-check("and carries the reason", "no session captured" in unk["reason"])
+    print("\n=== the same comparison, actually delivered ===")
+    s_fit = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                    financial_visible=True)
+    s_fit.retrieve("compare_outcome_mix", {"days": 7, "job_id": fjob})
+    d_fit = HD.delivery_report([s_fit])
+    v_fit = R.actual_evidence_delivered(S, ffix, d_fit)
+    check("delivered calculations are now counted",
+          v_fit["delivered_calculations"] > 0)
+    check("and the requirement is satisfied", v_fit["value"] is True)
 
-# (d) observed-empty is distinct from unavailable
-empty = R.actual_evidence_delivered(
-    S, bctx_fake, {"available": True, "keys": [], "calculations": [],
-                   "observed_empty": True})
-check("an observed-empty delivery is a real False, not unknown",
-      empty["value"] is False and empty["missing"] == required)
-check("empty and unavailable are different answers",
-      empty["value"] is not unk["value"])
+    print("\n=== a dropped or trimmed response delivers nothing ===")
+    s_drop = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                     financial_visible=True)
+    raw = s_drop.run("compare_outcome_mix", {"days": 7, "job_id": fjob})
+    # Fit, then settle as though the whole result had been dropped — the real
+    # path the product takes when a response cannot be sent.
+    sent, _text = s_drop.fit(raw)
+    s_drop2 = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                      financial_visible=True)
+    raw2 = s_drop2.run("compare_outcome_mix", {"days": 7, "job_id": fjob})
+    resp2 = s_drop2._responses.get(id(raw2), (None, None))[1]
+    s_drop2._settle_delivery(resp2, {}, whole_result_dropped=True)
+    d_drop = HD.delivery_report([s_drop2])
+    v_drop = R.actual_evidence_delivered(S, ffix, d_drop)
+    check("a dropped response promotes no evidence", d_drop["keys"] == [])
+    check("and no calculation", d_drop["calculations"] == [])
+    check("and records the drop", bool(d_drop.get("dropped_responses")))
+    check("so it cannot satisfy the requirement", v_drop["value"] is False)
 
-# (e) another reader's delivery cannot satisfy this one
-other_reader = R.actual_evidence_delivered(
-    S, bctx_fake, {"available": True, "keys": ["run:98", "run:99"],
-                   "calculations": []})
-check("another investigation's evidence satisfies nothing here",
-      other_reader["value"] is False
-      and other_reader["missing"] == required)
-check("delivery is merged per reader, from its own executions only",
-      "own job executions only" in R._merge_delivery(
-          [{"available": True, "keys": ["run:1"], "calculations": []}])["note"])
+    print("\n=== a calculation whose supporting values were removed ===")
+    s_trim = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                     financial_visible=True)
+    raw3 = s_trim.run("compare_outcome_mix", {"days": 7, "job_id": fjob})
+    resp3 = s_trim._responses.get(id(raw3), (None, None))[1]
+    # The ids survive; the numbers they refer to do not.
+    stripped = {k: v for k, v in raw3.items() if k not in ("current", "previous")}
+    s_trim._settle_delivery(resp3, stripped, whole_result_dropped=False)
+    d_trim = HD.delivery_report([s_trim])
+    check("the calculation ids are still in the sent payload",
+          "calculation_ids" in json.dumps(d_trim["payloads"], default=str))
+    check("but none is counted as delivered, because its value is gone",
+          d_trim["calculations"] == [])
+    check("so the comparison requirement fails",
+          R.actual_evidence_delivered(S, ffix, d_trim)["value"] is False)
 
-# (f) scenario E: run rows delivered, pattern still unretrievable
-ectx = ctx_for("E", {"job": 1, "heavy": [21, 22], "light": 23})
-e_required = S.required_keys(ectx)
-e_all = R.actual_evidence_delivered(
-    S, ectx, {"available": True,
-              "keys": [k for k in e_required if k.startswith("run:")],
-              "calculations": ["cost.spend_usd.7d"]})
-check("E's run rows alone do not satisfy its requirement",
-      e_all["value"] is False)
-check("because its pattern is unretrievable, not merely unfetched",
-      e_all["unretrievable"] and "pattern:E" == e_all["unretrievable"][0]["requirement"])
-check("and the reason says no tool can satisfy it",
-      "no tool can satisfy" in e_all["reason"])
-check("that is a different diagnosis from 'this run did not fetch it'",
-      SC.diagnose(status={"execution": "completed"},
-                  worker_reports=[{"status": "done", "candidates": 1}],
-                  published=0, evidence_delivered=False,
-                  evidence_unretrievable=True)["code"]
-      == "required_evidence_unretrievable")
+    print("\n=== a comparison for the wrong job cannot satisfy this one ===")
+    s_wrong = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                      financial_visible=True)
+    s_wrong.retrieve("compare_outcome_mix", {"days": 7})   # account-wide, no job
+    v_wrong = R.actual_evidence_delivered(S, ffix, HD.delivery_report([s_wrong]))
+    check("a comparison over the wrong population does not count",
+          v_wrong["value"] is False)
+    check("and the reason names the job and period it needed",
+          str(fjob) in v_wrong["reason"] and "7d" in v_wrong["reason"])
+
+    print("\n=== unknown vs observed-empty vs unavailable ===")
+    s_empty = SESSION(account_id=ffix["account_id"], only_user_ids=None,
+                      financial_visible=True)
+    d_empty = HD.delivery_report([s_empty])
+    check("a session that delivered nothing is observed empty, not unavailable",
+          d_empty["available"] is True and d_empty["observed_empty"] is True)
+    check("and yields a definite False",
+          R.actual_evidence_delivered(S, ffix, d_empty)["value"] is False)
+    d_none = HD.delivery_report([])
+    check("no session at all is unavailable", d_none["available"] is False)
+    check("and yields unknown, not False",
+          R.actual_evidence_delivered(S, ffix, d_none)["value"] is None)
+    check("those are different answers",
+          R.actual_evidence_delivered(S, ffix, d_empty)["value"]
+          is not R.actual_evidence_delivered(S, ffix, d_none)["value"])
+
+    print("\n=== an uninstrumented session cannot establish contents ===")
+    plain = PRISTINE_SESSION(
+        account_id=bfix["account_id"], only_user_ids=None, financial_visible=True)
+    plain.retrieve("list_comparable_runs", {"job_id": job, "limit": 50})
+    d_plain = HD.delivery_report([plain])
+    v_plain = R.actual_evidence_delivered(S, bfix, d_plain)
+    check("evidence keys are still trusted", bool(d_plain["keys"]))
+    check("but payload capture is reported absent",
+          d_plain["payload_capture"] is False)
+    check("and the content-dependent requirement is unknown, never satisfied",
+          v_plain["value"] is None and v_plain["unknown"])
+
+    print("\n=== an unsupported requirement kind never passes ===")
+    made_up = HD.check_requirements([{"kind": "telepathy"}], d_full)
+    check("an unrecognised requirement is unknown",
+          made_up["value"] is None and made_up["unknown"])
+    check("and says so", "unsupported requirement kind" in made_up["reason"])
+
+    print("\n=== scenario E keeps its unavailable-pattern distinction ===")
+    efix = S.build_instance(c, "E", instance=700)
+    s_e = SESSION(account_id=efix["account_id"], only_user_ids=None,
+                  financial_visible=True)
+    s_e.retrieve("list_comparable_runs", {"job_id": efix["ids"]["job"], "limit": 50})
+    s_e.retrieve("cost_evidence", {"days": 7})
+    for rid in efix["ids"]["heavy"]:
+        s_e.retrieve("inspect_run", {"run_id": rid})
+    v_e = R.actual_evidence_delivered(S, efix, HD.delivery_report([s_e]))
+    check("E's run rows and cost evidence are delivered",
+          not v_e["missing"])
+    check("yet the requirement is still not satisfied", v_e["value"] is False)
+    check("because its pattern is unretrievable",
+          v_e["unretrievable"]
+          and "repeated successful tool calls"
+          in v_e["unretrievable"][0]["requirement"])
+    check("and that is reported as 'no tool can satisfy', not 'did not fetch'",
+          "no tool can satisfy" in v_e["reason"])
+    check("the diagnosis code reflects that",
+          SC.diagnose(status={"execution": "completed"},
+                      worker_reports=[{"status": "done", "candidates": 1}],
+                      published=0, evidence_delivered=False,
+                      evidence_unretrievable=True)["code"]
+          == "required_evidence_unretrievable")
+
+    print("\n=== another execution's delivery cannot satisfy this one ===")
+    v_cross = R.actual_evidence_delivered(S, bfix, HD.delivery_report([s_fit]))
+    check("F's delivered comparison satisfies none of B's requirements",
+          v_cross["value"] is False and v_cross["missing"])
 
 CLIENT.__exit__(None, None, None)
 
