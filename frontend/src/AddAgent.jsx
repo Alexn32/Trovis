@@ -1785,6 +1785,10 @@ function ClaudeCoworkInstructions({ endpoint }) {
   )
 }
 
+// TRACES_ENDPOINT, not the generic one: OTEL_EXPORTER_OTLP_ENDPOINT is a base
+// url every SDK appends "/v1/traces" to, so the Trovis endpoint became
+// .../v1/traces/v1/traces. The signal-specific variable also keeps Claude
+// Code's metrics and logs — which it exports too — off a traces-only server.
 function ClaudeCodeInstructions({ endpoint }) {
   const apiKey = getApiKey() || ''
   const settingsJson = fill(
@@ -1793,8 +1797,8 @@ function ClaudeCodeInstructions({ endpoint }) {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
     "OTEL_TRACES_EXPORTER": "otlp",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "TROVIS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "TROVIS_ENDPOINT",
     "OTEL_EXPORTER_OTLP_HEADERS": "X-Trovis-Api-Key=TROVIS_API_KEY"
   }
 }`,
@@ -1877,9 +1881,10 @@ function OtherInstructions({ agentName, endpoint }) {
   const apiKey = getApiKey() || ''
   const envBlock = fill(
 `OTEL_SERVICE_NAME=AGENT_NAME
-OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT
-OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=TROVIS_ENDPOINT
 OTEL_TRACES_EXPORTER=otlp
+OTEL_METRICS_EXPORTER=none
+OTEL_LOGS_EXPORTER=none
 OTEL_EXPORTER_OTLP_HEADERS=X-Trovis-Api-Key=TROVIS_API_KEY`,
     agentName, endpoint,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')

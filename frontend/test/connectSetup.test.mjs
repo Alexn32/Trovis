@@ -209,6 +209,38 @@ test('the Grok Bot door admits the bot has to call in', () => {
   }
 })
 
+test('no page hands out the endpoint variable that double-appends', () => {
+  // OTEL_EXPORTER_OTLP_ENDPOINT is a BASE url the SDK appends /v1/traces to,
+  // so pointing it at the Trovis endpoint sends every batch to
+  // .../v1/traces/v1/traces. Three pages had it, two of them unreachable from
+  // the picker — which is exactly how a broken recipe survives: nobody clicks
+  // it, so nobody reports it, and it is still there when the tile comes back.
+  for (const [name, src] of [['AddAgent', addAgent], ['ConnectGuide', guide]]) {
+    for (const m of src.matchAll(/OTEL_EXPORTER_OTLP_ENDPOINT/g)) {
+      const line = src.slice(src.lastIndexOf('\n', m.index) + 1,
+                             src.indexOf('\n', m.index))
+      assert.ok(
+        line.trim().startsWith('//'),
+        `${name} still hands out the generic endpoint variable: ${line.trim()}`,
+      )
+    }
+  }
+})
+
+test('no page asks Python for the http/json exporter it does not ship', () => {
+  // Python has proto-http and grpc only. Trovis reads protobuf now, so the
+  // Python blocks say http/protobuf; the language-agnostic and Node blocks
+  // may still say http/json, which those runtimes really do have.
+  const py = addAgent.slice(
+    addAgent.indexOf('const QUICK_ENV_TEMPLATE'),
+    addAgent.indexOf('function PythonInstrumentorTabs'),
+  )
+  assert.doesNotMatch(py, /http\/json/)
+  assert.match(py, /http\/protobuf/)
+  // And the env block only works under the wrapper that boots the SDK.
+  assert.match(py, /opentelemetry-instrument python/)
+})
+
 test('the Actions door tells the GPT how to name its jobs', () => {
   // /actions/log takes a job_title now, so the door produces named Work like
   // every other one. The page used to admit it could not; what it must not do
