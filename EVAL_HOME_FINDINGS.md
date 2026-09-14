@@ -29,7 +29,7 @@ fixed here, and the corrected measurements are below.
 | Did this investigation receive the evidence the scenario turns on? | **Derived from actual delivery** — never from the probe. |
 | What does Home generation actually cost? | **Unmeasured.** No live run, and `claude-opus-5` has no price in the table. |
 | Do the fixtures establish what the rubric claims? | **Measured.** 122 checks. |
-| Does the harness itself behave? | **Measured.** 241 checks. |
+| Does the harness itself behave? | **Measured.** 280 checks. |
 | Does the pipeline run end to end? | **Measured**, with a scripted model. |
 
 ---
@@ -256,6 +256,73 @@ uninstrumented execution reports `payload_capture: false`,
 `payload_capture_partial: true`, the count of uncaptured executions, and
 carries that into the assessment's reason. Reporting it as observed would be
 the same substitution one level further out.
+
+#### 4 · An execution nobody could look at was left out of the count
+
+The merge filtered the `available: false` reports out BEFORE measuring capture
+completeness, so a reader with one observed execution and one unobservable one
+reported a clean bill written by leaving the unknown out of the denominator:
+
+```
+executions: [ {available: true,  payload_capture: true},
+              {available: false, reason: "capture missing"} ]
+
+BEFORE  payload_capture: true
+        payload_capture_partial: false
+        executions_without_payload_capture: 0
+
+NOW     payload_capture: false
+        payload_capture_partial: true
+        executions_without_payload_capture: 1
+        executions_total: 2   executions_unavailable: 1
+        unavailable_reasons: ["capture missing"]
+```
+
+Every execution is retained with its reason, and completeness is derived over
+all of them rather than over the readable ones.
+
+The same omission reached the assessment. An execution that definitively missed
+a requirement, sitting beside one nobody could read, reported a definite
+reader-wide `false` — an absence asserted from a gap in the instrumentation
+rather than from the record. Unavailable executions are now assessed too, and
+assess as `unknown`, so that pair reports `null`. Two facts stay apart:
+
+| field | answers |
+|---|---|
+| `verified_by_execution` | did some execution of this reader definitely receive everything? |
+| `payload_capture` / `payload_capture_partial` | could every execution of this reader be read at all? |
+
+A reader with one verified execution and one unreadable one is `value: true`,
+`verified_by_execution: true`, **`payload_capture: false`** — which is the
+honest combination, and the one the old shape could not express.
+
+#### 5 · A fixture could rewrite another fixture
+
+`home_eval_scenarios._classify` filed seeded work with
+`UPDATE loops SET workflow_id = ? WHERE title LIKE ?` and **no account
+filter**, so it reached across the whole database:
+
+```
+seed B in account 1  ->  job 1, runs 1-6 filed under job 1
+seed B in account 2  ->  job 2, runs 1-6 AND 7-12 filed under job 2
+```
+
+Every later read of the first fixture then found an empty job, and the
+harness's own regressions had to be ordered around it. It also meant the
+per-scenario `run_id()` lookups — `WHERE title = ? ORDER BY id DESC` — were
+resolving titles across the whole database and taking whichever row was newest.
+
+Both are now scoped to the fixture's own account. `_classify` resolves the
+matching runs inside the account first, **asserts the target job belongs to
+that same account** (filing one account's work under another's is refused
+rather than written), and updates by explicit id with the account filter still
+on the statement. `run_id` takes the account too.
+
+The regression seeds an equivalent second fixture and checks the first one's
+**job assignments, query results and delivered evidence are all unchanged**,
+that its requirements still resolve, and that neither fixture's runs appear in
+the other's results. The fixture-ordering workaround in the harness tests is
+gone.
 
 ### Corrected measurement — level 3, production budget
 
@@ -566,7 +633,7 @@ nothing saying they are different populations. **Severity: medium.**
 
 ```
 python3 test_home_eval_scenarios.py   ALL PASS (122 checks)   no network
-python3 test_home_eval_harness.py     ALL PASS (241 checks)   no network
+python3 test_home_eval_harness.py     ALL PASS (280 checks)   no network
 python3 run_home_eval.py --mode stub  9/9 reach execution=completed
 python3 run_home_eval.py --mode stub --scenarios B --repeat 2
                                       2 accounts, 2 jobs, 2 analysis ids, 5 calls each
@@ -655,9 +722,7 @@ transcript carries the worker's own `candidates`, `rejected`, `abstained`,
    never pooled across executions, but when a reader has more than one, the
    reader-level verdict is whichever execution established the most. That is
    the right unit — one execution is one investigation — and it does mean the
-   reader-level field is not "every execution saw this".
-12. **`home_eval_scenarios._classify` files seeded work by title across the
-   whole database**, so seeding a second fixture of the same scenario re-points
-   the first one's runs at the later job. Left as is (it is fixture-helper
-   behaviour outside this correction's scope); the new regressions order their
-   fixtures around it rather than relying on an earlier fixture staying put.
+   reader-level `value` is not "every execution saw this".
+   `verified_by_execution` and `payload_capture` are reported separately for
+   exactly that reason: the first says an execution definitely received
+   everything, the second says every execution of that reader could be read.

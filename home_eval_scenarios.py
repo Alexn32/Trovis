@@ -145,11 +145,24 @@ def align_to_spans(account_id: int) -> int:
     return moved
 
 
-def run_id(title: str) -> int | None:
+def run_id(title: str, account_id: int | None = None) -> int | None:
+    """One seeded work item's id, WITHIN one fixture account.
+
+    Unscoped, this matched the title across the whole database and took the
+    newest — which is the right row only as long as no other fixture has ever
+    used the same title. Every scenario reuses its titles across instances, so
+    that assumption is false the moment a second instance exists. The account
+    is now part of the question.
+    """
+    acct = "" if account_id is None else f" AND account_id = {database.PH}"
+    args: list[Any] = [title]
+    if account_id is not None:
+        args.append(account_id)
     with database._connect() as conn, database._cursor(conn) as cur:
         cur.execute(
-            f"SELECT id FROM loops WHERE title = {database.PH} ORDER BY id DESC",
-            (title,),
+            f"SELECT id FROM loops WHERE title = {database.PH}{acct} "
+            "ORDER BY id DESC",
+            tuple(args),
         )
         row = cur.fetchone()
         return int(row["id"]) if row else None
@@ -212,13 +225,57 @@ def _job(c, token: str, name: str) -> int:
     }).json()["id"]
 
 
-def _classify(job_id: int, like: str) -> None:
-    """File seeded work under a job, the way the matcher would."""
+def _classify(job_id: int, like: str, account_id: int) -> list[int]:
+    """File ONE fixture account's seeded work under its own job.
+
+    This used to be `UPDATE loops SET workflow_id = ? WHERE title LIKE ?` with
+    no account filter at all, so it reached across the whole database. Seeding
+    scenario B twice re-pointed the FIRST fixture's six runs at the SECOND
+    fixture's job:
+
+        seed B in account 1 -> job 1, runs 1-6 under job 1
+        seed B in account 2 -> job 2, runs 1-6 AND 7-12 under job 2
+
+    Every later read of account 1 then found an empty job, and the harness's
+    own regressions had to be ordered around it. Fixtures that silently rewrite
+    each other are not fixtures.
+
+    So: resolve the matching runs inside the account FIRST, assert the target
+    job belongs to that same account, and update by explicit id with the
+    account filter still on the statement. Returns the ids it filed, so a seed
+    can use exactly those rather than looking the titles up again.
+    """
     with database._connect() as conn, database._cursor(conn) as cur:
         cur.execute(
-            f"UPDATE loops SET workflow_id = {database.PH} WHERE title LIKE {database.PH}",
-            (job_id, like),
+            f"SELECT account_id FROM workflows WHERE id = {database.PH}",
+            (job_id,),
         )
+        owner = cur.fetchone()
+        if owner is None:
+            raise AssertionError(f"job {job_id} does not exist")
+        if int(dict(owner)["account_id"]) != int(account_id):
+            # Filing an account's work under another account's job is the exact
+            # cross-contamination this function caused; refuse it loudly rather
+            # than writing it.
+            raise AssertionError(
+                f"job {job_id} belongs to account {dict(owner)['account_id']}, "
+                f"not to fixture account {account_id}"
+            )
+        cur.execute(
+            f"SELECT id FROM loops WHERE account_id = {database.PH} "
+            f"AND title LIKE {database.PH} ORDER BY id",
+            (account_id, like),
+        )
+        ids = [int(dict(r)["id"]) for r in (cur.fetchall() or [])]
+        if not ids:
+            return []
+        holes = ", ".join([database.PH] * len(ids))
+        cur.execute(
+            f"UPDATE loops SET workflow_id = {database.PH} WHERE id IN ({holes}) "
+            f"AND account_id = {database.PH}",
+            tuple([job_id, *ids, account_id]),
+        )
+        return ids
 
 
 # --- A ---------------------------------------------------------------------
@@ -236,8 +293,8 @@ def seed_a(c, token, acct):
             cost=priced(),
         )
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Invoice sync%")
-    return {"job": job, "runs": [run_id(f"Invoice sync {i}") for i in range(6)]}
+    _classify(job, "Invoice sync%", acct)
+    return {"job": job, "runs": [run_id(f"Invoice sync {i}", acct) for i in range(6)]}
 
 
 # --- B ---------------------------------------------------------------------
@@ -272,12 +329,12 @@ def seed_b(c, token, acct):
             close="done", close_ago=ago - 60, cost=priced(),
         )
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Refund %")
-    stalled = [run_id(f"Refund {i}") for i in range(4)]
+    _classify(job, "Refund %", acct)
+    stalled = [run_id(f"Refund {i}", acct) for i in range(4)]
     for rid in stalled:
         database.abandon_loop(rid, acct)
     return {"job": job, "stalled": stalled,
-            "finished": [run_id(f"Refund {i}") for i in (4, 5)]}
+            "finished": [run_id(f"Refund {i}", acct) for i in (4, 5)]}
 
 
 # --- C ---------------------------------------------------------------------
@@ -298,8 +355,8 @@ def seed_c(c, token, acct):
             close="done", close_ago=ago - 40, cost=priced(),
         )
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Shipment %")
-    return {"job": job, "runs": [run_id(f"Shipment {i}") for i in range(3)]}
+    _classify(job, "Shipment %", acct)
+    return {"job": job, "runs": [run_id(f"Shipment {i}", acct) for i in range(3)]}
 
 
 # --- D ---------------------------------------------------------------------
@@ -332,9 +389,9 @@ def seed_d(c, token, acct, viewer_email: str, other_email: str):
             cost=priced(),
         )
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Contract %")
-    return {"job": job, "waiting_on_viewer": [run_id("Contract 0"), run_id("Contract 1")],
-            "waiting_on_other": [run_id("Contract 2")]}
+    _classify(job, "Contract %", acct)
+    return {"job": job, "waiting_on_viewer": [run_id("Contract 0", acct), run_id("Contract 1", acct)],
+            "waiting_on_other": [run_id("Contract 2", acct)]}
 
 
 # --- E ---------------------------------------------------------------------
@@ -361,9 +418,9 @@ def seed_e(c, token, acct):
                           tool_step(ago - 10, "web_search")],
                    close="done", close_ago=ago - 30, cost=priced(inp=2000, out=400))
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Research %")
-    return {"job": job, "heavy": [run_id(f"Research {i}") for i in range(4)],
-            "light": run_id("Research 4")}
+    _classify(job, "Research %", acct)
+    return {"job": job, "heavy": [run_id(f"Research {i}", acct) for i in range(4)],
+            "light": run_id("Research 4", acct)}
 
 
 # --- F ---------------------------------------------------------------------
@@ -393,9 +450,9 @@ def seed_f(c, token, acct):
                        close="done" if done else None,
                        close_ago=ago - 40, cost=priced())
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Onboarding %")
-    prev_open = [run_id(f"Onboarding prev {i}") for i in range(4, 9)]
-    now_open = [run_id("Onboarding now 8")]
+    _classify(job, "Onboarding %", acct)
+    prev_open = [run_id(f"Onboarding prev {i}", acct) for i in range(4, 9)]
+    now_open = [run_id("Onboarding now 8", acct)]
     for rid in prev_open + now_open:
         database.abandon_loop(rid, acct)
     return {"job": job, "prev_abandoned": prev_open, "now_abandoned": now_open}
@@ -421,8 +478,8 @@ def seed_g(c, token, acct):
                    steps=[tool_step(DAY * 1.2 - 10, "ping")],
                    close="done", close_ago=DAY * 1.2 - 20, cost=priced())
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Payroll %")
-    return {"job": job, "runs": [run_id(f"Payroll {i}") for i in range(3)],
+    _classify(job, "Payroll %", acct)
+    return {"job": job, "runs": [run_id(f"Payroll {i}", acct) for i in range(3)],
             "quiet_agent": "quiet-agent"}
 
 
@@ -450,7 +507,7 @@ def seed_h(c, token, acct):
                        close="done", close_ago=ago - 40,
                        cost=priced(model="some-unlisted-model-v9", inp=50000, out=5000))
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Billing %")
+    _classify(job, "Billing %", acct)
     return {"job": job, "priced_agent": "billing-agent", "unpriced_agent": "labs-agent"}
 
 
@@ -488,9 +545,9 @@ def seed_i(c, token, acct):
                        close=None if failed else "done",
                        close_ago=ago - 40, cost=priced())
     database.ingest_spans_with_loops(spans, account_id=acct)
-    _classify(job, "Payment %")
-    recent_bad = [run_id(f"Payment {i}") for i in range(3)]
-    prev_bad = [run_id(f"Payment {i}") for i in range(10, 13)]
+    _classify(job, "Payment %", acct)
+    recent_bad = [run_id(f"Payment {i}", acct) for i in range(3)]
+    prev_bad = [run_id(f"Payment {i}", acct) for i in range(10, 13)]
     for rid in recent_bad + prev_bad:
         database.abandon_loop(rid, acct)
     return {"job": job, "recent_abandoned": recent_bad, "prev_abandoned": prev_bad}

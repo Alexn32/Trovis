@@ -375,46 +375,71 @@ def _merge_delivery(parts: list) -> dict:
     checked per execution (`home_eval_delivery.check_requirements` reads
     `per_execution` when it is present), so two unrelated executions can never
     be pooled into evidence neither of them delivered.
+
+    **An execution we could not look at still counts.** Filtering the
+    `available: false` reports out before measuring capture completeness made a
+    reader with one observed execution and one unobservable one report
+    `payload_capture: true`, `payload_capture_partial: false`,
+    `executions_without_payload_capture: 0` — a clean bill written by leaving
+    the unknown out of the denominator. Every execution is kept, with its
+    reason; completeness is derived over all of them.
     """
-    usable = [p for p in parts if p and p.get("available")]
+    present = [p for p in parts if p]
+    usable = [p for p in present if p.get("available")]
     if not usable:
-        reasons = [p.get("reason") for p in parts if p and p.get("reason")]
+        reasons = [p.get("reason") for p in present if p.get("reason")]
         return {"available": False,
+                "executions": 0,
+                "executions_total": len(present),
+                "executions_unavailable": len(present),
+                "unavailable_reasons": reasons,
+                "payload_capture": False,
+                "payload_capture_partial": False,
+                "executions_without_payload_capture": len(present),
                 "reason": reasons[0] if reasons
                 else "no owned job execution captured delivery"}
     keys: set[str] = set()
     calcs: dict = {}
     payloads: list = []
     dropped: list = []
-    captured = [bool(p.get("payload_capture")) for p in usable]
+    # Over EVERY execution, not just the ones we could read: an execution whose
+    # delivery is unavailable is one we cannot say was captured.
+    captured = [bool(p.get("available")) and bool(p.get("payload_capture"))
+                for p in present]
     for p in usable:
         keys |= set(p.get("keys") or [])
         calcs.update(p.get("calculation_values") or
                      {c: None for c in (p.get("calculations") or [])})
         payloads.extend(p.get("payloads") or [])
         dropped.extend(p.get("dropped_responses") or [])
+    unavailable = [p for p in present if not p.get("available")]
     return {
         "available": True,
         "executions": len(usable),
-        # Per-execution reports, verbatim. The unit at which "what was
-        # delivered" has a single answer, and the unit the assessment uses.
-        "per_execution": usable,
+        "executions_total": len(present),
+        "executions_unavailable": len(unavailable),
+        "unavailable_reasons": [p.get("reason") for p in unavailable
+                                if p.get("reason")],
+        # Every execution's report, verbatim, INCLUDING the unavailable ones.
+        # The unit at which "what was delivered" has a single answer, and the
+        # unit the assessment uses.
+        "per_execution": present,
         "keys": sorted(keys),
         "calculations": sorted(calcs),
         "calculation_values": calcs,
         "payloads": payloads,
         "dropped_responses": dropped,
-        # True only when EVERY contributing execution captured payloads. A
+        # True only when EVERY execution of this reader was captured. A
         # partially captured reader is not a fully observed one, and saying so
         # would be the same substitution this file keeps undoing.
         "payload_capture": all(captured),
         "payload_capture_partial": any(captured) and not all(captured),
         "executions_without_payload_capture": captured.count(False),
         "observed_empty": not keys and not calcs,
-        "note": ("Per THIS reader's own job executions. The top-level union is "
-                 "for reporting; requirements are checked against each "
-                 "execution on its own, so no requirement can be satisfied by "
-                 "pooling two executions."),
+        "note": ("Per THIS reader's own job executions, unavailable ones "
+                 "included. The top-level union is for reporting; requirements "
+                 "are checked against each execution on its own, so no "
+                 "requirement can be satisfied by pooling two executions."),
     }
 
 
@@ -454,7 +479,19 @@ def actual_evidence_delivered(S, ctx, delivery: dict) -> dict:
         ],
         "delivered_keys": verdict.get("delivered_keys", 0),
         "delivered_calculations": verdict.get("delivered_calculations", 0),
+        # Capture COMPLETENESS across the reader's executions, kept separate
+        # from `verified_by_execution` — "one execution definitely received
+        # everything" and "we could see all of this reader's executions" are
+        # different facts and a report that merges them can say the second on
+        # the strength of the first.
         "payload_capture": verdict.get("payload_capture", False),
+        "payload_capture_partial": verdict.get("payload_capture_partial", False),
+        "verified_by_execution": verdict.get(
+            "verified_by_execution", verdict["value"] is True),
+        "executions_assessed": verdict.get("executions_assessed"),
+        "executions_observed": verdict.get("executions_observed"),
+        "executions_unavailable": verdict.get("executions_unavailable"),
+        "per_execution_values": verdict.get("per_execution_values"),
         "reason": verdict["reason"],
     }
 

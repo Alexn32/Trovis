@@ -1397,9 +1397,8 @@ check("the partial state is carried into the assessment's reason",
 
 # --- two executions are never pooled ---------------------------------------
 print("\n=== unrelated executions are not pooled into sufficiency ===")
-# A fresh B fixture, seeded last: `home_eval_scenarios._classify` files work by
-# title across the whole database, so a later B re-points an earlier B's runs
-# at the later job. Building this one last keeps its own job ids current.
+# A fresh B fixture. It no longer has to be seeded last: `_classify` is scoped
+# to its own account, so a later B cannot re-point this one's runs.
 pool_ctx = S.build_instance(CLIENT, "B", instance=14)
 half_a = HD.recording_session_class(PRISTINE_SESSION)(
     account_id=pool_ctx["account_id"], only_user_ids=None,
@@ -1424,6 +1423,236 @@ together = HD.delivery_report([half_a, half_b])
 check("the same two sessions inside ONE execution do satisfy it",
       R.actual_evidence_delivered(
           S, pool_ctx, R._merge_delivery([together]))["value"] is True)
+
+# ===========================================================================
+# 12. A fixture cannot rewrite another fixture
+# ===========================================================================
+# `home_eval_scenarios._classify` filed seeded work with
+# `UPDATE loops SET workflow_id = ? WHERE title LIKE ?` and no account filter,
+# so it reached across the whole database. Seeding scenario B twice re-pointed
+# the FIRST fixture's six runs at the SECOND fixture's job, and the harness's
+# own regressions had to be ordered around it. These prove the first fixture is
+# untouched — its job assignments, what a query returns, and what retrieval
+# actually delivers.
+print("\n=== a second fixture leaves the first one alone ===")
+
+
+def _raises(fn):
+    """Did `fn` refuse? Used where writing the wrong row is the bug."""
+    try:
+        fn()
+    except AssertionError:
+        return True
+    return False
+
+
+def _job_of(run_ids):
+    """The job each run is currently filed under, straight from the record."""
+    with database._connect() as conn, database._cursor(conn) as cur:
+        out = {}
+        for rid in run_ids:
+            cur.execute(
+                f"SELECT workflow_id, account_id FROM loops WHERE id = {database.PH}",
+                (rid,),
+            )
+            row = cur.fetchone()
+            out[rid] = dict(row) if row else None
+        return out
+
+
+first = S.build_instance(CLIENT, "B", instance=21)
+first_runs = list(first["ids"]["stalled"]) + list(first["ids"]["finished"])
+before_jobs = _job_of(first_runs)
+
+# What the first fixture's own job returns, and what an investigation is shown,
+# BEFORE the second fixture exists.
+probe_before = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=first["account_id"], only_user_ids=None, financial_visible=True)
+listed_before = probe_before.retrieve(
+    "list_comparable_runs", {"job_id": first["ids"]["job"], "limit": 50})
+keys_before = sorted(probe_before.delivered)
+
+# Now seed an equivalent second fixture: same scenario, same titles, its own
+# account and its own job.
+second = S.build_instance(CLIENT, "B", instance=22)
+
+after_jobs = _job_of(first_runs)
+probe_after = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=first["account_id"], only_user_ids=None, financial_visible=True)
+listed_after = probe_after.retrieve(
+    "list_comparable_runs", {"job_id": first["ids"]["job"], "limit": 50})
+keys_after = sorted(probe_after.delivered)
+
+check("the two fixtures got different accounts and different jobs",
+      first["account_id"] != second["account_id"]
+      and first["ids"]["job"] != second["ids"]["job"])
+check("the two fixtures seeded different runs",
+      not (set(first_runs) & set(second["ids"]["stalled"])))
+check("the first fixture's job assignments are unchanged",
+      after_jobs == before_jobs)
+check("and every one of its runs is still filed under ITS job",
+      all(r and r["workflow_id"] == first["ids"]["job"]
+          for r in after_jobs.values()))
+check("the first fixture's query returns the same rows it did before",
+      [x["run_id"] for x in (listed_after.get("runs") or [])]
+      == [x["run_id"] for x in (listed_before.get("runs") or [])])
+check("and the same six of them",
+      len(listed_after.get("runs") or []) == 6)
+check("the evidence delivered from it is unchanged",
+      keys_after == keys_before and keys_before)
+check("the second fixture's runs never appear in the first one's results",
+      not (set(second["ids"]["stalled"])
+           & {x["run_id"] for x in (listed_after.get("runs") or [])}))
+check("the second fixture's own job holds only its own runs",
+      all(r and r["workflow_id"] == second["ids"]["job"]
+          for r in _job_of(second["ids"]["stalled"]).values()))
+# The scenario's requirements still resolve against the first fixture after the
+# second exists — the point of the whole exercise.
+first_full = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=first["account_id"], only_user_ids=None, financial_visible=True)
+first_full.retrieve("list_comparable_runs",
+                    {"job_id": first["ids"]["job"], "limit": 50})
+for r in first["ids"]["stalled"]:
+    first_full.retrieve("inspect_run", {"run_id": r})
+first_full.retrieve("compare_outcome_mix",
+                    {"days": 7, "job_id": first["ids"]["job"]})
+check("and the first fixture still satisfies its own requirements",
+      R.actual_evidence_delivered(
+          S, first, R._merge_delivery([HD.delivery_report([first_full])])
+      )["value"] is True)
+
+print("\n=== classification refuses to cross an account boundary ===")
+try:
+    S._classify(second["ids"]["job"], "Refund %", first["account_id"])
+    crossed = True
+except AssertionError as exc:
+    crossed = False
+    cross_msg = str(exc)
+check("filing one account's work under another's job is refused",
+      crossed is False)
+check("and the refusal names both accounts", "belongs to account" in cross_msg)
+check("the refusal wrote nothing", _job_of(first_runs) == before_jobs)
+check("a non-existent job is refused too",
+      _raises(lambda: S._classify(10**9, "Refund %", first["account_id"])))
+
+# ===========================================================================
+# 13. An execution we could not look at still counts
+# ===========================================================================
+# `_merge_delivery` filtered the `available: false` reports out BEFORE
+# measuring capture completeness, so a reader with one observed execution and
+# one unobservable one reported `payload_capture: true`, `partial: false`,
+# `executions_without_payload_capture: 0` — a clean bill written by leaving the
+# unknown out of the denominator.
+print("\n=== an unavailable execution is not left out of the count ===")
+
+UNAVAILABLE = {"available": False, "reason": "capture missing"}
+
+obs_ctx = S.build_instance(CLIENT, "F", instance=23)
+observed_sess = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=obs_ctx["account_id"], only_user_ids=None, financial_visible=True)
+observed_sess.retrieve("compare_outcome_mix",
+                       {"days": 7, "job_id": obs_ctx["ids"]["job"]})
+observed = HD.delivery_report([observed_sess])
+
+# --- fully observed --------------------------------------------------------
+full = R._merge_delivery([observed])
+check("one observed execution is fully captured",
+      full["payload_capture"] is True
+      and full["payload_capture_partial"] is False
+      and full["executions_without_payload_capture"] == 0)
+check("and it reports its own totals",
+      full["executions"] == 1 and full["executions_total"] == 1
+      and full["executions_unavailable"] == 0)
+check("a fully observed reader is assessed from what it delivered",
+      R.actual_evidence_delivered(S, obs_ctx, full)["value"] is True)
+
+# --- the reproduction: one observed, one unavailable -----------------------
+mixed_av = R._merge_delivery([observed, dict(UNAVAILABLE)])
+check("a reader with an unavailable execution is NOT fully captured",
+      mixed_av["payload_capture"] is False)
+check("it is reported as partial",
+      mixed_av["payload_capture_partial"] is True)
+check("and the uncaptured execution is counted, not dropped",
+      mixed_av["executions_without_payload_capture"] == 1)
+check("both executions are retained",
+      mixed_av["executions_total"] == 2 and len(mixed_av["per_execution"]) == 2)
+check("with the unavailable one's reason kept",
+      mixed_av["unavailable_reasons"] == ["capture missing"])
+v_mixed_av = R.actual_evidence_delivered(S, obs_ctx, mixed_av)
+check("the observed execution's verified result survives",
+      v_mixed_av["value"] is True and v_mixed_av["verified_by_execution"] is True)
+check("but the reader's capture is NOT reported complete",
+      v_mixed_av["payload_capture"] is False
+      and v_mixed_av.get("payload_capture_partial") is True)
+check("and the reason says which executions could not be read",
+      "payload capture was unavailable for 1" in v_mixed_av["reason"])
+
+# --- an observed failure beside an unknown is not a reader-wide absence ----
+print("\n=== one failure plus one unknown is not a definite absence ===")
+short_sess = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=obs_ctx["account_id"], only_user_ids=None, financial_visible=True)
+short_sess.retrieve("list_comparable_runs",
+                    {"job_id": obs_ctx["ids"]["job"], "limit": 25})
+short = HD.delivery_report([short_sess])
+check("on its own, that execution definitively missed the requirement",
+      R.actual_evidence_delivered(
+          S, obs_ctx, R._merge_delivery([short]))["value"] is False)
+v_gap = R.actual_evidence_delivered(
+    S, obs_ctx, R._merge_delivery([short, dict(UNAVAILABLE)]))
+check("beside an unreadable execution it is NOT a definite absence",
+      v_gap["value"] is None)
+check("the unavailable execution is assessed, not skipped",
+      v_gap["executions_assessed"] == 2 and v_gap["executions_observed"] == 1
+      and v_gap["executions_unavailable"] == 1)
+check("and no execution verified it either",
+      v_gap["verified_by_execution"] is False)
+
+# --- fully unavailable -----------------------------------------------------
+print("\n=== every execution unavailable stays unavailable ===")
+none_av = R._merge_delivery([dict(UNAVAILABLE), dict(UNAVAILABLE)])
+check("no usable execution is unavailable, not observed-empty",
+      none_av["available"] is False and "observed_empty" not in none_av)
+check("it counts the executions it could not read",
+      none_av["executions_total"] == 2
+      and none_av["executions_unavailable"] == 2
+      and none_av["executions_without_payload_capture"] == 2)
+check("and never claims capture",
+      none_av["payload_capture"] is False
+      and none_av["payload_capture_partial"] is False)
+check("its reason is the executions' own",
+      none_av["reason"] == "capture missing")
+check("and the assessment is unknown, never False",
+      R.actual_evidence_delivered(S, obs_ctx, none_av)["value"] is None)
+
+# --- still no pooling ------------------------------------------------------
+check("an unavailable execution cannot complete another one's evidence",
+      R.actual_evidence_delivered(
+          S, b_full_ctx,
+          R._merge_delivery([HD.delivery_report([half_a]), dict(UNAVAILABLE)])
+      )["value"] is None)
+
+# --- through the runner ----------------------------------------------------
+print("\n=== the runner's own handoff keeps the unavailable execution ===")
+_, e2e_res = _e2e(
+    "F",
+    lambda ctx: [("compare_outcome_mix", {"days": 7, "job_id": ctx["ids"]["job"]})],
+    instance=24)
+runner_delivery = e2e_res["delivery"]
+check("a real run reports its execution total",
+      runner_delivery.get("executions_total") == runner_delivery.get("executions")
+      and runner_delivery.get("executions_unavailable") == 0)
+check("and is fully captured with nothing uncounted",
+      runner_delivery.get("payload_capture") is True
+      and runner_delivery.get("executions_without_payload_capture") == 0)
+check("and reaches a verified assessment",
+      e2e_res["actual_evidence_delivered"]["value"] is True)
+# The same runner report with one unreadable execution added behaves as above.
+runner_gap = R._merge_delivery(
+    list(runner_delivery["per_execution"]) + [dict(UNAVAILABLE)])
+check("adding an unreadable execution to a real run makes it partial",
+      runner_gap["payload_capture"] is False
+      and runner_gap["payload_capture_partial"] is True
+      and runner_gap["executions_without_payload_capture"] == 1)
 
 CLIENT.__exit__(None, None, None)
 

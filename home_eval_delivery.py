@@ -359,6 +359,12 @@ def check_requirements(requirements: list[dict], delivery: dict) -> dict:
     is the strongest single-execution answer. Requirements are never pooled
     across executions: one execution's `inspect_run` cannot complete another
     execution's comparison.
+
+    An execution whose delivery is UNAVAILABLE is assessed too, and it assesses
+    as `None`. Leaving it out would let one observed failure stand as a
+    definitive reader-wide "this never arrived" while another execution of the
+    same reader was never looked at — an absence asserted from a gap in the
+    instrumentation rather than from the record.
     """
     parts = (delivery or {}).get("per_execution")
     if parts is not None:
@@ -374,24 +380,36 @@ _RANK = {True: 2, None: 1, False: 0}
 
 def _check_across_executions(requirements: list[dict], delivery: dict,
                              parts: list[dict]) -> dict:
-    usable = [p for p in parts if p and p.get("available")]
-    if not usable:
+    present = [p for p in parts if p]
+    if not present:
         return _check_one_execution(requirements, delivery)
-    verdicts = [_check_one_execution(requirements, p) for p in usable]
+    # EVERY execution, unavailable ones included. An unavailable one yields
+    # `None` from `_check_one_execution`, which is exactly what it is worth.
+    verdicts = [_check_one_execution(requirements, p) for p in present]
+    observed = [v for p, v in zip(present, verdicts) if p.get("available")]
     best = max(verdicts, key=lambda v: _RANK[v["value"]])
     out = dict(best)
-    out["executions_assessed"] = len(usable)
+    out["executions_assessed"] = len(present)
+    out["executions_observed"] = len(observed)
+    out["executions_unavailable"] = len(present) - len(observed)
     out["per_execution_values"] = [v["value"] for v in verdicts]
+    # The reader-wide answer and any single execution's verified answer are
+    # different facts and are reported as both. `verified_by_execution` says an
+    # execution of this reader definitely received everything; it does NOT say
+    # the reader's capture was complete, which is `payload_capture` /
+    # `payload_capture_partial` below.
+    out["verified_by_execution"] = any(v["value"] is True for v in verdicts)
+    out["payload_capture"] = bool(delivery.get("payload_capture"))
     if delivery.get("payload_capture_partial"):
-        # Some execution of this reader was not instrumented. Whatever the
-        # chosen verdict, the reader's capture is not complete and the report
-        # must not read as though it were.
+        # Some execution of this reader was not instrumented, or could not be
+        # read at all. Whatever the chosen verdict, the reader's capture is not
+        # complete and the report must not read as though it were.
         out["payload_capture_partial"] = True
         out["reason"] = (out["reason"] + "; payload capture was unavailable for "
                          f"{delivery.get('executions_without_payload_capture', 0)} "
-                         "of this reader's job executions")
-    if len(usable) > 1:
-        out["reason"] += (f" (strongest of {len(usable)} job executions, each "
+                         f"of this reader's {len(present)} job executions")
+    if len(present) > 1:
+        out["reason"] += (f" (strongest of {len(present)} job executions, each "
                           "assessed on its own delivery)")
     return out
 
