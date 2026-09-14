@@ -8352,7 +8352,13 @@ def get_agent_summary(
             MIN(CASE WHEN start_time_unix >= {_FIRST_SEEN_FLOOR_NS} THEN start_time_unix END) AS first_seen_ns,
             MAX(start_time_unix)                           AS last_seen_ns,
             SUM(total_tokens)                              AS total_tokens,
-            SUM(estimated_cost_usd)                        AS estimated_cost_usd
+            SUM(estimated_cost_usd)                        AS estimated_cost_usd,
+            -- Has this agent EVER reported usage? Not "is it zero this week"
+            -- — a reporting door (a Grok Bot, a GPT via Actions) structurally
+            -- cannot send token counts, and printing $0.00 for it reads as
+            -- "this work was free" rather than "we were never told".
+            SUM(CASE WHEN total_tokens IS NOT NULL OR input_tokens IS NOT NULL
+                     THEN 1 ELSE 0 END)                    AS usage_spans
         FROM spans
         WHERE service_name = {PH}
           {span_account_filter}
@@ -8481,6 +8487,7 @@ def get_agent_summary(
         "owner_role": owner_row["owner_role"] if owner_row else None,
         "total_tokens": int(row["total_tokens"] or 0),
         "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6),
+        "reports_usage": bool(row["usage_spans"] or 0),
     }
 
 

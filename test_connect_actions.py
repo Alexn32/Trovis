@@ -277,6 +277,60 @@ with TestClient(main.app) as c:
           any(s["span_name"] == "after_restart" for s in rows),
           f"spans={sorted(s['span_name'] for s in rows)}")
 
+    print("\n[15b] A GPT that names its work produces named Work")
+    # This door used to write bare spans, so a GPT's steps arrived as activity
+    # and never reached the Work board. logActivity takes a job_title now: the
+    # steps of one task group into one job, and reportComplete closes it.
+    r = c.post("/actions/log", json={
+        "job_title": "Draft the Q3 board update",
+        "step_name": "gather_numbers",
+        "description": "Pulled revenue and headcount from the sheet.",
+    }, headers=AH)
+    check("a titled step returns 200 and names its job",
+          r.status_code == 200 and (r.json() or {}).get("job_id"),
+          f"body={r.json() if r.status_code == 200 else r.status_code}")
+    gpt_job_id = (r.json() or {}).get("job_id")
+
+    r = c.post("/actions/log", json={
+        "step_name": "write_draft",
+        "description": "Wrote the first pass.",
+    }, headers=AH)
+    check("a later step needs no id — it lands on the job already open",
+          (r.json() or {}).get("job_id") == gpt_job_id,
+          f"first={gpt_job_id} second={(r.json() or {}).get('job_id')}")
+
+    acct = account_id
+    jobs = [l for l in database.get_loops(acct, limit=50)
+            if l.get("external_id") == gpt_job_id]
+    check("the job exists, under the GPT's own title",
+          bool(jobs) and jobs[0].get("title") == "Draft the Q3 board update",
+          f"loop={jobs[0] if jobs else None}")
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("SELECT title_source FROM loops WHERE id = ?", (jobs[0]["id"],))
+        src = cur.fetchone()["title_source"]
+    check("stamped as a real name, not a generated shell", src == "provided",
+          f"title_source={src!r}")
+
+    items = c.get("/work/items", headers=KH).json()
+    titles = [it.get("title") for it in items.get("items") or []]
+    check("and it shows on the Work board",
+          "Draft the Q3 board update" in titles, f"titles={titles}")
+
+    r = c.post("/actions/complete", json={
+        "task_summary": "Sent the draft to the founders", "success": True,
+    }, headers=AH)
+    check("reportComplete closes that job", r.status_code == 200)
+    closed = [l for l in database.get_loops(acct, limit=50)
+              if l.get("external_id") == gpt_job_id]
+    check("the job is done", bool(closed) and closed[0].get("closed_at"),
+          f"loop={closed[0] if closed else None}")
+
+    # A GPT that never sends a title is unchanged: its steps still land.
+    r = c.post("/actions/log", json={
+        "step_name": "untitled_step", "description": "No job title sent.",
+    }, headers=AH)
+    check("an untitled GPT still reports without error", r.status_code == 200)
+
     print("\n[16] /actions/complete and /actions/status survive it too")
     main._action_agents.clear()
     r = c.get("/actions/status", headers=AH)

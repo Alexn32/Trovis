@@ -137,7 +137,12 @@ the global tracer provider at Trovis and every Grok call lands there.
 from trovis import init, set_loop_title
 
 # Call init() BEFORE creating the xAI client.
-init(api_key="ov_sk_your_key", agent_name="support-grok", platform="xai")
+init(
+    api_key="ov_sk_your_key",
+    agent_name="support-grok",
+    platform="xai",
+    agent_role="Front-line support: answers billing questions, escalates refunds",
+)
 
 from xai_sdk import Client
 from xai_sdk.chat import user
@@ -153,13 +158,21 @@ response = chat.sample()   # → a Trovis span, with token usage and cost
 `platform="grok"` is accepted as an alias, and `platform="auto"` picks this
 up whenever `xai-sdk` is installed.
 
+`agent_role` (also `TROVIS_AGENT_ROLE`) works on **every** platform, not just
+this one. It registers what the agent is for, and Trovis writes the agent's
+description from that first — without it, an agent is described from behavior
+alone, so whatever it happens to do first defines it. The frameworks with an
+identity file (a system prompt, a SOUL.md) supply this on their own; an xAI or
+plain-OTEL agent has nothing to read, which is why it matters most here.
+
 Two things to know:
 
 - **Don't create an `xai_sdk.telemetry.Telemetry()`.** It installs its own
-  tracer provider, which names *every* Grok agent `xai-sdk` (so they all
-  collapse into one in Trovis) and exports protobuf, which the Trovis JSON
-  ingest rejects. `init()` already does that job, and OTEL won't let a
-  second provider take over — if one got there first, `init()` warns.
+  tracer provider, which names *every* Grok agent `xai-sdk` — so they all
+  collapse into one agent in Trovis, and none of them carries your job titles
+  or handoffs. `init()` already does that job, and OTEL won't let a second
+  provider take over, so ordering is the whole fix: if one got there first,
+  `init()` warns.
 - **`XAI_SDK_DISABLE_TRACING=1` silences the SDK entirely.** With it set, a
   Grok agent emits no spans at all and never appears; `init()` warns about
   this too.
