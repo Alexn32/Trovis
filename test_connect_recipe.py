@@ -28,6 +28,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -219,6 +220,25 @@ try:
             "    assert s.is_recording(), 'span not recording — SDK never configured'\n"
         )
     runner = template.strip().splitlines()[-1].replace("{RUN_FILE}", agent_py)
+
+    # The recipe's command and the recipe's install line are one recipe. A
+    # missing `opentelemetry-instrument` used to surface as a FileNotFoundError
+    # traceback from subprocess, which reads like a broken test rather than
+    # what it is: an environment that never ran the install the page prints.
+    quick_install = re.search(r"const quickInstall = `([^`]+)`", page)
+    check("the page's quick install ships the command the recipe runs",
+          bool(quick_install) and "opentelemetry-distro" in quick_install.group(1),
+          "opentelemetry-distro is what puts `opentelemetry-instrument` on PATH")
+    tool = runner.split()[0]
+    if shutil.which(tool) is None:
+        check(f"`{tool}` is installed here", False,
+              f"run the page's own install first: "
+              f"{quick_install.group(1) if quick_install else 'pip install opentelemetry-distro'}")
+        raise SystemExit(
+            f"FAILED — `{tool}` is not on PATH, so the shipped recipe cannot be "
+            f"run at all. This is the test's whole job; do not skip it."
+        )
+
     proc_env = {**os.environ, **recipe_env}
     completed = subprocess.run(
         runner.split(), env=proc_env, capture_output=True, text=True, timeout=180
