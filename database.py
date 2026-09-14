@@ -8145,7 +8145,7 @@ def get_agent_records(
         in_ph = ", ".join([PH] * len(trace_ids))
         span_sql = f"""
             SELECT trace_id, span_name, start_time_unix, end_time_unix,
-                   status_code, attributes
+                   status_code, attributes, loop_id
             FROM spans
             WHERE service_name = {PH} {acct} {agent}
               AND trace_id IN ({in_ph})
@@ -8189,6 +8189,20 @@ def get_agent_records(
                     "status": "error" if sr["status_code"] == 2 else "ok",
                 }
             )
+        # The agent's fuller account, when it sent one, and the job this
+        # record belongs to — both only surfaced on request (see the
+        # "Get more details" control on the Work Feed).
+        details = None
+        loop_id = None
+        for a in attrs_list:
+            if details is None:
+                value = attr(a, "job.details")
+                if isinstance(value, str) and value.strip():
+                    details = value.strip()[:6000]
+        for sr in srows:
+            if sr["loop_id"] is not None:
+                loop_id = int(sr["loop_id"])
+                break
         exchange = None if only_system else _extract_exchange(attrs_list)
         # A record with no exchange is NOT a registration. Report-door agents
         # (a Grok Bot calling report_job_*) and any agent running with output
@@ -8212,6 +8226,8 @@ def get_agent_records(
                 "error": (prow["error_spans"] or 0) > 0,
                 "is_registration": bool(is_registration),
                 "title": title,
+                "details": details,
+                "loop_id": loop_id,
                 "exchange": exchange,
                 "spans": span_list,
                 "_start_ns": rec_start,  # internal: cursor source

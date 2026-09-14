@@ -2886,6 +2886,8 @@ def agent_records(
                 kind="system" if is_system else "report" if is_report else "interaction",
                 error=bool(r.get("error")),
                 exchange=(None if is_system else exchange),
+                details=(None if is_system else r.get("details")),
+                loop_id=r.get("loop_id"),
                 spans=r.get("spans", []),
             )
         )

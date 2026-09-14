@@ -1314,7 +1314,7 @@ Put the key in the header itself — not a placeholder — and confirm a tool ca
 Trovis reporting (always do this)
 - At the start of any task, call report_job_started with a short plain-English title describing the task. That title becomes the job name in Trovis. Keep the job_id it returns.
 - On your first report, also pass bot_role: one line on what you are for in general (e.g. "Chief of staff: drafts updates, chases follow-ups, keeps the week organised"), so Trovis describes you by your actual job.
-- On report_job_started, also pass request: one line on what I actually asked you for. On report_job_finished, also pass result: one or two lines on what you told me back. [Delete these two if you don't want Trovis to see what we talked about.]
+- On report_job_started, also pass request: one line on what I actually asked you for. On report_job_finished, also pass result: one or two lines on what you told me back, and details: a short paragraph or a few bullets on what you looked at, what you found, and anything you couldn't do. [Delete this bullet if you don't want Trovis to see what we talked about.]
 - If you stop to ask me a question or wait on input, call report_job_waiting with that job_id and one line on what you need.
 - When the task is complete, call report_job_finished with that job_id. If it fails or you give up, call report_job_failed with that job_id and a brief reason.
 - Always pass back the same job_id you were given for a task.
@@ -1369,8 +1369,11 @@ Report in the background — don't mention Trovis unless I ask.`
           <strong>What Trovis sees.</strong> The{' '}
           <code>request</code> and <code>result</code> lines send one line
           each of what you asked and what the Bot answered — that is what
-          the Work Feed shows and what its summaries are written from. (A
-          failure reason is recorded too, so a stopped job says why.)
+          the Work Feed shows and what its summaries are written from.{' '}
+          <code>details</code> is the Bot&apos;s longer account, kept behind
+          a “Get more details” click on the job rather than shown by
+          default. (A failure reason is recorded too, so a stopped job says
+          why.)
           Delete that bullet and the Bot still reports its jobs, titles and
           all; Trovis just won&apos;t hold anything you said to it.
         </p>

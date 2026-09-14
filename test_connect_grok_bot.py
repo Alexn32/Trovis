@@ -437,6 +437,45 @@ try:
               rec.get("summary") == "Stubbed record summary",
               f"summary={rec.get('summary')!r}")
 
+    print("\n[8e] The fuller account waits behind a click, with its job")
+    # Trovis cannot ask a Grok Bot what happened after the fact, so "get more
+    # details" can only reveal what the bot already sent. It rides the report
+    # and stays out of the feed line until someone asks for it.
+    run(call_tool("report_job_started", {
+        "title": "Re-escalate unanswered Slack", "bot_name": "Trovis PM",
+        "job_id": "grok-detail-1",
+        "request": "Asked me to chase the thread nobody answered",
+    }, KEY))
+    run(call_tool("report_job_finished", {
+        "job_id": "grok-detail-1",
+        "result": "Re-escalated to Wendy and set a reminder for tomorrow",
+        "details": "Checked the #hayneedle channel back to Tuesday. The last "
+                   "human reply was Wendy on Monday; two follow-ups since went "
+                   "unanswered. Re-pinged in-thread rather than opening a new "
+                   "one, and set a reminder for 9am. Could not tell whether "
+                   "the vendor reads that channel at all.",
+    }, KEY))
+    feed = requests.get(f"{BASE}/agents/Trovis PM/records", headers=H, timeout=30).json()
+    detailed = [x for x in (feed.get("records") or [])
+                if "Re-escalated to Wendy" in ((x.get("exchange") or {}).get("agent") or "")]
+    check("the record carries the account", len(detailed) == 1,
+          f"matched={len(detailed)}")
+    if detailed:
+        rec = detailed[0]
+        check("with the whole thing, not a truncation",
+              "Could not tell whether" in (rec.get("details") or ""),
+              f"details={(rec.get('details') or '')[:80]!r}")
+        check("the one-line summary is NOT the long account",
+              (rec.get("summary") or "") != rec.get("details"))
+        check("and the record points at its job, so the story needs no copy",
+              isinstance(rec.get("loop_id"), int), f"loop_id={rec.get('loop_id')!r}")
+
+    quiet_rec = [x for x in (feed.get("records") or [])
+                 if x.get("summary") == "Quiet job"]
+    check("a job with no account sent says so by carrying none",
+          bool(quiet_rec) and quiet_rec[0].get("details") is None,
+          f"details={quiet_rec[0].get('details') if quiet_rec else None!r}")
+
     print("\n[8d] A job's record keeps its title when a report goes astray")
     # The bug in the wild: a bot echoing a job_id Trovis has never seen turned
     # a finish into its own record titled "job_finished". Two defenses — the
