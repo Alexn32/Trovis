@@ -455,13 +455,34 @@ function ProviderStep({ onSelect }) {
 // Reusable instruction patterns
 // ---------------------------------------------------------------------------
 
+// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, not OTEL_EXPORTER_OTLP_ENDPOINT: the
+// generic variable is a BASE url the SDK appends "/v1/traces" to, so pointing
+// it at the Trovis endpoint produced .../v1/traces/v1/traces and a 404 per
+// batch. The signal-specific variable is the full URL, used as given.
+//
+// http/protobuf, not http/json: Python ships no http/json exporter at all
+// (only proto-http and grpc), so the old value asked for something that does
+// not exist — and OTEL_TRACES_EXPORTER=otlp on its own resolves to gRPC,
+// which cannot talk to an HTTPS ingest URL. Trovis reads protobuf now.
+//
+// `opentelemetry-instrument`, not bare `python`: environment variables do not
+// bootstrap the SDK by themselves. Run plain and the global provider stays a
+// ProxyTracerProvider — every span silently non-recording, nothing exported,
+// no error anywhere.
+//
+// METRICS and LOGS off: the distro configures all three signals, and Trovis
+// ingests traces only. Left on, they default to gRPC and either throw during
+// bootstrap (taking tracing down with them) or quietly retry against a
+// collector nobody is running.
 const QUICK_ENV_TEMPLATE =
 `OTEL_SERVICE_NAME=AGENT_NAME \\
-OTEL_EXPORTER_OTLP_ENDPOINT=TROVIS_ENDPOINT \\
-OTEL_EXPORTER_OTLP_PROTOCOL=http/json \\
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=TROVIS_ENDPOINT \\
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf \\
 OTEL_TRACES_EXPORTER=otlp \\
+OTEL_METRICS_EXPORTER=none \\
+OTEL_LOGS_EXPORTER=none \\
 OTEL_EXPORTER_OTLP_HEADERS=X-Trovis-Api-Key=TROVIS_API_KEY \\
-python {RUN_FILE}`
+opentelemetry-instrument python {RUN_FILE}`
 
 const EXPLICIT_SETUP_TEMPLATE =
 `from opentelemetry.sdk.trace import TracerProvider

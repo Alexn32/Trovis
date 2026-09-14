@@ -29,3 +29,10 @@ mcp==1.27.2
 stripe
 resend
 sentry-sdk[fastapi]
+
+# OTLP/protobuf ingest. Python's OpenTelemetry exporter sends protobuf by
+# default (there is no http/json exporter for Python at all), so without this
+# every hand-rolled OTEL agent — the recipe on the Connect page included —
+# posts a body this server cannot read. Only the generated message classes are
+# needed; no exporter, no SDK.
+opentelemetry-proto>=1.20.0
