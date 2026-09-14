@@ -56,3 +56,26 @@ test('a reported job is filed with the work, not under System', () => {
   assert.match(cat, /if \(r\.kind === 'system'\) return 'system'/)
   assert.doesNotMatch(cat, /!r\.exchange\) return 'system'/)
 })
+
+test('a collapsed row scans, an expanded one says exactly when', () => {
+  // "35m ago" is right for scanning a feed and wrong for correlating a job
+  // with a log line or a Slack thread. Keep both: relative on the row,
+  // absolute-to-the-second once it is open.
+  const feedItem = detail.slice(
+    detail.indexOf('function FeedItem'),
+    detail.indexOf('function WorkFeed'),
+  )
+  const head = feedItem.slice(0, feedItem.indexOf('depth > 0'))
+  assert.match(head, /fmtRel\(r\.time\)/, 'the row keeps the relative stamp')
+  assert.doesNotMatch(head, /fmtStamp/, 'the row does not carry the long one')
+
+  const body = feedItem.slice(feedItem.indexOf('depth > 0'))
+  // Both expanded bodies — with a transcript and without — carry it.
+  assert.equal((body.match(/fmtStamp\(r\.time\)/g) || []).length, 2)
+
+  // Seconds are the point: a minute-resolution stamp doesn't pin a run.
+  const fmt = detail.slice(detail.indexOf('function fmtStamp'))
+  assert.match(fmt.slice(0, fmt.indexOf('\n}')), /second: '2-digit'/)
+  // Local time, not UTC: the reader is correlating against their own clock.
+  assert.match(fmt.slice(0, fmt.indexOf('\n}')), /toLocaleString\(undefined/)
+})
