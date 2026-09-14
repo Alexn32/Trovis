@@ -41,6 +41,10 @@ from starlette.concurrency import run_in_threadpool
 import alerts
 import asker
 import billing
+# ChatGPT job bookkeeping lives in chatgpt_jobs so the Actions door
+# (/actions/* below) and the Custom MCP door (mcp_server.py) cannot drift —
+# same GPT, same product, one implementation.
+import chatgpt_jobs
 import database
 import saas_hubspot
 import saas_shopify
@@ -6666,98 +6670,6 @@ async def action_connect(request: Request):
             "message": f"Connected to Trovis as '{name}'. Activity is now being monitored."}
 
 
-# --- ChatGPT Actions: jobs, not loose activity -------------------------------
-#
-# This door used to write bare spans (database.insert_spans), so a GPT's work
-# arrived as activity and never as named Work — the Connect page had to admit
-# "Activity, not named jobs". The Grok Bot door showed the shape of the fix:
-# one job id per conversation, a plain-English title, and the loop-aware
-# ingest path. Same three moves here.
-
-_ACTION_JOB_SENTINEL = "__chatgpt_job__"
-
-
-def _action_job(
-    account_id: int, service: str, body: dict[str, Any]
-) -> tuple[str, str | None]:
-    """(job_id, title) for this GPT's current job.
-
-    A GPT that sends `job_title` starts (or renames) a job; one that sends
-    nothing keeps reporting into the job it already had. The id is remembered
-    per account+agent so a GPT never has to echo it back — it has enough to
-    remember without that.
-    """
-    title = str(body.get("job_title") or "").strip()[:200] or None
-    explicit = str(body.get("job_id") or "").strip()[:120]
-    row = database.get_insight(account_id, _ACTION_JOB_SENTINEL, "main", service)
-    remembered = (row or {}).get("data") if row else None
-    remembered = remembered if isinstance(remembered, dict) else {}
-
-    job_id = explicit or remembered.get("job_id") or ""
-    # A new title with no id means a new job: the GPT moved on to something
-    # else and said so.
-    if title and title != remembered.get("title"):
-        job_id = explicit or f"gpt-{uuid.uuid4().hex[:12]}"
-    if not job_id:
-        job_id = f"gpt-{uuid.uuid4().hex[:12]}"
-    resolved_title = title or remembered.get("title") or None
-    database.save_insight(
-        account_id, _ACTION_JOB_SENTINEL, "main", service,
-        {"job_id": job_id, "title": resolved_title or ""},
-    )
-    return job_id, resolved_title
-
-
-def _forget_action_job(account_id: int, service: str) -> None:
-    """A completed job stops being the one later steps attach to."""
-    database.save_insight(
-        account_id, _ACTION_JOB_SENTINEL, "main", service, {"job_id": "", "title": ""}
-    )
-
-
-def _write_action_span(
-    account_id: int,
-    service: str,
-    job_id: str,
-    span_name: str,
-    attributes: dict[str, Any],
-    start_ns: int,
-    end_ns: int,
-    status_code: int = 0,
-    status_message: str = "",
-) -> None:
-    """One Actions report -> one span on the job's trace, through the
-    loop-aware path so it lands as Work.
-
-    The trace id is derived from the job id (as the Grok Bot door does), so
-    every step of a job groups into one record instead of one row each.
-    """
-    trace_id = hashlib.sha256(f"{account_id}:{job_id}".encode()).hexdigest()[:32]
-    attrs: dict[str, Any] = {
-        "trovis.agent.id": "main",
-        "trovis.loop.external_id": job_id,
-        "trovis.run.id": job_id,
-    }
-    attrs.update({k: v for k, v in attributes.items() if v not in (None, "")})
-    database.ingest_spans_with_loops([{
-        "trace_id": trace_id,
-        "span_id": uuid.uuid4().hex[:16],
-        "parent_span_id": None,
-        "service_name": service,
-        "span_name": span_name,
-        "kind": 0,
-        "start_time_unix": start_ns,
-        "end_time_unix": end_ns,
-        "status_code": status_code,
-        "status_message": status_message,
-        "attributes": attrs,
-        "resource_attributes": {
-            "service.name": service,
-            "trovis.platform": "chatgpt",
-        },
-    }], account_id=account_id)
-
-
 @app.post("/actions/log")
 async def action_log(request: Request):
     """Log a completed activity or task step."""
@@ -6773,8 +6685,11 @@ async def action_log(request: Request):
     now = int(_time.time() * 1_000_000_000)
     dur = float(body.get("duration_seconds", 0) or 0)
     dur_ns = int(dur * 1_000_000_000) if dur > 0 else 0
-    job_id, job_title = _action_job(account_id, service, body)
-    _write_action_span(
+    job_id, job_title = chatgpt_jobs.resolve_job(
+        account_id, service,
+        title=body.get("job_title"), job_id=body.get("job_id"),
+    )
+    chatgpt_jobs.write_span(
         account_id, service, job_id, step,
         {
             "trovis.event.type": "agent_activity",
@@ -6802,8 +6717,11 @@ async def action_complete(request: Request):
 
     import time as _time
     now = int(_time.time() * 1_000_000_000)
-    job_id, job_title = _action_job(account_id, service, body)
-    _write_action_span(
+    job_id, job_title = chatgpt_jobs.resolve_job(
+        account_id, service,
+        title=body.get("job_title"), job_id=body.get("job_id"),
+    )
+    chatgpt_jobs.write_span(
         account_id, service, job_id, "agent_run_complete",
         {
             "trovis.event.type": "agent_run_complete",
@@ -6819,7 +6737,7 @@ async def action_complete(request: Request):
         status_code=0 if success else 2,
         status_message="" if success else "task failed",
     )
-    _forget_action_job(account_id, service)
+    chatgpt_jobs.forget_job(account_id, service)
     return {"status": "completed", "task_summary": summary, "job_id": job_id}
 
 
