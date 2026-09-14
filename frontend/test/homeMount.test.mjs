@@ -986,3 +986,149 @@ test('a dismissed-list failure stays visible and retryable on its own', async ()
   assert.match(body().textContent, /Old worry/, 'which works')
   m.unmount()
 })
+
+// ---------------------------------------------------------------------------
+// 11. Ownership, on every path out of a save
+//
+// A context check is not an ownership check. Leaving a period and returning
+// puts the reader back in the SAME context string, so a superseded operation's
+// completion passes a context test and writes its error, or its refresh, over
+// a save that is still running. The guard has to be the context AND the
+// operation id, read live, and it has to be the same guard on success, on
+// failure and on cleanup — a rule applied to two paths out of three is the bug
+// it was meant to fix, moved.
+//
+// `A` below is always the abandoned operation and `B` the current one.
+// ---------------------------------------------------------------------------
+
+/** Start A, leave and return, start B. Both held; B owns the card. */
+async function twoSaves() {
+  const A = deferred()
+  const B = deferred()
+  const C = deferred()
+  let n = 0
+  const calls = stubApi({
+    setState: () => (++n === 1 ? A.promise : n === 2 ? B.promise : C.promise),
+  })
+  const m = await mount(home())
+  await m.settle()
+  const btn = () => ackBtn(card(m, 'Three invoice runs stopped'))
+  await m.click(btn())
+  await m.settle()
+  await setControl(m, 'Period', 14)
+  await m.settle()
+  await setControl(m, 'Period', 7)
+  await m.settle()
+  await m.click(btn())
+  await m.settle()
+  assert.equal(calls.setState.length, 2, 'two saves were started')
+  assert.match(btn().textContent, /Saving/, 'B is pending')
+  return { A, B, C, m, btn, calls }
+}
+
+test('A failing while B is pending writes no error and leaves B busy', async () => {
+  const { A, B, m, btn } = await twoSaves()
+  A.reject(new Error('the abandoned one'))
+  await m.settle()
+  assert.doesNotMatch(m.text(), /Couldn’t mark this seen/,
+    'the superseded operation does not decorate the card')
+  assert.doesNotMatch(m.text(), /the abandoned one/)
+  assert.match(btn().textContent, /Saving/, 'and B is still running')
+  B.resolve(findingFixture({ state: 'acknowledged' }))
+  await m.settle()
+  m.unmount()
+})
+
+test('A succeeding while B is pending refreshes nothing and leaves B busy', async () => {
+  const { A, B, m, btn, calls } = await twoSaves()
+  const reads = calls.findings.length
+  A.resolve(findingFixture({ state: 'acknowledged' }))
+  await m.settle()
+  assert.equal(calls.findings.length, reads,
+    'a superseded success does not re-read the collection')
+  assert.match(btn().textContent, /Saving/, 'and does not end B')
+  B.resolve(findingFixture({ state: 'acknowledged' }))
+  await m.settle()
+  assert.ok(calls.findings.length > reads, 'B’s own success does read it')
+  m.unmount()
+})
+
+test('B failing shows its own error, and retry works', async () => {
+  const { A, B, C, m, btn, calls } = await twoSaves()
+  B.reject(new Error('B did not save'))
+  await m.settle()
+  assert.match(m.text(), /Couldn’t mark this seen/, 'the current failure is stated')
+  assert.match(m.text(), /B did not save/, 'with its own reason')
+  assert.match(btn().textContent, /Try again/)
+  assert.equal(btn().disabled, false)
+
+  await m.click(btn())
+  await m.settle()
+  assert.equal(calls.setState.length, 3, 'retry starts a new save')
+  C.resolve(findingFixture({ state: 'acknowledged' }))
+  await m.settle()
+  assert.doesNotMatch(m.text(), /Couldn’t mark this seen/, 'which, on success, clears the error')
+  assert.doesNotMatch(btn().textContent, /Saving/, 'and settles the card')
+  A.reject(new Error('still abandoned'))
+  await m.settle()
+  m.unmount()
+})
+
+test('A failing after B has already succeeded writes no late error', async () => {
+  const { A, B, m } = await twoSaves()
+  B.resolve(findingFixture({ state: 'acknowledged' }))
+  await m.settle()
+  assert.doesNotMatch(m.text(), /Couldn’t mark this seen/)
+  A.reject(new Error('far too late'))
+  await m.settle()
+  assert.doesNotMatch(m.text(), /Couldn’t mark this seen/,
+    'a completed card does not acquire an error from an operation it replaced')
+  assert.doesNotMatch(m.text(), /far too late/)
+  m.unmount()
+})
+
+test('a stale completion on one card leaves another card’s save alone', async () => {
+  const A = deferred()
+  const B = deferred()
+  const other = deferred()
+  let first = 0
+  const calls = twoFindings({
+    setState: (id) => {
+      if (id === 2) return other.promise
+      return ++first === 1 ? A.promise : B.promise
+    },
+  })
+  const m = await mount(home())
+  await m.settle()
+  const one = () => ackBtn(card(m, 'First worry'))
+  const two = () => ackBtn(card(m, 'Second worry'))
+
+  await m.click(one())
+  await m.settle()
+  await setControl(m, 'Period', 14)
+  await m.settle()
+  await setControl(m, 'Period', 7)
+  await m.settle()
+  await m.click(one())
+  await m.click(two())
+  await m.settle()
+  assert.equal(calls.setState.length, 3)
+  assert.match(one().textContent, /Saving/)
+  assert.match(two().textContent, /Saving/)
+
+  // The abandoned save on card one lands.
+  A.reject(new Error('abandoned'))
+  await m.settle()
+  assert.match(one().textContent, /Saving/, 'card one keeps its current save')
+  assert.match(two().textContent, /Saving/, 'and card two is untouched')
+  assert.doesNotMatch(m.text(), /Couldn’t mark this seen/)
+
+  other.resolve(findingFixture({ id: 2, state: 'acknowledged' }))
+  await m.settle()
+  assert.doesNotMatch(two().textContent, /Saving/, 'card two settles on its own')
+  assert.match(one().textContent, /Saving/, 'without ending card one')
+  B.resolve(findingFixture({ id: 1, state: 'acknowledged' }))
+  await m.settle()
+  assert.doesNotMatch(one().textContent, /Saving/)
+  m.unmount()
+})

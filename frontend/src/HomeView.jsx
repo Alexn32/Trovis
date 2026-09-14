@@ -241,10 +241,12 @@ export default function HomeView({
   // would 404 it — and leaving the old body on screen would present it as
   // though it still applied. The state is cleared in an effect AND the panel
   // is gated on the context during render, so nothing survives even one frame.
-  // A LIVE read of the context for async work already in flight. `contextKey`
-  // captured in a closure is the value at call time; this is the value now.
-  const contextRef = useRef(contextKey)
-  contextRef.current = contextKey
+  //
+  // (There was a `contextRef` here — a live read of the context for async work
+  // in flight. It is gone because it was not enough on its own: a reader who
+  // leaves a period and returns is in the same context again, so it passed for
+  // an operation that had since been superseded. The pending-operation map is
+  // stamped with the context anyway, so checking ownership checks both.)
   const openContext = useRef(contextKey)
   if (openContext.current !== contextKey && openFinding) openContext.current = null
   useEffect(() => {
@@ -302,10 +304,12 @@ export default function HomeView({
   //     because it belongs to a scope the reader has left — and, the part that
   //     was missing, it does not leave the card it started on pending either.
   //
-  // Each save takes an operation id. Everything it does afterwards — clearing
-  // busy, writing an error — is conditional on that id still owning the card,
-  // so a slow completion can never speak for a newer save of the same finding,
-  // and saves on two different cards never see each other's state at all.
+  // Each save takes an operation id, and EVERY path after the await — the
+  // refresh, the error, the clear — is conditional on that id still owning the
+  // card. One rule, applied three times, because applying it in only some of
+  // them is how the last two bugs here worked: a slow completion cannot speak
+  // for a newer save of the same finding, and saves on two different cards
+  // never see each other's state at all.
   const acknowledge = useCallback(
     async (finding) => {
       const inContext = contextKey
@@ -324,13 +328,26 @@ export default function HomeView({
         context: inContext,
         byId: { ...(e.context === inContext ? e.byId : {}), [finding.id]: null },
       }))
+      // Does this operation still own the card? The context alone does not
+      // answer it: a reader who leaves a period and comes back is in the SAME
+      // context string again, so a context check passes for an operation that
+      // was superseded in between. Ownership is the context AND the operation
+      // id, read live from the map rather than from this closure.
+      //
+      // Losing ownership does not undo anything. The PATCH was sent and the
+      // server has done whatever it did; what expires is only this
+      // completion's right to write to the screen.
+      const stillMine = () => {
+        const m = mutatingRef.current
+        return m.context === inContext && m.byId[finding.id] === op
+      }
       try {
         await api.setFindingState(finding.id, 'acknowledged', query)
-        if (contextRef.current !== inContext) return
+        if (!stillMine()) return
         // Every view of the findings collection, not just the active groups.
         invalidateFindings()
       } catch (err) {
-        if (contextRef.current !== inContext) return
+        if (!stillMine()) return
         setAckError((e) => ({
           context: inContext,
           byId: {
