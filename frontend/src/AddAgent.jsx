@@ -1187,7 +1187,7 @@ async for message in query(
 //
 // Two things this page must say out loud, because both fail silently:
 //   - xai_sdk.telemetry.Telemetry() takes the global provider first, names
-//     every agent "xai-sdk", and exports protobuf (Trovis ingest is OTLP/JSON).
+//     every agent "xai-sdk", so a whole fleet collapses into one row.
 //   - XAI_SDK_DISABLE_TRACING=1 silences the SDK entirely.
 
 function GrokInstructions({ agentName, endpoint }) {
@@ -1215,7 +1215,14 @@ function GrokSdkSetup({ agentName, endpoint }) {
 
 # Call init() BEFORE creating the xAI client — it points OpenTelemetry at
 # Trovis, and the xAI SDK traces itself through that same pipeline.
-init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="xai")
+init(
+    api_key="TROVIS_API_KEY",
+    agent_name="AGENT_NAME",
+    platform="xai",
+    # One line on what this agent is for. Trovis describes it from this
+    # rather than from whatever it happens to do first.
+    agent_role="Front-line support: answers billing questions, escalates refunds",
+)
 
 from xai_sdk import Client
 from xai_sdk.chat import user
@@ -1263,11 +1270,11 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
       <Callout variant="warning">
         <strong>Don't call <code>Telemetry()</code> yourself.</strong>{' '}
         <code>xai_sdk.telemetry.Telemetry()</code> installs its own tracer
-        provider: it names every agent <code>xai-sdk</code> (so they all
-        collapse into one here) and exports protobuf, which the
-        Trovis JSON ingest rejects. <code>init()</code> does that job, and
-        OpenTelemetry won't let a second provider take over — if one got
-        there first, <code>init()</code> says so in the logs.
+        provider: it names every agent <code>xai-sdk</code>, so a whole
+        fleet collapses into one row here and none of it carries your job
+        titles. <code>init()</code> does that job, and OpenTelemetry won&apos;t
+        let a second provider take over — if one got there first,{' '}
+        <code>init()</code> says so in the logs.
       </Callout>
 
       <Callout variant="info">
@@ -1460,6 +1467,7 @@ Token exchange:     Default (POST request)`
   const gptInstructions =
 `You are connected to Trovis, the user's agent monitoring system.
 - At the START of each conversation, call connectAgent with your name, your role, and a one-line description of what you do.
+- When the user asks you for something, call logActivity with job_title set to what you're doing in plain English ("Draft the Q3 board update") — that becomes the job's name in Trovis. Keep the same job until the task changes.
 - As you finish each meaningful step, call logActivity with a short step name and description.
 - When the task is done, call reportComplete with a one-line summary of what you accomplished.
 - Whenever the user asks ANYTHING about their agents or fleet (e.g. "what was the last agent that ran?", "what did my agents do today?", "which ones are drifting?", "what did I spend?"), call askFleet with their question and answer from the result. For a plain list of agents use listAgents; for a timeline of recent runs use recentActivity.
@@ -1538,12 +1546,12 @@ Do the connect/log/complete calls silently in the background — don't mention T
       </Callout>
 
       <Callout variant="info">
-        <strong>Activity, not named jobs — yet.</strong> The Actions door has
-        no field for a job title, so a GPT's steps land as agent activity rather
-        than named jobs on Work. That is a gap in the Actions contract, not
-        something you can fix from the GPT side. If you need this GPT&apos;s work
-        to appear as named jobs today, have it emit OpenTelemetry with{' '}
-        <code>trovis.loop.title</code> instead.
+        <strong>Named jobs, if the GPT names them.</strong>{' '}
+        <code>logActivity</code> takes a <code>job_title</code>: send one and
+        the GPT&apos;s steps group into a named job on Work, closed by{' '}
+        <code>reportComplete</code>. Send none and its steps still land, as
+        activity without a name — same as before. The Instructions block below
+        already asks for it.
       </Callout>
 
       <SuccessCallout />

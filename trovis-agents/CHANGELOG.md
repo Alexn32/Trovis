@@ -1,5 +1,18 @@
 # Changelog — trovis-agents
 
+## 0.5.1
+
+`init(agent_role="…")` — one line on what an agent is FOR, registered as its
+identity. `describe_agent` reads a registration before it reads behavior, so
+this is the difference between "drafts the founder's updates and chases
+follow-ups" and "an agent that runs smoke tests", which is what an agent gets
+called when its first telemetry happens to be a connection test.
+
+Every adapter already registered identity from the framework — an Agent's
+instructions, a SOUL.md, a system prompt. The doors with no such file to read
+(xAI, and anyone emitting plain OTEL) had no way to say it at all. Also reads
+`TROVIS_AGENT_ROLE`; best-effort, and never delays the agent's first work.
+
 ## 0.5.0
 
 **Grok (xAI SDK).** `init(platform="xai")` — alias `"grok"`, and picked up

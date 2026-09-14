@@ -35,6 +35,11 @@ class AgentSummary(BaseModel):
 
     service_name: str
     agent_id: str | None = None
+    # False when this agent has never sent token usage — a reporting door
+    # (Grok Bot, a GPT via Actions) cannot. The dashboard drops its cost and
+    # token tiles rather than printing $0.00, which reads as "free" instead
+    # of "never reported".
+    reports_usage: bool = True
     span_count: int
     error_count: int
     avg_duration_ms: float

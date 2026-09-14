@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from typing import Any, Optional
 
 from opentelemetry import trace
@@ -108,10 +110,10 @@ def _setup_otel(
     means `init()` and `hermes.register()` can both reach for this
     helper without coordinating.
 
-    Uses the in-package OTLPJsonSpanExporter because the Trovis
-    backend speaks OTLP/JSON. The standard
-    `opentelemetry-exporter-otlp-proto-http` package would send
-    protobuf and 400.
+    Uses the in-package OTLPJsonSpanExporter: OTLP/JSON over `requests`,
+    which keeps this package's dependency list to the OTEL API/SDK and
+    nothing else. Trovis ingest reads protobuf too, so this is a packaging
+    choice now rather than a requirement.
     """
     if _state.get("tracer") is not None:
         return _state["tracer"]
@@ -169,6 +171,7 @@ def init(
     endpoint: Optional[str] = None,
     capture_outputs: bool = False,
     platform: str = "auto",
+    agent_role: Optional[str] = None,
 ) -> None:
     """Connect this process's agents to Trovis.
 
@@ -186,6 +189,16 @@ def init(
         endpoint: OTLP/HTTP traces endpoint. Falls back to TROVIS_ENDPOINT
             (legacy OVERSEE_ENDPOINT), then the Trovis cloud default
             (DEFAULT_ENDPOINT, the api.trovisai.com ingest URL).
+        agent_role: One line on what this agent is FOR — e.g. "Chief of
+            staff: drafts updates, chases follow-ups". Registered as the
+            agent's identity, which the dashboard's description is written
+            from FIRST. Without it an agent is described from behavior
+            alone, so whatever it happens to do first defines it: connect
+            one, let it run a smoke test, and it is "an agent that runs
+            smoke tests" from then on. Falls back to TROVIS_AGENT_ROLE
+            (legacy OVERSEE_AGENT_ROLE). Optional but strongly recommended
+            for the SDK doors that have no identity file to read — xAI and
+            plain OTEL agents especially.
         capture_outputs: When True, the CaptureProcessor emits
             additional Trovis-named spans with the actual message /
             response / tool-result content (truncated to 10 000 chars).
@@ -235,6 +248,7 @@ def init(
         capture_outputs
         or (_env("CAPTURE_OUTPUTS", "") or "").lower() == "true"
     )
+    resolved_role = (agent_role or _env("AGENT_ROLE") or "").strip()
 
     # Setting the capture flag must happen on every call, even when
     # we skip the rest of init (re-init case).
@@ -254,6 +268,14 @@ def init(
         platform=_platform_label_for_init(platform),
     )
     _state["capture_outputs"] = resolved_capture
+
+    # 1b. Identity, when the caller told us what this agent is for. Every
+    # adapter below reads identity from the framework (an Agent's
+    # instructions, a SOUL.md, a system prompt); the SDK doors that have no
+    # such file — xAI, and anyone emitting plain OTEL — had no way to say it
+    # at all, and got described from whatever they did first.
+    if resolved_role:
+        _register_agent_role(resolved_agent_name, resolved_role, resolved_api_key)
 
     # 2. Wire each platform's tracing into the OTEL pipeline.
     # `platform` resolution: "auto" detects installed SDKs; explicit
@@ -331,6 +353,55 @@ def init(
             "Install openai-agents, anthropic, claude-agent-sdk, or xai-sdk "
             "to enable per-SDK instrumentation."
         )
+
+
+def _register_agent_role(agent_name: str, role: str, api_key: Optional[str]) -> None:
+    """POST the agent's stated identity as a registration span.
+
+    Best-effort and out-of-band of the span pipeline: a role that cannot be
+    delivered must not delay or break the agent's first real work. The span
+    shape matches what every other door registers with, so the backend needs
+    no special case.
+    """
+    endpoint = _state.get("endpoint") or DEFAULT_ENDPOINT
+    try:
+        import requests
+
+        now = time.time_ns()
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-Trovis-Api-Key"] = api_key
+        requests.post(
+            endpoint,
+            timeout=5.0,
+            headers=headers,
+            json={"resourceSpans": [{
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": agent_name}},
+                    {"key": "trovis.sdk.version", "value": {"stringValue": __version__}},
+                ]},
+                "scopeSpans": [{"spans": [{
+                    "traceId": uuid.uuid4().hex,
+                    "spanId": uuid.uuid4().hex[:16],
+                    "name": "agent_registration",
+                    "startTimeUnixNano": str(now),
+                    "endTimeUnixNano": str(now),
+                    # soul + identity are the two the ingest extractor reads
+                    # (main._extract_registrations); a "role" key would be
+                    # dropped on the floor. Saving a registration also kicks
+                    # off the describe, so the agent is described from what it
+                    # says it is rather than from its first span.
+                    "attributes": [
+                        {"key": "trovis.event.type",
+                         "value": {"stringValue": "agent_registration"}},
+                        {"key": "trovis.agent.soul", "value": {"stringValue": role}},
+                        {"key": "trovis.agent.identity", "value": {"stringValue": role}},
+                    ],
+                }]}],
+            }]},
+        )
+    except Exception as e:  # noqa: BLE001 — identity is never worth an outage
+        logger.debug("[Trovis] could not register agent_role: %s", e)
 
 
 def _normalize_platform(platform: str) -> str:
