@@ -79,3 +79,48 @@ test('a collapsed row scans, an expanded one says exactly when', () => {
   // Local time, not UTC: the reader is correlating against their own clock.
   assert.match(fmt.slice(0, fmt.indexOf('\n}')), /toLocaleString\(undefined/)
 })
+
+test('"Get more details" is on request, and only when there is more', () => {
+  const feedItem = detail.slice(
+    detail.indexOf('function FeedItem'),
+    detail.indexOf('function WorkFeed'),
+  )
+  // Gated on there being something to reveal — a button that opens an empty
+  // panel teaches people not to press it.
+  assert.match(feedItem, /\{\(r\.details \|\| r\.loop_id\) && \(/)
+  assert.match(feedItem, /Get more details/)
+  assert.match(feedItem, /Hide details/)
+  // Nothing is fetched or rendered until the click.
+  assert.match(feedItem, /\{more && \(/)
+})
+
+test('the detail panel reuses the job story instead of drawing its own', () => {
+  // The Work board already renders a loop's timeline. A second implementation
+  // here would drift from it the first time either changed.
+  assert.match(detail, /import StoryView from '\.\/StoryView\.jsx'/)
+  const feedItem = detail.slice(
+    detail.indexOf('function FeedItem'),
+    detail.indexOf('function WorkFeed'),
+  )
+  assert.match(feedItem, /<StoryView loop=\{\{ id: r\.loop_id \}\}/)
+  // Read-only here: acting on work belongs on the board, not in a feed row.
+  assert.match(feedItem, /sessionUser=\{null\}/)
+})
+
+test('a job with no written account says how to get one', () => {
+  const feedItem = detail.slice(
+    detail.indexOf('function FeedItem'),
+    detail.indexOf('function WorkFeed'),
+  )
+  assert.match(feedItem, /didn&apos;t send a written account/)
+  assert.match(feedItem, /report_job_finished/)
+})
+
+test('a long-running job reads in days, not thousands of seconds', () => {
+  // A reported job that waits overnight spans real time: 232441.2s is 2.7d,
+  // and only one of those is a number anyone can act on.
+  const fmt = detail.slice(detail.indexOf('function fmtDur'))
+  const body = fmt.slice(0, fmt.indexOf('\n}'))
+  assert.match(body, /\/ 24/)
+  assert.match(body, /`\$\{Math\.round\(m\)\}m`/)
+})

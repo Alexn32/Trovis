@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import StoryView from './StoryView.jsx'
 import { QuietBrand } from './BrandMarks.jsx'
 
 /* ─────────────────────────────────────────────
@@ -62,7 +63,15 @@ function fmtStamp(iso) {
 function fmtDur(ms) {
   const v = Number(ms) || 0
   if (v < 1000) return `${Math.round(v)}ms`
-  return `${(v / 1000).toFixed(1)}s`
+  const s = v / 1000
+  if (s < 90) return `${s.toFixed(1)}s`
+  // A reported job that waits overnight on a person spans real time, and
+  // "232441.2s" is not a number anyone reads as 2.7 days.
+  const m = s / 60
+  if (m < 90) return `${Math.round(m)}m`
+  const h = m / 60
+  if (h < 36) return `${h.toFixed(1)}h`
+  return `${(h / 24).toFixed(1)}d`
 }
 function fmtCost(usd) {
   if (usd == null) return '—'
@@ -452,6 +461,7 @@ function WeekStrip({ weekly, costDays }) {
 /* ── 4. Work Feed (3 depths) ── */
 function FeedItem({ r }) {
   const [depth, setDepth] = useState(0) // 0 collapsed · 1 exchange · 2 spans
+  const [more, setMore] = useState(false) // the on-request detail panel
   // Only a real registration/heartbeat is a system row. A record with no
   // exchange is work the agent reported without a transcript — filing it as
   // "system" is what made a busy bot look like it only ever announced itself.
@@ -535,11 +545,46 @@ function FeedItem({ r }) {
             </div>
           )}
 
-          {r.spans.length > 0 && (
-            <button onClick={() => setDepth(depth === 2 ? 1 : 2)} style={{
-              marginTop: 12, background: 'none', border: 'none', color: C.teal,
-              fontSize: 13, fontFamily: F.body, cursor: 'pointer', padding: 0,
-            }}>{depth === 2 ? 'Hide spans' : `View ${r.spans.length} spans`}</button>
+          <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
+            {r.spans.length > 0 && (
+              <button onClick={() => setDepth(depth === 2 ? 1 : 2)} style={{
+                background: 'none', border: 'none', color: C.teal,
+                fontSize: 13, fontFamily: F.body, cursor: 'pointer', padding: 0,
+              }}>{depth === 2 ? 'Hide spans' : `View ${r.spans.length} spans`}</button>
+            )}
+            {/* On request, not by default. Trovis cannot ask a reporting agent
+                what happened after the fact — MCP runs agent → Trovis — so
+                this reveals the fuller account the agent already sent, plus
+                the job's own story. Nobody pays for it until they click. */}
+            {(r.details || r.loop_id) && (
+              <button onClick={() => setMore(!more)} style={{
+                background: 'none', border: 'none', color: C.teal,
+                fontSize: 13, fontFamily: F.body, cursor: 'pointer', padding: 0,
+              }}>{more ? 'Hide details' : 'Get more details'}</button>
+            )}
+          </div>
+
+          {more && (
+            <div style={{ marginTop: 12 }}>
+              {r.details ? (
+                <div style={{
+                  fontSize: 13.5, lineHeight: 1.6, color: C.body, background: C.linen,
+                  border: `1px solid ${C.subtle}`, borderRadius: 10,
+                  padding: '12px 14px', whiteSpace: 'pre-wrap', maxWidth: 700,
+                }}>{r.details}</div>
+              ) : (
+                <div style={{ fontSize: 13, color: C.muted, fontFamily: F.body, maxWidth: 700 }}>
+                  The agent didn&apos;t send a written account of this one. It
+                  can: pass <code>details</code> on its{' '}
+                  <code>report_job_finished</code> call and it shows up here.
+                </div>
+              )}
+              {r.loop_id && (
+                <div style={{ marginTop: 10 }}>
+                  <StoryView loop={{ id: r.loop_id }} sessionUser={null} />
+                </div>
+              )}
+            </div>
           )}
 
           {depth === 2 && (

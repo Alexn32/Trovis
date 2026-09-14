@@ -1030,6 +1030,11 @@ class AgentRecord(BaseModel):
     kind: str = "interaction"
     error: bool = False
     exchange: RecordExchange | None = None
+    # Surfaced only when the reader asks for it ("Get more details"): the
+    # agent's own longer account of the job, and the job it belongs to so the
+    # feed can show that job's story without duplicating it.
+    details: str | None = None
+    loop_id: int | None = None
     spans: list[RecordSpanItem] = Field(default_factory=list)
 
 

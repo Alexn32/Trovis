@@ -404,6 +404,7 @@ async def report_job_waiting(
 async def report_job_finished(
     summary: str = "",
     result: str = "",
+    details: str = "",
     job_id: str = "",
     bot_name: str = "",
     api_key: str = "",
@@ -414,6 +415,7 @@ async def report_job_finished(
     Args:
         summary: One line on what you delivered.
         result: What you actually told the person, in one or two lines — the answer, the finding, the thing you handed back. This is what the Work Feed shows and summarizes; without it the job closes with no outcome recorded.
+        details: The fuller account, a short paragraph or a few bullets: what you looked at, what you found, what you decided and why, anything you could not do. Nobody reads this unless they click "Get more details" on the job, so write it for the person who comes back a week later asking what happened.
         job_id: The id report_job_started returned. Omit to use this bot's most recent job.
         bot_name: This bot's name (same value you started the job with).
         api_key: Only if this MCP server has no Authorization header.
@@ -440,6 +442,10 @@ async def report_job_finished(
             "trovis.step.name": "job_finished",
             # The agent's side of the exchange — the outcome a person reads.
             "trovis.response.content": outcome,
+            # Held back until asked for. Trovis cannot call a Grok Bot to ask
+            # what happened — MCP runs bot → Trovis only — so the fuller
+            # account has to arrive with the report and wait behind a button.
+            "trovis.job.details": _clean(details, 6000),
         },
     )
     _remember_job(account_id, name, None)
@@ -449,6 +455,7 @@ async def report_job_finished(
 @mcp.tool()
 async def report_job_failed(
     reason: str,
+    details: str = "",
     job_id: str = "",
     bot_name: str = "",
     api_key: str = "",
@@ -458,6 +465,7 @@ async def report_job_failed(
 
     Args:
         reason: What went wrong, in one line.
+        details: The fuller account: what you tried, how far you got, what blocked you. Shown when someone clicks "Get more details" on the job.
         job_id: The id report_job_started returned. Omit to use this bot's most recent job.
         bot_name: This bot's name (same value you started the job with).
         api_key: Only if this MCP server has no Authorization header.
@@ -479,6 +487,7 @@ async def report_job_failed(
             "trovis.task.summary": clean_reason,
             "trovis.step.name": "job_failed",
             "trovis.response.content": clean_reason,
+            "trovis.job.details": _clean(details, 6000),
         },
         status_code=2,
         status_message=clean_reason,
