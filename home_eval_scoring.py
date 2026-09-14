@@ -341,8 +341,14 @@ DIAGNOSES = {
                                  "the abstention reasons say why.",
     "draft_blocked_by_validation": "A draft existed and the deterministic "
                                    "validator refused it. Read `rejected`.",
-    "required_evidence_unreachable": "The evidence this scenario turns on did "
-                                     "not reach the investigation.",
+    "required_evidence_not_delivered": "This investigation did not retrieve "
+                                       "the evidence the scenario turns on. A "
+                                       "fact about THIS RUN — the model may "
+                                       "simply not have asked — not proof the "
+                                       "tools cannot reach it.",
+    "required_evidence_unretrievable": "The scenario turns on something no "
+                                       "tool in the allowlist exposes. No "
+                                       "prompt or budget fixes this.",
     "pipeline_failed_before_decision": "No decision was reached at all. This is "
                                        "not an abstention.",
     "not_run": "The harness declined to run this attempt.",
@@ -357,7 +363,8 @@ DIAGNOSES = {
 
 
 def diagnose(*, status: dict[str, Any], worker_reports: list[dict[str, Any]] | None,
-             published: int, evidence_delivered: bool | None = None) -> dict[str, Any]:
+             published: int, evidence_delivered: bool | None = None,
+             evidence_unretrievable: bool = False) -> dict[str, Any]:
     """Which of the reviewer's questions this run answers.
 
     "Nothing was published" has at least five different causes and they call
@@ -391,8 +398,11 @@ def diagnose(*, status: dict[str, Any], worker_reports: list[dict[str, Any]] | N
         code = "draft_blocked_by_validation"
     elif candidates_known and candidates == 0:
         code = "no_candidate_raised"
+    elif evidence_unretrievable:
+        # No tool exposes it. Distinct from the model not having fetched it.
+        code = "required_evidence_unretrievable"
     elif evidence_delivered is False:
-        code = "required_evidence_unreachable"
+        code = "required_evidence_not_delivered"
     elif execution == "incomplete":
         code = "incomplete_execution"
     elif abstained:
@@ -409,7 +419,10 @@ def diagnose(*, status: dict[str, Any], worker_reports: list[dict[str, Any]] | N
         "candidate_count_reported": candidates_known,
         "validator_rejections": [r.get("rejected") for r in rejected],
         "abstention_reasons": [r.get("abstained") for r in abstained],
+        # Derived from what THIS investigation received. `None` means the
+        # instrumentation could not establish it — never "the probe said yes".
         "required_evidence_delivered": evidence_delivered,
+        "required_evidence_unretrievable": evidence_unretrievable,
     }
 
 
@@ -419,6 +432,7 @@ def assess(spec: dict[str, Any], findings: list[dict[str, Any]],
            worker_reports: list[dict[str, Any]] | None = None,
            delivery: dict[str, Any] | None = None,
            evidence_delivered: bool | None = None,
+           evidence_unretrievable: bool = False,
            restricted: bool = False) -> dict[str, Any]:
     """One scenario's result: settled facts, flags to read, and open questions."""
     details = details or []
@@ -463,7 +477,8 @@ def assess(spec: dict[str, Any], findings: list[dict[str, Any]],
         "status": status,
         "diagnosis": diagnose(status=status, worker_reports=worker_reports,
                               published=len(findings),
-                              evidence_delivered=evidence_delivered),
+                              evidence_delivered=evidence_delivered,
+                              evidence_unretrievable=evidence_unretrievable),
         "published": len(findings),
         "titles": [f.get("title") for f in findings],
         # `passed` counts only checks that actually ran and passed. An

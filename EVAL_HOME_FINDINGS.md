@@ -25,10 +25,11 @@ fixed here, and the corrected measurements are below.
 | Does the AI discover useful patterns? | **Not measured.** No live run. |
 | Is the required evidence delivered under the **production** budget? | **Measured.** 9 of 9 — see the correction to the old claim. |
 | Is the *repetition* pattern retrievable at all? | **No** (scenario E) — finding 2. |
-| Did the model actually receive the evidence it cited? | **Verifiable now** — captured per investigation, reported `unavailable` when it cannot be. |
+| Did the model actually receive the evidence it cited? | **Verifiable now** — captured per job execution, `unavailable` when it cannot be. |
+| Did this investigation receive the evidence the scenario turns on? | **Derived from actual delivery** — never from the probe. |
 | What does Home generation actually cost? | **Unmeasured.** No live run, and `claude-opus-5` has no price in the table. |
 | Do the fixtures establish what the rubric claims? | **Measured.** 120 checks. |
-| Does the harness itself behave? | **Measured.** 153 checks. |
+| Does the harness itself behave? | **Measured.** 192 checks. |
 | Does the pipeline run end to end? | **Measured**, with a scripted model. |
 
 ---
@@ -75,7 +76,8 @@ Every attempt carries a `diagnosis`:
 | `no_candidate_raised` | Discovery proposed nothing to investigate. |
 | `investigated_and_withheld` | A candidate ran and was not published; the abstention reasons say why. |
 | `draft_blocked_by_validation` | A draft existed and the deterministic validator refused it. |
-| `required_evidence_unreachable` | The evidence the scenario turns on did not reach the investigation. |
+| `required_evidence_not_delivered` | This run did not retrieve what the scenario turns on. A fact about **this run** — the model may simply not have asked. |
+| `required_evidence_unretrievable` | No tool in the allowlist exposes it. No prompt or budget fixes this. |
 | `pipeline_failed_before_decision` | No decision was reached. **Not** an abstention. |
 | `incomplete_execution` | It did not finish what it started. **Not** an abstention. |
 | `outcome_not_reported` | No worker report carried a candidate count, so why nothing was published cannot be established. |
@@ -101,16 +103,40 @@ and 400, and it conflated levels that have to stay apart.
 3. **It is delivered within the PRODUCTION budget** by an independent,
    optimally-targeted probe (`investigation_tools.ToolBudget()`).
 4. **It was delivered during THIS investigation** — captured from the real
-   `InvestigationSession.delivered` by test-only instrumentation, and used to
-   check that published citations match what the model was actually shown.
+   `InvestigationSession.delivered`, per **job execution**, and used both to
+   check published citations and to answer whether the scenario's own evidence
+   requirements were met.
 5. **The model discovered a supported finding** — requires semantic review.
    Not measured.
 
-Levels 3 and 4 are different questions and are never substituted for each
+Levels 3 and 4 are different questions and are **never** substituted for each
 other. A successful probe says the budget *could* reach the evidence; it says
 nothing about what this run retrieved. Comparing citations against the
 publication's own evidence list — which the first version did — only checks
 that the publication agrees with itself.
+
+`diagnosis.required_evidence_delivered` is now derived from level 4 against the
+scenario's explicit `needs`. It used to be handed the level-3 probe result,
+which is the same substitution one field further on. The scripted run shows the
+two diverging, which is the whole point:
+
+```
+A#1  probe (level 3): delivered_within_budget = true
+     actual (level 4): value = false, missing = ["mix"]
+```
+
+The scripted model only calls `list_comparable_runs`, so it never obtains the
+`compare_outcome_mix` calculation scenario A requires. The budget could have
+reached it; this run did not ask. Those are different facts and the report now
+carries both.
+
+**"Not delivered" is not "unretrievable".** A model choosing not to retrieve
+something says nothing about whether the tools can. The diagnosis separates
+`required_evidence_not_delivered` (this run did not fetch it) from
+`required_evidence_unretrievable` (no tool exposes it — scenario E). Delivered
+run rows never imply a pattern arrived: E's requirement set carries
+`pattern:E` as explicitly unretrievable, so its rows arriving still yields
+`value: false` with the reason naming the pattern.
 
 When the instrumentation is not active, the delivery check reports
 **unavailable with a reason**. It is never reported as passed, and never
@@ -280,17 +306,46 @@ the prices are this repository's, and only the provider knows what it charged.
 
 **Actual usage: 0 model calls, 0 tokens, $0.00.** No live evaluation ran.
 
+### Usage follows the job that incurred it
+
+Usage is attributed per **job execution** — one call of `analysis_jobs.run_one()`,
+which claims exactly one job — and rolled up to the reader that owns the job,
+then to the attempt. The previous version took a meter delta around
+`drain(max_jobs=3)`; a drain runs whatever is queued, so another fixture's job
+executing inside that window was billed to whoever triggered the drain:
+
+```
+Queue scenario B's job. Run scenario A.
+  BEFORE:  A lists B's job as foreign — and still reports 9 calls as its own.
+  NOW:     job 1 (B, account 1) = 5 calls, kept under B's identity
+           job 2 (A, account 2) = 4 calls, A's own usage
+           A reports 4. Calls outside any job execution: 0.
+```
+
+Ownership resolves from `analysis_jobs` — account **and** `viewer_user_id` from
+the stored request, because scenario H has two readers with different scopes in
+the *same* account. A job whose row cannot be read is recorded as
+`ownership: unknown` and its usage is reported under `unattributed`, never
+assigned to the current scenario. Failed and crashed executions keep their own
+usage and status.
+
+Reconciliation now covers **calls, reported input and output tokens, measured
+estimated cost, and outstanding reservations** — equal call totals were what
+hid the wrong ownership in the first place.
+
 ### Usage reconciliation — SCRIPTED run, no model, no spend
 
 `python3 run_home_eval.py --mode stub --scenarios A,H --repeat 2` (scripted
 model; the call counts are real, the answers are hand-written):
 
 ```
-usage:          "model_calls": 28
-reconciliation: {"global_model_calls": 28,
-                 "sum_of_attempt_totals": 28,
-                 "unattributed_model_calls": 0,
-                 "reconciles": true}
+usage:  "model_calls": 28
+reconciliation:
+  model_calls    global 28 | attempts 28 | job executions 28   reconciles
+  input_tokens   global  0 | attempts  0 | job executions  0   reconciles
+  output_tokens  global  0 | attempts  0 | job executions  0   reconciles
+  estimated_usd  global  0 | attempts  0 | job executions  0   reconciles
+  job_executions: 6   unattributed_executions: 0   problems: []
 
 A#1 total 5   (primary 5)
 A#2 total 5   (primary 5)
@@ -398,7 +453,7 @@ nothing saying they are different populations. **Severity: medium.**
 
 ```
 python3 test_home_eval_scenarios.py   ALL PASS (120 checks)   no network
-python3 test_home_eval_harness.py     ALL PASS (153 checks)   no network
+python3 test_home_eval_harness.py     ALL PASS (192 checks)   no network
 python3 run_home_eval.py --mode stub  9/9 reach execution=completed
 python3 run_home_eval.py --mode stub --scenarios B --repeat 2
                                       2 accounts, 2 jobs, 2 analysis ids, 5 calls each

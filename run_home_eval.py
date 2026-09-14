@@ -178,6 +178,9 @@ def main() -> int:
     import investigation_tools
     recorder = DeliveryRecorder(investigation_tools)
     recorder.install()
+    ledger = JobLedger(analysis_jobs, meter=meter, recorder=recorder,
+                       database=database)
+    ledger.install()
 
     started = time.time()
     results = []
@@ -199,30 +202,25 @@ def main() -> int:
                 results.append(run_one_scenario(
                     c, S, ctx, analysis_jobs, investigator,
                     attempt=attempt, meter=meter, usage_before=before,
-                    database=database, recorder=recorder))
+                    database=database, recorder=recorder, ledger=ledger))
 
+    ledger.uninstall()
     recorder.uninstall()
     attempt_totals = _sum_usage([r.get("usage_attempt_total") or {}
                                  for r in results])
     usage = meter.report()
+    executions = ledger.executions
+    by_execution = _sum_usage([ex["usage"] for ex in executions])
+    unowned = [ex for ex in executions if ex["ownership"] == "unknown"]
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "plan": plan,
         "usage": usage,
         # Every model call must land in exactly one attempt. A non-zero
         # `unattributed` is a harness defect, not a rounding detail.
-        "usage_reconciliation": {
-            "global_model_calls": usage["model_calls"],
-            "sum_of_attempt_totals": attempt_totals.get("model_calls", 0),
-            "unattributed_model_calls":
-                usage["model_calls"] - attempt_totals.get("model_calls", 0),
-            "reconciles": (usage["model_calls"]
-                           == attempt_totals.get("model_calls", 0)),
-            "sum_of_attempt_estimated_usd":
-                round(attempt_totals.get("estimated_usd", 0.0), 6),
-            "note": ("Attempt totals cover every reader investigated under an "
-                     "attempt. Do not also add the per-reader subtotals."),
-        },
+        "usage_reconciliation": _reconcile_usage(
+            usage, attempt_totals, by_execution, executions, unowned),
+        "job_executions": [_execution_summary(ex) for ex in executions],
         "elapsed_s": round(time.time() - started, 1),
         "results": results,
     }
@@ -281,15 +279,16 @@ def skipped_result(key: str, attempt: int, S, *, reason: str) -> dict:
 
 
 def _read_for(c, S, database, analysis_jobs, *, token: str, account_id: int,
-              meter, recorder, q: str) -> dict:
-    """One READER's investigation: enqueue, drain, read back, with its own
-    usage subtotal, its own job set and its own observed delivery.
+              viewer_user_id, meter, recorder, ledger, q: str) -> dict:
+    """One READER's investigation: enqueue, drain, read back.
 
-    Every reader gets one of these — including scenario H's restricted reader,
-    whose calls were previously spent globally and recorded nowhere.
+    Usage and delivery come from the JOB EXECUTIONS this reader owns, not from
+    a clock window around the drain. A drain runs whatever is queued, so the
+    window included other fixtures' jobs; the executions know which job they
+    were, and the job record knows whose it is.
     """
-    usage_before = meter.snapshot()
-    mark = recorder.mark() if recorder else 0
+    window_before = meter.snapshot()
+    ledger_mark = ledger.mark() if ledger else 0
     first = c.get(f"/home/findings?{q}", headers=S.auth(token)).json()
     drained = analysis_jobs.drain(max_jobs=3)
     after = c.get(f"/home/findings?{q}", headers=S.auth(token)).json()
@@ -298,47 +297,191 @@ def _read_for(c, S, database, analysis_jobs, *, token: str, account_id: int,
     details = [c.get(f"/home/findings/{f['id']}?{q}",
                      headers=S.auth(token)).json() for f in findings]
 
-    # Ownership comes from the job record, never from a missing field.
-    owned, foreign = [], []
-    for d in drained:
-        (owned if job_owner(database, d.get("job_id")) == account_id
-         else foreign).append(d)
+    executions = ledger.since(ledger_mark) if ledger else []
+    mine_ex = JobLedger.owned_by(executions, account_id=account_id,
+                                 viewer_user_id=viewer_user_id)
+    mine_ids = {ex["job_id"] for ex in mine_ex}
+    unknown_ex = [ex for ex in executions if ex["ownership"] == "unknown"]
+    foreign_ex = [ex for ex in executions
+                  if ex not in mine_ex and ex not in unknown_ex]
+
+    owned = [d for d in drained if d.get("job_id") in mine_ids]
+    foreign = [d for d in drained if d.get("job_id") not in mine_ids]
+
+    window = meter.delta(window_before)
+    accounted = _sum_usage([ex["usage"] for ex in executions])
+    if ledger is None:
+        # No per-job accounting available. Report the window and SAY SO, rather
+        # than reporting zero (which under-states) or the window as though it
+        # were attributed (which is the bug this replaced).
+        usage = window
+        attribution = "window_unattributed"
+        outside = {"model_calls": 0}
+    else:
+        usage = _sum_usage([ex["usage"] for ex in mine_ex])
+        attribution = "per_job_execution"
+        outside = {k: window.get(k, 0) - accounted.get(k, 0)
+                   for k in ("model_calls",)}
 
     return {
         "first": first, "after": after,
         "findings": findings, "details": details,
         "owned": owned, "foreign": foreign,
-        "delivery": (recorder.since(mark, account_id) if recorder else
-                     {"available": False,
-                      "reason": "delivery instrumentation was not installed"}),
-        "usage": meter.delta(usage_before),
+        "executions": mine_ex,
+        "foreign_executions": [_execution_summary(ex) for ex in foreign_ex],
+        "unattributed_executions": [_execution_summary(ex) for ex in unknown_ex],
+        # Model calls that happened during this reader's window but inside no
+        # job execution. Should be zero; reported rather than absorbed.
+        "calls_outside_job_execution": outside["model_calls"],
+        "usage_attribution": attribution,
+        "delivery": _merge_delivery([ex.get("delivery") for ex in mine_ex]),
+        "usage": usage,
+        "window_usage": window,
+    }
+
+
+def _execution_summary(ex: dict) -> dict:
+    ident = ex.get("identity") or {}
+    return {
+        "job_id": ex.get("job_id"),
+        "ownership": ex.get("ownership"),
+        "account_id": ident.get("account_id"),
+        "viewer_user_id": ident.get("viewer_user_id"),
+        "scope_key": ex.get("scope_key"),
+        "analysis_id": ex.get("analysis_id"),
+        "status": ex.get("status"),
+        "error": ex.get("error"),
+        "usage": ex.get("usage"),
+        "tags": ex.get("tags"),
+    }
+
+
+def _merge_delivery(parts: list) -> dict:
+    """One reader's delivery, from its own executions only.
+
+    No execution at all is UNAVAILABLE. An execution that delivered nothing is
+    OBSERVED EMPTY. The two stay apart: the first says we cannot tell what the
+    model saw, the second says it saw nothing.
+    """
+    usable = [p for p in parts if p and p.get("available")]
+    if not usable:
+        reasons = [p.get("reason") for p in parts if p and p.get("reason")]
+        return {"available": False,
+                "reason": reasons[0] if reasons
+                else "no owned job execution captured delivery"}
+    keys: set[str] = set()
+    calcs: set[str] = set()
+    for p in usable:
+        keys |= set(p.get("keys") or [])
+        calcs |= set(p.get("calculations") or [])
+    return {"available": True, "executions": len(usable),
+            "keys": sorted(keys), "calculations": sorted(calcs),
+            "observed_empty": not keys and not calcs,
+            "note": "Union over THIS reader's own job executions only."}
+
+
+def actual_evidence_delivered(S, ctx, delivery: dict) -> dict:
+    """Did THIS investigation receive the evidence the scenario turns on?
+
+    Derived from captured delivery and the scenario's explicit requirements —
+    never from the independent probe, which answers a different question ("could
+    an optimally targeted search have reached it?").
+
+    Three outcomes, and the third is the one that was missing:
+      * True  — every requirement appears in what was delivered.
+      * False — something required was not delivered by this execution. That is
+                a fact about THIS RUN, not about the tools: a model may simply
+                not have asked.
+      * None  — the instrumentation could not establish it.
+
+    A requirement the tools cannot satisfy at all (scenario E's repeated
+    successful tool calls) is reported separately as `unretrievable`, because
+    "the model did not fetch it" and "no tool exposes it" call for opposite
+    responses.
+    """
+    spec = ctx["spec"]
+    required = S.required_keys(ctx)
+    unretrievable = []
+    if spec.get("pattern_retrievable") is False:
+        unretrievable.append({
+            "requirement": "pattern:" + spec["key"],
+            "reason": spec.get("pattern_note") or "no tool exposes this pattern",
+        })
+    if not delivery or not delivery.get("available"):
+        return {
+            "value": None,
+            "required": required,
+            "unretrievable": unretrievable,
+            "reason": (delivery or {}).get("reason")
+                      or "no delivery instrumentation for this investigation",
+        }
+    keys = set(delivery.get("keys") or [])
+    calcs = set(delivery.get("calculations") or [])
+    missing = []
+    for need in required:
+        if need.startswith("run:"):
+            if need not in keys:
+                missing.append(need)
+        elif need == "mix" and not any(k.startswith("mix.") for k in calcs):
+            missing.append(need)
+        elif need == "cost" and not any(k.startswith("cost.") for k in calcs):
+            missing.append(need)
+        elif need == "waits" and not any(k.startswith("wait.") for k in calcs):
+            missing.append(need)
+        elif need == "agent" and not any(k.startswith("agent_context:")
+                                         for k in keys):
+            missing.append(need)
+    satisfied = not missing and not unretrievable
+    return {
+        "value": bool(satisfied),
+        "required": required,
+        "delivered_keys": len(keys),
+        "delivered_calculations": len(calcs),
+        "missing": missing,
+        "unretrievable": unretrievable,
+        "reason": (
+            "every requirement was delivered to this investigation" if satisfied
+            else ("requirements this run did not retrieve: " + ", ".join(missing)
+                  if missing else "")
+            + ("; requirements no tool can satisfy: "
+               + ", ".join(u["requirement"] for u in unretrievable)
+               if unretrievable else "")
+        ),
     }
 
 
 def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
                      attempt: int, meter, usage_before: dict,
-                     database=None, recorder=None) -> dict:
+                     database=None, recorder=None, ledger=None) -> dict:
     """One fixture instance, through the whole real path, with its provenance."""
     key = ctx["key"]
     spec = ctx["spec"]
     token = ctx["token"]
     q = "days=7&tz=UTC"
 
+    if ledger is not None:
+        ledger.tags = {"scenario": key, "attempt": attempt,
+                       "fixture_id": ctx["fixture_id"], "reader": "primary"}
     snap = c.get(f"/home/snapshot?{q}", headers=S.auth(token)).json()
     primary = _read_for(c, S, database, analysis_jobs, token=token,
-                        account_id=ctx["account_id"], meter=meter,
-                        recorder=recorder, q=q)
+                        account_id=ctx["account_id"],
+                        viewer_user_id=ctx["user_id"], meter=meter,
+                        recorder=recorder, ledger=ledger, q=q)
     first, after = primary["first"], primary["after"]
     findings, details = primary["findings"], primary["details"]
     mine, foreign = primary["owned"], primary["foreign"]
 
     analysis = after.get("analysis") or {}
     discoverability = _discoverability(S, ctx)
+    # From what THIS investigation received — never from the probe, which
+    # answers "could an optimally targeted search have reached it?".
+    actual = actual_evidence_delivered(S, ctx, primary["delivery"])
     assessment = S.assess(
         spec, findings, details,
         analysis=analysis, worker_reports=mine,
         delivery=primary["delivery"],
-        evidence_delivered=discoverability["production"]["delivered_within_budget"],
+        evidence_delivered=actual["value"],
+        evidence_unretrievable=bool(actual["unretrievable"]),
     )
 
     usage = dict(primary["usage"])
@@ -366,6 +509,12 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
             "model_calls_this_attempt": usage["model_calls"],
         },
         "delivery": primary["delivery"],
+        "actual_evidence_delivered": actual,
+        "usage_attribution": primary["usage_attribution"],
+        "job_executions": [_execution_summary(ex) for ex in primary["executions"]],
+        "foreign_job_executions": primary["foreign_executions"],
+        "unattributed_job_executions": primary["unattributed_executions"],
+        "calls_outside_job_execution": primary["calls_outside_job_execution"],
         "execution": assessment["status"]["execution"],
         "analysis": {
             "state": analysis.get("state"),
@@ -395,9 +544,13 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
         # spent against the global meter and recorded nowhere, which is why the
         # global total exceeded the sum of the attempts.
         r = ctx["restricted"]
+        if ledger is not None:
+            ledger.tags = {"scenario": key, "attempt": attempt,
+                           "fixture_id": ctx["fixture_id"], "reader": "restricted"}
         reader = _read_for(c, S, database, analysis_jobs, token=r["token"],
-                           account_id=ctx["account_id"], meter=meter,
-                           recorder=recorder, q=q)
+                           account_id=ctx["account_id"],
+                           viewer_user_id=r["user_id"], meter=meter,
+                           recorder=recorder, ledger=ledger, q=q)
         out["restricted_reader"] = {
             "user_id": r["user_id"],
             "published": len(reader["findings"]),
@@ -405,12 +558,18 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
             "worker_reports": [_worker_report(d) for d in reader["owned"]],
             "job_ids": [d.get("job_id") for d in reader["owned"]],
             "delivery": reader["delivery"],
+            "actual_evidence_delivered": actual_evidence_delivered(
+                S, ctx, reader["delivery"]),
+            "job_executions": [_execution_summary(ex)
+                               for ex in reader["executions"]],
             "usage": reader["usage"],
             "assessment": S.assess(
                 spec, reader["findings"], reader["details"],
                 analysis=reader["after"].get("analysis") or {},
                 worker_reports=reader["owned"],
-                delivery=reader["delivery"], restricted=True),
+                delivery=reader["delivery"], restricted=True,
+                evidence_delivered=actual_evidence_delivered(
+                    S, ctx, reader["delivery"])["value"]),
         }
         out["usage_readers"] = [
             {"reader": "primary", "user_id": ctx["user_id"], "usage": usage},
@@ -435,13 +594,100 @@ def run_one_scenario(c, S, ctx, analysis_jobs, investigator, *,
     return out
 
 
+def _reconcile_usage(usage, attempt_totals, by_execution, executions,
+                     unowned) -> dict:
+    """Reconcile on every dimension, not just the call count.
+
+    Equal call totals can hide wrong ownership — which is exactly what
+    happened: scenario A reported another fixture's five calls as its own and
+    the arithmetic still balanced. So this compares calls, reported tokens,
+    measured cost and outstanding reservations, AND reports how many executions
+    could not be attributed at all.
+    """
+    problems = []
+    dims = {}
+    for field, label in (("model_calls", "model calls"),
+                         ("input_tokens", "reported input tokens"),
+                         ("output_tokens", "reported output tokens"),
+                         ("estimated_usd", "estimated cost")):
+        glob = usage.get({"estimated_usd": "estimated_usd"}.get(field, field), 0)
+        if field == "estimated_usd":
+            glob = usage.get("estimated_usd", 0.0)
+        attempts = attempt_totals.get(field, 0)
+        per_job = by_execution.get(field, 0)
+        ok = abs(glob - per_job) < 1e-6 and abs(attempts - per_job) < 1e-6
+        dims[field] = {"global": glob, "sum_of_attempt_totals": attempts,
+                       "sum_of_job_executions": per_job, "reconciles": ok}
+        if not ok:
+            problems.append(
+                f"{label}: global={glob} attempts={attempts} "
+                f"executions={per_job} — these must agree")
+    if unowned:
+        problems.append(
+            f"{len(unowned)} job execution(s) could not be attributed to any "
+            "account; their usage is reported under `unattributed`.")
+    return {
+        "dimensions": dims,
+        "job_executions": len(executions),
+        "unattributed_executions": len(unowned),
+        "unattributed_usage": _sum_usage([ex["usage"] for ex in unowned]),
+        "outstanding_reservations":
+            usage.get("of_which_unreconciled_reservations", 0.0),
+        "reconciles": not problems,
+        "problems": problems,
+        "note": ("Usage is attributed per JOB EXECUTION and rolled up to the "
+                 "reader that owns the job, then to the attempt. Attempt "
+                 "totals already include every reader; do not add the "
+                 "per-reader subtotals on top."),
+    }
+
+
+# The shape every usage total has, so "no executions" reads as zero rather
+# than as an empty dict a consumer has to guess at.
+USAGE_FIELDS = ("model_calls", "input_tokens", "output_tokens", "usage_missing",
+                "failed_calls", "measured_calls", "counted_input_tokens",
+                "count_requests", "estimated_usd")
+
+
 def _sum_usage(parts: list[dict]) -> dict:
-    total: dict[str, Any] = {}
+    total: dict[str, Any] = {k: 0 for k in USAGE_FIELDS}
     for part in parts:
         for k, v in (part or {}).items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
                 total[k] = round(total.get(k, 0) + v, 6)
     return total
+
+
+def job_identity(database, job_id) -> dict | None:
+    """Who a drained job belongs to, from the job record itself.
+
+    Account is not enough: scenario H has two readers with different scopes in
+    the SAME account, so `viewer_user_id` — which `analysis_jobs.request`
+    carries — is what separates them. A job whose row cannot be read resolves
+    to None and is attributed to nobody.
+    """
+    if job_id is None:
+        return None
+    try:
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute(
+                "SELECT account_id, scope_key, request FROM analysis_jobs "
+                f"WHERE id = {database.PH}", (int(job_id),))
+            row = cur.fetchone()
+    except Exception:
+        return None
+    if not row or row["account_id"] is None:
+        return None
+    try:
+        request = json.loads(row["request"] or "{}")
+    except (TypeError, ValueError):
+        request = {}
+    return {
+        "job_id": int(job_id),
+        "account_id": int(row["account_id"]),
+        "viewer_user_id": request.get("viewer_user_id"),
+        "scope_key": row["scope_key"] or request.get("scope_key"),
+    }
 
 
 def job_owner(database, job_id) -> int | None:
@@ -464,6 +710,100 @@ def job_owner(database, job_id) -> int | None:
     except Exception:
         return None
     return int(row["account_id"]) if row and row["account_id"] is not None else None
+
+
+class JobLedger:
+    """What each JOB EXECUTION cost and was shown — test-only.
+
+    The previous accounting took a meter delta around `drain(max_jobs=3)` and
+    called the whole thing the draining reader's usage. A drain runs whatever
+    is queued, so a second fixture's job executing inside that window was
+    billed to the reader that happened to trigger the drain: A would correctly
+    list B's job as foreign and still report B's five calls as its own. The
+    totals reconciled and the ownership was wrong, which is the worst shape a
+    number can have.
+
+    So the unit of accounting is one execution of `analysis_jobs.run_one()` —
+    the function that claims exactly one job and runs the investigation for it.
+    Everything spent inside that call belongs to that job, including failures,
+    requeues and the token-count requests the meter makes. A call that happens
+    outside any execution is recorded as unattributed rather than given to
+    whoever was nearby.
+    """
+
+    def __init__(self, analysis_jobs, *, meter, recorder, database):
+        self._mod = analysis_jobs
+        self._original = analysis_jobs.run_one
+        self._meter = meter
+        self._recorder = recorder
+        self._db = database
+        self.executions: list[dict] = []
+        self.tags: dict = {}
+        self.installed = False
+
+    def install(self) -> None:
+        ledger = self
+        original = self._original
+
+        def run_one():
+            before = ledger._meter.snapshot()
+            mark = ledger._recorder.mark() if ledger._recorder else 0
+            report = None
+            error = None
+            try:
+                report = original()
+            except Exception as exc:          # a crashed job still spent money
+                error = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                if report is not None or error is not None:
+                    ledger._record(report, error, before, mark)
+            return report
+
+        self._mod.run_one = run_one
+        self.installed = True
+
+    def uninstall(self) -> None:
+        self._mod.run_one = self._original
+        self.installed = False
+
+    def _record(self, report, error, before, mark) -> None:
+        job_id = (report or {}).get("job_id")
+        identity = job_identity(self._db, job_id)
+        usage = self._meter.delta(before)
+        delivery = (self._recorder.window(mark, identity["account_id"])
+                    if self._recorder and identity
+                    else (self._recorder.window(mark) if self._recorder else None))
+        self.executions.append({
+            "job_id": job_id,
+            "identity": identity,
+            "ownership": "resolved" if identity else "unknown",
+            "status": (report or {}).get("status") or ("crashed" if error else None),
+            "analysis_id": (report or {}).get("analysis_id"),
+            "scope_key": (report or {}).get("scope_key")
+                         or (identity or {}).get("scope_key"),
+            "error": error or (report or {}).get("error"),
+            "usage": usage,
+            "delivery": delivery,
+            "tags": dict(self.tags),
+        })
+
+    def mark(self) -> int:
+        return len(self.executions)
+
+    def since(self, mark: int) -> list[dict]:
+        return self.executions[mark:]
+
+    @staticmethod
+    def owned_by(executions, *, account_id, viewer_user_id) -> list[dict]:
+        """Executions belonging to ONE reader — account AND viewer."""
+        out = []
+        for ex in executions:
+            ident = ex.get("identity") or {}
+            if (ident.get("account_id") == account_id
+                    and ident.get("viewer_user_id") == viewer_user_id):
+                out.append(ex)
+        return out
 
 
 class DeliveryRecorder:
@@ -508,6 +848,44 @@ class DeliveryRecorder:
 
     def mark(self) -> int:
         return len(self.sessions)
+
+    def window(self, mark: int, account_id: int | None = None) -> dict[str, Any]:
+        """Delivery observed since `mark`, for one account or for all of them.
+
+        Used per JOB EXECUTION, which is the only scope where "what was
+        delivered" has a single answer. Unioning across an account mixes two
+        readers' investigations (scenario H) and, once a foreign job can drain
+        inside a reader's window, two scenarios'.
+
+        Calculations are captured alongside the evidence keys because a
+        scenario can require a server calculation (`mix`, `cost`, `wait`) that
+        never appears in the evidence ledger.
+        """
+        if not self.installed:
+            return {"available": False,
+                    "reason": "delivery instrumentation was not installed"}
+        mine = [s for s in self.sessions[mark:]
+                if account_id is None
+                or getattr(s, "account_id", None) == account_id]
+        if not mine:
+            return {"available": False,
+                    "reason": ("no investigation session was created"
+                               + (f" for account {account_id}" if account_id
+                                  else "") + " in this window")}
+        keys: set[str] = set()
+        calcs: set[str] = set()
+        for sess in mine:
+            keys |= set(getattr(sess, "delivered", ()) or ())
+            calcs |= set(getattr(sess, "calculations", {}) or {})
+        return {
+            "available": True,
+            "sessions": len(mine),
+            "keys": sorted(keys),
+            "calculations": sorted(calcs),
+            "observed_empty": not keys and not calcs,
+            "note": ("Captured from InvestigationSession.delivered — the keys "
+                     "this investigation actually put in front of the model."),
+        }
 
     def since(self, mark: int, account_id: int) -> dict[str, Any]:
         """Delivery observed for one account since `mark`.
@@ -997,9 +1375,8 @@ def print_summary(report: dict, mode: str) -> None:
     rec = report.get("usage_reconciliation") or {}
     print("\nusage: " + json.dumps(report["usage"]))
     print("reconciliation: " + json.dumps(rec))
-    if not rec.get("reconciles", True):
-        print(f"  !! {rec.get('unattributed_model_calls')} model call(s) are "
-              "not attributed to any attempt — harness defect.")
+    for line in rec.get("problems") or []:
+        print(f"  !! {line}")
 
 
 if __name__ == "__main__":

@@ -80,6 +80,9 @@ if True:
     investigator._client = lambda: meter.wrap(eval_stub_model.client())
     recorder = R.DeliveryRecorder(investigation_tools)
     recorder.install()
+    ledger = R.JobLedger(analysis_jobs, meter=meter, recorder=recorder,
+                         database=database)
+    ledger.install()
 
     runs = []
     for attempt in (1, 2):
@@ -89,7 +92,7 @@ if True:
         runs.append(R.run_one_scenario(
             c, S, ctx, analysis_jobs, investigator,
             attempt=attempt, meter=meter, usage_before=before,
-            database=database, recorder=recorder))
+            database=database, recorder=recorder, ledger=ledger))
 
     a, b = runs
     check("two attempts use two different fixture accounts",
@@ -130,10 +133,10 @@ if True:
     eval_stub_model.reset()
     first = R.run_one_scenario(c, S, same, analysis_jobs, investigator,
                                attempt=1, meter=meter, usage_before=meter.snapshot(),
-                               database=database, recorder=recorder)
+                               database=database, recorder=recorder, ledger=ledger)
     second = R.run_one_scenario(c, S, same, analysis_jobs, investigator,
                                 attempt=2, meter=meter, usage_before=meter.snapshot(),
-                                database=database, recorder=recorder)
+                                database=database, recorder=recorder, ledger=ledger)
     check("the product declines to re-analyse an unchanged audience",
           second["provenance"]["enqueued_on_first_read"] is False)
     check("and that re-read drains no job",
@@ -144,6 +147,7 @@ if True:
           first["fixture"]["account_id"] == second["fixture"]["account_id"]
           and "build_instance(c, key_, instance=attempt)" in open(
               "run_home_eval.py").read())
+    ledger.uninstall()
 
 # ===========================================================================
 # 2. Budget exhaustion is an explicit non-result
@@ -600,10 +604,15 @@ check("a validator rejection is named as one",
            worker_reports=[{"status": "done", "candidates": 1,
                             "rejected": ["overstated scope"]}])
       == "draft_blocked_by_validation")
-check("unreachable evidence is named as unreachable",
+check("evidence this run did not retrieve is named as not delivered",
       diag(analysis={"analysis_outcome": "complete"},
            worker_reports=[{"status": "done", "candidates": 1}],
-           evidence_delivered=False) == "required_evidence_unreachable")
+           evidence_delivered=False) == "required_evidence_not_delivered")
+check("and evidence no tool exposes is named as unretrievable",
+      diag(analysis={"analysis_outcome": "complete"},
+           worker_reports=[{"status": "done", "candidates": 1}],
+           evidence_delivered=False,
+           evidence_unretrievable=True) == "required_evidence_unretrievable")
 check("an investigated candidate that was withheld is named as such",
       diag(analysis={"analysis_outcome": "complete"},
            worker_reports=[{"status": "done", "candidates": 1,
@@ -713,6 +722,8 @@ if True:
     investigator._client = lambda: m2.wrap(eval_stub_model.client())
     rec2 = R.DeliveryRecorder(investigation_tools)
     rec2.install()
+    led2 = R.JobLedger(analysis_jobs, meter=m2, recorder=rec2, database=database)
+    led2.install()
     got = []
     for scen in ("A", "H"):
         for attempt in (1, 2):
@@ -722,7 +733,8 @@ if True:
             got.append(R.run_one_scenario(
                 c, S, ctx, analysis_jobs, investigator, attempt=attempt,
                 meter=m2, usage_before=before,
-                database=database, recorder=rec2))
+                database=database, recorder=rec2, ledger=led2))
+    led2.uninstall()
     rec2.uninstall()
 
     total = sum(r["usage_attempt_total"]["model_calls"] for r in got)
@@ -828,6 +840,227 @@ check("the note names the gaps instead",
       "candidates_not_examined" in inc["discovery_note"])
 check("the status still says it is not an abstention",
       inc["status"]["abstained"] is False)
+
+# ===========================================================================
+# 9. Usage follows the JOB that incurred it, not the reader that drained
+# ===========================================================================
+print("\n=== a foreign job draining inside a reader's window ===")
+
+if True:
+    c = CLIENT
+    m3 = R.Meter(max_calls=200, max_usd=5.0, database=database,
+                 model=investigator.MODEL, priced=False)
+    investigator._client = lambda: m3.wrap(eval_stub_model.client())
+    rec3 = R.DeliveryRecorder(investigation_tools)
+    rec3.install()
+    led3 = R.JobLedger(analysis_jobs, meter=m3, recorder=rec3, database=database)
+    led3.install()
+
+    # Queue B's job and leave it queued. Then run A — whose drain executes it.
+    bctx = S.build_instance(c, "B", instance=900)
+    c.get("/home/findings?days=7&tz=UTC", headers=S.auth(bctx["token"]))
+    actx = S.build_instance(c, "A", instance=900)
+    eval_stub_model.reset()
+    before = m3.snapshot()
+    ares = R.run_one_scenario(c, S, actx, analysis_jobs, investigator,
+                              attempt=1, meter=m3, usage_before=before,
+                              database=database, recorder=rec3, ledger=led3)
+
+    own = ares["job_executions"]
+    foreign = ares["foreign_job_executions"]
+    total_window = m3.delta(before)["model_calls"]
+    check("A drained a job that is not its own", bool(foreign))
+    b_jobs = [e for e in foreign if e["account_id"] == bctx["account_id"]]
+    check("B's job is attributed to B's account, not A's",
+          b_jobs and all(e["account_id"] != actx["account_id"] for e in b_jobs))
+    check("A's own execution is attributed to A's account",
+          own and all(e["account_id"] == actx["account_id"] for e in own))
+    a_calls = ares["usage"]["model_calls"]
+    b_calls = sum(e["usage"]["model_calls"] for e in b_jobs)
+    check(f"A reports only its own calls ({a_calls}), not the window's "
+          f"({total_window})", a_calls < total_window and b_calls > 0)
+    check("every call in the window belongs to exactly one job execution",
+          sum(e["usage"]["model_calls"]
+              for e in ares["job_executions"] + foreign) == total_window)
+    check("the foreign job keeps its usage under its own identity",
+          all(e["usage"]["model_calls"] > 0 for e in foreign))
+    check("no call happened outside a job execution",
+          ares["calls_outside_job_execution"] == 0)
+    check("the attempt total does not absorb the foreign job",
+          ares["usage_attempt_total"]["model_calls"] == a_calls)
+    check("and the accounting says it is per-job, not a window",
+          ares["usage_attribution"] == "per_job_execution")
+    check("A's delivery does not borrow B's evidence",
+          not (set(ares["delivery"].get("keys") or [])
+               & set((foreign and rec3 and []) or [])) )
+
+    # Two readers in the same account keep separate attribution.
+    print("\n=== two readers, one account ===")
+    hctx = S.build_instance(c, "H", instance=900)
+    eval_stub_model.reset()
+    hres = R.run_one_scenario(c, S, hctx, analysis_jobs, investigator,
+                              attempt=1, meter=m3, usage_before=m3.snapshot(),
+                              database=database, recorder=rec3, ledger=led3)
+    rr = hres["restricted_reader"]
+    check("both readers ran in the same account",
+          hres["fixture"]["account_id"] == hctx["account_id"])
+    check("the primary reader's executions carry its own viewer id",
+          all(e["viewer_user_id"] == hctx["user_id"]
+              for e in hres["job_executions"]))
+    check("the restricted reader's executions carry a different viewer id",
+          rr["job_executions"]
+          and all(e["viewer_user_id"] == rr["user_id"]
+                  for e in rr["job_executions"]))
+    check("account alone would have merged them — viewer id keeps them apart",
+          hctx["user_id"] != rr["user_id"])
+    check("neither reader's subtotal contains the other's job",
+          set(e["job_id"] for e in hres["job_executions"]).isdisjoint(
+              e["job_id"] for e in rr["job_executions"]))
+    check("and the attempt total is exactly their sum",
+          hres["usage_attempt_total"]["model_calls"]
+          == hres["usage"]["model_calls"] + rr["usage"]["model_calls"])
+
+    led3.uninstall()
+    rec3.uninstall()
+
+print("\n=== failures and unknown ownership stay put ===")
+
+class _Boom(Exception):
+    pass
+
+
+class _FakeJobs:
+    """Stands in for analysis_jobs so run_one's outcome can be chosen."""
+
+    def __init__(self, behaviour):
+        self.behaviour = list(behaviour)
+
+    meter = None
+
+    def run_one(self):
+        if not self.behaviour:
+            return None
+        kind, payload, spend = self.behaviour.pop(0)
+        # Spend INSIDE the execution, which is what the ledger measures.
+        self.meter.calls += spend
+        if kind == "raise":
+            raise _Boom(payload)
+        return payload
+
+
+mfail = R.Meter(max_calls=50, max_usd=5.0, database=database,
+                model=investigator.MODEL, priced=False)
+fake_jobs = _FakeJobs([
+    ("ok", {"job_id": 424242, "status": "failed", "error": "transport"}, 3),
+    ("raise", "kaboom", 2),
+])
+fake_jobs.meter = mfail
+led4 = R.JobLedger(fake_jobs, meter=mfail, recorder=None, database=database)
+led4.install()
+fake_jobs.run_one()
+try:
+    fake_jobs.run_one()
+except _Boom:
+    pass
+led4.uninstall()
+
+check("a FAILED job still records an execution", len(led4.executions) == 2)
+check("its usage is retained", led4.executions[0]["usage"]["model_calls"] == 3)
+check("its failure status is retained",
+      led4.executions[0]["status"] == "failed")
+check("a CRASHED job records an execution too",
+      led4.executions[1]["status"] == "crashed"
+      and led4.executions[1]["usage"]["model_calls"] == 2)
+check("a job id that resolves to nothing is explicitly unattributed",
+      all(e["ownership"] == "unknown" for e in led4.executions))
+check("and carries no borrowed account",
+      all(e["identity"] is None for e in led4.executions))
+check("unknown-ownership usage is not assigned to any reader",
+      R.JobLedger.owned_by(led4.executions, account_id=1,
+                           viewer_user_id=1) == [])
+
+# ===========================================================================
+# 10. Actual delivery, not probe reachability
+# ===========================================================================
+print("\n=== required evidence: delivered vs merely reachable ===")
+
+class _Ctx(dict):
+    pass
+
+
+def ctx_for(key, ids):
+    return {"key": key, "spec": S.scenario(key), "ids": ids,
+            "account_id": 1, "user_id": 1}
+
+
+bctx_fake = ctx_for("C", {"job": 1, "runs": [11, 12, 13]})
+required = S.required_keys(bctx_fake)
+check("scenario C requires its three run rows",
+      required == ["run:11", "run:12", "run:13"])
+
+# (a) probe succeeded, this investigation omitted a requirement
+partial = R.actual_evidence_delivered(
+    S, bctx_fake, {"available": True, "keys": ["run:11"], "calculations": []})
+check("a probe that could reach it does not make actual delivery true",
+      partial["value"] is False)
+check("and the missing requirements are named",
+      partial["missing"] == ["run:12", "run:13"])
+check("the reason says this RUN did not retrieve it",
+      "did not retrieve" in partial["reason"])
+
+# (b) everything actually delivered
+full = R.actual_evidence_delivered(
+    S, bctx_fake, {"available": True,
+                   "keys": ["run:11", "run:12", "run:13"], "calculations": []})
+check("evidence this investigation really received is true",
+      full["value"] is True and not full["missing"])
+
+# (c) instrumentation unavailable -> unknown with a reason
+unk = R.actual_evidence_delivered(
+    S, bctx_fake, {"available": False, "reason": "no session captured"})
+check("no instrumentation is unknown, not false",
+      unk["value"] is None)
+check("and carries the reason", "no session captured" in unk["reason"])
+
+# (d) observed-empty is distinct from unavailable
+empty = R.actual_evidence_delivered(
+    S, bctx_fake, {"available": True, "keys": [], "calculations": [],
+                   "observed_empty": True})
+check("an observed-empty delivery is a real False, not unknown",
+      empty["value"] is False and empty["missing"] == required)
+check("empty and unavailable are different answers",
+      empty["value"] is not unk["value"])
+
+# (e) another reader's delivery cannot satisfy this one
+other_reader = R.actual_evidence_delivered(
+    S, bctx_fake, {"available": True, "keys": ["run:98", "run:99"],
+                   "calculations": []})
+check("another investigation's evidence satisfies nothing here",
+      other_reader["value"] is False
+      and other_reader["missing"] == required)
+check("delivery is merged per reader, from its own executions only",
+      "own job executions only" in R._merge_delivery(
+          [{"available": True, "keys": ["run:1"], "calculations": []}])["note"])
+
+# (f) scenario E: run rows delivered, pattern still unretrievable
+ectx = ctx_for("E", {"job": 1, "heavy": [21, 22], "light": 23})
+e_required = S.required_keys(ectx)
+e_all = R.actual_evidence_delivered(
+    S, ectx, {"available": True,
+              "keys": [k for k in e_required if k.startswith("run:")],
+              "calculations": ["cost.spend_usd.7d"]})
+check("E's run rows alone do not satisfy its requirement",
+      e_all["value"] is False)
+check("because its pattern is unretrievable, not merely unfetched",
+      e_all["unretrievable"] and "pattern:E" == e_all["unretrievable"][0]["requirement"])
+check("and the reason says no tool can satisfy it",
+      "no tool can satisfy" in e_all["reason"])
+check("that is a different diagnosis from 'this run did not fetch it'",
+      SC.diagnose(status={"execution": "completed"},
+                  worker_reports=[{"status": "done", "candidates": 1}],
+                  published=0, evidence_delivered=False,
+                  evidence_unretrievable=True)["code"]
+      == "required_evidence_unretrievable")
 
 CLIENT.__exit__(None, None, None)
 
