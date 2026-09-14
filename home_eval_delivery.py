@@ -353,7 +353,50 @@ def check_requirements(requirements: list[dict], delivery: dict) -> dict:
     `False` when one definitively was not. `None` when something could not be
     established — an unsupported requirement kind, or missing instrumentation.
     An unknown never passes.
+
+    When the report carries `per_execution` (a reader with one or more job
+    executions), every execution is assessed ON ITS OWN and the reader's answer
+    is the strongest single-execution answer. Requirements are never pooled
+    across executions: one execution's `inspect_run` cannot complete another
+    execution's comparison.
     """
+    parts = (delivery or {}).get("per_execution")
+    if parts is not None:
+        return _check_across_executions(requirements, delivery, parts)
+    return _check_one_execution(requirements, delivery)
+
+
+# True beats "could not establish", which beats a definite "not delivered": a
+# reader whose other execution left something unverifiable must not be reported
+# as having definitively missed it.
+_RANK = {True: 2, None: 1, False: 0}
+
+
+def _check_across_executions(requirements: list[dict], delivery: dict,
+                             parts: list[dict]) -> dict:
+    usable = [p for p in parts if p and p.get("available")]
+    if not usable:
+        return _check_one_execution(requirements, delivery)
+    verdicts = [_check_one_execution(requirements, p) for p in usable]
+    best = max(verdicts, key=lambda v: _RANK[v["value"]])
+    out = dict(best)
+    out["executions_assessed"] = len(usable)
+    out["per_execution_values"] = [v["value"] for v in verdicts]
+    if delivery.get("payload_capture_partial"):
+        # Some execution of this reader was not instrumented. Whatever the
+        # chosen verdict, the reader's capture is not complete and the report
+        # must not read as though it were.
+        out["payload_capture_partial"] = True
+        out["reason"] = (out["reason"] + "; payload capture was unavailable for "
+                         f"{delivery.get('executions_without_payload_capture', 0)} "
+                         "of this reader's job executions")
+    if len(usable) > 1:
+        out["reason"] += (f" (strongest of {len(usable)} job executions, each "
+                          "assessed on its own delivery)")
+    return out
+
+
+def _check_one_execution(requirements: list[dict], delivery: dict) -> dict:
     if not delivery or not delivery.get("available"):
         return {
             "value": None,

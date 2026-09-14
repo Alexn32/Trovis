@@ -1174,6 +1174,257 @@ if True:
     check("F's delivered comparison satisfies none of B's requirements",
           v_cross["value"] is False and v_cross["missing"])
 
+# ===========================================================================
+# 11. The captured contents reach the assessment — end to end
+# ===========================================================================
+# Section 10 proves the instrumentation records the right thing. It did, and
+# the assessment still never saw it: `_merge_delivery` reduced every execution
+# to its evidence keys and calculation ids before handing it on, so
+# `--scenarios B,F,H` reported `payload_capture: missing` and
+# `actual_evidence_delivered.value: null` for all three. These go through
+# `run_one_scenario` — the real enqueue/drain/read path — because a direct call
+# to a delivery helper cannot see a runner that drops the helper's output.
+print("\n=== captured payloads reach assessment through the runner ===")
+
+
+class _ScriptedClient:
+    """A model that makes exactly the tool calls it is told to.
+
+    `eval_stub_model` deliberately opens with one `list_comparable_runs` and
+    stops, which exercises the pipeline but can never deliver a scenario's full
+    evidence. These regressions need both directions, so the tool script is an
+    argument.
+    """
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.turns = 0
+        self.run_ref = None
+        outer = self
+
+        class M:
+            def create(self, **kw):
+                return outer._create(**kw)
+
+        self.messages = M()
+
+    def _create(self, **kw):
+        import eval_stub_model as SM
+        system = kw.get("system") or ""
+        seen = SM._first_run_ref(kw.get("messages") or [])
+        if seen and not self.run_ref:
+            self.run_ref = seen
+        if system.startswith("You are Trovis, examining"):
+            return SM._text({"candidates": [{
+                "topic": "recorded-outcomes",
+                "question": "What do the recorded outcomes of this job show?",
+                "hypothesis": "Some items did not finish.",
+                "category": "attention",
+                "why_this_reader": "They are responsible for this work.",
+                "evidence_needed": ["the job's runs and their outcomes"],
+            }]})
+        if system.startswith("You are Trovis, investigating"):
+            if self.turns < len(self._script):
+                name, args = self._script[self.turns]
+                self.turns += 1
+                return SM._tool(name, args, call_id=f"s{self.turns}")
+            self.turns += 1
+            ref = self.run_ref
+            return SM._text({
+                "verdict": "qualified",
+                "summary": "The retrieved runs carry the outcomes shown.",
+                "for": [f"run:{ref}"] if ref else [],
+                "against": [],
+                "alternatives_considered": ["a different population"],
+                "unknown": ["why any individual item ended as it did"],
+                "sample": {"observed": 1, "comparable": 1},
+            })
+        if system.startswith("You are Trovis, checking"):
+            return SM._text({"decision": "publish", "reason": "observation only",
+                             "claim_kind": "observation",
+                             "confidence": "qualified",
+                             "overstated_phrases": []})
+        if system.startswith("You are Trovis, ordering"):
+            return SM._text({"order": [{"index": 0, "score": 0.5,
+                                        "reason": "only one"}],
+                             "merge": [], "drop": []})
+        ref = self.run_ref
+        if not ref:
+            return SM._text({"withdraw": True})
+        return SM._text({
+            "title": "One work item's recorded outcome",
+            "explanation": "The record shows this item's outcome as retrieved.",
+            "consequence": None,
+            "claims": [{"text": "This item has the outcome the record shows.",
+                        "kind": "observation", "evidence": [f"run:{ref}"]}],
+            "entities": [{"kind": "run", "id": int(ref)}],
+            "evidence": [{"kind": "run", "ref": ref, "note": "the retrieved row"}],
+            "uncertainty": ["this is one item, not a pattern"],
+            "next_step": {"kind": "review_runs", "text": "Open the item."},
+            "graphic": {"kind": "none"},
+        })
+
+
+def _e2e(key, script_for, *, instance, recorder=None):
+    """Run ONE scenario end to end with a scripted tool sequence.
+
+    Returns the runner's own result dict, so the assertions read exactly the
+    fields `--mode stub` writes into the transcript.
+    """
+    meter = R.Meter(max_calls=60, max_usd=5.0, database=database,
+                    model=investigator.MODEL, priced=False)
+    rec = recorder if recorder is not None else R.DeliveryRecorder(
+        investigation_tools)
+    own_recorder = recorder is None
+    if own_recorder:
+        rec.install()
+    ledger = R.JobLedger(analysis_jobs, meter=meter, recorder=rec,
+                         database=database)
+    ledger.install()
+    try:
+        ctx = S.build_instance(CLIENT, key, instance=instance)
+        client = _ScriptedClient(script_for(ctx))
+        investigator._client = lambda: meter.wrap(client)
+        res = R.run_one_scenario(
+            CLIENT, S, ctx, analysis_jobs, investigator,
+            attempt=1, meter=meter, usage_before=meter.snapshot(),
+            database=database, recorder=rec, ledger=ledger)
+        return ctx, res
+    finally:
+        ledger.uninstall()
+        if own_recorder:
+            rec.uninstall()
+
+
+# --- the evidence the scenario turns on IS delivered -----------------------
+b_full_ctx, b_full = _e2e(
+    "B",
+    lambda ctx: (
+        [("list_comparable_runs", {"job_id": ctx["ids"]["job"], "limit": 25})]
+        + [("inspect_run", {"run_id": r}) for r in ctx["ids"]["stalled"]]
+        + [("compare_outcome_mix", {"days": 7, "job_id": ctx["ids"]["job"]})]
+    ), instance=11)
+bd, ba = b_full["delivery"], b_full["actual_evidence_delivered"]
+check("the runner's delivery report carries payload capture",
+      bd.get("payload_capture") is True)
+check("and carries the captured payloads themselves",
+      bool(bd.get("payloads")))
+check("and keeps them per job execution rather than flattened away",
+      isinstance(bd.get("per_execution"), list) and bd["per_execution"])
+check("B with the full retrieval is assessed as delivered",
+      ba["value"] is True, )
+check("with no requirement unknown, so nothing passed by default",
+      ba["unknown"] == [] and ba["missing"] == [])
+check("and the supporting calculations are counted as delivered",
+      ba["delivered_calculations"] > 0)
+
+# --- summary-only retrieval does NOT satisfy the failing step --------------
+b_sum_ctx, b_sum = _e2e(
+    "B",
+    lambda ctx: [
+        ("list_comparable_runs", {"job_id": ctx["ids"]["job"], "limit": 25}),
+        ("compare_outcome_mix", {"days": 7, "job_id": ctx["ids"]["job"]}),
+    ], instance=12)
+bs = b_sum["actual_evidence_delivered"]
+check("summary-only B reaches a definite answer, not 'unavailable'",
+      bs["value"] is False)
+check("and it is the failing step that is named missing",
+      any(r.get("kind") == "failing_step" for r in bs["missing"]))
+check("the run summaries themselves still count as delivered",
+      b_sum["delivery"].get("keys")
+      and any(k.startswith("run:") for k in b_sum["delivery"]["keys"]))
+check("and payload capture is reported present, not missing",
+      b_sum["delivery"].get("payload_capture") is True)
+
+# --- a calculation that was generated but never fitted ---------------------
+# The runner's own path always fits, so the unfitted case is produced by
+# settling a real response as wholly dropped inside a real execution's session,
+# then letting the runner report it.
+print("\n=== an unfitted / dropped calculation is not a delivered one ===")
+f_ctx, f_res = _e2e(
+    "F",
+    lambda ctx: [("compare_outcome_mix", {"days": 7, "job_id": ctx["ids"]["job"]})],
+    instance=13)
+fa = f_res["actual_evidence_delivered"]
+check("F with a fitted comparison is assessed as delivered",
+      fa["value"] is True and fa["delivered_calculations"] > 0)
+
+sess_drop = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=f_ctx["account_id"], only_user_ids=None, financial_visible=True)
+raw_drop = sess_drop.run("compare_outcome_mix",
+                         {"days": 7, "job_id": f_ctx["ids"]["job"]})
+resp_drop = sess_drop._responses.get(id(raw_drop), (None, None))[1]
+sess_drop._settle_delivery(resp_drop, {}, whole_result_dropped=True)
+drop_report = HD.delivery_report([sess_drop])
+merged_drop = R._merge_delivery([drop_report])
+v_drop = R.actual_evidence_delivered(S, f_ctx, merged_drop)
+check("a registered calculation with a dropped response is not delivered",
+      v_drop["value"] is False and v_drop["delivered_calculations"] == 0)
+check("even though the session registered the calculation ids",
+      len(getattr(sess_drop, "calculations", {}) or {}) > 0)
+check("and the merge reports the dropped response rather than hiding it",
+      bool(merged_drop.get("dropped_responses")))
+check("the raw tool result did carry the calculation ids",
+      bool((raw_drop or {}).get("calculation_ids")))
+
+# --- missing instrumentation stays explicitly unavailable ------------------
+print("\n=== missing instrumentation stays unavailable, never satisfied ===")
+plain_e2e = PRISTINE_SESSION(
+    account_id=f_ctx["account_id"], only_user_ids=None, financial_visible=True)
+plain_e2e.retrieve("compare_outcome_mix",
+                   {"days": 7, "job_id": f_ctx["ids"]["job"]})
+merged_plain = R._merge_delivery([HD.delivery_report([plain_e2e])])
+v_plain = R.actual_evidence_delivered(S, f_ctx, merged_plain)
+check("an uninstrumented execution reports payload capture absent",
+      merged_plain.get("payload_capture") is False)
+check("and its content requirement is unknown, never true",
+      v_plain["value"] is None and v_plain["unknown"])
+check("no owned execution at all is unavailable, not observed-empty",
+      R._merge_delivery([])["available"] is False
+      and "observed_empty" not in R._merge_delivery([]))
+
+# --- partial capture is not full capture -----------------------------------
+mixed = R._merge_delivery([HD.delivery_report([plain_e2e]),
+                           HD.delivery_report([sess_drop])])
+check("a reader with one uninstrumented execution is not fully observed",
+      mixed.get("payload_capture") is False
+      and mixed.get("payload_capture_partial") is True)
+check("and the count of uncaptured executions is reported",
+      mixed.get("executions_without_payload_capture") == 1)
+v_mixed = R.actual_evidence_delivered(S, f_ctx, mixed)
+check("the partial state is carried into the assessment's reason",
+      "payload capture was unavailable" in v_mixed["reason"])
+
+# --- two executions are never pooled ---------------------------------------
+print("\n=== unrelated executions are not pooled into sufficiency ===")
+# A fresh B fixture, seeded last: `home_eval_scenarios._classify` files work by
+# title across the whole database, so a later B re-points an earlier B's runs
+# at the later job. Building this one last keeps its own job ids current.
+pool_ctx = S.build_instance(CLIENT, "B", instance=14)
+half_a = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=pool_ctx["account_id"], only_user_ids=None,
+    financial_visible=True)
+for r in pool_ctx["ids"]["stalled"]:
+    half_a.retrieve("inspect_run", {"run_id": r})
+half_b = HD.recording_session_class(PRISTINE_SESSION)(
+    account_id=pool_ctx["account_id"], only_user_ids=None,
+    financial_visible=True)
+half_b.retrieve("list_comparable_runs",
+                {"job_id": pool_ctx["ids"]["job"], "limit": 25})
+half_b.retrieve("compare_outcome_mix",
+                {"days": 7, "job_id": pool_ctx["ids"]["job"]})
+split = R._merge_delivery([HD.delivery_report([half_a]),
+                           HD.delivery_report([half_b])])
+v_split = R.actual_evidence_delivered(S, pool_ctx, split)
+check("two executions each holding half the evidence do not add up to enough",
+      v_split["value"] is False)
+check("although the top-level union does contain both halves",
+      len(split["keys"]) > len(HD.delivery_report([half_b])["keys"]))
+together = HD.delivery_report([half_a, half_b])
+check("the same two sessions inside ONE execution do satisfy it",
+      R.actual_evidence_delivered(
+          S, pool_ctx, R._merge_delivery([together]))["value"] is True)
+
 CLIENT.__exit__(None, None, None)
 
 print("\n" + ("FAILED: " + "; ".join(failures) if failures else "ALL PASS"))

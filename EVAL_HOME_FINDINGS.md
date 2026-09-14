@@ -29,7 +29,7 @@ fixed here, and the corrected measurements are below.
 | Did this investigation receive the evidence the scenario turns on? | **Derived from actual delivery** — never from the probe. |
 | What does Home generation actually cost? | **Unmeasured.** No live run, and `claude-opus-5` has no price in the table. |
 | Do the fixtures establish what the rubric claims? | **Measured.** 122 checks. |
-| Does the harness itself behave? | **Measured.** 217 checks. |
+| Does the harness itself behave? | **Measured.** 241 checks. |
 | Does the pipeline run end to end? | **Measured**, with a scripted model. |
 
 ---
@@ -212,6 +212,50 @@ When the instrumentation is not active, the delivery check reports
 inferred from the publication. An **observed empty** delivery ledger stays
 distinct from **unavailable**: the first says the model was shown nothing, the
 second says we do not know what it was shown.
+
+#### 3 · The captured contents never reached the assessment
+
+The instrumentation above was correct and the runner threw its output away.
+`_merge_delivery` reduced each job execution's report to its evidence keys and
+calculation ids before handing it to the assessment, so every content
+requirement read "payload capture unavailable" and the end-to-end run reported
+nothing at all:
+
+```
+run_home_eval.py --mode stub --scenarios B,F,H
+
+BEFORE  B  payload_capture: missing   actual_evidence_delivered.value: null
+        F  payload_capture: missing   actual_evidence_delivered.value: null
+        H  payload_capture: missing   actual_evidence_delivered.value: null
+           reason: "could not be established: payload capture unavailable ..."
+
+NOW     B  payload_capture: true   value: false
+           "runs with no delivered 'approval_service' failing step: [...]"
+        F  payload_capture: true   value: false
+           "no delivered comparison for job N over 7d carrying
+            ['started','completed','abandoned']"
+        H  payload_capture: true   value: false
+           "no delivered cost evidence carrying
+            ['spend_usd','coverage_ratio','unpriced_token_spans']"
+```
+
+`false` is the right answer for the scripted model: it opens with one
+`list_comparable_runs` and stops. The defect was that the harness could not
+say so — every scenario read `null`, which is the answer "we cannot tell",
+and it was not true.
+
+Each execution's report now travels **intact**, under `per_execution`. The
+top-level union is for the transcript only; requirements are checked against
+**one execution at a time**, and a reader's answer is the strongest
+single-execution answer. Two executions each holding half of scenario B's
+evidence do **not** add up to a satisfied requirement — the same two sessions
+inside one execution do.
+
+Partial capture is not full capture. A reader with one instrumented and one
+uninstrumented execution reports `payload_capture: false`,
+`payload_capture_partial: true`, the count of uncaptured executions, and
+carries that into the assessment's reason. Reporting it as observed would be
+the same substitution one level further out.
 
 ### Corrected measurement — level 3, production budget
 
@@ -522,7 +566,7 @@ nothing saying they are different populations. **Severity: medium.**
 
 ```
 python3 test_home_eval_scenarios.py   ALL PASS (122 checks)   no network
-python3 test_home_eval_harness.py     ALL PASS (217 checks)   no network
+python3 test_home_eval_harness.py     ALL PASS (241 checks)   no network
 python3 run_home_eval.py --mode stub  9/9 reach execution=completed
 python3 run_home_eval.py --mode stub --scenarios B --repeat 2
                                       2 accounts, 2 jobs, 2 analysis ids, 5 calls each
@@ -539,6 +583,12 @@ test_home_snapshot_bounds.py          PASS
 test_home_snapshot_integrity.py       PASS
 test_home_desk.py                     PASS
 test_surface_breadth.py               PASS
+```
+
+```
+python3 run_home_eval.py --mode stub --scenarios B,F,H
+        payload_capture true for all three; every scenario reaches a definite
+        answer with a named missing requirement, none reads null
 ```
 
 Python 3.11.15, SQLite 3.45.1. **SQLite only — Postgres not exercised.** All
@@ -601,3 +651,13 @@ transcript carries the worker's own `candidates`, `rejected`, `abstained`,
    easier than production.
 10. **No adversarial scenario** — nothing evaluates an agent emitting text that
    tries to steer the investigation.
+11. **A reader's answer is its strongest single execution.** Requirements are
+   never pooled across executions, but when a reader has more than one, the
+   reader-level verdict is whichever execution established the most. That is
+   the right unit — one execution is one investigation — and it does mean the
+   reader-level field is not "every execution saw this".
+12. **`home_eval_scenarios._classify` files seeded work by title across the
+   whole database**, so seeding a second fixture of the same scenario re-points
+   the first one's runs at the later job. Left as is (it is fixture-helper
+   behaviour outside this correction's scope); the new regressions order their
+   fixtures around it rather than relying on an earlier fixture staying put.

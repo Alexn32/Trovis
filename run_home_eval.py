@@ -362,6 +362,19 @@ def _merge_delivery(parts: list) -> dict:
     No execution at all is UNAVAILABLE. An execution that delivered nothing is
     OBSERVED EMPTY. The two stay apart: the first says we cannot tell what the
     model saw, the second says it saw nothing.
+
+    This used to reduce each execution to its evidence keys and calculation ids
+    and throw the rest away. The instrumentation was capturing payloads at
+    `_settle_delivery` and the assessment never saw them, so every content
+    requirement read `payload capture unavailable` and every scenario's
+    `actual_evidence_delivered` came back `null` — `--scenarios B,F,H` reported
+    exactly that. So each execution's report is carried through INTACT, under
+    `per_execution`, and the assessment runs against those.
+
+    The union at the top level is for the transcript only: requirements are
+    checked per execution (`home_eval_delivery.check_requirements` reads
+    `per_execution` when it is present), so two unrelated executions can never
+    be pooled into evidence neither of them delivered.
     """
     usable = [p for p in parts if p and p.get("available")]
     if not usable:
@@ -370,14 +383,39 @@ def _merge_delivery(parts: list) -> dict:
                 "reason": reasons[0] if reasons
                 else "no owned job execution captured delivery"}
     keys: set[str] = set()
-    calcs: set[str] = set()
+    calcs: dict = {}
+    payloads: list = []
+    dropped: list = []
+    captured = [bool(p.get("payload_capture")) for p in usable]
     for p in usable:
         keys |= set(p.get("keys") or [])
-        calcs |= set(p.get("calculations") or [])
-    return {"available": True, "executions": len(usable),
-            "keys": sorted(keys), "calculations": sorted(calcs),
-            "observed_empty": not keys and not calcs,
-            "note": "Union over THIS reader's own job executions only."}
+        calcs.update(p.get("calculation_values") or
+                     {c: None for c in (p.get("calculations") or [])})
+        payloads.extend(p.get("payloads") or [])
+        dropped.extend(p.get("dropped_responses") or [])
+    return {
+        "available": True,
+        "executions": len(usable),
+        # Per-execution reports, verbatim. The unit at which "what was
+        # delivered" has a single answer, and the unit the assessment uses.
+        "per_execution": usable,
+        "keys": sorted(keys),
+        "calculations": sorted(calcs),
+        "calculation_values": calcs,
+        "payloads": payloads,
+        "dropped_responses": dropped,
+        # True only when EVERY contributing execution captured payloads. A
+        # partially captured reader is not a fully observed one, and saying so
+        # would be the same substitution this file keeps undoing.
+        "payload_capture": all(captured),
+        "payload_capture_partial": any(captured) and not all(captured),
+        "executions_without_payload_capture": captured.count(False),
+        "observed_empty": not keys and not calcs,
+        "note": ("Per THIS reader's own job executions. The top-level union is "
+                 "for reporting; requirements are checked against each "
+                 "execution on its own, so no requirement can be satisfied by "
+                 "pooling two executions."),
+    }
 
 
 def actual_evidence_delivered(S, ctx, delivery: dict) -> dict:
