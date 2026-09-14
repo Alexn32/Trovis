@@ -1812,6 +1812,14 @@ class HomeCostMonth(BaseModel):
 
     `budget_source` separates a budget somebody set from the deployment
     default, so a surface can decline to draw a bar nobody chose.
+
+    The month carries its OWN `coverage`, because the period's describes a
+    different window: a fully priced week inside a month that also holds
+    unpriced calls must not draw an unqualified budget bar.
+    `month_to_date_usd` is RECORDED spend — unpriced calls are unknown cost,
+    never zero — so `budget_pct` is a floor whenever
+    `budget_pct_is_floor` is true, and `over_budget: false` is NOT a claim that
+    the org is safely under.
     """
 
     available: bool = False
@@ -1820,10 +1828,16 @@ class HomeCostMonth(BaseModel):
     timezone: str | None = None
     note: str | None = None
     month_start_utc: str | None = None
+    # When the month was read. A projection is anchored to this, not to
+    # whatever clock renders the page later.
+    as_of_utc: str | None = None
     month_to_date_usd: float | None = None
+    spend_is_recorded_only: bool | None = None
+    coverage: HomeCostCoverage | None = None
     budget_usd: float | None = None
     budget_source: str | None = None    # account | deployment_default
     budget_pct: float | None = None
+    budget_pct_is_floor: bool | None = None
     over_budget: bool | None = None
 
 

@@ -128,12 +128,17 @@ test('the chart renders from the server buckets and reads out its shape', async 
   // speaks through a tooltip is decoration on a touch screen.
   const legend = m.$('.hv-cost-chart-legend')
   assert.ok(legend, 'the legend is rendered')
-  assert.match(legend.textContent, /Peak \$4\.00 on Sep 7/)
+  assert.match(legend.textContent, /Peak recorded \$4\.00 on Sep 7/)
   assert.match(legend.textContent, /a day on average/)
-  // And an accessible name that states the period, total and peak.
+  // And an accessible name that states the period, recorded total and peak.
   const plot = m.$('.hv-cost-plot')
   assert.equal(plot.getAttribute('role'), 'img')
-  assert.match(plot.getAttribute('aria-label'), /7 days, \$12\.50 total, peak \$4\.00/)
+  assert.match(plot.getAttribute('aria-label'), /7 days\./)
+  assert.match(plot.getAttribute('aria-label'),
+               /\$12\.50 recorded across 7 days, peak \$4\.00/)
+  // A fully priced window carries no gap note and no unknown band.
+  assert.equal(m.$('.hv-cost-chart-gapnote'), null)
+  assert.equal(m.$('.hv-cost-gap'), null)
   m.unmount()
 })
 
@@ -178,8 +183,215 @@ test('arrow keys inspect a day without a pointer', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// Mixed priced / unpriced days: an unknown day is a gap, not a zero
+// ---------------------------------------------------------------------------
+
+/** $10 · nothing priced · $10 — the reviewer's reproduction. */
+function mixedFinancial() {
+  const fin = financial()
+  const day = (d, spend, unpriced) => ({
+    bucket_start: `2026-09-0${d}T00:00:00+00:00`,
+    bucket_start_utc: `2026-09-0${d}T00:00:00+00:00`,
+    spend_usd: spend,
+    unpriced_token_spans: unpriced,
+  })
+  const points = [day(5, 10, 0), day(6, 0, 5), day(7, 10, 0)]
+  fin.spend_usd = 20
+  fin.coverage = { ratio: 0.8, priced_spans: 20, unpriced_token_spans: 5,
+                   denominator: 25 }
+  fin.daily = {
+    available: true, bucket: 'local_day', timezone: 'UTC',
+    points, total: 20, aggregate_total: 20, reconciles: true,
+  }
+  return fin
+}
+
+test('an unpriced-only day breaks the line instead of drawing a free day', async () => {
+  // $10, nothing priced, $10. Drawing that as a V says the middle day was
+  // free. It says nothing of the kind, and this asserts on the RENDERED chart
+  // rather than on caveat text.
+  const m = await renderHome(mixedFinancial())
+
+  // Nothing is drawn ACROSS the gap. Both surviving days are isolated, so
+  // there is no stroke at all — and critically no V down to zero.
+  assert.equal(m.$$('path.hv-cost-line').length, 0,
+               'no line is drawn through the unknown day')
+  assert.equal(m.$$('path[d*="L"]').filter((p) =>
+    !p.classList.contains('hv-cost-grid')).length, 0,
+               'no path interpolates between the two known days')
+
+  const gap = m.$('rect.hv-cost-gap')
+  assert.ok(gap, 'the unknown day is marked with an explicit band')
+  assert.equal(gap.getAttribute('data-day'), '1', 'and it is the middle day')
+  assert.ok(Number(gap.getAttribute('height')) > 0, 'the band spans the plot')
+
+  // The band carries a text marker, not colour alone.
+  assert.ok(m.$('text.hv-cost-gap-mark'), 'the gap is marked in text too')
+
+  // Both real days are still drawn at their recorded value.
+  const lone = m.$$('circle.hv-cost-lone')
+  assert.equal(lone.length, 2, 'each island day keeps its recorded value')
+
+  m.unmount()
+})
+
+test('a longer window draws each run of known days as its own segment', async () => {
+  // The three-day reproduction leaves two isolated days. This is the same rule
+  // where real multi-day runs exist: two strokes, neither crossing the gap.
+  const fin = financial()
+  const day = (d, spend, unpriced) => ({
+    bucket_start: `2026-09-0${d}T00:00:00+00:00`,
+    bucket_start_utc: `2026-09-0${d}T00:00:00+00:00`,
+    spend_usd: spend,
+    unpriced_token_spans: unpriced,
+  })
+  const points = [day(5, 10, 0), day(6, 8, 0), day(7, 0, 5),
+                  day(8, 10, 0), day(9, 9, 0)]
+  fin.spend_usd = 37
+  fin.daily = { available: true, bucket: 'local_day', timezone: 'UTC',
+                points, total: 37, aggregate_total: 37, reconciles: true }
+  const m = await renderHome(fin)
+  const lines = m.$$('path.hv-cost-line')
+  assert.equal(lines.length, 2, 'two segments, split at the unknown day')
+  // Each segment joins exactly two points — so neither spans the gap.
+  for (const p of lines) {
+    assert.equal(p.getAttribute('d').split('L').length, 2,
+                 `a segment spans the gap: ${p.getAttribute('d')}`)
+  }
+  assert.equal(m.$$('rect.hv-cost-gap').length, 1)
+  m.unmount()
+})
+
+test('the unknown day is described as unknown, never as zero', async () => {
+  const m = await renderHome(mixedFinancial())
+
+  // The legend says so without hovering.
+  const note = m.$('.hv-cost-chart-gapnote')
+  assert.ok(note, 'the gap is explained beside the chart')
+  assert.match(note.textContent, /1 day has no priced calls/)
+  assert.match(note.textContent, /unknown, not zero/)
+
+  // The accessible description says so too.
+  const plot = m.$('.hv-cost-plot')
+  assert.match(plot.getAttribute('aria-label'), /recorded across 2 days/)
+  assert.match(plot.getAttribute('aria-label'),
+               /1 day has no priced calls, so its cost is unknown rather than zero/)
+  assert.match(plot.getAttribute('aria-label'), /the line is broken there/)
+
+  // Peak and average are over RECORDED days: averaging the unknown day in as
+  // zero would report a number nobody measured ($6.67 rather than $10.00).
+  const legend = m.$('.hv-cost-chart-legend')
+  assert.match(legend.textContent, /Peak recorded \$10\.00/)
+  assert.match(legend.textContent, /\$10\.00 a day across recorded days/)
+  assert.doesNotMatch(legend.textContent, /\$6\.6/)
+
+  // And the authoritative recorded total above is untouched — no estimate of
+  // the missing money anywhere.
+  assert.match(m.$('.hv-cost-value').textContent, /\$20\.00/)
+  m.unmount()
+})
+
+test('the tooltip on an unknown day says unknown, not $0.00', async () => {
+  const m = await renderHome(mixedFinancial())
+  const plot = m.$('.hv-cost-plot')
+  const { act } = await import('react')
+  // Arrow to the middle day.
+  for (const key of ['Home', 'ArrowRight']) {
+    await act(async () => {
+      plot.dispatchEvent(new window.window.KeyboardEvent('keydown', {
+        key, bubbles: true,
+      }))
+    })
+  }
+  const tip = m.$('.hv-cost-tip')
+  assert.ok(tip, 'the day is read out')
+  assert.match(tip.textContent, /Unknown/)
+  assert.match(tip.textContent, /5 calls carry no stored price/)
+  assert.match(tip.textContent, /not \$0/)
+  assert.doesNotMatch(tip.textContent, /^\$0\.00/)
+  m.unmount()
+})
+
+test('a partly priced day keeps its recorded amount, qualified as a floor', async () => {
+  // Recorded money on a day that also has unpriced calls is real and is drawn.
+  // It is a FLOOR, and the chart says so without hiding the value.
+  const fin = financial()
+  fin.daily = {
+    ...fin.daily,
+    points: fin.daily.points.map((p, i) =>
+      (i === 2 ? { ...p, unpriced_token_spans: 4 } : p)),
+  }
+  const m = await renderHome(fin)
+  const ring = m.$('circle.hv-cost-partial')
+  assert.ok(ring, 'the partly priced day is marked on the line')
+  assert.equal(ring.getAttribute('data-day'), '2')
+  // The line is NOT broken — the value is known, just not the whole of it.
+  assert.equal(m.$$('path.hv-cost-line').length, 1)
+  assert.equal(m.$('rect.hv-cost-gap'), null)
+
+  const note = m.$('.hv-cost-chart-gapnote')
+  assert.match(note.textContent, /1 day is partly unpriced/)
+  assert.match(note.textContent, /a floor/)
+
+  const { act } = await import('react')
+  const plot = m.$('.hv-cost-plot')
+  for (const key of ['Home', 'ArrowRight', 'ArrowRight']) {
+    await act(async () => {
+      plot.dispatchEvent(new window.window.KeyboardEvent('keydown', {
+        key, bubbles: true,
+      }))
+    })
+  }
+  const tip = m.$('.hv-cost-tip')
+  assert.match(tip.textContent, /\$4\.00\+/, 'the recorded value, marked as a floor')
+  assert.match(tip.textContent, /4 more unpriced/)
+  m.unmount()
+})
+
+// ---------------------------------------------------------------------------
 // Partial pricing coverage
 // ---------------------------------------------------------------------------
+
+test('a rounded percentage cannot hide a missing price', async () => {
+  // 999 priced, 1 unpriced: the ratio is 0.999, which rounds to 100. Deciding
+  // the warning from that rounded number made the warning disappear exactly
+  // where it was most likely to be missed.
+  const nearly = financial({
+    coverage: { ratio: 999 / 1000, priced_spans: 999, unpriced_token_spans: 1,
+                denominator: 1000 },
+  })
+  const m = await renderHome(nearly)
+  const cov = m.$('.hv-cost-cov')
+  assert.ok(cov, 'the warning survives rounding')
+  assert.match(cov.textContent, /Some calls are unpriced/)
+  // Rounding is for display only, and never to a figure that contradicts it.
+  assert.match(cov.textContent, />99% priced/)
+  assert.doesNotMatch(cov.textContent, /100% priced/)
+  m.unmount()
+})
+
+test('coverage the server could not establish is not read as complete', async () => {
+  const unknown = financial({
+    coverage: { ratio: null, priced_spans: 0, unpriced_token_spans: 0,
+                denominator: 0, unavailable_reason: 'something_else' },
+  })
+  const m = await renderHome(unknown)
+  assert.match(m.$('.hv-cost-cov').textContent, /coverage not established/)
+  m.unmount()
+})
+
+test('a window with no cost-bearing calls at all is not a warning', async () => {
+  // Nothing was spent and nothing is missing. "Some calls are unpriced" there
+  // would be a warning about zero calls.
+  const quiet = financial({
+    coverage: { ratio: null, priced_spans: 0, unpriced_token_spans: 0,
+                denominator: 0,
+                unavailable_reason: 'no_cost_bearing_spans_in_period' },
+  })
+  const m = await renderHome(quiet)
+  assert.equal(m.$('.hv-cost-cov'), null)
+  m.unmount()
+})
 
 test('material incompleteness stays visible in the reading flow', async () => {
   const partial = financial({
@@ -224,6 +436,118 @@ test('a day of only unpriced calls is not drawn as a free day', async () => {
 // ---------------------------------------------------------------------------
 // Budget context stays monthly
 // ---------------------------------------------------------------------------
+
+/** A fully priced 7-day period inside a month that also holds unpriced calls. */
+function pricedWeekUnpricedMonth() {
+  const fin = financial()
+  // The period is spotless.
+  fin.coverage = { ratio: 1, priced_spans: 20, unpriced_token_spans: 0,
+                   denominator: 20 }
+  // The month is not.
+  fin.monthly = {
+    ...fin.monthly,
+    month_to_date_usd: 40,
+    spend_is_recorded_only: true,
+    coverage: { measure: 'priced_cost_bearing_spans', priced_spans: 80,
+                unpriced_token_spans: 12, denominator: 92, ratio: 80 / 92,
+                unavailable_reason: null },
+    budget_pct: 40,
+    budget_pct_is_floor: true,
+    over_budget: false,
+    as_of_utc: '2026-09-11T12:00:00+00:00',
+  }
+  return fin
+}
+
+test('a fully priced week inside a partly unpriced month still warns', async () => {
+  // The period caveat at the foot of the card describes a DIFFERENT window.
+  // Without its own coverage the month would draw an unqualified bar and read
+  // as complete spend.
+  const m = await renderHome(pricedWeekUnpricedMonth())
+
+  // The period is clean, so the period caveat is correctly absent...
+  assert.equal(m.$('.hv-cost-cov'), null, 'the period itself is fully priced')
+
+  // ...and the month's own qualification is visible beside the month.
+  const unknown = m.$('.hv-cost-month-unknown')
+  assert.ok(unknown, 'the month carries its own incompleteness')
+  assert.match(unknown.textContent, /12 calls this month carry no stored price/)
+  assert.match(unknown.textContent, /actual spend is higher than recorded/)
+  m.unmount()
+})
+
+test('an incomplete month reads as recorded, and its percentage as a floor', async () => {
+  const m = await renderHome(pricedWeekUnpricedMonth())
+  const month = m.$('.hv-cost-month')
+  assert.match(month.textContent, /recorded month to date/)
+  // A floor, not an actual: unknown money can only push it up.
+  assert.match(m.$('.hv-cost-month-pct').textContent, /≥40%/)
+  // The projection is explicitly of recorded priced spend only.
+  assert.match(month.textContent, /from recorded priced spend only/)
+  // And nothing anywhere says the org is safely under budget.
+  assert.doesNotMatch(m.text(), /under budget/i)
+  assert.doesNotMatch(m.text(), /within budget/i)
+  m.unmount()
+})
+
+test('a fully priced month says nothing about recorded-only spend', async () => {
+  const clean = financial()
+  clean.monthly = {
+    ...clean.monthly,
+    coverage: { priced_spans: 92, unpriced_token_spans: 0, denominator: 92,
+                ratio: 1, unavailable_reason: null },
+    budget_pct_is_floor: false,
+  }
+  const m = await renderHome(clean)
+  assert.equal(m.$('.hv-cost-month-unknown'), null)
+  assert.match(m.$('.hv-cost-month-pct').textContent, /^40%/)
+  assert.doesNotMatch(m.text(), /from recorded priced spend only/)
+  m.unmount()
+})
+
+test('a month whose coverage is unknown is not treated as fully priced', async () => {
+  const murky = financial()
+  murky.monthly = { ...murky.monthly, coverage: null, budget_pct_is_floor: true }
+  const m = await renderHome(murky)
+  assert.match(m.$('.hv-cost-month-unknown').textContent,
+               /coverage for this month could not be established/)
+  m.unmount()
+})
+
+test('the projection is anchored to the snapshot, not the browser clock', async () => {
+  // A page left open past the 1st would otherwise extrapolate last month's
+  // burn across a month it has no data for.
+  const stale = financial()
+  stale.monthly = {
+    ...stale.monthly,
+    as_of_utc: '2026-09-10T12:00:00+00:00',   // day 10 of 30
+    month_to_date_usd: 40,
+  }
+  const m = await renderHome(stale)
+  // The inline " of $X budget" span shares this class; read them all.
+  const note = m.$$('.hv-cost-month-note').map((n) => n.textContent).join(' ')
+  assert.match(note, /day 10 of 30/,
+               'the day comes from the snapshot, not from Date.now()')
+  assert.match(note, /Projected \$120\.00 by month end/)
+  m.unmount()
+})
+
+test('the progressbar value stays inside its declared range', async () => {
+  const over = financial()
+  over.monthly = { ...over.monthly, month_to_date_usd: 144, budget_pct: 144,
+                   over_budget: true }
+  const m = await renderHome(over)
+  const bar = m.$('.hv-cost-bar')
+  assert.equal(bar.getAttribute('aria-valuemin'), '0')
+  assert.equal(bar.getAttribute('aria-valuemax'), '100')
+  assert.equal(bar.getAttribute('aria-valuenow'), '100',
+               'clamped — 144 against a max of 100 is an invalid state')
+  // The real figure is still announced, and still visible.
+  assert.match(bar.getAttribute('aria-valuetext'), /144 percent/)
+  assert.match(bar.getAttribute('aria-valuetext'), /over budget/)
+  assert.match(m.$('.hv-cost-month-pct').textContent, /144%/)
+  m.unmount()
+})
 
 test('the budget bar is labelled month-to-date, never the selected period', async () => {
   const m = await renderHome(financial())

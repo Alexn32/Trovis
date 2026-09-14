@@ -5810,15 +5810,30 @@ def _home_cost_month_to_date(
     args: list[Any] = [start_ns, end_ns]
     if account_id is not None:
         args.append(account_id)
+    # The month gets its OWN pricing coverage, computed the same way as the
+    # period's. The two windows differ, so the period's coverage says nothing
+    # about the month: a fully priced week inside a month that also holds
+    # unpriced calls would otherwise show a budget bar with no warning beside
+    # it, and the bar would read as complete spend.
     cur.execute(
-        "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS spend "
+        "SELECT "
+        "  COALESCE(SUM(estimated_cost_usd), 0) AS spend, "
+        "  COALESCE(SUM(CASE WHEN estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0) "
+        "      AS priced_n, "
+        "  COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL "
+        "      AND total_tokens IS NOT NULL THEN 1 ELSE 0 END), 0) AS unpriced_n "
         f"FROM spans WHERE start_time_unix >= {PH} AND start_time_unix < {PH}{acct}",
         tuple(args),
     )
     r = dict(cur.fetchone() or {})
     return {
         "month_start_utc": month_start,
+        # The instant the month was read, so a projection is anchored to the
+        # data rather than to whatever clock renders it later.
+        "as_of_utc": now_utc,
         "spend_usd": float(r.get("spend") or 0.0),
+        "priced_spans": int(r.get("priced_n") or 0),
+        "unpriced_token_spans": int(r.get("unpriced_n") or 0),
     }
 
 

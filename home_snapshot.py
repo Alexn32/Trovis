@@ -799,6 +799,14 @@ def _cost_month(rows: dict[str, Any], account_id: int | None) -> dict[str, Any]:
 
     `budget_source` distinguishes a budget somebody SET from the deployment
     default, so a surface can decline to show a bar nobody chose.
+
+    The month carries its OWN pricing coverage. The period's coverage describes
+    a different window and says nothing about this one: a fully priced week
+    inside a month that also holds unpriced calls would otherwise draw a budget
+    bar with no warning anywhere near it, and that bar would read as complete
+    spend. `month_to_date_usd` is RECORDED spend either way — unpriced calls
+    are unknown cost, never zero, so the true figure is at least this and the
+    budget percentage is a floor, not an actual.
     """
     month = rows.get("cost_month")
     if not month:
@@ -806,6 +814,9 @@ def _cost_month(rows: dict[str, Any], account_id: int | None) -> dict[str, Any]:
     saved = database.get_account_budget(account_id) if account_id is not None else None
     budget = float(database.monthly_budget_usd(account_id))
     mtd = round(float(month["spend_usd"]), 6)
+    priced = int(month.get("priced_spans") or 0)
+    unpriced = int(month.get("unpriced_token_spans") or 0)
+    denom = priced + unpriced
     return {
         "available": True,
         "unavailable_reason": None,
@@ -817,10 +828,36 @@ def _cost_month(rows: dict[str, Any], account_id: int | None) -> dict[str, Any]:
             "be added to it."
         ),
         "month_start_utc": _iso(month["month_start_utc"]),
+        # When the month was read. A projection anchored to this cannot be
+        # extrapolated into a different month by a stale page left open.
+        "as_of_utc": _iso(month["as_of_utc"]),
         "month_to_date_usd": mtd,
+        "spend_is_recorded_only": unpriced > 0,
+        "coverage": {
+            "measure": "priced_cost_bearing_spans",
+            "definition": (
+                "Share of this MONTH's spans carrying usage or a stored cost "
+                "that also carry a stored price. A different window from the "
+                "period's coverage, and not a share of dollars."
+            ),
+            "priced_spans": priced,
+            "unpriced_token_spans": unpriced,
+            "denominator": denom,
+            "ratio": round(priced / denom, 6) if denom else None,
+            "unavailable_reason": (
+                None if denom else "no_cost_bearing_spans_in_month"
+            ),
+        },
         "budget_usd": budget if budget > 0 else None,
         "budget_source": "account" if saved is not None else "deployment_default",
         "budget_pct": round(mtd / budget * 100.0, 1) if budget > 0 else None,
+        # A floor, not an actual, whenever the month holds unpriced calls: the
+        # unknown money can only push it up.
+        "budget_pct_is_floor": bool(budget > 0 and unpriced > 0),
+        # True only when RECORDED spend already exceeds the budget. It is never
+        # the complement of "safely under" — unknown cost can put a month over
+        # without this ever turning true, which is why the client must not read
+        # a False here as reassurance.
         "over_budget": bool(budget > 0 and mtd > budget),
     }
 

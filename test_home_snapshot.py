@@ -630,6 +630,46 @@ with TestClient(main.app) as c:
     check("and going over it is reported, not implied",
           set_month["over_budget"] is True and set_month["budget_pct"] > 100)
     database.set_account_budget(ACCT, None)
+    check("the month is stamped with when it was read",
+          month["as_of_utc"] and month["as_of_utc"].endswith("+00:00"))
+
+    # -----------------------------------------------------------------
+    print("\n--- the month carries its OWN pricing coverage ---")
+    # -----------------------------------------------------------------
+    # The visible caveat on Home describes the selected PERIOD. A fully priced
+    # week inside a month that also holds unpriced calls would otherwise draw a
+    # budget bar with no warning anywhere near it, and that bar reads as
+    # complete spend.
+    mcov = month["coverage"]
+    check("the month reports its own priced/unpriced counts",
+          mcov["denominator"] == mcov["priced_spans"] + mcov["unpriced_token_spans"]
+          and mcov["unpriced_token_spans"] >= 1)
+    check("and month-to-date is labelled recorded-only while they exist",
+          month["spend_is_recorded_only"] is True)
+    check("so the budget percentage is a floor, not an actual",
+          month["budget_pct_is_floor"] is True)
+
+    # A fully priced SEVEN-DAY period inside that same partly unpriced month.
+    # The unpriced call above is ~110s old, so push the period's own window
+    # past it by asking for a window that contains only priced work: seed a
+    # priced-only day and read a 1-day period.
+    post(KEY, "ceo-agent", [sp("llm_call", 5, {
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "gen_ai.usage.input_tokens": 500, "gen_ai.usage.output_tokens": 100})])
+    one_day = snap(CEO, days=1, tz="UTC").json()["financial"]
+    # Whatever the period's own coverage turns out to be, the month's is
+    # independent of it and still reports the unpriced call.
+    check("the month's coverage is computed independently of the period's",
+          one_day["monthly"]["coverage"]["unpriced_token_spans"]
+          == mcov["unpriced_token_spans"])
+    check("and stays visible however clean the selected period is",
+          one_day["monthly"]["spend_is_recorded_only"] is True
+          and one_day["monthly"]["coverage"]["ratio"] < 1)
+    check("the month's coverage definition names its own window",
+          "MONTH" in mcov["definition"])
+    check("a month with no cost-bearing spans has no percentage to state",
+          (snap(OTHER, days=7, tz="UTC").json()["financial"]["monthly"]
+           ["coverage"]["unavailable_reason"]) == "no_cost_bearing_spans_in_month")
 
     # -----------------------------------------------------------------
     print("\n--- the new financial paths are behind the SAME gate ---")

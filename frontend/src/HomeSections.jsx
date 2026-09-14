@@ -10,7 +10,8 @@
 // distinction carries text or a shape, never color alone.
 
 import {
-  bucketLabel, findingQualifier, formatCount, formatMoney, relTime,
+  bucketLabel, coverageLabel, findingQualifier, formatCount, formatMoney,
+  relTime,
 } from './homeView.js'
 // The Cost page's own chart primitives, so Home's compact version is the same
 // visual and the two cannot drift.
@@ -352,7 +353,10 @@ export function AnalysisNote({ read, onRefresh }) {
 export function CostCard({
   fin, period, periodDays, onOpenCost, locale, destinationNote,
 }) {
-  const pct = fin.coverageRatio == null ? null : Math.round(fin.coverageRatio * 100)
+  // Whether to warn comes from the AUTHORITATIVE counts; the percentage is for
+  // display only. Deciding visibility from a rounded percentage hid the warning
+  // at 0.999, which rounds to 100.
+  const covLabel = coverageLabel(fin.coverageRatio)
   const open = onOpenCost ? () => onOpenCost(periodDays ?? null) : null
   return (
     <div className="hv-cost">
@@ -391,10 +395,11 @@ export function CostCard({
       <MonthlyBudget month={fin.monthly} currency={fin.currency} locale={locale} />
 
       <div className="hv-cost-foot">
-        {pct != null && pct < 100 ? (
-          <span className="hv-cost-cov">Some calls are unpriced · {pct}% priced</span>
-        ) : pct == null ? (
-          <span className="hv-cost-cov">Pricing coverage not established</span>
+        {fin.pricingIncomplete ? (
+          <span className="hv-cost-cov">
+            Some calls are unpriced
+            {covLabel ? ` · ${covLabel} priced` : ' · coverage not established'}
+          </span>
         ) : null}
         <details className="hv-cost-about">
           <summary>How this is counted</summary>
@@ -421,30 +426,55 @@ export function CostCard({
  * names the month rather than sitting silently under a 7-day figure. Omitted
  * entirely when no budget has been set or the month cannot be established —
  * the honest omission, not a bar against a placeholder.
+ *
+ * The month carries its OWN coverage. The caveat at the foot of the card
+ * describes the selected period, which can be a fully priced week inside a
+ * partly unpriced month — so a bar drawn from that month's recorded spend
+ * needs its own qualification, right here, or it reads as complete spend.
+ * When it is incomplete: the figure is labelled RECORDED, the percentage is a
+ * floor (`≥`), the projection is explicitly of recorded priced spend only, and
+ * nothing says the org is under budget — unknown money can only push it up.
  */
 function MonthlyBudget({ month, currency, locale }) {
   if (!month) return null
   const money = (v) => formatMoney(v, currency, locale)
+  const incomplete = month.coverageIncomplete
+  const recordedWord = incomplete ? 'recorded month to date' : 'month to date'
+  // Anchored to when the SERVER read the month, not to the browser clock: a
+  // page left open past midnight on the 1st would otherwise project last
+  // month's burn across this one.
+  const asOf = month.asOf ? new Date(month.asOf) : null
+  const proj = projectMonth(
+    month.monthToDate,
+    asOf && !Number.isNaN(asOf.getTime()) ? asOf : undefined,
+  )
+  const unknownNote = !incomplete ? null : month.unpricedSpans > 0
+    ? `${formatCount(month.unpricedSpans)} call${month.unpricedSpans === 1 ? '' : 's'} this month carry no stored price, so actual spend is higher than recorded.`
+    : 'Pricing coverage for this month could not be established, so actual spend may be higher than recorded.'
+
   if (!month.budget) {
     return (
       <p className="hv-cost-month">
-        <b>{money(month.monthToDate)}</b> month to date
+        <b>{money(month.monthToDate)}</b> {recordedWord}
         <span className="hv-cost-month-note"> (UTC calendar month)</span>
+        {unknownNote ? (
+          <span className="hv-cost-month-unknown"> {unknownNote}</span>
+        ) : null}
       </p>
     )
   }
-  const proj = projectMonth(month.monthToDate)
   const projOver = proj && proj.projected > month.budget
-  const pct = Math.min(100, Math.max(0, month.budgetPct ?? 0))
+  const truePct = month.budgetPct ?? 0
+  const fill = Math.min(100, Math.max(0, truePct))
   return (
     <div className={`hv-cost-month ${month.overBudget ? 'over' : ''}`}>
       <div className="hv-cost-month-row">
         <span>
-          <b>{money(month.monthToDate)}</b> month to date
+          <b>{money(month.monthToDate)}</b> {recordedWord}
           <span className="hv-cost-month-note"> of {money(month.budget)} budget</span>
         </span>
         <span className="hv-cost-month-pct">
-          {Math.round(month.budgetPct ?? 0)}%
+          {month.budgetPctIsFloor ? '≥' : ''}{Math.round(truePct)}%
           {month.overBudget ? ' · over budget' : ''}
         </span>
       </div>
@@ -453,12 +483,22 @@ function MonthlyBudget({ month, currency, locale }) {
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={Math.round(month.budgetPct ?? 0)}
-        aria-label="Month-to-date spend against the monthly budget"
+        // Clamped to the declared range — an aria-valuenow of 144 against a
+        // max of 100 is an invalid state for a screen reader to announce. The
+        // real percentage stays in the visible text beside it.
+        aria-valuenow={Math.round(fill)}
+        aria-valuetext={`${month.budgetPctIsFloor ? 'at least ' : ''}${Math.round(
+          truePct,
+        )} percent of the monthly budget${month.overBudget ? ', over budget' : ''}`}
+        aria-label={
+          incomplete
+            ? 'Recorded month-to-date spend against the monthly budget; some calls are unpriced'
+            : 'Month-to-date spend against the monthly budget'
+        }
       >
         <div
           className={`hv-cost-bar-fill ${month.overBudget ? 'over' : ''}`}
-          style={{ width: `${pct}%` }}
+          style={{ width: `${fill}%` }}
         />
       </div>
       <p className="hv-cost-month-note">
@@ -466,9 +506,14 @@ function MonthlyBudget({ month, currency, locale }) {
         {proj
           ? ` Projected ${money(proj.projected)} by month end at this pace${
               projOver ? ' — over budget' : ''
-            } (day ${proj.dayOfMonth} of ${proj.daysInMonth}).`
+            }${incomplete ? ', from recorded priced spend only' : ''} (day ${
+              proj.dayOfMonth
+            } of ${proj.daysInMonth}).`
           : ''}
       </p>
+      {unknownNote ? (
+        <p className="hv-cost-month-unknown">{unknownNote}</p>
+      ) : null}
     </div>
   )
 }
