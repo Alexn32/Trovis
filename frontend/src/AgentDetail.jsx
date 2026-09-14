@@ -47,6 +47,18 @@ function fmtDate(iso) {
   if (Number.isNaN(d.getTime())) return '—'
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
+// The exact moment, local, to the second: "35m ago" is the right thing to
+// scan a feed with, and the wrong thing to correlate with a log or a Slack
+// thread. The row keeps the relative stamp; expanding gives you this.
+function fmtStamp(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', second: '2-digit',
+  })
+}
 function fmtDur(ms) {
   const v = Number(ms) || 0
   if (v < 1000) return `${Math.round(v)}ms`
@@ -497,7 +509,8 @@ function FeedItem({ r }) {
                   <div style={{ fontSize: 14, lineHeight: 1.55, color: C.ink, background: C.linen, border: `1px solid ${C.subtle}`, borderRadius: 10, padding: '10px 14px', whiteSpace: 'pre-wrap' }}>{r.exchange.agent}</div>
                 </div>
               )}
-              <div style={{ display: 'flex', gap: 18, marginTop: 10, fontFamily: F.mono, fontSize: 11.5, color: C.muted }}>
+              <div style={{ display: 'flex', gap: 18, marginTop: 10, flexWrap: 'wrap', fontFamily: F.mono, fontSize: 11.5, color: C.muted }}>
+                <span title={r.time || ''}>{fmtStamp(r.time)}</span>
                 <span>{fmtDur(r.duration_ms)}</span>
                 <span>{(r.tokens || 0).toLocaleString()} tokens</span>
                 <span>{fmtCost(r.cost_usd)}</span>
@@ -510,13 +523,15 @@ function FeedItem({ r }) {
                   ? 'System record — the agent registered and declared its identity. No exchange to show.'
                   : 'The agent reported this job — Trovis recorded what it did, not the conversation. No transcript to show.'}
               </div>
-              {!isSystem && (
-                <div style={{ display: 'flex', gap: 18, marginTop: 10, fontFamily: F.mono, fontSize: 11.5, color: C.muted }}>
-                  <span>{fmtDur(r.duration_ms)}</span>
-                  <span>{(r.tokens || 0).toLocaleString()} tokens</span>
-                  <span>{fmtCost(r.cost_usd)}</span>
-                </div>
-              )}
+              {/* Every expanded record says exactly when, system ones included —
+                  "when did that registration land" is the same question. The
+                  cost/token line stays off a system row, which has neither. */}
+              <div style={{ display: 'flex', gap: 18, marginTop: 10, flexWrap: 'wrap', fontFamily: F.mono, fontSize: 11.5, color: C.muted }}>
+                <span title={r.time || ''}>{fmtStamp(r.time)}</span>
+                {!isSystem && <span>{fmtDur(r.duration_ms)}</span>}
+                {!isSystem && <span>{(r.tokens || 0).toLocaleString()} tokens</span>}
+                {!isSystem && <span>{fmtCost(r.cost_usd)}</span>}
+              </div>
             </div>
           )}
 
