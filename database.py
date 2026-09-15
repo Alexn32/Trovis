@@ -13,6 +13,7 @@ constant (a literal — no SQL-injection surface).
 from __future__ import annotations
 
 import base64
+import bisect
 import hashlib
 import hmac
 import json
@@ -5495,6 +5496,8 @@ def get_home_snapshot_rows(
     previous_end_utc: datetime,
     include_cost: bool = False,
     series_cap: int = 50_000,
+    cost_bucket_starts: list[datetime] | None = None,
+    cost_span_cap: int = 50_000,
 ) -> dict[str, Any]:
     """One connection, five bounded aggregates, no N+1.
 
@@ -5662,6 +5665,23 @@ def get_home_snapshot_rows(
                 if include_cost
                 else None
             )
+            # The same window, folded into the caller's local-day buckets, and
+            # the UTC calendar month the budget is kept in. Both behind the
+            # same `include_cost` gate as the aggregate above: a reader without
+            # the financial surface gets None, not a smaller number.
+            out["cost_daily"] = (
+                _home_cost_buckets(
+                    cur, account_id, cost_bucket_starts, end_utc,
+                    cap=cost_span_cap,
+                )
+                if include_cost and cost_bucket_starts
+                else None
+            )
+            out["cost_month"] = (
+                _home_cost_month_to_date(cur, account_id, end_utc)
+                if include_cost
+                else None
+            )
             return out
     except Exception as exc:
         if _is_query_canceled(exc):
@@ -5706,6 +5726,133 @@ def _home_cost_window(
         "priced_spans": int(r.get("priced_n") or 0),
         "unpriced_token_spans": int(r.get("unpriced_n") or 0),
     }
+
+
+def _home_cost_buckets(
+    cur,
+    account_id: int | None,
+    bucket_starts: list[datetime],
+    end_utc: datetime,
+    *,
+    cap: int,
+) -> dict[str, Any]:
+    """The window's stored span cost, folded into the caller's local days.
+
+    Buckets arrive as LOCAL day starts (from `home_snapshot._period`), so a DST
+    day is one bucket and the series lines up with the completion series beside
+    it. The fold happens here in Python against the same rows the aggregate
+    sums, which is what lets the caller assert the two reconcile — a chart that
+    disagrees with the number printed above it is worse than no chart.
+
+    Bounded like the completion series: at most `cap` cost-bearing spans are
+    read, and going over reports `over_cap` rather than drawing a series from a
+    truncated read. Unpriced spans are counted per bucket and never folded into
+    the money — their cost is unknown, not zero.
+    """
+    if not bucket_starts:
+        return {"over_cap": False, "buckets": [], "rows_read": 0}
+    start_ns = int(bucket_starts[0].astimezone(timezone.utc).timestamp()
+                   * 1_000_000_000)
+    end_ns = int(end_utc.timestamp() * 1_000_000_000)
+    edges = [int(b.astimezone(timezone.utc).timestamp() * 1_000_000_000)
+             for b in bucket_starts]
+    acct = f" AND account_id = {PH}" if account_id is not None else ""
+    args: list[Any] = [start_ns, end_ns]
+    if account_id is not None:
+        args.append(account_id)
+    args.append(cap + 1)
+    cur.execute(
+        "SELECT start_time_unix, estimated_cost_usd, total_tokens FROM spans "
+        f"WHERE start_time_unix >= {PH} AND start_time_unix < {PH}{acct} "
+        "  AND (estimated_cost_usd IS NOT NULL OR total_tokens IS NOT NULL) "
+        f"ORDER BY start_time_unix ASC LIMIT {PH}",
+        tuple(args),
+    )
+    rows = cur.fetchall() or []
+    if len(rows) > cap:
+        return {"over_cap": True, "buckets": [], "rows_read": len(rows)}
+
+    buckets = [{"spend_usd": 0.0, "priced_spans": 0, "unpriced_token_spans": 0}
+               for _ in bucket_starts]
+    for raw in rows:
+        row = dict(raw)
+        ts = int(row.get("start_time_unix") or 0)
+        idx = bisect.bisect_right(edges, ts) - 1
+        if idx < 0:
+            idx = 0
+        if idx >= len(buckets):
+            idx = len(buckets) - 1
+        cost = row.get("estimated_cost_usd")
+        if cost is None:
+            buckets[idx]["unpriced_token_spans"] += 1
+        else:
+            buckets[idx]["spend_usd"] += float(cost)
+            buckets[idx]["priced_spans"] += 1
+    return {"over_cap": False, "buckets": buckets, "rows_read": len(rows)}
+
+
+def _home_cost_month_to_date(
+    cur, account_id: int | None, now_utc: datetime
+) -> dict[str, Any]:
+    """Month-to-date stored spend, in the UTC calendar month.
+
+    The monthly budget is kept and compared in UTC months everywhere else in
+    the product (`/cost/overview`, `_daily_series`), so this uses the same
+    month rather than the reader's local one. That makes it a DIFFERENT window
+    from the snapshot's period, which is why it is returned as its own block
+    with its own start — the caller labels it, and never adds it to the
+    period's spend.
+    """
+    month_start = datetime(now_utc.year, now_utc.month, 1, tzinfo=timezone.utc)
+    start_ns = int(month_start.timestamp() * 1_000_000_000)
+    end_ns = int(now_utc.timestamp() * 1_000_000_000)
+    acct = f" AND account_id = {PH}" if account_id is not None else ""
+    args: list[Any] = [start_ns, end_ns]
+    if account_id is not None:
+        args.append(account_id)
+    # The month gets its OWN pricing coverage, computed the same way as the
+    # period's. The two windows differ, so the period's coverage says nothing
+    # about the month: a fully priced week inside a month that also holds
+    # unpriced calls would otherwise show a budget bar with no warning beside
+    # it, and the bar would read as complete spend.
+    cur.execute(
+        "SELECT "
+        "  COALESCE(SUM(estimated_cost_usd), 0) AS spend, "
+        "  COALESCE(SUM(CASE WHEN estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0) "
+        "      AS priced_n, "
+        "  COALESCE(SUM(CASE WHEN estimated_cost_usd IS NULL "
+        "      AND total_tokens IS NOT NULL THEN 1 ELSE 0 END), 0) AS unpriced_n "
+        f"FROM spans WHERE start_time_unix >= {PH} AND start_time_unix < {PH}{acct}",
+        tuple(args),
+    )
+    r = dict(cur.fetchone() or {})
+    return {
+        "month_start_utc": month_start,
+        # The instant the month was read, so a projection is anchored to the
+        # data rather than to whatever clock renders it later.
+        "as_of_utc": now_utc,
+        "spend_usd": float(r.get("spend") or 0.0),
+        "priced_spans": int(r.get("priced_n") or 0),
+        "unpriced_token_spans": int(r.get("unpriced_n") or 0),
+    }
+
+
+def monthly_budget_usd(account_id: int | None = None) -> float:
+    """The org's monthly cost budget: the per-account value when one is set,
+    else the MONTHLY_BUDGET env default.
+
+    One definition, because two surfaces now read it: the Cost page and Home's
+    cost summary. A second copy would eventually disagree, and a budget bar
+    that disagrees with the budget bar on the next screen is worse than none.
+    """
+    if account_id is not None:
+        saved = get_account_budget(account_id)
+        if saved is not None:
+            return saved
+    try:
+        return float(env("MONTHLY_BUDGET", "500") or 500)
+    except (TypeError, ValueError):
+        return 500.0
 
 
 def _decode_work_items_cursor(cursor: str | None) -> tuple[int, int] | None:

@@ -5302,15 +5302,12 @@ def remove_connection(conn_id: int, request: Request) -> None:
 
 def _monthly_budget(account_id: int | None = None) -> float:
     """The org's monthly cost budget: the per-account value when set, else the
-    OVERSEE_MONTHLY_BUDGET env default."""
-    if account_id is not None:
-        saved = database.get_account_budget(account_id)
-        if saved is not None:
-            return saved
-    try:
-        return float(database.env("MONTHLY_BUDGET", "500") or 500)
-    except (TypeError, ValueError):
-        return 500.0
+    MONTHLY_BUDGET env default.
+
+    One definition, in `database`, because Home's cost summary reads the same
+    budget. Two copies would eventually disagree across two screens.
+    """
+    return database.monthly_budget_usd(account_id)
 
 
 def _last_seen_age_days(last_seen: str | None) -> float | None:

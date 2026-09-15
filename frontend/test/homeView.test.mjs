@@ -325,7 +325,13 @@ test('organization-wide spend is labelled organization-wide', () => {
   })
   assert.equal(fin.orgWide, true)
   assert.equal(fin.attributable, false)
-  assert.match(sections, /covers the whole organization regardless of the work scope/)
+  // The scope label is a VISIBLE chip, not prose buried in a disclosure: this
+  // is organization-wide money sitting under a possibly narrowed work scope.
+  assert.match(sections, /hv-cost-scope/)
+  assert.match(sections, /Organization-wide/)
+  assert.match(sections, /covers the whole organization in this period regardless of the work scope/)
+  // And the card must never call org-wide spend the cost of the shown work.
+  assert.match(sections, /It is not what the selected work cost\./)
 })
 
 test('unpriced cost reads as unknown, never as free', () => {
