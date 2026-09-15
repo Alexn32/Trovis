@@ -63,3 +63,7 @@ trovis.db-wal
 
 # Claude Code (per-user, not project)
 .claude/
+
+# Evaluation-run transcripts. Artifacts of `run_home_eval.py`, regenerated
+# on every run; the report quotes the numbers that matter.
+eval_out/
