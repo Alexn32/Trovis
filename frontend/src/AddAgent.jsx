@@ -4,6 +4,7 @@ import { SparkleIcon, TrovisMark } from './Icons.jsx'
 import { BrandMark, WorksWithStrip } from './BrandMarks.jsx'
 import ConnectGuide from './ConnectGuide.jsx'
 import { brandIdForConnector } from './connectors.js'
+import { SETUP_TILE_IDS } from './connectionsPage.js'
 
 // Tile → V1 brand id, read from the canonical connector registry
 // (connectors.js) — tile ids are connector ids. ChatGPT and the OpenAI Agents
@@ -11,8 +12,7 @@ import { brandIdForConnector } from './connectors.js'
 // logo". A Grok Bot is a Cursor desktop assistant, so it carries the Cursor
 // mark while the xAI mark belongs to the SDK tile — a different product.
 const TILE_BRAND = Object.fromEntries(
-  ['openclaw', 'openai-agents', 'claude', 'chatgpt', 'grok', 'grok-bot', 'cursor']
-    .map((id) => [id, brandIdForConnector(id)]),
+  SETUP_TILE_IDS.map((id) => [id, brandIdForConnector(id)]),
 )
 
 // The two Claude variants shown on the sub-step after picking "Claude Agents".
@@ -1935,11 +1935,22 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // Top-level shell — landing → AI guide | manual wizard
 // ---------------------------------------------------------------------------
 
-export default function AddAgent({ onClose, embedded = false, onUpgrade }) {
-  const [view, setView] = useState('landing') // 'landing' | 'guide' | 'manual'
+// `initialView` / `initialPlatform` let the Connections page open this flow
+// already pointed at one connector (the manual wizard on that tile, or the
+// AI guide for the custom OpenTelemetry path) instead of at the landing.
+// Both default to the landing, so every existing caller is unchanged.
+export default function AddAgent({
+  onClose,
+  embedded = false,
+  onUpgrade,
+  initialView = null,
+  initialPlatform = null,
+}) {
+  const startView = initialView === 'manual' || initialView === 'guide' ? initialView : 'landing'
+  const [view, setView] = useState(startView) // 'landing' | 'guide' | 'manual'
   // Once visited, the guide stays MOUNTED (hidden) across guide↔manual
   // switches so the chat history and connect-poll baseline survive a detour.
-  const [guideVisited, setGuideVisited] = useState(false)
+  const [guideVisited, setGuideVisited] = useState(startView === 'guide')
 
   // At-limit awareness: a non-blocking nudge when the account is already at its
   // plan's agent cap. Telemetry is NEVER blocked (cardinal rule) — connecting
@@ -1998,6 +2009,7 @@ export default function AddAgent({ onClose, embedded = false, onUpgrade }) {
           onClose={onClose}
           embedded={embedded}
           onBackToLanding={() => setView('landing')}
+          initialPlatform={startView === 'manual' ? initialPlatform : null}
         />
       )}
     </div>
@@ -2043,8 +2055,15 @@ function AddAgentLanding({ onStartGuide, onManual, onClose, hideWorksWith = fals
 // export). Internals unchanged; the shell above owns the .add-agent wrapper.
 // ---------------------------------------------------------------------------
 
-function ManualWizard({ onClose, embedded = false, onBackToLanding = null }) {
-  const [platform, setPlatform] = useState(null)   // platform id, e.g. 'custom-python'
+function ManualWizard({ onClose, embedded = false, onBackToLanding = null, initialPlatform = null }) {
+  // Platform id. Preselected when the Connections page opened this flow on a
+  // specific tile; only a real picker tile counts, anything else starts at
+  // step 1 exactly as before.
+  const [platform, setPlatform] = useState(() =>
+    PLATFORMS.some((p) => p.id === initialPlatform) || RECIPE_PLATFORMS.some((p) => p.id === initialPlatform)
+      ? initialPlatform
+      : null,
+  )
   const [provider, setProvider] = useState(null)   // provider id, only when platform.needsProvider
   const [claudeVariant, setClaudeVariant] = useState(null) // 'claude-agent-sdk' | 'claude-agents'
   // The ingest endpoint (VITE_API_URL → prod). Agents name themselves on
