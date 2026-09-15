@@ -270,6 +270,21 @@ function AppInner() {
       /* ignore */
     }
     setMe(payload)
+    // `/auth/login` answers with { token, user, org } and NO seat, so the
+    // payload we just stored has none. `seatOf` widens on doubt — correctly,
+    // because the server re-checks every request — but "widened" is not the
+    // reader's seat, and every control that renders FROM the seat reads the
+    // fallback until something replaces it. Home's Work-scope selector was
+    // the visible symptom: the server offered all four choices and the page
+    // drew none, because the fallback carries no reports. It reappeared after
+    // a reload, which is the session-restore path fetching /auth/me.
+    //
+    // So fetch it now, through the same call restore already uses. The brief
+    // window before it lands is the existing widen-on-doubt behaviour, not a
+    // new one.
+    refreshMe().catch(() => {
+      /* the seat stays widened until the next restore; the server still gates */
+    })
   }
 
   function logout() {

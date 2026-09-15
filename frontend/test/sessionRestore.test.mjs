@@ -245,3 +245,36 @@ test('login/auth timeouts and AbortError become human copy, not raw errors', asy
   assert.match(api, /unreachableMessage\(path\)/)
   assert.match(app, /Can't reach Trovis — retry/)
 })
+
+test('a fresh login fetches the seat instead of rendering the widened fallback', async () => {
+  // `/auth/login` answers with { token, user, org } and NO seat. `seatOf`
+  // widens on doubt — correct, since the server re-checks every request — but
+  // a widened seat is not the reader's seat, and every control that renders
+  // FROM the seat read the fallback until a reload happened to hit the
+  // session-restore path.
+  //
+  // The visible symptom, reproduced in a browser against a running app: the
+  // server offered all four Work-scope choices (`selector_offered: true`) and
+  // Home drew no selector at all, because the fallback carries no reports.
+  // It appeared after a page reload and not before.
+  const { readFileSync } = await import('node:fs')
+  const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+  const authed = app.slice(app.indexOf('function handleAuthed('),
+                           app.indexOf('function logout('))
+  assert.match(authed, /setMe\(payload\)/)
+  assert.match(authed, /refreshMe\(\)/,
+               'handleAuthed must fetch /auth/me after a login')
+  // And it must not take the page down when that fetch fails: the seat simply
+  // stays widened until the next restore, which is where it was before.
+  assert.match(authed, /refreshMe\(\)\.catch\(/)
+
+  // `refreshMe` is the full /auth/me, not a merge — the one call that carries
+  // the seat.
+  assert.match(app, /async function refreshMe\(\)/)
+  assert.match(app, /api\.validateSession\(\)/)
+
+  // The control itself is still gated on the seat having reports, so a seat
+  // with none correctly draws nothing.
+  const whose = readFileSync(new URL('../src/whoseWork.js', import.meta.url), 'utf8')
+  assert.match(whose, /if \(!hasReports\(seat\)\) return \[\]/)
+})
