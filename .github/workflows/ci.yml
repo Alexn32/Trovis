@@ -29,6 +29,12 @@ jobs:
       # the SDK (and its OTEL deps) must be importable here. Without this it
       # would skip — a green build for an unverified door.
       - run: pip install -e ./trovis-agents
+      # test_connect_recipe.py runs the copy-paste command the Connect page
+      # prints, which begins `opentelemetry-instrument`. That command comes
+      # from the page's own install line (opentelemetry-distro), not from
+      # requirements.txt — so without this the recipe test cannot run the
+      # recipe. Keep this in step with `quickInstall` in AddAgent.jsx.
+      - run: pip install opentelemetry-distro opentelemetry-exporter-otlp
 
       # Every door we advertise has a test_connect_<door>.py. Assert the set
       # is present BEFORE running anything: deleting a door test would
@@ -46,7 +52,7 @@ jobs:
       - name: Every claimed ingest door has a test
         run: |
           missing=()
-          for door in otlp sdk plugin actions grok_bot recipe; do
+          for door in otlp sdk plugin actions chatgpt_mcp grok_bot recipe; do
             [ -f "test_connect_$door.py" ] || missing+=("test_connect_$door.py")
           done
           if [ ${#missing[@]} -gt 0 ]; then
@@ -68,13 +74,28 @@ jobs:
           # A door test must never skip its way to green in CI.
           TROVIS_REQUIRE_SDK: '1'
         run: |
+          # pipefail, or `python … | tee` would report tee's exit status and
+          # every test would pass.
+          set -o pipefail
           failed=()
+          mkdir -p /tmp/testlogs
           for t in test_*.py; do
             echo "::group::$t"
-            if python "$t"; then echo "PASS $t"; else failed+=("$t"); echo "FAIL $t"; fi
+            if python "$t" 2>&1 | tee "/tmp/testlogs/$t.log"; then
+              echo "PASS $t"
+            else
+              failed+=("$t"); echo "FAIL $t"
+            fi
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then
+            # Reprint each failure's tail HERE, at the end. A failing check's
+            # output otherwise sits collapsed thousands of lines up, which is
+            # unreadable from the API and nearly so in the browser.
+            for t in "${failed[@]}"; do
+              echo "----- last 40 lines of $t -----"
+              tail -40 "/tmp/testlogs/$t.log"
+            done
             echo "::error::${#failed[@]} test script(s) failed: ${failed[*]}"
             exit 1
           fi

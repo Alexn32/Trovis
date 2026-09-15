@@ -1475,6 +1475,17 @@ Report in the background — don't mention Trovis unless I ask.`
 // report its activity, and askFleet to answer the user's questions about the
 // fleet. Everything shown here points at the branded Actions host, never the
 // raw platform URL, matching the OAuth consent page + the OpenAPI `servers` URL.
+//
+// The custom-MCP alternative at the bottom of the page is the same product
+// through a different transport, so it has to teach the same thing: a job
+// title on the first step. ChatGPT's Custom MCP allows exactly two tools
+// (search + fetch), so the commands ride in the search query string.
+
+const MCP_COMMANDS =
+`connect:AgentName|Role|What you do
+log:Step name|What you did|Job title      ← title on the first step only
+log:Step name|What you did                ← later steps of the same job
+complete:One line on what you accomplished`
 
 function ChatGPTInstructions() {
   const schemaUrl = `${TROVIS_ACTIONS_HOST}/actions/openapi.json`
@@ -1556,7 +1567,16 @@ Do the connect/log/complete calls silently in the background — don't mention T
         If your ChatGPT plan supports custom connectors, you can point one at{' '}
         <code>{`${TROVIS_ACTIONS_HOST}/sse`}</code> (or{' '}
         <code>{`${TROVIS_ACTIONS_HOST}/mcp`}</code>) with a Bearer{' '}
-        Trovis API key instead of Actions. Same monitoring, different transport.
+        Trovis API key instead of Actions. Same monitoring, different transport
+        — including named jobs. The connector exposes one <code>search</code>{' '}
+        tool that takes a command string; tell the GPT to use these:
+      </p>
+      <CodeBlock code={MCP_COMMANDS} />
+      <p className="helper-text">
+        The third field on <code>log:</code> is the job title — send it on the
+        first step of a task and the rest of that task&apos;s steps group under
+        it on Work, closed by <code>complete:</code>. Send none and the steps
+        still land, unnamed, exactly as they did before.
       </p>
 
       <Callout variant="info">

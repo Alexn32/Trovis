@@ -11,9 +11,11 @@ contextvar) — no global mutable "current key", so it's multi-tenant safe.
 
 Storage: we're in-process with the REST API, so tools write straight to the same
 database as parsed OTEL-style spans (NOT over HTTP). ChatGPT agents then show up
-in the fleet exactly like SDK/plugin agents. The "which agent is this account
-talking about" mapping reuses the existing insights cache (sentinel `__mcp__`),
-so no new table/migration is needed.
+in the fleet exactly like SDK/plugin agents — and, when the GPT names its task,
+as named Work: log/complete go through chatgpt_jobs, the same job bookkeeping
+the Actions door uses, so the two ChatGPT doors behave identically. The "which
+agent is this account talking about" mapping reuses the existing insights cache
+(sentinel `__mcp__`), so no new table/migration is needed.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+import chatgpt_jobs
 import database
 
 # streamable_http_path="/" because we mount this app under "/mcp" on the main
@@ -205,7 +208,7 @@ def _make_fetch_result(doc_id: str, title: str, text: str, metadata: dict | None
 
 @mcp.tool()
 async def search(query: str, ctx: Context = None) -> SearchOutput:
-    """Search Oversee monitoring data. Accepts queries like 'connect:AgentName|Role|Instructions', 'log:StepName|Description', 'complete:Summary', or 'status'.
+    """Search Oversee monitoring data. Accepts queries like 'connect:AgentName|Role|Instructions', 'log:StepName|Description|Job title', 'complete:Summary', or 'status'. Send the job title on the first log of a task — in plain English, as you'd say it to a colleague — and it becomes the job's name in Trovis; later steps of the same task need only 'log:StepName|Description'.
 
     Args:
         query: A search query string
@@ -240,13 +243,24 @@ async def search(query: str, ctx: Context = None) -> SearchOutput:
         service = _current_agent(account_id)
         if not service:
             return _result("error", "Call connect first")
-        parts = q[4:].split("|", 1)
+        # "log:Step|Description|Job title" — the third field is optional and
+        # is what names the job on Work. Send it on the first step of a task
+        # and every later step lands on that same job; send nothing and the
+        # steps still land, unnamed, as they always did.
+        parts = q[4:].split("|", 2)
         step = (parts[0].strip() if parts else "") or "activity"
         desc = parts[1].strip() if len(parts) > 1 else ""
-        _create_span(service, step,
-                      {"trovis.event.type": "agent_activity", "trovis.step.name": step,
-                       "trovis.step.description": desc},
-                      account_id)
+        title = parts[2].strip() if len(parts) > 2 else ""
+        job_id, job_title = chatgpt_jobs.resolve_job(account_id, service, title=title)
+        chatgpt_jobs.write_span(
+            account_id, service, job_id, step,
+            {
+                "trovis.event.type": "agent_activity",
+                "trovis.loop.title": job_title or "",
+                "trovis.step.name": step,
+                "trovis.step.description": desc,
+            },
+        )
         return _result("logged", f"Logged: {step}")
 
     if q.lower().startswith("complete:"):
@@ -254,10 +268,20 @@ async def search(query: str, ctx: Context = None) -> SearchOutput:
         if not service:
             return _result("error", "Call connect first")
         summary = q[9:].strip()
-        _create_span(service, "agent_run_complete",
-                      {"trovis.event.type": "agent_run_complete",
-                       "trovis.task.summary": summary},
-                      account_id)
+        job_id, job_title = chatgpt_jobs.resolve_job(account_id, service)
+        chatgpt_jobs.write_span(
+            account_id, service, job_id, "agent_run_complete",
+            {
+                "trovis.event.type": "agent_run_complete",
+                "trovis.loop.title": job_title or "",
+                "trovis.loop.close": "done",
+                "trovis.task.summary": summary,
+                # The GPT's own account of the outcome — the agent side of
+                # the exchange the Work Feed renders and summarizes.
+                "trovis.response.content": summary,
+            },
+        )
+        chatgpt_jobs.forget_job(account_id, service)
         return _result("completed", f"Task complete: {summary}")
 
     service = _current_agent(account_id)
