@@ -43,6 +43,7 @@ import anthropic
 
 import database
 import findings as findings_mod
+import home_llm_usage
 import home_snapshot
 import investigation_tools
 
@@ -409,14 +410,25 @@ def _parse_json(raw: str) -> Any:
         return None
 
 
-def _ask(system: str, user: str, max_tokens: int) -> Any:
-    resp = _client().messages.create(
+def _ask(system: str, user: str, max_tokens: int, *, stage: str) -> Any:
+    """One single-turn provider request, recorded in the Home usage ledger.
+
+    `stage` is required rather than defaulted: a request that cannot say which
+    part of the investigation it belongs to is one the spending report cannot
+    attribute, and a default would hide that at the call site that forgot.
+    """
+    client = _client()
+    resp = home_llm_usage.call(
+        stage,
+        lambda: client.messages.create(
+            model=MODEL,
+            thinking=THINKING,
+            output_config=OUTPUT_CONFIG,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        ),
         model=MODEL,
-        thinking=THINKING,
-        output_config=OUTPUT_CONFIG,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
     )
     return _parse_json(_text_of(resp))
 
@@ -496,6 +508,11 @@ def investigate(
     # excluded the very rows it was meant to close. A random suffix costs
     # nothing and removes the collision entirely.
     analysis_id = f"{scope_key[:8]}-{int(now.timestamp())}-{uuid.uuid4().hex[:8]}"
+    # Stamp it on the usage context so every request from here on carries it.
+    # Requests made before this point (there are none today) would carry a null
+    # analysis id and still carry the job and attempt, which is what
+    # attribution turns on.
+    home_llm_usage.set_analysis_id(analysis_id)
     financial_visible = bool((snapshot.get("financial") or {}).get("visible"))
 
     session = investigation_tools.InvestigationSession(
@@ -775,7 +792,8 @@ def _discover(
         + json.dumps(_snapshot_for_prompt(snapshot), indent=2, default=str)
         + "\n\nWhat, if anything, deserves investigation?"
     )
-    parsed = _ask(DISCOVERY_PROMPT, user, DISCOVERY_TOKENS)
+    parsed = _ask(DISCOVERY_PROMPT, user, DISCOVERY_TOKENS,
+                  stage=home_llm_usage.STAGE_PROPOSING)
     if not isinstance(parsed, dict):
         return {"ok": False, "candidates": [],
                 "reason": ANALYSIS_DISCOVERY_UNUSABLE}
@@ -827,14 +845,20 @@ def _investigate_one(
     for _ in range(MAX_INVESTIGATION_TURNS):
         if not deadline.ok():
             break
-        resp = client.messages.create(
+        # Every turn of the tool loop is its own provider request and its own
+        # ledger row — the provider bills per request, not per investigation.
+        resp = home_llm_usage.call(
+            home_llm_usage.STAGE_INVESTIGATING,
+            lambda: client.messages.create(
+                model=MODEL,
+                thinking=THINKING,
+                output_config=OUTPUT_CONFIG,
+                max_tokens=INVESTIGATION_TOKENS,
+                system=system,
+                tools=tools,
+                messages=convo,
+            ),
             model=MODEL,
-            thinking=THINKING,
-            output_config=OUTPUT_CONFIG,
-            max_tokens=INVESTIGATION_TOKENS,
-            system=system,
-            tools=tools,
-            messages=convo,
         )
         last_text = _text_of(resp)
         if getattr(resp, "stop_reason", None) != "tool_use":
@@ -1002,7 +1026,8 @@ def _revise(
         + json.dumps(session.calculations, indent=2, default=str)
         + "\n\nRewrite it, or withdraw it."
     )
-    parsed = _ask(REVISION_PROMPT, user, COMPOSE_TOKENS)
+    parsed = _ask(REVISION_PROMPT, user, COMPOSE_TOKENS,
+                  stage=home_llm_usage.STAGE_REVISING)
     if not isinstance(parsed, dict) or parsed.get("withdraw") or not parsed.get("title"):
         return None
     # Carry forward what the reviser is not responsible for, so a rewrite that
@@ -1038,7 +1063,8 @@ def _compose(
         + json.dumps(_snapshot_for_prompt(snapshot), indent=2, default=str)
         + "\n\nWrite the finding."
     )
-    parsed = _ask(system, user, COMPOSE_TOKENS)
+    parsed = _ask(system, user, COMPOSE_TOKENS,
+                  stage=home_llm_usage.STAGE_COMPOSING)
     if not isinstance(parsed, dict) or not parsed.get("title"):
         return None
     return parsed
@@ -1070,7 +1096,8 @@ def _assess(
         + json.dumps(session.calculations, indent=2, default=str)
         + "\n\nDoes the evidence carry this wording?"
     )
-    parsed = _ask(ASSESSMENT_PROMPT, user, ASSESSMENT_TOKENS)
+    parsed = _ask(ASSESSMENT_PROMPT, user, ASSESSMENT_TOKENS,
+                  stage=home_llm_usage.STAGE_ASSESSING)
     if not isinstance(parsed, dict):
         return None
     return parsed
@@ -1096,7 +1123,8 @@ def _rank(
             ], indent=2, default=str)
         + "\n\nOrder them."
     )
-    parsed = _ask(RANKING_PROMPT, user, ASSESSMENT_TOKENS)
+    parsed = _ask(RANKING_PROMPT, user, ASSESSMENT_TOKENS,
+                  stage=home_llm_usage.STAGE_RANKING)
     if not isinstance(parsed, dict):
         for i, d in enumerate(drafts):
             d.setdefault("rank_score", 1.0 - i * 0.1)
