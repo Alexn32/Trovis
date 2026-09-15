@@ -205,6 +205,69 @@ When visible, everything is **organization-wide**, and says so:
   freshness (`freshness.latest_telemetry_at`) is computed independently of the
   cost gate for the same reason.
 
+#### `financial.daily` — recorded spend per local day
+
+The same period and the **same local-day buckets as `completions_series`**, so
+the two read as one period and a DST day is one bucket. Home draws its compact
+spend chart from these and nothing else.
+
+- `reconciles` is **asserted**, not assumed: the bucket sum is compared against
+  the independent aggregate `SUM` (to the cent — both sides sum the same stored
+  values in a different order) and a mismatch is reported. A chart that
+  disagrees with the total printed above it is worse than no chart, so a client
+  seeing `reconciles: false` must drop the chart and keep the total.
+- `points[].unpriced_token_spans` is the honest other half of each bucket. A
+  day reading `0.00` with unpriced spans had cost that is **unknown, not zero**,
+  and a client must not draw it as a free day: Home breaks its line and area at
+  such a day and marks it as a gap, rather than plotting a point at zero and
+  interpolating through it. A day with *both* recorded money and unpriced spans
+  keeps its recorded amount — that money is real — labelled as a **floor**.
+- Bounded like the completion series: over `SERIES_ROW_CAP` cost-bearing spans
+  the series comes back `available: false` with
+  `too_many_cost_spans_to_bucket` rather than drawn from a truncated read.
+- Days the server did not send are **not** days that cost nothing. A client
+  fills no gaps.
+
+#### `financial.monthly` — month-to-date against the budget
+
+A **different window** from the period above, and it says so rather than
+leaving it to be assumed: `window: "utc_calendar_month"`, `timezone: "UTC"`,
+and a `note` stating it is not the period shown above. The budget is kept and
+compared in UTC calendar months everywhere else in the product
+(`/cost/overview`), so this matches that rather than the reader's own zone.
+**It must never be added to the period's spend.**
+
+- `budget_usd` comes from `database.monthly_budget_usd` — the single definition
+  the Cost page also reads, so the two screens cannot disagree.
+- `budget_source` is `account` when somebody set it and `deployment_default`
+  when it is only the `MONTHLY_BUDGET` fallback. Home declines to draw a budget
+  bar against a default nobody in the org chose; the month-to-date figure still
+  stands without one.
+- **`coverage` is the MONTH's own**, computed exactly like the period's and over
+  a different window. The period's coverage says nothing about the month: a
+  fully priced week inside a month that also holds unpriced calls would
+  otherwise draw a budget bar with no warning anywhere near it, and that bar
+  reads as complete spend.
+- `month_to_date_usd` is therefore **recorded** spend. When the month holds
+  unpriced calls, `spend_is_recorded_only` and `budget_pct_is_floor` are true
+  and the real figure is *at least* what is reported. **`over_budget: false` is
+  not a claim that the org is safely under** — unknown cost can put a month over
+  without it ever turning true, so a client must not read it as reassurance.
+- `as_of_utc` is when the month was read. A projection must be anchored to it
+  rather than to the rendering clock, or a page left open past the 1st
+  extrapolates last month's burn across this one.
+- `over_budget` and `budget_pct` are `null`/`false` when there is no positive
+  budget. No projection is computed here: the straight-line month-end estimate
+  is a client-side extrapolation (`costChart.projectMonth`), shared by the Cost
+  page and Home, and both label it a projection — and Home additionally labels
+  it "from recorded priced spend only" whenever the month's coverage is
+  incomplete.
+
+Both blocks are behind the **same seat gate** as `spend_usd`: a reader without
+the `Cost` surface gets `daily: null` and `monthly: null`, never a smaller
+number. Gating the total while leaving a series open would hand the whole
+figure back one bucket at a time.
+
 ### `freshness`
 Newest recorded completion, newest work activity, newest telemetry, and the
 first recorded work — so Home can say how current the picture is rather than

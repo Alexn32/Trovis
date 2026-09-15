@@ -534,7 +534,15 @@ function AppInner() {
   } else if (overlay?.kind === 'settings') {
     overlayContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} onUpgrade={openUpgrade} />
   } else if (overlay?.kind === 'cost') {
-    overlayContent = <CostPage onBack={closeOverlay} onOpenAgent={openDetail} />
+    overlayContent = (
+      <CostPage
+        onBack={closeOverlay}
+        onOpenAgent={openDetail}
+        // Home asks for the window closest to the period it was showing. The
+        // Cost page validates it against its own 7/30/90 ladder.
+        initialRange={overlay.days ?? undefined}
+      />
+    )
   } else if (overlay?.kind === 'workfeed') {
     // NOTE: nothing opens this today. Home used to carry the only link to the
     // work feed and no longer previews it — Home answers what is waiting on
@@ -647,7 +655,7 @@ function AppInner() {
             setTab('work')
             setOverlay(null)
           }}
-          onOpenCost={() => setOverlay({ kind: 'cost' })}
+          onOpenCost={(days) => setOverlay({ kind: 'cost', days: days ?? null })}
           onConnectAgent={openAddAgent}
         />
       </TabPane>

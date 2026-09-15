@@ -316,6 +316,13 @@ def build_snapshot(
         previous_end_utc=period["previous_end_utc"],
         include_cost=financial_visible,
         series_cap=SERIES_ROW_CAP,
+        # The daily spend series is folded into the SAME local-day buckets as
+        # the completion series, so the two charts on Home line up. Passed only
+        # when the seat allows money at all.
+        cost_bucket_starts=(
+            period["bucket_starts_local"] if financial_visible else None
+        ),
+        cost_span_cap=SERIES_ROW_CAP,
     )
 
     # The whose-work filter's waiting-on leg is a capped scan. When it caps,
@@ -329,7 +336,8 @@ def build_snapshot(
     comparison = _comparison(rows, period, completed, membership_complete)
     attention = _attention(rows, viewer_user_id, seat)
     financial = _financial(
-        rows, period, visible=financial_visible, reason=financial_reason
+        rows, period, visible=financial_visible, reason=financial_reason,
+        account_id=account_id,
     )
 
     # Absence is a claim, and an incomplete scope cannot make it. Finding rows
@@ -650,6 +658,7 @@ def _financial(
     *,
     visible: bool,
     reason: str | None,
+    account_id: int | None = None,
 ) -> dict[str, Any]:
     """Money, when the seat includes the financial surface — and only then.
 
@@ -678,6 +687,10 @@ def _financial(
             "scope": None,
             "spend_usd": None,
             "coverage": None,
+            # No financial surface means no financial figures from ANY of
+            # these paths — the series and the budget are money too.
+            "daily": None,
+            "monthly": None,
         }
     cost = rows["cost"] or {}
     priced = int(cost.get("priced_spans") or 0)
@@ -713,6 +726,139 @@ def _financial(
                 None if denom else "no_cost_bearing_spans_in_period"
             ),
         },
+        "daily": _cost_series(rows, period, float(cost.get("spend_usd") or 0.0)),
+        "monthly": _cost_month(rows, account_id),
+    }
+
+
+def _cost_series(
+    rows: dict[str, Any], period: dict[str, Any], spend: float
+) -> dict[str, Any]:
+    """Recorded spend per local calendar day, over the SAME period.
+
+    Same buckets as the completion series, so the two read as one period. And
+    like that series, `reconciles` is ASSERTED: the buckets are compared with
+    the independent aggregate SUM and a mismatch is reported rather than
+    smoothed away, because a chart that disagrees with the total printed above
+    it is worse than no chart. The comparison allows a cent of float drift —
+    both sides are sums of the same stored values in a different order.
+
+    Unpriced spans are counted per bucket and never added to the money. A day
+    whose calls carry no stored price is a day with unknown cost, not a free
+    one, and a bucket reading 0.00 with unpriced spans says exactly that.
+    """
+    starts = period["bucket_starts_local"]
+    daily = rows.get("cost_daily")
+    if not daily or daily.get("over_cap"):
+        return {
+            "available": False,
+            "unavailable_reason": (
+                "too_many_cost_spans_to_bucket" if daily and daily.get("over_cap")
+                else "not_collected"
+            ),
+            "bucket": "local_day",
+            "timezone": period["timezone"],
+            "points": [],
+            "total": None,
+            "aggregate_total": round(spend, 6),
+            "reconciles": None,
+        }
+    buckets = daily.get("buckets") or []
+    points = [
+        {
+            "bucket_start": s.isoformat(),
+            "bucket_start_utc": s.astimezone(timezone.utc).isoformat(),
+            "spend_usd": round(float(b["spend_usd"]), 6),
+            "unpriced_token_spans": int(b["unpriced_token_spans"]),
+        }
+        for s, b in zip(starts, buckets)
+    ]
+    bucket_sum = round(sum(p["spend_usd"] for p in points), 6)
+    return {
+        "available": True,
+        "unavailable_reason": None,
+        "bucket": "local_day",
+        "timezone": period["timezone"],
+        "points": points,
+        "total": bucket_sum,
+        "aggregate_total": round(spend, 6),
+        # One cent: these are the same stored values summed in two orders, so
+        # anything larger is a real disagreement and must surface as one.
+        "reconciles": abs(bucket_sum - round(spend, 6)) < 0.01,
+    }
+
+
+def _cost_month(rows: dict[str, Any], account_id: int | None) -> dict[str, Any]:
+    """Month-to-date spend against the org's monthly budget.
+
+    A DIFFERENT window from the period above, and labeled as one. The budget is
+    kept and compared in UTC calendar months across the rest of the product, so
+    this is a UTC month even when Home's period is in the reader's own zone;
+    `timezone` says so rather than leaving the reader to assume they match.
+    Nothing here may be added to the period's spend.
+
+    `budget_source` distinguishes a budget somebody SET from the deployment
+    default, so a surface can decline to show a bar nobody chose.
+
+    The month carries its OWN pricing coverage. The period's coverage describes
+    a different window and says nothing about this one: a fully priced week
+    inside a month that also holds unpriced calls would otherwise draw a budget
+    bar with no warning anywhere near it, and that bar would read as complete
+    spend. `month_to_date_usd` is RECORDED spend either way — unpriced calls
+    are unknown cost, never zero, so the true figure is at least this and the
+    budget percentage is a floor, not an actual.
+    """
+    month = rows.get("cost_month")
+    if not month:
+        return {"available": False, "unavailable_reason": "not_collected"}
+    saved = database.get_account_budget(account_id) if account_id is not None else None
+    budget = float(database.monthly_budget_usd(account_id))
+    mtd = round(float(month["spend_usd"]), 6)
+    priced = int(month.get("priced_spans") or 0)
+    unpriced = int(month.get("unpriced_token_spans") or 0)
+    denom = priced + unpriced
+    return {
+        "available": True,
+        "unavailable_reason": None,
+        "window": "utc_calendar_month",
+        "timezone": "UTC",
+        "note": (
+            "Month-to-date is a UTC calendar month, which is the window the "
+            "budget is kept in. It is not the period shown above and must not "
+            "be added to it."
+        ),
+        "month_start_utc": _iso(month["month_start_utc"]),
+        # When the month was read. A projection anchored to this cannot be
+        # extrapolated into a different month by a stale page left open.
+        "as_of_utc": _iso(month["as_of_utc"]),
+        "month_to_date_usd": mtd,
+        "spend_is_recorded_only": unpriced > 0,
+        "coverage": {
+            "measure": "priced_cost_bearing_spans",
+            "definition": (
+                "Share of this MONTH's spans carrying usage or a stored cost "
+                "that also carry a stored price. A different window from the "
+                "period's coverage, and not a share of dollars."
+            ),
+            "priced_spans": priced,
+            "unpriced_token_spans": unpriced,
+            "denominator": denom,
+            "ratio": round(priced / denom, 6) if denom else None,
+            "unavailable_reason": (
+                None if denom else "no_cost_bearing_spans_in_month"
+            ),
+        },
+        "budget_usd": budget if budget > 0 else None,
+        "budget_source": "account" if saved is not None else "deployment_default",
+        "budget_pct": round(mtd / budget * 100.0, 1) if budget > 0 else None,
+        # A floor, not an actual, whenever the month holds unpriced calls: the
+        # unknown money can only push it up.
+        "budget_pct_is_floor": bool(budget > 0 and unpriced > 0),
+        # True only when RECORDED spend already exceeds the budget. It is never
+        # the complement of "safely under" — unknown cost can put a month over
+        # without this ever turning true, which is why the client must not read
+        # a False here as reassurance.
+        "over_budget": bool(budget > 0 and mtd > budget),
     }
 
 

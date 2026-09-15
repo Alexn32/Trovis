@@ -21,7 +21,10 @@ test('App wires every destination Home expects', () => {
   // A finding's run target opens that exact run through Work's run route.
   assert.match(app, /onOpenRun=\{\(id\) => \{/)
   assert.match(app, /setWorkRoute\(\{ job: null, run: Number\(id\) \}\)/)
-  assert.match(app, /onOpenCost=\{\(\) => setOverlay\(\{ kind: 'cost' \}\)\}/)
+  // Cost carries the period Home was showing, so the destination opens on the
+  // closest window it can represent rather than always on its own default.
+  assert.match(app, /onOpenCost=\{\(days\) => setOverlay\(\{ kind: 'cost', days: days \?\? null \}\)\}/)
+  assert.match(app, /initialRange=\{overlay\.days \?\? undefined\}/)
   assert.match(app, /onConnectAgent=\{openAddAgent\}/)
   // The by-job bars open the job pane App already owns.
   assert.match(app, /onOpenJob=\{\(id\) => id && setOverlay\(\{ kind: 'workflow', id \}\)\}/)
