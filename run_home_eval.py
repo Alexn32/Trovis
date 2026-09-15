@@ -112,6 +112,7 @@ def main() -> int:
     database.SQLITE_PATH = tmp.name
 
     import analysis_jobs
+    import home_llm_usage
     import investigator
     import main as app_main
     from fastapi.testclient import TestClient
@@ -139,7 +140,19 @@ def main() -> int:
             "max_investigation_turns": investigator.MAX_INVESTIGATION_TURNS,
             "max_findings_published": investigator.MAX_FINDINGS_PUBLISHED,
             "tool_budget": investigation_budget(),
-            "provider_retries": 0,
+            # What a single logical call can actually put on the wire, which
+            # is the number a spend estimate turns on. The SDK's own retrying
+            # is off; the same policy runs at Trovis's recorded boundary, and
+            # EVERY attempt is metered here and billed by the provider. A flat
+            # "provider_retries: 0" read as "one call, one request" and
+            # understated a run by up to 3x.
+            "retry_policy": {
+                "sdk_retries": 0,
+                "trovis_boundary_retries": home_llm_usage.MAX_RETRIES,
+                "max_requests_per_call": home_llm_usage.MAX_RETRIES + 1,
+                "note": "each HTTP attempt is metered separately against "
+                        "max_model_calls and max_estimated_usd",
+            },
         },
         "database": tmp.name,
         "api_key_present": bool(key),
@@ -242,10 +255,16 @@ def _finite_positive(value) -> bool:
 
 
 def _live_client(investigator):
-    """The real client, with provider retries OFF.
+    """The real client, with the SDK's own retrying OFF.
 
     An SDK that silently retries turns one counted call into three uncounted
     requests, and a ceiling that does not bound requests is not a ceiling.
+
+    Retrying still happens — `home_llm_usage.call` re-runs the same policy at
+    Trovis's recorded boundary — but it happens OUTSIDE this client, so each
+    attempt comes back through the meter and is counted and reserved. That is
+    why the plan reports `retry_policy` rather than "no retries": one logical
+    call can cost up to `MAX_RETRIES + 1` metered requests.
     """
     import anthropic
     return anthropic.Anthropic(
