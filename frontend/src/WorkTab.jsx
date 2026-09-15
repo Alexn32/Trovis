@@ -682,7 +682,7 @@ function JobRow({ grouped, now, onOpenJob, onOpenItem }) {
         {COLUMNS.map((c) => {
           const { cards, more } = cellCards(grouped, c.key)
           return (
-            <div key={c.key} className="jb-cell">
+            <div key={c.key} className="jb-cell" data-col={c.label}>
               {cards.map((r) => (
                 <RunCard key={r.id} row={r} col={c.key} now={now} onOpen={onOpenItem} />
               ))}
@@ -736,7 +736,7 @@ function FlatBoard({ rows, now, onOpenItem }) {
       </div>
       <div className="jb-grid">
         {COLUMNS.map((c) => (
-          <div key={c.key} className="jb-cell">
+          <div key={c.key} className="jb-cell" data-col={c.label}>
             {buckets[c.key].map((r) => (
               <RunCard key={r.id} row={r} col={c.key} now={now} onOpen={onOpenItem} />
             ))}

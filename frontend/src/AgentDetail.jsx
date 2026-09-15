@@ -279,7 +279,9 @@ function Header({ summary, registration, account, onBack, onOwnerChanged }) {
   const reason = summary.status_reason || 'No status recorded'
   return (
     <div>
-      <button onClick={onBack} style={{
+      {/* Standalone control, not a link inside a sentence, so it takes a real
+          touch target on a phone (see .ad-back). */}
+      <button className="ad-back" onClick={onBack} style={{
         background: 'none', border: 'none', color: C.muted, fontSize: 13.5,
         fontFamily: F.body, cursor: 'pointer', padding: 0, marginBottom: 18,
       }}>← Back to fleet</button>
@@ -382,7 +384,7 @@ function AskBar({ serviceName, agentId }) {
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
         {chips.map((c) => (
-          <button key={c} onClick={() => ask(c)} disabled={pending} style={{
+          <button key={c} className="ad-chip" onClick={() => ask(c)} disabled={pending} style={{
             padding: '7px 14px', background: C.linen, border: `1px solid ${C.border}`,
             borderRadius: 999, fontSize: 13, color: C.body, cursor: pending ? 'default' : 'pointer', fontFamily: F.body,
           }}>{c}</button>
@@ -447,12 +449,16 @@ function WeekStrip({ weekly, costDays, reportsUsage = true }) {
       <p style={{ margin: '0 0 16px', fontSize: 15, lineHeight: 1.55, color: C.body, fontFamily: F.body, maxWidth: 720 }}>
         {brief}
       </p>
-      <div style={{ display: 'flex', gap: 0, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        {stats.map(([k, v], i) => (
-          <div key={k} style={{
-            padding: '0 28px 0 0', marginRight: 28,
-            borderRight: i < stats.length - 1 ? `1px solid ${C.subtle}` : 'none',
-          }}>
+      {/* Layout is a class, not an inline style, so a phone can re-lay it out.
+          Inline `borderRight: i < last` drew a divider after whichever stat
+          happened to end a wrapped row and left the next row's first stat
+          indented by its neighbour's margin — dividers in the middle of
+          nothing. CSS can drop them at the width where the row wraps; an
+          inline style cannot. The rule colour rides in as a custom property
+          because this page carries its own palette. */}
+      <div className="ad-stats" style={{ '--ad-rule': C.subtle }}>
+        {stats.map(([k, v]) => (
+          <div key={k} className="ad-stat">
             <div style={{ fontFamily: F.mono, fontSize: 10.5, letterSpacing: '0.07em', textTransform: 'uppercase', color: C.muted, marginBottom: 4 }}>{k}</div>
             <div style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 22, color: C.ink }}>{v}</div>
           </div>
@@ -461,7 +467,7 @@ function WeekStrip({ weekly, costDays, reportsUsage = true }) {
             Off entirely for an agent with no usage to chart — 14 flat ticks
             are a picture of nothing. */}
         {reportsUsage && (
-          <div style={{ flex: 1, minWidth: 160, display: 'flex', alignItems: 'flex-end', gap: 3, height: 46, paddingBottom: 2 }}>
+          <div className="ad-spark" style={{ flex: 1, minWidth: 160, display: 'flex', alignItems: 'flex-end', gap: 3, height: 46, paddingBottom: 2 }}>
             {costDays.map((v, i) => (
               <div key={i} title={v > 0 ? fmtCost(v) : 'no activity'} style={{
                 flex: 1, borderRadius: 2,
@@ -714,6 +720,7 @@ function WorkFeed({ serviceName, agentId }) {
             return (
               <button
                 key={key}
+                className="ad-chip"
                 onClick={() => chooseFilter(key)}
                 style={{
                   fontFamily: F.mono, fontSize: 10.5, fontWeight: 500, letterSpacing: '0.04em',
