@@ -144,19 +144,37 @@ def _int_or_none(value: Any) -> int | None:
     return n if n >= 0 else None
 
 
+# The fields Anthropic bills a Messages request on. Both are present on every
+# well-formed usage block; the cache counts appear only when prompt caching is
+# in play. So these two are REQUIRED to price a request and the cache fields
+# are optional — which is the provider's actual contract, not a blanket rule in
+# either direction.
+BILLABLE_REQUIRED = ("input_tokens", "output_tokens")
+
+
 def read_usage(resp: Any) -> dict[str, Any]:
-    """Provider-reported usage, keeping "absent" and "zero" apart.
+    """Provider-reported usage, keeping three states apart.
+
+    * NOTHING reported — `usage_reported: 0`. We do not know what it cost.
+    * SOMETHING reported but not everything billable — `usage_reported: 1`,
+      `usage_complete: 0`. We know part of it. Presenting that part as the
+      request's cost is a number that is always low and always looks finished,
+      which is the bug this split exists to prevent.
+    * EVERYTHING billable reported — `usage_complete: 1`. Priceable.
 
     Anthropic reports `input_tokens` EXCLUDING cached tokens and reports the
-    cache counts separately, so the three add without overlapping. Reading them
-    into one bucket, or defaulting the cache fields to zero when the block is
-    missing entirely, would either double-count or under-count.
+    cache counts separately, so the three add without overlapping. An absent
+    cache field alongside present required fields means no cached tokens — the
+    block simply omits them when caching was not used — so it is zero, not
+    unknown. An absent REQUIRED field is unknown and is never zeroed.
     """
     usage = getattr(resp, "usage", None)
     if usage is None:
         return {"input_tokens": None, "output_tokens": None,
                 "cache_creation_input_tokens": None,
-                "cache_read_input_tokens": None, "usage_reported": 0}
+                "cache_read_input_tokens": None,
+                "usage_reported": 0, "usage_complete": 0,
+                "missing_billable": list(BILLABLE_REQUIRED)}
     fields = {
         "input_tokens": _int_or_none(getattr(usage, "input_tokens", None)),
         "output_tokens": _int_or_none(getattr(usage, "output_tokens", None)),
@@ -165,7 +183,10 @@ def read_usage(resp: Any) -> dict[str, Any]:
         "cache_read_input_tokens": _int_or_none(
             getattr(usage, "cache_read_input_tokens", None)),
     }
+    missing = [f for f in BILLABLE_REQUIRED if fields[f] is None]
     fields["usage_reported"] = int(any(v is not None for v in fields.values()))
+    fields["usage_complete"] = int(not missing and bool(fields["usage_reported"]))
+    fields["missing_billable"] = missing
     return fields
 
 
@@ -184,45 +205,121 @@ def _outcome_for(exc: BaseException) -> str:
     return OUTCOME_FAILED
 
 
-def call(stage: str, fn: Callable[[], Any], *, model: str) -> Any:
-    """Run one provider request and record what it cost.
+# --------------------------------------------------------------------------
+# Retry, moved to the recorded boundary
+# --------------------------------------------------------------------------
+#
+# The Anthropic SDK retries inside `messages.create()` — 2 retries by default,
+# with backoff. Wrapping that call recorded ONE row for what could be three
+# HTTP requests, so a 500 / 500 / success looked like a single clean call and
+# two potentially billable attempts vanished from the ledger.
+#
+# Disabling retries would have fixed the accounting by making Home less
+# reliable, which is a bad trade. Instead the client is built with
+# `max_retries=0` and the SAME policy is re-run here, one ledger row per
+# attempt. The timeout is still the SDK's per-request timeout, so a retry gets
+# a fresh one exactly as before.
+#
+# Two counters, and they mean different things:
+#   `request_seq`  — the LOGICAL call within a job execution (turn 3 of the
+#                    tool loop). Shared by every attempt of that call.
+#   `http_attempt` — which attempt this row is, 1-based. One row per attempt,
+#                    so counting rows counts HTTP requests and grouping by
+#                    `(request_seq)` counts logical calls. Neither double
+#                    counts the other.
+
+MAX_RETRIES = 2            # matches anthropic._constants.DEFAULT_MAX_RETRIES
+_RETRY_BASE_DELAY_S = 0.5
+_RETRY_MAX_DELAY_S = 8.0
+# The statuses the SDK itself retries. 408 request-timeout, 409 conflict,
+# 429 rate-limit and any 5xx; everything else is the provider's final answer.
+_RETRY_STATUSES = frozenset({408, 409, 429})
+
+
+def _status_of(exc: BaseException) -> int | None:
+    for attr in ("status_code", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def is_retryable(exc: BaseException) -> bool:
+    """Would the SDK have retried this? Same rule, at our boundary."""
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return False
+    name = type(exc).__name__
+    # Connection and timeout failures never reached the provider's answer.
+    if "APIConnection" in name or "APITimeout" in name or isinstance(
+            exc, (ConnectionError, TimeoutError)):
+        return True
+    status = _status_of(exc)
+    if status is None:
+        return False
+    return status in _RETRY_STATUSES or 500 <= status < 600
+
+
+def _backoff(attempt: int) -> float:
+    return min(_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)), _RETRY_MAX_DELAY_S)
+
+
+def call(stage: str, fn: Callable[[], Any], *, model: str,
+         max_retries: int = MAX_RETRIES, sleep: Callable[[float], None] = time.sleep
+         ) -> Any:
+    """Run one logical provider request, recording EVERY HTTP attempt.
+
+    `fn` must issue exactly one HTTP request — build the client with
+    `max_retries=0` — because this function owns the retrying now and counts
+    one ledger row per call of it.
 
     The request happens either way. Every failure inside the accounting is
     swallowed and logged: a ledger that can take Home's analysis down is worse
     than one with a gap in it, and the gap is visible in the report's coverage.
     """
     ctx = _CTX.get()
-    request_key = uuid.uuid4().hex
     seq = None
     if ctx is not None:
         ctx["seq"] = int(ctx.get("seq") or 0) + 1
         seq = ctx["seq"]
-    started = _now()
-    opened = database.open_home_llm_request({
-        "request_key": request_key,
-        "account_id": (ctx or {}).get("account_id"),
-        "analysis_job_id": (ctx or {}).get("analysis_job_id"),
-        "job_attempt": (ctx or {}).get("job_attempt"),
-        "analysis_id": (ctx or {}).get("analysis_id"),
-        "scope_key": (ctx or {}).get("scope_key"),
-        "stage": stage,
-        "request_seq": seq,
-        "model_requested": model,
-        "started_at": _stamp(started),
-    })
 
-    monotonic = time.monotonic()
-    try:
-        resp = fn()
-    except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+    attempt = 0
+    while True:
+        attempt += 1
+        request_key = uuid.uuid4().hex
+        started = _now()
+        opened = database.open_home_llm_request({
+            "request_key": request_key,
+            "account_id": (ctx or {}).get("account_id"),
+            "analysis_job_id": (ctx or {}).get("analysis_job_id"),
+            "job_attempt": (ctx or {}).get("job_attempt"),
+            "analysis_id": (ctx or {}).get("analysis_id"),
+            "scope_key": (ctx or {}).get("scope_key"),
+            "stage": stage,
+            "request_seq": seq,
+            "http_attempt": attempt,
+            "model_requested": model,
+            "started_at": _stamp(started),
+        })
+        monotonic = time.monotonic()
+        try:
+            resp = fn()
+        except BaseException as exc:  # noqa: BLE001 — recorded, then decided
+            if opened:
+                # A failed attempt reached the provider or did not; we cannot
+                # tell, and we do not claim it was charged. Usage stays unknown
+                # and the cost stays NULL.
+                _settle(request_key, model, None, started, monotonic,
+                        outcome=_outcome_for(exc), error_kind=_error_kind(exc))
+            if attempt <= max_retries and is_retryable(exc):
+                sleep(_backoff(attempt))
+                continue
+            raise
         if opened:
-            _settle(request_key, model, None, started, monotonic,
-                    outcome=_outcome_for(exc), error_kind=_error_kind(exc))
-        raise
-    if opened:
-        _settle(request_key, model, resp, started, monotonic,
-                outcome=OUTCOME_SUCCEEDED, error_kind=None)
-    return resp
+            _settle(request_key, model, resp, started, monotonic,
+                    outcome=OUTCOME_SUCCEEDED, error_kind=None)
+        return resp
 
 
 def _settle(request_key, model_requested, resp, started, monotonic, *,
@@ -232,7 +329,8 @@ def _settle(request_key, model_requested, resp, started, monotonic, *,
         usage = (read_usage(resp) if resp is not None else
                  {"input_tokens": None, "output_tokens": None,
                   "cache_creation_input_tokens": None,
-                  "cache_read_input_tokens": None, "usage_reported": 0})
+                  "cache_read_input_tokens": None,
+                  "usage_reported": 0, "usage_complete": 0})
         # The model the provider ACTUALLY served, which can differ from the one
         # asked for. Pricing follows what was served; a fallback priced at the
         # requested model's rate would be the wrong bill.
@@ -256,8 +354,12 @@ def _settle(request_key, model_requested, resp, started, monotonic, *,
             **{k: usage[k] for k in (
                 "input_tokens", "output_tokens",
                 "cache_creation_input_tokens", "cache_read_input_tokens",
-                "usage_reported")},
-            "estimated_cost_usd": cost,
+                "usage_reported", "usage_complete")},
+            # The FULL cost, or NULL when something billable is unknown.
+            "estimated_cost_usd": cost["total_usd"],
+            # What we can price from what did arrive. A floor, in its own
+            # column, never added to a total as though it were one.
+            "known_subtotal_usd": cost["known_subtotal_usd"],
             "pricing_source": price["source"],
             "pricing_model_key": price["matched_key"],
             # The rate AS IT WAS when the request ran. A later price update

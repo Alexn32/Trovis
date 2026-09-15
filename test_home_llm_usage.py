@@ -416,22 +416,385 @@ with TestClient(main.app) as c:
     check("and never borrows another model's price",
           database.home_llm_cost(unpriced["rates"], input_tokens=5000,
                                  output_tokens=1000, cache_creation=None,
-                                 cache_read=None) is None)
-    dated = database.resolve_home_llm_price(f"{investigator.MODEL}-20260101")
-    check("a dated variant of a priced model uses ITS OWN row, and says so",
-          dated["rates"] == (0.003, 0.015)
-          and dated["source"] == database._PRICE_MATCH_PREFIX
-          and dated["matched_key"] == investigator.MODEL)
+                                 cache_read=None)["total_usd"] is None)
     check("a measured request with a zero-token response is priced 0, not unknown",
           database.home_llm_cost((0.003, 0.015), input_tokens=0, output_tokens=0,
-                                 cache_creation=None, cache_read=None) == 0.0)
+                                 cache_creation=None, cache_read=None)
+          == {"total_usd": 0.0, "known_subtotal_usd": 0.0,
+              "priceable": True, "missing": []})
+
+    # =================================================================
+    print("\n--- partial usage is not a measured, priced request ---")
+    # =================================================================
+    # The reproduction: input reported, output missing, $0.003/$0.015 per 1k.
+    # This priced at $0.003 -- the input alone, presented as the finished cost,
+    # always low -- and counted as 100% usage and pricing coverage.
+    partial_in = home_llm_usage.read_usage(
+        _Resp([], usage=_Usage(input_tokens=1000)))
+    check("input present / output missing is reported but NOT complete",
+          partial_in["usage_reported"] == 1
+          and partial_in["usage_complete"] == 0
+          and partial_in["missing_billable"] == ["output_tokens"])
+    pc = database.home_llm_cost((0.003, 0.015), input_tokens=1000,
+                                output_tokens=None, cache_creation=None,
+                                cache_read=None)
+    check("so it has NO total cost",
+          pc["total_usd"] is None and pc["priceable"] is False)
+    check("but the part we can price is kept, as an explicit floor",
+          abs(pc["known_subtotal_usd"] - 0.003) < 1e-9)
+
+    partial_out = home_llm_usage.read_usage(
+        _Resp([], usage=_Usage(output_tokens=200)))
+    check("output present / input missing is the same shape",
+          partial_out["usage_reported"] == 1
+          and partial_out["usage_complete"] == 0
+          and partial_out["missing_billable"] == ["input_tokens"])
+    check("and also has no total",
+          database.home_llm_cost((0.003, 0.015), input_tokens=None,
+                                 output_tokens=200, cache_creation=None,
+                                 cache_read=None)["total_usd"] is None)
+
+    absent = home_llm_usage.read_usage(_Resp([]))
+    check("usage entirely absent is neither reported nor complete",
+          absent["usage_reported"] == 0 and absent["usage_complete"] == 0
+          and absent["missing_billable"] == list(home_llm_usage.BILLABLE_REQUIRED))
+
+    zeroed = home_llm_usage.read_usage(
+        _Resp([], usage=_Usage(input_tokens=0, output_tokens=0)))
+    check("an explicit zero is measured, and different from absent",
+          zeroed["usage_reported"] == 1 and zeroed["usage_complete"] == 1
+          and zeroed["input_tokens"] == 0)
+
+    full = home_llm_usage.read_usage(
+        _Resp([], usage=_Usage(input_tokens=900, output_tokens=120)))
+    check("complete usage WITHOUT caching is complete",
+          full["usage_complete"] == 1
+          and full["cache_creation_input_tokens"] is None)
+    check("and prices as a total, treating absent cache fields as no caching",
+          database.home_llm_cost(
+              (0.003, 0.015), input_tokens=900, output_tokens=120,
+              cache_creation=None, cache_read=None)["total_usd"] is not None)
+    full_cached = home_llm_usage.read_usage(
+        _Resp([], usage=_Usage(input_tokens=900, output_tokens=120,
+                               cache_creation_input_tokens=50,
+                               cache_read_input_tokens=70)))
+    check("complete usage WITH caching is complete too",
+          full_cached["usage_complete"] == 1
+          and full_cached["cache_creation_input_tokens"] == 50)
+
+    # And the report keeps the distinction.
+    pr = home_llm_report.collect(
+        [{"estimated_cost_usd": None, "known_subtotal_usd": 0.003,
+          "usage_reported": 1, "usage_complete": 0, "outcome": "succeeded",
+          "account_id": ACCT, "model_served": investigator.MODEL,
+          "stage": "proposing", "analysis_job_id": 1, "job_attempt": 0,
+          "input_tokens": 1000, "output_tokens": None,
+          "cache_creation_input_tokens": None,
+          "cache_read_input_tokens": None}],
+        {1: {"status": "done", "attempts": 0}})
+    check("the report counts a partial request as unknown spending",
+          pr["unknown_spend_requests"] == 1 and pr["priced_requests"] == 0
+          and pr["estimated_subtotal_usd"] == 0)
+    check("names it partial, with its floor beside it",
+          pr["requests_with_partial_usage"] == 1
+          and abs(pr["partial_usage_known_floor_usd"] - 0.003) < 1e-9)
+    check("and reports 0% usage and pricing coverage, not 100%",
+          pr["usage_coverage"] == 0.0 and pr["pricing_coverage"] == 0.0)
+
+    # =================================================================
+    print("\n--- a version suffix is not a date alias ---")
+    # =================================================================
+    exact = database.resolve_home_llm_price(investigator.MODEL)
+    check("an exact id matches exactly",
+          exact["source"] == database._PRICE_MATCH_EXACT
+          and exact["matched_key"] == investigator.MODEL)
+    dated = database.resolve_home_llm_price(f"{investigator.MODEL}-20260101")
+    check("a DATE-suffixed id resolves to its base row, and says so",
+          dated["rates"] == (0.003, 0.015)
+          and dated["source"] == database._PRICE_MATCH_DATE_STRIPPED
+          and dated["matched_key"] == investigator.MODEL)
+    check("a long-form date suffix resolves too",
+          database.resolve_home_llm_price(
+              f"{investigator.MODEL}-2026-01-01")["matched_key"]
+          == investigator.MODEL)
+    # The reproduction: only `claude-opus-4` is priced, and `claude-opus-4-1`
+    # is a DIFFERENT model version, not a dated alias of it.
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            f"DELETE FROM model_pricing WHERE model_name = {database.PH}",
+            ("zz-parent-model",))
+        cur.execute(
+            "INSERT INTO model_pricing (model_name, input_cost_per_1k, "
+            f"output_cost_per_1k) VALUES ({database.PH}, {database.PH}, {database.PH})",
+            ("zz-parent-model", 0.015, 0.075))
+    for suffix, why in (("-1", "a version"), ("-2", "another version"),
+                        ("-turbo", "an arbitrary suffix"),
+                        ("-v2", "a version tag"), ("-latest", "a channel"),
+                        ("-preview", "a channel")):
+        got = database.resolve_home_llm_price(f"zz-parent-model{suffix}")
+        check(f"'{suffix}' ({why}) does NOT inherit the parent's price",
+              got["rates"] is None
+              and got["source"] == database._PRICE_MATCH_NONE,
+              f"got {got['source']} -> {got['matched_key']}")
+    check("the parent itself still resolves",
+          database.resolve_home_llm_price("zz-parent-model")["rates"]
+          == (0.015, 0.075))
+    unknown_rep = home_llm_report.collect(
+        [{"estimated_cost_usd": None, "known_subtotal_usd": None,
+          "usage_reported": 1, "usage_complete": 1, "outcome": "succeeded",
+          "account_id": ACCT, "model_served": "zz-parent-model-1",
+          "stage": "proposing", "analysis_job_id": 1, "job_attempt": 0,
+          "input_tokens": 10, "output_tokens": 2,
+          "cache_creation_input_tokens": None,
+          "cache_read_input_tokens": None}],
+        {1: {"status": "done", "attempts": 0}})
+    check("an unpriceable model stays unknown in the report",
+          unknown_rep["requests_without_price"] == 1
+          and unknown_rep["unknown_spend_requests"] == 1
+          and unknown_rep["estimated_subtotal_usd"] == 0)
+    check("and the model it could not price is named in the breakdown",
+          "zz-parent-model-1" in unknown_rep["by_model"])
+
+    # =================================================================
+    print("\n--- every HTTP attempt is its own ledger row ---")
+    # =================================================================
+    # The reproduction: the SDK retries INSIDE messages.create(), so a
+    # 500/500/success was three billable HTTP requests recorded as one row.
+    # These drive the REAL anthropic client — the same class investigator uses
+    # — over a mock transport, so what is counted is what the SDK actually put
+    # on the wire. No network, no provider, no key.
+    import anthropic
+    import httpx
+
+    OK_BODY = {
+        "id": "msg_test", "type": "message", "role": "assistant",
+        "model": investigator.MODEL,
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn", "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": 20},
+    }
+
+    def scripted_transport(statuses):
+        """Replies with each status in turn; records every request seen."""
+        seen = []
+
+        def handle(request):
+            seen.append(request.url.path)
+            status = statuses[min(len(seen) - 1, len(statuses) - 1)]
+            if status == 200:
+                return httpx.Response(200, json=OK_BODY)
+            return httpx.Response(status, json={
+                "type": "error",
+                "error": {"type": "api_error", "message": "upstream trouble"}})
+
+        return handle, seen
+
+    def real_client(statuses):
+        handle, seen = scripted_transport(statuses)
+        # max_retries=0 is what investigator._client() builds: the retrying
+        # lives at the recorded boundary now, not below it.
+        client = anthropic.Anthropic(
+            api_key="test-key-not-used-for-network", max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(handle)))
+        return client, seen
+
+    def drive(statuses, **kw):
+        client, seen = real_client(statuses)
+        before = len(ledger_rows())
+        err = None
+        with home_llm_usage.attributed(account_id=ACCT, analysis_job_id=9001,
+                                       job_attempt=1):
+            try:
+                home_llm_usage.call(
+                    home_llm_usage.STAGE_PROPOSING,
+                    lambda: client.messages.create(
+                        model=investigator.MODEL, max_tokens=16,
+                        messages=[{"role": "user", "content": "hi"}]),
+                    model=investigator.MODEL, sleep=lambda _s: None, **kw)
+            except BaseException as exc:  # noqa: BLE001
+                err = exc
+        return seen, ledger_rows()[before:], err
+
+    seen, rows_r, err = drive([500, 500, 200])
+    check("retry then success: the SDK issued three HTTP requests",
+          len(seen) == 3, f"requests={len(seen)}")
+    check("and the ledger has one row per HTTP request, not one per call",
+          len(rows_r) == 3, f"rows={len(rows_r)}")
+    check("numbered 1, 2, 3 within a single logical call",
+          [r["http_attempt"] for r in rows_r] == [1, 2, 3]
+          and len({r["request_seq"] for r in rows_r}) == 1,
+          f"attempts={[r['http_attempt'] for r in rows_r]}"
+          f" seqs={[r['request_seq'] for r in rows_r]}")
+    check("the two that failed are recorded failed and unpriced",
+          [r["outcome"] for r in rows_r[:2]]
+          == [home_llm_usage.OUTCOME_FAILED] * 2
+          and all(r["estimated_cost_usd"] is None for r in rows_r[:2]))
+    check("the one that succeeded is measured and priced",
+          rows_r[2]["outcome"] == home_llm_usage.OUTCOME_SUCCEEDED
+          and rows_r[2]["input_tokens"] == 100
+          and rows_r[2]["estimated_cost_usd"] is not None)
+    check("the call still returned a response to production",
+          err is None)
+    check("no provider error text is stored",
+          "upstream trouble" not in json.dumps(rows_r, default=str))
+
+    seen, rows_x, err = drive([500, 500, 500])
+    check("exhausted retries: three attempts and then the error surfaces",
+          len(seen) == 3 and err is not None, f"requests={len(seen)} err={err!r}")
+    check("all three are on the ledger as spending we cannot price",
+          len(rows_x) == 3
+          and all(r["outcome"] == home_llm_usage.OUTCOME_FAILED
+                  for r in rows_x)
+          and all(r["estimated_cost_usd"] is None for r in rows_x))
+    check("and none of them is silently counted as $0.00",
+          all(r["usage_reported"] == 0 and r["usage_complete"] == 0
+              for r in rows_x))
+    rep_x = home_llm_report.collect(rows_x, {})
+    check("the report counts them as unknown spending, not as nothing",
+          rep_x["unknown_spend_requests"] == 3
+          and rep_x["estimated_subtotal_usd"] == 0)
+
+    seen, rows_n, err = drive([400])
+    check("a non-retryable failure is attempted exactly once",
+          len(seen) == 1 and len(rows_n) == 1,
+          f"requests={len(seen)} rows={len(rows_n)}")
+    check("it is not retried and it does raise",
+          err is not None and rows_n[0]["http_attempt"] == 1)
+    check("and 400 is correctly judged non-retryable",
+          not home_llm_usage.is_retryable(err))
+    check("while 429, 500 and a connection error are retryable",
+          home_llm_usage.is_retryable(
+              anthropic.RateLimitError(
+                  "rate limited",
+                  response=httpx.Response(
+                      429, request=httpx.Request("POST", "https://x/")),
+                  body=None))
+          and home_llm_usage.is_retryable(ConnectionError("reset")))
+
+    check("the retry budget matches the SDK default it replaces",
+          home_llm_usage.MAX_RETRIES == 2)
+    seen, rows_b, err = drive([500, 200], max_retries=0)
+    check("with retries off, one attempt and one row",
+          len(seen) == 1 and len(rows_b) == 1 and err is not None)
+
+    # No duplicate settlement: each attempt holds its own request_key and a
+    # second settle of an already-closed row cannot rewrite it.
+    keys = [r["request_key"] for r in rows_r]
+    check("each HTTP attempt carries its own idempotency key",
+          len(set(keys)) == len(keys))
+    settled = rows_r[2]
+    database.close_home_llm_request(settled["request_key"], {
+        "model_served": investigator.MODEL,
+        "outcome": home_llm_usage.OUTCOME_SUCCEEDED, "error_kind": None,
+        "finished_at": settled["finished_at"], "latency_ms": 1,
+        "input_tokens": 999999, "output_tokens": 999999,
+        "cache_creation_input_tokens": None, "cache_read_input_tokens": None,
+        "usage_reported": 1, "usage_complete": 1,
+        "estimated_cost_usd": 99.0, "known_subtotal_usd": 99.0,
+        "pricing_source": "x", "pricing_model_key": "x",
+        "pricing_captured_at": None,
+        "price_input_per_1k": 1.0, "price_output_per_1k": 1.0})
+    again = ledger_rows(request_key=settled["request_key"])
+    check("settling an already-settled attempt does not bill it twice",
+          len(again) == 1
+          and float(again[0]["estimated_cost_usd"])
+          == float(settled["estimated_cost_usd"]),
+          f"cost={again[0]['estimated_cost_usd']}")
+
+    # =================================================================
+    print("\n--- an execution's outcome comes from the job, not the window ---")
+    # =================================================================
+    # The reproduction: the report used to call the newest attempt VISIBLE in
+    # the window the final one. Attempt 1 fails inside the window, attempt 2
+    # succeeds outside it, and attempt 1 inherited the job's `done`.
+    def ex_row(job_id, attempt, cost=0.001):
+        return {"analysis_job_id": job_id, "job_attempt": attempt,
+                "account_id": ACCT, "model_served": investigator.MODEL,
+                "stage": home_llm_usage.STAGE_PROPOSING,
+                "outcome": home_llm_usage.OUTCOME_SUCCEEDED,
+                "estimated_cost_usd": cost, "known_subtotal_usd": cost,
+                "usage_reported": 1, "usage_complete": 1,
+                "input_tokens": 100, "output_tokens": 20,
+                "cache_creation_input_tokens": None,
+                "cache_read_input_tokens": None}
+
+    # Attempt 1 only; the job is `done` because attempt 2 succeeded LATER,
+    # outside this window. attempts == 2, so attempt 1 was superseded.
+    win = home_llm_report.collect([ex_row(50, 1)],
+                                  {50: {"status": "done", "attempts": 2}})
+    check("a failed attempt does not inherit a later attempt's success",
+          win["executions_completed"] == 0 and win["executions_failed"] == 1,
+          f"done={win['executions_completed']} failed={win['executions_failed']}")
+
+    # The successful retry made no provider request of its own (cache, or it
+    # short-circuited). It is simply not an execution here; attempt 1 stays
+    # failed and nothing is invented for attempt 2.
+    check("a retry that issued no request is not counted as an execution",
+          win["executions_started"] == 1)
+
+    both = home_llm_report.collect([ex_row(51, 1), ex_row(51, 2)],
+                                   {51: {"status": "done", "attempts": 2}})
+    check("both attempts inside the window: one failed, one completed",
+          both["executions_started"] == 2
+          and both["executions_failed"] == 1
+          and both["executions_completed"] == 1,
+          f"started={both['executions_started']}"
+          f" failed={both['executions_failed']}"
+          f" done={both['executions_completed']}")
+    check("and the spending of the failed attempt is still in the subtotal",
+          both["estimated_subtotal_usd"] == 0.002)
+
+    running = home_llm_report.collect([ex_row(52, 1)],
+                                      {52: {"status": "running", "attempts": 1}})
+    check("a still-running attempt is unfinished, not completed or failed",
+          running["executions_unfinished"] == 1
+          and running["executions_completed"] == 0
+          and running["executions_failed"] == 0)
+    queued = home_llm_report.collect([ex_row(53, 1)],
+                                     {53: {"status": "queued", "attempts": 2}})
+    check("a superseded attempt of a requeued job counts as failed",
+          queued["executions_failed"] == 1
+          and queued["executions_unfinished"] == 0)
+    outright = home_llm_report.collect([ex_row(54, 1)],
+                                       {54: {"status": "failed", "attempts": 1}})
+    check("a job that gave up marks its last attempt failed",
+          outright["executions_failed"] == 1)
+
+    missing_job = home_llm_report.collect([ex_row(55, 1)], {})
+    check("an execution whose job row is gone is unknown, never guessed",
+          missing_job["executions_outcome_unknown"] == 1
+          and missing_job["executions_completed"] == 0
+          and missing_job["executions_failed"] == 0)
+    no_counter = home_llm_report.collect(
+        [ex_row(56, 1)], {56: {"status": "done", "attempts": None}})
+    check("a job row with no attempt counter is unknown too",
+          no_counter["executions_outcome_unknown"] == 1
+          and no_counter["executions_completed"] == 0)
+    no_attempt = home_llm_report.collect(
+        [ex_row(57, None)], {57: {"status": "done", "attempts": 1}})
+    check("a request with no recorded attempt is unknown, not attempt 1",
+          no_attempt["executions_outcome_unknown"] == 1)
+    check("unknown outcomes are still counted as started executions",
+          missing_job["executions_started"] == 1
+          and no_counter["executions_started"] == 1)
+    check("and cost-per-completed is null rather than a divide-by-zero",
+          missing_job["cost_per_completed_execution_usd"] is None
+          and missing_job["cost_per_started_execution_usd"] is not None)
+
+    partial_window = home_llm_report.collect(
+        [ex_row(58, 1)], {58: {"status": "done", "attempts": 1}},
+        spending_may_extend_outside=1)
+    check("the report says how many executions also spent outside the window",
+          partial_window["executions_spending_outside_window"] == 1)
+    check("and states that the per-execution figure is window-scoped",
+          "THIS WINDOW" in partial_window["cost_per_execution_measure"])
 
     # =================================================================
     print("\n--- cache tokens are counted once, at their own rates ---")
     # =================================================================
     cost = database.home_llm_cost(
         (0.010, 0.050), input_tokens=1000, output_tokens=500,
-        cache_creation=2000, cache_read=4000)
+        cache_creation=2000, cache_read=4000)["total_usd"]
     expect = round(1000 / 1000 * 0.010 + 500 / 1000 * 0.050
                    + 2000 / 1000 * 0.010 * 1.25 + 4000 / 1000 * 0.010 * 0.10, 8)
     check("cache creation bills at 1.25x input and cache read at 0.1x",
@@ -541,11 +904,13 @@ with TestClient(main.app) as c:
           denied)
     os.environ["TROVIS_INTERNAL_OPS"] = "1"
 
+    # The report reads the JOB ROW, `attempts` included -- the authoritative
+    # counter -- rather than inferring an execution's outcome from the window.
     all_rows = ledger_rows()
-    jobs_status = {}
     with database._connect() as conn, database._cursor(conn) as cur:
-        cur.execute("SELECT id, status FROM analysis_jobs")
-        jobs_status = {int(dict(r)["id"]): dict(r)["status"]
+        cur.execute("SELECT id, status, attempts FROM analysis_jobs")
+        jobs_status = {int(dict(r)["id"]): {"status": dict(r)["status"],
+                                            "attempts": dict(r)["attempts"]}
                        for r in (cur.fetchall() or [])}
     rep = home_llm_report.collect(all_rows, jobs_status)
     check("it counts every recorded request", rep["requests"] == len(all_rows))
@@ -580,10 +945,11 @@ with TestClient(main.app) as c:
           rep["executions_failed"] >= 1
           and rep["executions_started"]
           == rep["executions_completed"] + rep["executions_failed"]
-          + rep["executions_unfinished"],
+          + rep["executions_unfinished"] + rep["executions_outcome_unknown"],
           f"started={rep['executions_started']} done={rep['executions_completed']}"
           f" failed={rep['executions_failed']}"
-          f" unfinished={rep['executions_unfinished']}")
+          f" unfinished={rep['executions_unfinished']}"
+          f" unknown={rep['executions_outcome_unknown']}")
     check("no cost-per-user is offered anywhere",
           not any("per_user" in k for k in rep))
     rendered = home_llm_report._render(rep, datetime.now(timezone.utc) -

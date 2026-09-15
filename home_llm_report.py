@@ -20,10 +20,18 @@ it does not know.
   could both measure and price. It is an ESTIMATE from list prices, not an
   invoice.
 * **Unknown additional spending** — requests that were sent (so they may well
-  have been billed) but which we could not price: no usage reported, or no
-  stored rate for the model served, or still unresolved. These are counted and
-  listed separately and are NEVER added into the subtotal as zero. The true
-  total is the subtotal PLUS an unknown amount, and that is how it prints.
+  have been billed) but which we could not price: no usage reported, only
+  PART of the usage reported, no stored rate for the model served, or still
+  unresolved. These are counted and listed separately and are NEVER added into
+  the subtotal as zero. The true total is the subtotal PLUS an unknown amount,
+  and that is how it prints.
+* **Partial usage** is its own line. A response that reported `input_tokens`
+  and not `output_tokens` used to be priced on the input alone and counted as
+  fully covered — a number that was always low and always looked finished.
+  Such a request is now unknown spending, and the part we CAN price is shown
+  beside it as an explicit floor.
+* **Usage coverage** counts requests whose billable usage was COMPLETE, not
+  requests where some field happened to arrive.
 * **Failed, cancelled and retried requests are included.** The provider bills
   for the attempt. A report that counted only successful investigations would
   under-state exactly the spending worth looking at.
@@ -36,10 +44,15 @@ choice and they differ a lot:
 * per STARTED execution — every `(job, attempt)` pair that made at least one
   request, failures and retries included;
 * per COMPLETED execution — those that finished. An execution's outcome is
-  ITS OWN: a job that failed once and succeeded on retry is one failed
-  execution and one completed one, because counting both as completed (the job
-  did eventually finish) would hide exactly the retry spending this report
-  exists to surface.
+  ITS OWN and is resolved from the job row's `attempts` counter, never from
+  which attempt happens to be newest inside the window: attempt 1 can fail
+  inside the window while attempt 2 succeeds outside it, and reading the
+  window would hand attempt 1 the job's `done` verdict. An outcome we cannot
+  resolve is reported unknown rather than guessed.
+
+The NUMERATOR in both is priced spending recorded **in this window**. These
+are window-scoped figures, not the lifetime cost of those executions, and the
+report says so — including how many of them also spent outside it.
 
 There is deliberately **no cost per user**. Home investigations are per
 account and per audience scope, not per person; dividing a shared
@@ -53,7 +66,9 @@ This ledger counts requests WE issued and prices them from the local
 1. A request can be billed without us recording a response — the row stays
    `in_flight` (see "unresolved" below), and the provider may still charge.
 2. List prices in `model_pricing` may lag the contract actually billed.
-3. SDK-internal retries below our call boundary are invisible here.
+3. Retries are recorded per HTTP attempt (the SDK's own retrying is off and
+   the same policy runs at our boundary), but anything the provider bills
+   below that boundary is still invisible here.
 
 To reconcile: take the period's request count and token totals from this
 report and compare against the provider's usage console for the same UTC
@@ -87,15 +102,27 @@ def _money(v: float | None) -> str:
     return "unknown" if v is None else f"${v:,.4f}"
 
 
-def collect(rows: list[dict[str, Any]], jobs: dict[int, str]) -> dict[str, Any]:
-    """Fold ledger rows into the report. Pure — takes rows, returns numbers."""
+def collect(rows: list[dict[str, Any]], jobs: dict[int, dict[str, Any]],
+            *, spending_may_extend_outside: int = 0) -> dict[str, Any]:
+    """Fold ledger rows into the report. Pure — takes rows, returns numbers.
+
+    `jobs` maps an analysis-job id to `{"status", "attempts"}` — the job row
+    itself, because an execution's outcome cannot be read off the window.
+    """
     priced = [r for r in rows if r.get("estimated_cost_usd") is not None]
     subtotal = round(sum(float(r["estimated_cost_usd"]) for r in priced), 6)
 
     unresolved = [r for r in rows if r.get("outcome") == "in_flight"]
     no_usage = [r for r in rows if not r.get("usage_reported")]
+    # PARTIAL: the provider reported something, but not everything it bills on.
+    # These are unknown spending, not priced spending — the part we can price
+    # is a floor and is reported as one, in its own line.
+    partial = [r for r in rows
+               if r.get("usage_reported") and not r.get("usage_complete")]
+    partial_floor = round(sum(float(r["known_subtotal_usd"]) for r in partial
+                              if r.get("known_subtotal_usd") is not None), 6)
     unpriced = [r for r in rows
-                if r.get("usage_reported") and r.get("estimated_cost_usd") is None]
+                if r.get("usage_complete") and r.get("estimated_cost_usd") is None]
 
     by = {"account": defaultdict(lambda: [0, 0.0, 0]),
           "model": defaultdict(lambda: [0, 0.0, 0]),
@@ -117,30 +144,41 @@ def collect(rows: list[dict[str, Any]], jobs: dict[int, str]) -> dict[str, Any]:
     # One execution is one (job, attempt) pair that actually issued a request.
     executions = {(r.get("analysis_job_id"), r.get("job_attempt")) for r in rows}
     executions.discard((None, None))
-    # An execution's outcome is ITS OWN, not its job's final one. A job that
-    # failed once and succeeded on retry is one failed execution and one
-    # completed execution — counting both as completed (because the job
-    # eventually finished 'done') would hide exactly the retry spending this
-    # report exists to surface. The last attempt of a job carries the job's
-    # verdict; every earlier attempt is one that did not finish.
-    last_attempt: dict[Any, Any] = {}
-    for job_id, attempt in executions:
-        if job_id is None:
-            continue
-        prev = last_attempt.get(job_id)
-        if prev is None or (attempt is not None and attempt > prev):
-            last_attempt[job_id] = attempt
-    completed, failed, unfinished = set(), set(), set()
+    # An execution's outcome is ITS OWN, and it is resolved from the JOB ROW --
+    # never from which attempt happens to be the newest one visible in the
+    # report's window.
+    #
+    # The window is a slice, not the history. Attempt 1 could fail inside it
+    # and attempt 2 succeed outside it; reading "the last attempt I can see" as
+    # the final one then handed attempt 1 the job's `done` verdict and counted
+    # a failure as a completion. `analysis_jobs.attempts` is the authoritative
+    # counter and does not move when the window does:
+    #
+    #   attempt <  jobs[id].attempts   -> superseded, so it did not finish
+    #   attempt == jobs[id].attempts   -> the job's own status decides
+    #   no job row, or no counter      -> UNKNOWN, never guessed
+    #
+    # A retry that succeeded without issuing a request of its own simply is not
+    # in `executions`; the earlier attempt is still correctly counted failed.
+    completed, failed, unfinished, unknown_outcome = set(), set(), set(), set()
     for ex in executions:
         job_id, attempt = ex
-        if attempt != last_attempt.get(job_id):
-            failed.add(ex)          # superseded by a later attempt
-        elif jobs.get(job_id) == "done":
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            unknown_outcome.add(ex)
+            continue
+        final = job.get("attempts")
+        status = job.get("status")
+        if attempt is None or final is None:
+            unknown_outcome.add(ex)
+        elif attempt < final:
+            failed.add(ex)          # a later attempt superseded this one
+        elif status == "done":
             completed.add(ex)
-        elif jobs.get(job_id) == "failed":
+        elif status == "failed":
             failed.add(ex)
         else:
-            unfinished.add(ex)      # still queued/running, or job row gone
+            unfinished.add(ex)      # still queued or running
 
     outcomes = defaultdict(int)
     for r in rows:
@@ -159,9 +197,14 @@ def collect(rows: list[dict[str, Any]], jobs: dict[int, str]) -> dict[str, Any]:
         "unknown_spend_requests": len(rows) - len(priced),
         "unresolved_requests": len(unresolved),
         "requests_without_usage": len(no_usage),
+        "requests_with_partial_usage": len(partial),
+        "partial_usage_known_floor_usd": partial_floor,
         "requests_without_price": len(unpriced),
-        "usage_coverage": (round(len(rows) - len(no_usage), 6) / len(rows)
-                           if rows else None),
+        # COMPLETE usage, not "any field arrived". A request that reported
+        # input and not output is not a measured request.
+        "usage_coverage": (
+            sum(1 for r in rows if r.get("usage_complete")) / len(rows)
+            if rows else None),
         "pricing_coverage": (len(priced) / len(rows) if rows else None),
         "outcomes": dict(outcomes),
         "tokens": tokens,
@@ -178,11 +221,18 @@ def collect(rows: list[dict[str, Any]], jobs: dict[int, str]) -> dict[str, Any]:
         "executions_completed": len(completed),
         "executions_failed": len(failed),
         "executions_unfinished": len(unfinished),
+        "executions_outcome_unknown": len(unknown_outcome),
+        # Executions whose spending is only PARTLY inside this window, so the
+        # per-execution figures below are window-scoped and not lifetime cost.
+        "executions_spending_outside_window": spending_may_extend_outside,
         # Both denominators, both named. Null rather than a divide-by-zero.
         "cost_per_started_execution_usd": (
             round(subtotal / len(executions), 6) if executions else None),
         "cost_per_completed_execution_usd": (
             round(subtotal / len(completed), 6) if completed else None),
+        "cost_per_execution_measure": (
+            "priced spending recorded IN THIS WINDOW per execution; not the "
+            "lifetime cost of those executions"),
         "note": (
             "Estimated subtotal covers only requests we could measure AND "
             "price. Unknown spending is reported separately and never added "
@@ -207,6 +257,9 @@ def _render(report: dict[str, Any], start, end) -> str:
         w(f"  + UNKNOWN additional spend over "
           f"{report['unknown_spend_requests']} request(s) we could not price")
         w(f"      no usage reported       {report['requests_without_usage']}")
+        w(f"      partial usage reported  {report['requests_with_partial_usage']}"
+          + (f"   (at least {_money(report['partial_usage_known_floor_usd'])},"
+             " a floor)" if report["requests_with_partial_usage"] else ""))
         w(f"      no price for the model  {report['requests_without_price']}")
         w(f"      still unresolved        {report['unresolved_requests']}")
         w("    The true total is the subtotal PLUS an unknown amount.")
@@ -219,7 +272,8 @@ def _render(report: dict[str, Any], start, end) -> str:
     cov = report["pricing_coverage"]
     ucov = report["usage_coverage"]
     w(f"  usage coverage            "
-      f"{'n/a' if ucov is None else f'{ucov * 100:.1f}%'}")
+      f"{'n/a' if ucov is None else f'{ucov * 100:.1f}%'}"
+      "   (COMPLETE billable usage, not 'some field arrived')")
     w(f"  pricing coverage          "
       f"{'n/a' if cov is None else f'{cov * 100:.1f}%'}")
     w("")
@@ -245,6 +299,9 @@ def _render(report: dict[str, Any], start, end) -> str:
     if report.get("executions_unfinished"):
         w(f"  investigations unfinished {report['executions_unfinished']}"
           "   (still queued or running at read time)")
+    if report.get("executions_outcome_unknown"):
+        w(f"  outcome unknown           {report['executions_outcome_unknown']}"
+          "   (no job row to resolve it against — not guessed)")
     w("")
     w("  cost per investigation — the denominator is stated, not assumed:")
     w(f"      per STARTED execution     "
@@ -253,6 +310,13 @@ def _render(report: dict[str, Any], start, end) -> str:
     w(f"      per COMPLETED execution   "
       f"{_money(report['cost_per_completed_execution_usd'])}"
       f"   (n={report['executions_completed']})")
+    w("      the NUMERATOR is priced spending recorded in THIS WINDOW, so")
+    w("      these are window-scoped figures, not the lifetime cost of those")
+    if report.get("executions_spending_outside_window"):
+        w(f"      executions — {report['executions_spending_outside_window']} of"
+          " them also spent outside it.")
+    else:
+        w("      executions.")
     w("      no cost-per-user is offered: Home analyses an account's audience "
       "scope,")
     w("      not a person, so a headcount denominator would invent a number.")
@@ -284,18 +348,44 @@ def main(argv: list[str] | None = None) -> int:
     rows = database.home_llm_requests_between(start, end, account_id=args.account)
 
     job_ids = {r.get("analysis_job_id") for r in rows if r.get("analysis_job_id")}
-    jobs: dict[int, str] = {}
+    jobs: dict[int, dict[str, Any]] = {}
+    outside = 0
     if job_ids:
         with database._connect() as conn, database._cursor(conn) as cur:
             holes = ", ".join([database.PH] * len(job_ids))
+            # `attempts` as well as `status`: the authoritative attempt counter
+            # is what says whether the attempt we can see was the final one.
+            # Reading that off the window instead handed a superseded failure
+            # its job's `done` verdict.
             cur.execute(
-                f"SELECT id, status FROM analysis_jobs WHERE id IN ({holes})",
+                f"SELECT id, status, attempts FROM analysis_jobs "
+                f"WHERE id IN ({holes})",
                 tuple(job_ids),
             )
-            jobs = {int(dict(r)["id"]): dict(r)["status"]
-                    for r in (cur.fetchall() or [])}
+            for r in (cur.fetchall() or []):
+                row = dict(r)
+                jobs[int(row["id"])] = {"status": row.get("status"),
+                                        "attempts": row.get("attempts")}
+            # How many of the executions we are about to divide by also spent
+            # OUTSIDE this window — so the per-execution figures can say they
+            # are window-scoped rather than lifetime.
+            seen = {(r.get("analysis_job_id"), r.get("job_attempt"))
+                    for r in rows}
+            seen.discard((None, None))
+            for job_id, attempt in seen:
+                cur.execute(
+                    "SELECT 1 AS x FROM home_llm_requests "
+                    f"WHERE analysis_job_id = {database.PH} "
+                    f"AND job_attempt = {database.PH} "
+                    f"AND (created_at < {database.PH} OR created_at >= {database.PH}) "
+                    "LIMIT 1",
+                    (job_id, attempt, database._home_ts(start),
+                     database._home_ts(end, ceil=True)),
+                )
+                if cur.fetchone() is not None:
+                    outside += 1
 
-    report = collect(rows, jobs)
+    report = collect(rows, jobs, spending_may_extend_outside=outside)
     report["window"] = {"start_utc": start.isoformat(), "end_utc": end.isoformat(),
                         "days": args.days, "account_id": args.account}
     if args.json:

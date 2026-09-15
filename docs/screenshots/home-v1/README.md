@@ -13,8 +13,10 @@ numbers are therefore real outputs of the real code over invented records.
 Nothing here was verified against production: no production data, no
 production deployment, and no live model.
 
-The app under test was `main` **plus the merged-but-not-on-`main` commits from
-#201**, because that is the integrated Home the work assumes. See the PR body.
+The app under test was the integrated Home: `main` plus this branch. The Home
+cost redesign these shots depend on was on this branch when they were captured
+and has since landed on `main` in its own right, so the shots match `main`'s
+Home as well.
 
 | file | what it shows |
 |---|---|

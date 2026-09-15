@@ -383,7 +383,18 @@ def _api_key() -> str:
 
 
 def _client() -> Any:
-    return anthropic.Anthropic(api_key=_api_key(), timeout=call_timeout_s())
+    """The provider client, with SDK-internal retries OFF.
+
+    Retrying has not been removed — it moved to `home_llm_usage.call`, which
+    re-runs the SAME policy (2 retries, the same retryable statuses, the same
+    backoff) one ledger row per attempt. The SDK retried inside
+    `messages.create()`, so a 500 / 500 / success was three HTTP requests and
+    one recorded row: two potentially billable attempts that the ledger could
+    not see. The per-request `timeout` is unchanged, and each attempt gets a
+    fresh one exactly as it did before.
+    """
+    return anthropic.Anthropic(
+        api_key=_api_key(), timeout=call_timeout_s(), max_retries=0)
 
 
 def _text_of(resp: Any) -> str:

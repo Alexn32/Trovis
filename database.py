@@ -1689,6 +1689,7 @@ CREATE TABLE IF NOT EXISTS home_llm_requests (
     scope_key          TEXT,
     stage              TEXT      NOT NULL,
     request_seq        INTEGER,
+    http_attempt       INTEGER,
     model_requested    TEXT,
     model_served       TEXT,
     outcome            TEXT      NOT NULL DEFAULT 'in_flight',
@@ -1701,7 +1702,9 @@ CREATE TABLE IF NOT EXISTS home_llm_requests (
     cache_creation_input_tokens INTEGER,
     cache_read_input_tokens     INTEGER,
     usage_reported     INTEGER   NOT NULL DEFAULT 0,
+    usage_complete     INTEGER   NOT NULL DEFAULT 0,
     estimated_cost_usd DOUBLE PRECISION,
+    known_subtotal_usd DOUBLE PRECISION,
     pricing_source     TEXT,
     pricing_model_key  TEXT,
     pricing_captured_at TIMESTAMP,
@@ -1722,6 +1725,7 @@ CREATE TABLE IF NOT EXISTS home_llm_requests (
     scope_key          TEXT,
     stage              TEXT    NOT NULL,
     request_seq        INTEGER,
+    http_attempt       INTEGER,
     model_requested    TEXT,
     model_served       TEXT,
     outcome            TEXT    NOT NULL DEFAULT 'in_flight',
@@ -1734,7 +1738,9 @@ CREATE TABLE IF NOT EXISTS home_llm_requests (
     cache_creation_input_tokens INTEGER,
     cache_read_input_tokens     INTEGER,
     usage_reported     INTEGER NOT NULL DEFAULT 0,
+    usage_complete     INTEGER NOT NULL DEFAULT 0,
     estimated_cost_usd REAL,
+    known_subtotal_usd REAL,
     pricing_source     TEXT,
     pricing_model_key  TEXT,
     pricing_captured_at TIMESTAMP,
@@ -2897,17 +2903,43 @@ def _load_pricing(cur) -> dict[str, tuple[float, float]]:
 # Trovis's own Home inference spending
 # ---------------------------------------------------------------------------
 
-# How a price was matched, most specific first. `family_fallback` is
-# deliberately ABSENT: `_match_pricing` will price an unknown id at the newest
-# same-tier rate, which is a sound estimate for a customer's span and the wrong
-# thing entirely for our own ledger. Substituting another model's price without
-# saying so is how a cost report becomes fiction, so this resolver refuses it
-# and reports the price unknown instead.
+# How a price was matched, most specific first.
+#
+# Two kinds of fallback are deliberately ABSENT here, both of which
+# `_match_pricing` does for customer spans and both of which are wrong for our
+# own ledger:
+#
+#   * the same-TIER fallback (price an unknown id at the newest opus/sonnet
+#     rate) — a sound estimate for a customer's span, fiction in a cost report;
+#   * the unrestricted PREFIX fallback. `claude-opus-4-1` is not a dated alias
+#     of `claude-opus-4`; it is a different model version with its own price.
+#     Prefix matching cannot tell those apart, so it is gone. Only a suffix
+#     that is verifiably a DATE, or an alias we have explicitly declared,
+#     resolves to a base model's row.
+#
+# Anything else stays unknown, which is recoverable: the report counts it and
+# names the model, and somebody adds the row.
 _PRICE_MATCH_EXACT = "exact"
 _PRICE_MATCH_NORMALIZED = "normalized"
-_PRICE_MATCH_PREFIX = "dated_variant_prefix"
 _PRICE_MATCH_DATE_STRIPPED = "date_suffix_stripped"
+_PRICE_MATCH_ALIAS = "declared_alias"
 _PRICE_MATCH_NONE = "unavailable"
+
+# A suffix that is a real calendar date, and nothing else. `-20250514` and
+# `-2025-05-14` qualify; `-1`, `-v2`, `-latest` and `-preview` do not, because
+# none of them says "the same model, dated".
+_LEDGER_DATE_SUFFIX_RE = re.compile(r"[-@:](\d{8}|\d{4}-\d{2}-\d{2})$")
+
+# Ids we have checked by hand to be the SAME model as their target. Empty on
+# purpose: an alias belongs here only once somebody has confirmed the provider
+# bills the two identically, and the entry is the record of that check.
+_HOME_LLM_PRICE_ALIASES: dict[str, str] = {}
+
+
+def _ledger_date_base(name: str) -> str | None:
+    """`claude-opus-4-20250514` -> `claude-opus-4`; otherwise None."""
+    stripped = _LEDGER_DATE_SUFFIX_RE.sub("", name)
+    return stripped if stripped != name else None
 
 
 def resolve_home_llm_price(model: Any) -> dict[str, Any]:
@@ -2935,21 +2967,18 @@ def resolve_home_llm_price(model: Any) -> dict[str, Any]:
     if norm in pricing:
         return {"rates": pricing[norm], "source": _PRICE_MATCH_NORMALIZED,
                 "matched_key": norm, "captured_at": now}
-    # A dated or variant id of the SAME model ('claude-opus-4-20250514' ->
-    # 'claude-opus-4'). Still this model's own price, so it is allowed — and
-    # `matched_key` records which row supplied it.
-    best: str | None = None
-    for key in pricing:
-        if norm == key or norm.startswith(key + "-"):
-            if best is None or len(key) > len(best):
-                best = key
-    if best is not None:
-        return {"rates": pricing[best], "source": _PRICE_MATCH_PREFIX,
-                "matched_key": best, "captured_at": now}
-    base = _strip_date_suffix(norm)
-    if base != norm and base in pricing:
+    # A suffix that is verifiably a DATE means the same model, dated:
+    # 'claude-opus-4-20250514' -> 'claude-opus-4'. A suffix that is a version
+    # ('-1'), a channel ('-latest', '-preview') or anything else does NOT, and
+    # falls through to unknown rather than inheriting a neighbour's price.
+    base = _ledger_date_base(norm)
+    if base and base in pricing:
         return {"rates": pricing[base], "source": _PRICE_MATCH_DATE_STRIPPED,
                 "matched_key": base, "captured_at": now}
+    alias = _HOME_LLM_PRICE_ALIASES.get(norm)
+    if alias and alias in pricing:
+        return {"rates": pricing[alias], "source": _PRICE_MATCH_ALIAS,
+                "matched_key": alias, "captured_at": now}
     return {"rates": None, "source": _PRICE_MATCH_NONE,
             "matched_key": None, "captured_at": now}
 
@@ -2961,32 +2990,51 @@ def home_llm_cost(
     output_tokens: int | None,
     cache_creation: int | None,
     cache_read: int | None,
-) -> float | None:
-    """Estimated USD for one request, or None when it cannot be established.
+) -> dict[str, Any]:
+    """What one request cost, and whether that is the WHOLE cost.
 
-    None when there is no rate, and None when the provider reported no usage at
-    all — an unpriced or unmeasured request costs an unknown amount, never
-    zero. A request that genuinely reported zero tokens prices at 0.0, which is
-    a different thing and stays distinguishable.
+    Returns `{total_usd, known_subtotal_usd, priceable, missing}`.
 
-    Cache tokens are billed against the INPUT rate at Anthropic's published
-    multiples (creation 1.25x, read 0.1x) and are counted exactly once:
-    `input_tokens` from the provider already excludes them, so the three add
-    rather than overlap.
+    `total_usd` is the request's full estimated cost, and is None unless every
+    field the provider bills on is known. Anthropic bills on `input_tokens`
+    and `output_tokens`; both are required. A response that reported input and
+    not output used to price at the input alone — `$0.003` presented as the
+    finished number, always low, and counted as fully covered. It is now None,
+    and the report counts the request as unknown spending.
+
+    `known_subtotal_usd` keeps what we CAN price from what did arrive, so a
+    partial report is not thrown away. It is a floor, never a total, and the
+    ledger and the report keep it in its own column and its own line.
+
+    The cache fields follow the provider's actual contract rather than a blanket
+    rule: they appear when prompt caching is in play and are simply absent
+    otherwise, so with `input_tokens` and `output_tokens` both present an absent
+    cache field means no cached tokens — zero, not unknown. They are billed
+    against the INPUT rate at Anthropic's published multiples (creation 1.25x,
+    read 0.1x) and counted exactly once, because the provider's `input_tokens`
+    already excludes them.
     """
+    missing = [name for name, value in (("input_tokens", input_tokens),
+                                        ("output_tokens", output_tokens))
+               if value is None]
     if rates is None:
-        return None
-    if input_tokens is None and output_tokens is None \
-            and cache_creation is None and cache_read is None:
-        return None
+        return {"total_usd": None, "known_subtotal_usd": None,
+                "priceable": False, "missing": missing or ["price"]}
     in_per_1k, out_per_1k = rates
-    return round(
+    subtotal = round(
         (input_tokens or 0) / 1000.0 * in_per_1k
         + (output_tokens or 0) / 1000.0 * out_per_1k
         + (cache_creation or 0) / 1000.0 * in_per_1k * _CACHE_WRITE_MULT
         + (cache_read or 0) / 1000.0 * in_per_1k * _CACHE_READ_MULT,
         8,
     )
+    if missing:
+        # Something billable is unknown. Keep the part we can stand behind,
+        # refuse to present it as the total.
+        return {"total_usd": None, "known_subtotal_usd": subtotal,
+                "priceable": False, "missing": missing}
+    return {"total_usd": subtotal, "known_subtotal_usd": subtotal,
+            "priceable": True, "missing": []}
 
 
 def open_home_llm_request(row: dict[str, Any]) -> bool:
@@ -2997,7 +3045,7 @@ def open_home_llm_request(row: dict[str, Any]) -> bool:
     the same write cannot create a second row for one request.
     """
     cols = ("request_key", "account_id", "analysis_job_id", "job_attempt",
-            "analysis_id", "scope_key", "stage", "request_seq",
+            "analysis_id", "scope_key", "stage", "request_seq", "http_attempt",
             "model_requested", "started_at")
     holes = ", ".join([PH] * len(cols))
     conflict = ("ON CONFLICT (request_key) DO NOTHING" if USE_POSTGRES else "")
@@ -3025,16 +3073,25 @@ def close_home_llm_request(request_key: str, row: dict[str, Any]) -> bool:
     cols = ("model_served", "outcome", "error_kind", "finished_at",
             "latency_ms", "input_tokens", "output_tokens",
             "cache_creation_input_tokens", "cache_read_input_tokens",
-            "usage_reported", "estimated_cost_usd", "pricing_source",
+            "usage_reported", "usage_complete", "estimated_cost_usd",
+            "known_subtotal_usd", "pricing_source",
             "pricing_model_key", "pricing_captured_at",
             "price_input_per_1k", "price_output_per_1k")
     sets = ", ".join(f"{c} = {PH}" for c in cols)
+    # The two coverage flags are NOT NULL and a caller that omits one means
+    # "not reported" / "not complete" -- which is 0, the direction that leaves
+    # the request counted as unknown spending. Letting a missing flag raise
+    # would lose the whole settlement, and with it a request that was billed.
+    values = [row.get(c) for c in cols]
+    for flag in ("usage_reported", "usage_complete"):
+        i = cols.index(flag)
+        values[i] = int(bool(values[i]))
     try:
         with _connect() as conn, _cursor(conn) as cur:
             cur.execute(
                 f"UPDATE home_llm_requests SET {sets} "
                 f"WHERE request_key = {PH} AND outcome = 'in_flight'",
-                tuple([row.get(c) for c in cols] + [request_key]),
+                tuple(values + [request_key]),
             )
             return bool(getattr(cur, "rowcount", 0))
     except Exception:  # noqa: BLE001
