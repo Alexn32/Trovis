@@ -4,9 +4,14 @@ import { Spinner } from './ui.jsx'
 import { statusFor, statusColor } from './utils.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
-// Multi-agent connections map. A directional system diagram: agent nodes +
-// directed edges (who feeds whom), derived from telemetry (shared traces)
-// and operator-curated. Lives on the Workflows tab.
+// Agent Flow — the agent-to-agent map. A directional system diagram: agent
+// nodes + directed edges (observed handoffs between agents), derived from
+// telemetry (shared traces) and operator-confirmed. Lives on the Workflows tab.
+//
+// Vocabulary: this is *Agent Flow* (relationships/handoffs between agents),
+// not *Connections* (external systems Trovis connects to — see
+// connectors.js). The component name and the backend /connections endpoints
+// keep their historical names; only the product copy says Agent Flow.
 //
 // Edges: detected = dashed gray (with ✓/× to confirm/dismiss), confirmed =
 // solid teal, manual = solid accent. Nodes are draggable (positions persist
@@ -247,7 +252,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
       await api.addConnection({ source_service: source, target_service: target })
       await load(false)
     } catch (e) {
-      setError(e.message || 'Could not add connection')
+      setError(e.message || 'Could not add handoff')
     } finally {
       setBusy(false)
     }
@@ -281,7 +286,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
       setDescribeText('')
       setDescribeOpen(false)
     } catch (e) {
-      setError(e.message || 'Could not propose connections')
+      setError(e.message || 'Could not propose handoffs')
     } finally {
       setBusy(false)
     }
@@ -296,10 +301,10 @@ export default function ConnectionsMap({ onSelectAgent }) {
     <div className="map-view">
       <div className="map-toolbar">
         <div>
-          <h2 className="section-label">Connections map</h2>
+          <h2 className="section-label">Agent Flow</h2>
           <p className="map-subtitle">
-            How your agents feed into each other. Edges come from shared
-            traces; confirm the ones that are real or draw your own.
+            How work moves between your agents. Handoffs are observed in
+            shared traces; confirm the ones that are real or draw your own.
           </p>
         </div>
         <div className="map-actions">
@@ -311,7 +316,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
               setConnectSource(null)
             }}
           >
-            {connectMode ? 'Done' : 'Add connection'}
+            {connectMode ? 'Done' : 'Add handoff'}
           </button>
           <button type="button" className="btn btn-secondary btn-sm" onClick={resetLayout}>
             Reset layout
@@ -335,7 +340,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
             className="text-input"
             value={describeText}
             onChange={(e) => setDescribeText(e.target.value)}
-            placeholder="Describe the data flow, e.g. 'the research agent feeds the writer, which feeds the publisher'"
+            placeholder="Describe the agent flow, e.g. 'the research agent hands off to the writer, which hands off to the publisher'"
             onKeyDown={(e) => e.key === 'Enter' && describeConnections()}
           />
           <button type="button" className="btn btn-primary btn-sm" disabled={busy || !describeText.trim()} onClick={describeConnections}>
@@ -352,7 +357,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
 
       {connectMode && (
         <div className="map-hint">
-          {connectSource ? 'Now click the target agent.' : 'Click a source agent, then a target, to draw a connection.'}
+          {connectSource ? 'Now click the agent it hands off to.' : 'Click the agent that hands off, then the one that receives, to draw a handoff.'}
         </div>
       )}
 
@@ -361,7 +366,7 @@ export default function ConnectionsMap({ onSelectAgent }) {
         <div className="state-card error"><h2>Couldn't load the map</h2><p>{error}</p></div>
       )}
       {!loading && !error && nodeIds.length === 0 && (
-        <div className="state-card"><h2>No agents yet</h2><p>Once agents send telemetry they'll appear here, with connections drawn from shared traces.</p></div>
+        <div className="state-card"><h2>No agents yet</h2><p>Once agents send telemetry they'll appear here, with handoffs drawn from shared traces.</p></div>
       )}
 
       {!loading && !error && nodeIds.length > 0 && (
