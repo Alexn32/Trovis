@@ -578,6 +578,114 @@ with TestClient(main.app) as c:
           "agents" not in ceo_fin and "agent_count" not in str(ceo_fin))
 
     # -----------------------------------------------------------------
+    print("\n--- the daily spend series ---")
+    # -----------------------------------------------------------------
+    # Home draws a compact chart from these buckets. A chart that disagrees
+    # with the total printed above it is worse than no chart, so the series
+    # ASSERTS the reconciliation rather than assuming it.
+    daily = ceo_fin["daily"]
+    check("the series is bucketed by the same local day as completions",
+          daily["available"] is True
+          and daily["bucket"] == "local_day"
+          and daily["timezone"] == "UTC")
+    check("it has one bucket per requested day",
+          len(daily["points"]) == 7)
+    check("its buckets reconcile with the independent aggregate sum",
+          daily["reconciles"] is True
+          and abs(daily["total"] - ceo_fin["spend_usd"]) < 0.01
+          and daily["aggregate_total"] == ceo_fin["spend_usd"])
+    check("the spend lands in a bucket rather than smearing across the window",
+          sum(1 for p in daily["points"] if p["spend_usd"] > 0) >= 1)
+    check("unpriced calls are counted per day and never added to the money",
+          sum(p["unpriced_token_spans"] for p in daily["points"]) >= 1
+          and all(isinstance(p["spend_usd"], (int, float))
+                  for p in daily["points"]))
+    check("the series follows the requested period, not a fixed window",
+          len(snap(CEO, days=3, tz="UTC").json()["financial"]["daily"]["points"]) == 3)
+    tz_daily = snap(CEO, days=7, tz="America/New_York").json()["financial"]["daily"]
+    check("and follows the requested timezone",
+          tz_daily["timezone"] == "America/New_York"
+          and tz_daily["reconciles"] is True)
+
+    # -----------------------------------------------------------------
+    print("\n--- month-to-date is a different window, and says so ---")
+    # -----------------------------------------------------------------
+    month = ceo_fin["monthly"]
+    check("the monthly block names its own window and zone",
+          month["available"] is True
+          and month["window"] == "utc_calendar_month"
+          and month["timezone"] == "UTC"
+          and month["month_start_utc"].endswith("-01T00:00:00+00:00"))
+    check("and says in so many words that it is not the period above",
+          "not the period shown above" in month["note"])
+    check("month-to-date is a real figure, not a copy of the period spend",
+          isinstance(month["month_to_date_usd"], (int, float)))
+    check("the budget it compares against is the one the Cost page uses",
+          month["budget_usd"] == database.monthly_budget_usd(ACCT)
+          and month["budget_source"] == "deployment_default")
+    database.set_account_budget(ACCT, 0.01)
+    set_month = snap(CEO, days=7, tz="UTC").json()["financial"]["monthly"]
+    check("a budget somebody set is marked as theirs, not the default",
+          set_month["budget_source"] == "account" and set_month["budget_usd"] == 0.01)
+    check("and going over it is reported, not implied",
+          set_month["over_budget"] is True and set_month["budget_pct"] > 100)
+    database.set_account_budget(ACCT, None)
+    check("the month is stamped with when it was read",
+          month["as_of_utc"] and month["as_of_utc"].endswith("+00:00"))
+
+    # -----------------------------------------------------------------
+    print("\n--- the month carries its OWN pricing coverage ---")
+    # -----------------------------------------------------------------
+    # The visible caveat on Home describes the selected PERIOD. A fully priced
+    # week inside a month that also holds unpriced calls would otherwise draw a
+    # budget bar with no warning anywhere near it, and that bar reads as
+    # complete spend.
+    mcov = month["coverage"]
+    check("the month reports its own priced/unpriced counts",
+          mcov["denominator"] == mcov["priced_spans"] + mcov["unpriced_token_spans"]
+          and mcov["unpriced_token_spans"] >= 1)
+    check("and month-to-date is labelled recorded-only while they exist",
+          month["spend_is_recorded_only"] is True)
+    check("so the budget percentage is a floor, not an actual",
+          month["budget_pct_is_floor"] is True)
+
+    # A fully priced SEVEN-DAY period inside that same partly unpriced month.
+    # The unpriced call above is ~110s old, so push the period's own window
+    # past it by asking for a window that contains only priced work: seed a
+    # priced-only day and read a 1-day period.
+    post(KEY, "ceo-agent", [sp("llm_call", 5, {
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "gen_ai.usage.input_tokens": 500, "gen_ai.usage.output_tokens": 100})])
+    one_day = snap(CEO, days=1, tz="UTC").json()["financial"]
+    # Whatever the period's own coverage turns out to be, the month's is
+    # independent of it and still reports the unpriced call.
+    check("the month's coverage is computed independently of the period's",
+          one_day["monthly"]["coverage"]["unpriced_token_spans"]
+          == mcov["unpriced_token_spans"])
+    check("and stays visible however clean the selected period is",
+          one_day["monthly"]["spend_is_recorded_only"] is True
+          and one_day["monthly"]["coverage"]["ratio"] < 1)
+    check("the month's coverage definition names its own window",
+          "MONTH" in mcov["definition"])
+    check("a month with no cost-bearing spans has no percentage to state",
+          (snap(OTHER, days=7, tz="UTC").json()["financial"]["monthly"]
+           ["coverage"]["unavailable_reason"]) == "no_cost_bearing_spans_in_month")
+
+    # -----------------------------------------------------------------
+    print("\n--- the new financial paths are behind the SAME gate ---")
+    # -----------------------------------------------------------------
+    # A series or a budget is money. Gating the total and leaving these open
+    # would hand the whole figure back one bucket at a time.
+    for name, blind in (("no seat", ira_fin), ("custom level", pod_fin)):
+        check(f"{name}: the daily series is withheld too",
+              blind["daily"] is None)
+        check(f"{name}: the monthly budget is withheld too",
+              blind["monthly"] is None)
+    check("no spend figure of any kind survives in a withheld block",
+          not any(isinstance(v, (int, float)) and v > 0
+                  for v in ira_fin.values()))
+
+    # -----------------------------------------------------------------
     print("\n--- navigation identifiers ---")
     # -----------------------------------------------------------------
     nav = narrow["navigation"]

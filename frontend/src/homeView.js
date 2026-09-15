@@ -509,6 +509,15 @@ export function readFinancial(snapshot) {
     attributable: fin.attributable_to_shown_work === true,
     coverageRatio: typeof cov.ratio === 'number' ? cov.ratio : null,
     unpricedSpans: unpriced,
+    // Whether anything is missing, decided from the AUTHORITATIVE count and the
+    // unrounded ratio — never from a rounded percentage. A ratio of 0.999
+    // rounds to 100 and would have hidden the warning behind its own display
+    // format. Coverage the server could not establish is incomplete too: an
+    // unknown is not a clean bill.
+    pricingIncomplete:
+      unpriced > 0
+      || (typeof cov.ratio === 'number' ? cov.ratio < 1
+          : cov.unavailable_reason !== 'no_cost_bearing_spans_in_period'),
     // Unpriced is UNKNOWN cost, never zero cost. The copy has to say so, or a
     // low number reads as a cheap month.
     unpricedNote:
@@ -517,7 +526,101 @@ export function readFinancial(snapshot) {
         : null,
     periodStart: fin.period_start_utc || null,
     periodEnd: fin.period_end_utc || null,
+    // The server's own buckets, over the same period and the same local days
+    // as the completion series. Read only when it says they reconcile with the
+    // total beside them: a chart that disagrees with the number printed above
+    // it is worse than no chart, so a mismatch drops the chart and keeps the
+    // number. Points are never synthesised here — a day the server did not
+    // send is not a day that cost nothing.
+    daily: readCostSeries(fin.daily),
+    monthly: readCostMonth(fin.monthly),
   }
+}
+
+/** The daily spend series, or null when it cannot be trusted or is absent. */
+export function readCostSeries(daily) {
+  if (!daily || daily.available !== true) return null
+  if (daily.reconciles === false) return null
+  const points = Array.isArray(daily.points) ? daily.points : []
+  if (points.length < 2) return null
+  return {
+    points: points.map((p) => ({
+      bucket_start: p.bucket_start,
+      spend_usd: typeof p.spend_usd === 'number' ? p.spend_usd : 0,
+      unpriced_token_spans:
+        typeof p.unpriced_token_spans === 'number' ? p.unpriced_token_spans : 0,
+    })),
+    timezone: daily.timezone || 'UTC',
+    total: typeof daily.total === 'number' ? daily.total : null,
+  }
+}
+
+/**
+ * Month-to-date against the monthly budget — a DIFFERENT window from the
+ * period above, kept separate and labelled by the caller.
+ *
+ * Null when the server could not establish it, and null when the only budget
+ * on offer is the deployment default: a bar against a number nobody in this
+ * org chose would read as a limit they set. The month-to-date figure itself
+ * still stands without one.
+ */
+export function readCostMonth(monthly) {
+  if (!monthly || monthly.available !== true) return null
+  const mtd = monthly.month_to_date_usd
+  if (typeof mtd !== 'number') return null
+  const chosen = monthly.budget_source === 'account'
+  const budget = chosen && typeof monthly.budget_usd === 'number' && monthly.budget_usd > 0
+    ? monthly.budget_usd
+    : null
+  // The MONTH's own coverage. The period's describes a different window and
+  // says nothing about this one, so a fully priced week inside a partly
+  // unpriced month must still carry the warning.
+  const cov = monthly.coverage || {}
+  const unpriced = typeof cov.unpriced_token_spans === 'number'
+    ? cov.unpriced_token_spans
+    : null
+  // Unknown is not complete. A month we could not establish coverage for is
+  // treated as incomplete, not as fully priced.
+  const incomplete = unpriced == null
+    ? cov.unavailable_reason !== 'no_cost_bearing_spans_in_month'
+    : unpriced > 0
+  return {
+    monthToDate: mtd,
+    monthStart: monthly.month_start_utc || null,
+    // When the server read the month. The projection is anchored to this, not
+    // to the browser clock, so a page left open overnight cannot extrapolate
+    // last month's burn into this one.
+    asOf: monthly.as_of_utc || null,
+    timezone: monthly.timezone || 'UTC',
+    budget,
+    budgetPct: budget ? monthly.budget_pct : null,
+    // Recorded spend can only go up once the unknown calls are priced, so the
+    // percentage is a floor and `overBudget: false` is not reassurance.
+    budgetPctIsFloor: Boolean(budget) && incomplete,
+    overBudget: budget ? monthly.over_budget === true : false,
+    coverageIncomplete: incomplete,
+    coverageKnown: unpriced != null,
+    unpricedSpans: unpriced,
+    coverageRatio: typeof cov.ratio === 'number' ? cov.ratio : null,
+  }
+}
+
+/**
+ * A pricing-coverage percentage for DISPLAY, from the unrounded ratio.
+ *
+ * Rounding decided visibility once: a ratio of 0.999 became `100` and the
+ * "some calls are unpriced" warning disappeared behind it. Rounding is now for
+ * display only — and it never rounds to a number that contradicts the fact
+ * that something is missing, so 0.999 reads `>99%` and not `100%`.
+ */
+export function coverageLabel(ratio) {
+  if (typeof ratio !== 'number' || !Number.isFinite(ratio)) return null
+  if (ratio >= 1) return '100%'
+  if (ratio <= 0) return '0%'
+  const pct = ratio * 100
+  if (pct > 99) return '>99%'
+  if (pct < 1) return '<1%'
+  return `${Math.round(pct)}%`
 }
 
 export function formatMoney(amount, currency = 'USD', locale = undefined) {
