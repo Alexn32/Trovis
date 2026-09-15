@@ -4132,7 +4132,7 @@ a:hover {
 .wf-conn-confirmed { background: var(--success-faint); color: var(--success); }
 .wf-conn-manual { background: var(--accent-faint); color: var(--accent); }
 
-/* ---------- Workflows: connections map ---------- */
+/* ---------- Workflows: Agent Flow (agent-to-agent map, ConnectionsMap.jsx) ---------- */
 .workflow-map-btn {
   width: 100%;
   text-align: left;

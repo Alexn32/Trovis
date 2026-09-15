@@ -3,21 +3,17 @@ import { api, getApiKey } from './api.js'
 import { SparkleIcon, TrovisMark } from './Icons.jsx'
 import { BrandMark, WorksWithStrip } from './BrandMarks.jsx'
 import ConnectGuide from './ConnectGuide.jsx'
+import { brandIdForConnector } from './connectors.js'
 
-// Tile → V1 brand id. ChatGPT and the OpenAI Agents SDK share the OpenAI mark;
-// that is recognition, not "one connector per logo".
-const TILE_BRAND = {
-  openclaw: 'openclaw',
-  'openai-agents': 'chatgpt',
-  claude: 'claude',
-  chatgpt: 'chatgpt',
-  grok: 'grok',
-  // A Grok Bot is a Cursor desktop assistant — the Cursor mark is the one a
-  // customer recognises. The xAI mark belongs to the SDK tile, which is a
-  // different product entirely.
-  'grok-bot': 'cursor',
-  cursor: 'cursor',
-}
+// Tile → V1 brand id, read from the canonical connector registry
+// (connectors.js) — tile ids are connector ids. ChatGPT and the OpenAI Agents
+// SDK share the OpenAI mark; that is recognition, not "one connector per
+// logo". A Grok Bot is a Cursor desktop assistant, so it carries the Cursor
+// mark while the xAI mark belongs to the SDK tile — a different product.
+const TILE_BRAND = Object.fromEntries(
+  ['openclaw', 'openai-agents', 'claude', 'chatgpt', 'grok', 'grok-bot', 'cursor']
+    .map((id) => [id, brandIdForConnector(id)]),
+)
 
 // The two Claude variants shown on the sub-step after picking "Claude Agents".
 // Each maps to the existing instructions platform id.
