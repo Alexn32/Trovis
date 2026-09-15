@@ -3,13 +3,12 @@ import GraduateCard from './Graduate.jsx'
 import { api } from './api.js'
 import { Spinner } from './ui.jsx'
 import { ArrowLeftIcon, TrashIcon } from './Icons.jsx'
-import { BrandMark } from './BrandMarks.jsx'
 
 // Organization + account settings. Reachable from the account-badge dropdown.
 //   - Everyone: org info + change-password.
 //   - Business owners: members list, invite links, remove members.
 
-export default function Settings({ me, onClose, onUpdated, onUpgrade }) {
+export default function Settings({ me, onClose, onUpdated, onUpgrade, onOpenConnections }) {
   const user = me?.user
   const org = me?.org
   const isOwner = user?.role === 'owner'
@@ -38,7 +37,7 @@ export default function Settings({ me, onClose, onUpdated, onUpgrade }) {
 
       <BillingCard onUpgrade={onUpgrade} />
 
-      {user && <IntegrationsCard />}
+      {user && <ConnectionsCard onOpenConnections={onOpenConnections} />}
 
       {user && <AlertsCard />}
 
@@ -153,216 +152,25 @@ function BillingCard({ onUpgrade }) {
   )
 }
 
-// SaaS Connect — Work waits, not Trovis billing / not CRM / not catalog sync.
-// Isolated from the plan webhook. Agents stamp a loop key on the Stripe
-// object, HubSpot deal/ticket, or Shopify order.
-function IntegrationsCard() {
-  const [data, setData] = useState(null)
-  const [busy, setBusy] = useState(null)
-
-  function load() {
-    return api.getSaasConnections().then(setData).catch(() => setData({ connections: [] }))
-  }
-
-  useEffect(() => {
-    let alive = true
-    api.getSaasConnections()
-      .then((d) => alive && setData(d))
-      .catch(() => alive && setData({ connections: [] }))
-    return () => { alive = false }
-  }, [])
-
+// Connections moved to their own surface (Connections.jsx — the Connect
+// atom). Stripe / HubSpot / Shopify connect and disconnect THERE; this card is
+// the doorway for someone who came looking in Settings, not a second manager.
+function ConnectionsCard({ onOpenConnections }) {
   return (
     <section className="settings-card">
-      <h3 className="settings-card-title">Integrations</h3>
-      <IntegrationProvider
-        brandId="stripe"
-        label="Stripe"
-        copy={(
-          <>
-            Connect your Stripe account so payment events can wait, clear, or
-            flag a job — only when the PaymentIntent, Invoice, Charge, or Dispute
-            carries a Trovis loop key
-            (<code>trovis_loop_external_id</code>). Trovis never invents a job
-            from Stripe alone. This is not Trovis billing.
-          </>
-        )}
-        row={ (data?.connections || []).find((c) => c.provider === 'stripe') }
-        canOauth={!!data?.stripe_oauth_configured}
-        notConfigured="Stripe Connect isn’t configured on this deploy yet."
-        connectLabel="Connect Stripe"
-        start={api.startStripeConnect}
-        disconnect={api.disconnectStripe}
-        startError="Could not start Stripe Connect."
-        disconnectError="Could not disconnect Stripe."
-        busy={busy}
-        setBusy={setBusy}
-        onChanged={load}
-      />
-      <IntegrationProvider
-        brandId="hubspot"
-        label="HubSpot"
-        copy={(
-          <>
-            Connect your HubSpot account so deal-stage and ticket-status
-            changes can wait, clear, or flag a job — only when that deal or
-            ticket carries a Trovis loop key
-            (<code>trovis_loop_external_id</code>). Trovis never invents a job
-            from HubSpot alone. This is not CRM or contact sync.
-          </>
-        )}
-        row={ (data?.connections || []).find((c) => c.provider === 'hubspot') }
-        canOauth={!!data?.hubspot_oauth_configured}
-        notConfigured="HubSpot Connect isn’t configured on this deploy yet."
-        connectLabel="Connect HubSpot"
-        start={api.startHubSpotConnect}
-        disconnect={api.disconnectHubSpot}
-        startError="Could not start HubSpot Connect."
-        disconnectError="Could not disconnect HubSpot."
-        busy={busy}
-        setBusy={setBusy}
-        onChanged={load}
-      />
-      <IntegrationProvider
-        brandId="shopify"
-        label="Shopify"
-        copy={(
-          <>
-            Connect your Shopify store so order, payment, and fulfillment
-            events can wait, clear, or flag a job — only when that order
-            (or fulfillment / refund) carries a Trovis loop key
-            (<code>trovis_loop_external_id</code>). Trovis never invents a
-            job from Shopify alone. This is not catalog, product, or
-            customer sync.
-          </>
-        )}
-        row={ (data?.connections || []).find((c) => c.provider === 'shopify') }
-        canOauth={!!data?.shopify_oauth_configured}
-        notConfigured="Shopify Connect isn’t configured on this deploy yet."
-        connectLabel="Connect Shopify"
-        start={api.startShopifyConnect}
-        disconnect={api.disconnectShopify}
-        startError="Could not start Shopify Connect."
-        disconnectError="Could not disconnect Shopify."
-        busy={busy}
-        setBusy={setBusy}
-        onChanged={load}
-        needsShop
-        shopPlaceholder="your-store.myshopify.com"
-      />
+      <h3 className="settings-card-title">Connections</h3>
+      <p className="settings-note">
+        Manage the systems Trovis uses to observe work — AI workers, agent
+        platforms, and work systems like Stripe, HubSpot and Shopify.
+      </p>
+      {onOpenConnections && (
+        <div className="settings-actions">
+          <button type="button" className="btn btn-secondary" onClick={onOpenConnections}>
+            Manage connections
+          </button>
+        </div>
+      )}
     </section>
-  )
-}
-
-function IntegrationProvider({
-  brandId,
-  label,
-  copy,
-  row,
-  canOauth,
-  notConfigured,
-  connectLabel,
-  start,
-  disconnect,
-  startError,
-  disconnectError,
-  busy,
-  setBusy,
-  onChanged,
-  needsShop = false,
-  shopPlaceholder,
-}) {
-  const [error, setError] = useState(null)
-  const [shop, setShop] = useState('')
-  const connected = row?.status === 'connected'
-  const acct = row?.provider_account_id || ''
-  const acctShort = acct.includes('.') ? acct : (acct.length > 8 ? `…${acct.slice(-6)}` : acct)
-  const mine = busy === brandId
-  const shopReady = !needsShop || !!shop.trim()
-
-  async function connect() {
-    setError(null)
-    if (needsShop && !shop.trim()) {
-      setError('Enter your Shopify store domain to connect.')
-      return
-    }
-    setBusy(brandId)
-    try {
-      const res = await start(needsShop ? shop.trim() : undefined)
-      if (res?.authorize_url) {
-        window.location.href = res.authorize_url
-        return
-      }
-      setError(startError)
-    } catch (e) {
-      if (e?.status === 503) setError(notConfigured)
-      else if (e?.status === 400 && needsShop) setError('Enter a valid Shopify store (your-store.myshopify.com).')
-      else setError(`${startError} Please try again.`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function onDisconnect() {
-    setError(null)
-    setBusy(brandId)
-    try {
-      await disconnect()
-      await onChanged()
-    } catch (e) {
-      setError(disconnectError)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  return (
-    <div className="saas-connect-block">
-      <div className="saas-connect-row">
-        <span className="saas-connect-brand">
-          <BrandMark id={brandId} size={18} />
-          <span>{label}</span>
-        </span>
-        <span className={`saas-connect-status ${connected ? 'is-on' : ''}`}>
-          {connected ? `Connected${acctShort ? ` · ${acctShort}` : ''}` : 'Not connected'}
-        </span>
-      </div>
-      <p className="settings-note">{copy}</p>
-      {!connected && needsShop && (
-        <input
-          className="text-input saas-connect-shop"
-          type="text"
-          value={shop}
-          onChange={(e) => setShop(e.target.value)}
-          placeholder={shopPlaceholder || 'your-store.myshopify.com'}
-          aria-label="Shopify store domain"
-          autoComplete="off"
-          spellCheck={false}
-        />
-      )}
-      <div className="saas-connect-actions">
-        {connected ? (
-          <button type="button" className="btn btn-secondary" onClick={onDisconnect} disabled={!!busy}>
-            {mine ? 'Working…' : 'Disconnect'}
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={connect}
-            disabled={!!busy || !canOauth || !shopReady}
-          >
-            {mine ? 'Opening…' : connectLabel}
-          </button>
-        )}
-      </div>
-      {!canOauth && !connected && (
-        <p className="settings-note">{notConfigured}</p>
-      )}
-      {error && (
-        <p className="settings-note" style={{ color: 'var(--error)' }}>{error}</p>
-      )}
-    </div>
   )
 }
 

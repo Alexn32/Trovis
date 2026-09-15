@@ -18,6 +18,8 @@ import UpgradeModal from './UpgradeModal.jsx'
 import Org from './Org.jsx'
 import GraduateCard from './Graduate.jsx'
 import Settings from './Settings.jsx'
+import Connections from './Connections.jsx'
+import { setupEntryFor } from './connectionsPage.js'
 import Onboarding from './Onboarding.jsx'
 // A render crash used to blank the whole app; each pane and the overlay now
 // fail on their own. See ErrorBoundary.jsx.
@@ -32,7 +34,7 @@ import {
 import { restoreSession } from './sessionRestore.js'
 import { performLogout } from './sessionLogout.js'
 import { isPaneVisible, nextRosterEpoch, visibleTabs } from './tabs.js'
-import { seatOf } from './seat.js'
+import { hasSurface, seatOf } from './seat.js'
 import {
   MonitorIcon,
   MoonIcon,
@@ -308,6 +310,19 @@ function AppInner() {
   function openAddAgent() {
     setOverlay({ kind: 'add' })
   }
+  // Connections → "Connect" on an AI connector: the same Add Agent overlay,
+  // opened on that connector's existing setup (manual tile or AI guide).
+  // A connector with no setup entry (coming soon) opens nothing.
+  function openConnectorSetup(connectorId) {
+    const entry = setupEntryFor(connectorId)
+    if (!entry) return
+    setOverlay({ kind: 'add', view: entry.view, platform: entry.platform })
+  }
+  function openConnections() {
+    setTab('connections')
+    setWorkRoute({ job: null, run: null })
+    setOverlay(null)
+  }
   function openSettings() {
     setOverlay({ kind: 'settings' })
   }
@@ -529,10 +544,20 @@ function AppInner() {
           closeOverlay()
         }}
         onUpgrade={openUpgrade}
+        initialView={overlay.view ?? null}
+        initialPlatform={overlay.platform ?? null}
       />
     )
   } else if (overlay?.kind === 'settings') {
-    overlayContent = <Settings me={me} onClose={closeOverlay} onUpdated={refreshMe} onUpgrade={openUpgrade} />
+    overlayContent = (
+      <Settings
+        me={me}
+        onClose={closeOverlay}
+        onUpdated={refreshMe}
+        onUpgrade={openUpgrade}
+        onOpenConnections={openConnections}
+      />
+    )
   } else if (overlay?.kind === 'cost') {
     overlayContent = (
       <CostPage
@@ -597,6 +622,7 @@ function AppInner() {
   const dashboardVisible = isPaneVisible('dashboard', paneState)
   const fleetVisible = isPaneVisible('fleet', paneState)
   const workVisible = isPaneVisible('work', paneState)
+  const connectionsVisible = isPaneVisible('connections', paneState)
   // Take up a pending roster invalidation only while the pane is on screen,
   // so the refetch happens when the user arrives — not in the background.
   // (`key` remounts that one pane; the other panes are untouched.)
@@ -669,6 +695,12 @@ function AppInner() {
           onAgentsChanged={() => rosterChanged('fleet')}
           onUpgrade={openUpgrade}
         />
+      </TabPane>
+      <TabPane id="connections" visible={connectionsVisible}>
+        {/* The Connect surface. AI connectors open the Add Agent setup;
+            work systems connect and disconnect in place. `active` lets the
+            pane re-check SaaS state when it comes back on screen. */}
+        <Connections active={connectionsVisible} onConnect={openConnectorSetup} />
       </TabPane>
       <TabPane id="org" visible={isPaneVisible('org', paneState)}>
         <Org seat={seat} org={me?.org} onGraduated={refreshMe} />
@@ -818,7 +850,12 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
   // Which of the rest are offered comes from the seat's surfaces, resolved
   // server-side. Hiding a tab is a courtesy: every endpoint behind it
   // re-checks the seat, so a stale one costs a visible tab, never access.
-  const tabs = visibleTabs(seatOf(me).surfaces)
+  const seat = seatOf(me)
+  const tabs = visibleTabs(seat.surfaces)
+  // The quick "+ Add Agent" door is the Connect surface too: a seat without
+  // it hides the button the same way it hides the Connections tab. Courtesy,
+  // not a lock — the API re-checks the seat on every request.
+  const canConnect = hasSurface(seat, 'Connect')
   return (
     <header className="app-header">
       <div className="app-header-left">
@@ -845,14 +882,16 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
         {/* The label is a span so phone widths can drop it and leave the
             plus — the word costs ~80px the header does not have, and the
             aria-label keeps the button named for anyone not reading it. */}
-        <button
-          type="button"
-          className="btn btn-primary btn-compact"
-          onClick={onAddAgent}
-          aria-label="Add Agent"
-        >
-          <PlusIcon /> <span className="btn-compact-label">Add Agent</span>
-        </button>
+        {canConnect && (
+          <button
+            type="button"
+            className="btn btn-primary btn-compact"
+            onClick={onAddAgent}
+            aria-label="Add Agent"
+          >
+            <PlusIcon /> <span className="btn-compact-label">Add Agent</span>
+          </button>
+        )}
         <AccountBadge me={me} onLogout={onLogout} onOpenSettings={onOpenSettings} />
       </div>
     </header>
