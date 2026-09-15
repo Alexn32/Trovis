@@ -99,6 +99,28 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 - **Theme via CSS variables only** — no hardcoded hex in components. Update values in `:root`
   (dark) and `:root[data-theme="light"]`; pages inherit automatically. Inter is scoped to the
   `.dash` / `.wf2` wrappers; the app otherwise uses DM Sans.
+- **Phones.** Three breakpoints, each with its own reason, and they are deliberately not
+  the same number. **720px — the shell**: the header keeps the logo and three icon-only
+  actions, and the nav leaves the header to become a fixed bottom bar (same `<nav
+  className="tabs">`, same tablist roles, same seat-driven list — only `position` changes;
+  never add a second mobile nav). **860px — the Work board**: four state columns stop being
+  readable well before the header stops fitting, so `.jb-rowgrid` and `.jb-flat .jb-grid`
+  collapse to one column and each `.jb-cell` names itself from `data-col` (sourced from
+  `COLUMNS`, not a second copy of the strings); empty cells are dropped, reversing the wide
+  board's "empty cells keep their height" rule because stacked there is no row shape to
+  read. **`(pointer: coarse)` — tap size**: how big a control must be is about what is
+  pointing at it, not how wide the screen is; an iPad in portrait is 768px and still a
+  thumb. Fields go to 16px there too — under 16px Safari zooms on focus and never zooms
+  back. Inline text buttons inside a sentence ("0 waiting") stay small on purpose.
+  Two traps worth knowing: **`backdrop-filter` makes an element a containing block for its
+  `position: fixed` children** — it is on `.app-header::before`, never on `.app-header`, or
+  the bottom nav pins to the bottom of the header; and **a bare `1fr` track is
+  `minmax(auto, 1fr)`**, so one card with a wide min-content stretches the grid and the
+  page (use `minmax(0, 1fr)`). Anything a media query must change cannot be an inline
+  style — inline wins over every rule — which is why `AgentDetail.jsx` hands its stat row
+  and chips a class. Verify layout by driving the app at 360/390/430/768/1024/1440 and
+  measuring `scrollWidth` vs `clientWidth`; `test/responsive.test.mjs` pins only the
+  decisions a media query cannot express.
 - `api.js` `request()` attaches `Authorization: Bearer` and/or `X-Trovis-Api-Key` headers
   (never cookies). It returns parsed JSON.
 - View switching is `useState` tab state in `App.jsx` (no router); overlays via `setOverlay`.

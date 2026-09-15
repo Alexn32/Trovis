@@ -254,16 +254,30 @@ a:hover {
   position: sticky;
   top: 0;
   z-index: 20;
-  /* Frosted glass so the paper-grain texture shows through subtly on scroll */
-  background: var(--nav-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--nav-border);
   padding: 14px 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
+}
+
+/* Frosted glass so the paper-grain texture shows through subtly on scroll.
+   It lives on a pseudo-element rather than on .app-header itself for a
+   structural reason, not a stylistic one: `backdrop-filter` makes an element
+   a CONTAINING BLOCK for its `position: fixed` descendants. With the filter
+   on the header, the phone nav bar inside it pinned to the bottom of the
+   HEADER — a 55px strip under the logo — instead of the bottom of the screen.
+   Moving the filter down one level leaves the header a plain sticky box, so a
+   fixed child escapes to the viewport the way it reads. */
+.app-header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--nav-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 
 .app-header-left {
@@ -682,7 +696,11 @@ a:hover {
 
 .agents-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  /* minmax(0, ...), not a bare 1fr: `1fr` means minmax(AUTO, 1fr), so a card
+     whose min-content is wider than the screen stretches the track and takes
+     the page with it. The roster has exactly such a card — a stats row of four
+     nowrap columns. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -829,7 +847,9 @@ a:hover {
 
 .agent-card-stats {
   display: flex;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  min-width: 0;
   font-size: 12px;
 }
 
@@ -1107,6 +1127,7 @@ a:hover {
   display: inline-flex;
   align-items: center;
   gap: 14px;
+  min-width: 0;
   margin-left: auto;
   font-family: "IBM Plex Mono", monospace;
   font-size: 12px;
@@ -1140,7 +1161,7 @@ a:hover {
 
 .instance-group-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   padding: 6px;
 }
@@ -7143,8 +7164,11 @@ button.work-td-task:hover {
 .jb-more:hover { color: var(--text-primary); }
 
 @media (max-width: 860px) {
-  .jb-colheads { display: none; }
-  .jb-counts, .jb-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* The column heads and the stacked cell layout that replaces them live
+     together in the PHONES — Work board block near the end of this file.
+     Hiding the heads here while re-laying only `.jb-grid` left the by-job
+     view (which uses `.jb-rowgrid`) as five unlabelled columns. */
+  .jb-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* =============================================================================
@@ -8061,4 +8085,395 @@ button.work-td-task:hover {
   .hv-bar-label { font-size: 9.5px; }
   .hv-job-row { grid-template-columns: 1fr auto; }
   .hv-job-track { display: none; }
+}
+
+/* ===========================================================================
+   PHONES — the app shell at ≤720px
+   ---------------------------------------------------------------------------
+   Everything above this block was written for a desktop header: logo, a
+   four-tab nav, a theme toggle, "+ Add Agent" and a named account pill, all
+   on one row. That row needs ~640px. At 390px the pieces overlapped each
+   other and pushed the document 8px wider than the screen, so EVERY page
+   scrolled sideways — the nav overlapping the logo was the visible symptom;
+   the sideways scroll was the same cause.
+
+   The fix is a layout, not a set of shrinks:
+
+     * The nav leaves the header and becomes a fixed bottom bar. Same DOM,
+       same roles and aria — only its position changes — so tab logic,
+       routing and the seat-driven tab list are untouched. It also puts the
+       four destinations under the thumb, which is where they belong on a
+       phone.
+     * The header keeps the logo and the three actions, with their labels
+       dropped to icons. A word that forces the row to overflow is not
+       carrying its weight.
+     * Ask becomes a small pill in the corner above the bar rather than a
+       wide one across the middle, where it sat on top of the content it was
+       supposed to help with.
+
+   Tap targets are 44px minimum. `env(safe-area-inset-bottom)` keeps the bar
+   clear of the iOS home indicator; it resolves to 0 everywhere else.
+   =========================================================================== */
+
+@media (max-width: 720px) {
+  /* ---- header ---- */
+  .app-header {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .app-header-left {
+    gap: 0;
+    flex: 1;
+  }
+  .app-header-right {
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .trovis-logo-word { font-size: 17px; }
+  .trovis-logo-badge { width: 26px; height: 26px; }
+
+  /* Labels off, icons on. Both keep an aria-label, so the control is still
+     named for a screen reader even though the word is gone. */
+  .btn-compact-label,
+  .account-badge-label { display: none; }
+  .btn.btn-compact {
+    padding: 0;
+    width: 40px;
+    height: 40px;
+    justify-content: center;
+  }
+  .account-badge-btn { padding: 6px; }
+  .btn-icon { width: 40px; height: 40px; }
+
+  /* ---- nav: header row -> bottom bar ---- */
+  .tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: 2px;
+    padding: 5px 6px calc(5px + env(safe-area-inset-bottom, 0px));
+    border: none;
+    border-top: 1px solid var(--nav-border);
+    border-radius: 0;
+    background: var(--nav-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  .tab {
+    min-height: 44px;
+    padding: 6px 4px;
+    font-size: 12.5px;
+    border-radius: 10px;
+  }
+
+  /* ---- content clears the bar ---- */
+  .app-main {
+    /* 54px bar + safe area. The Ask pill sits in the corner rather than
+       across the middle, so it does not need its own reserved band. */
+    padding-bottom: calc(66px + env(safe-area-inset-bottom, 0px));
+  }
+  .view { padding: 16px 14px 20px; }
+
+  /* ---- Ask: wide pill -> corner pill ---- */
+  .dash-ask-pill {
+    left: auto;
+    right: 12px;
+    transform: none;
+    bottom: calc(66px + env(safe-area-inset-bottom, 0px));
+    padding: 10px 16px;
+    min-height: 44px;
+  }
+  .dash-kbd { display: none; }
+
+  /* ---- the last resort ----
+     Causes are fixed above; this keeps one future wide child from silently
+     restoring the sideways scroll on every page. Anything that genuinely
+     needs to be wider than the screen (the org chart, a table) carries its
+     own scroll container and is unaffected. */
+  html, body { overflow-x: hidden; }
+}
+
+/* ---------------------------------------------------------------------------
+   PHONES — controls
+   ---------------------------------------------------------------------------
+   Two things a mouse hides.
+
+   TAP SIZE. A 28px-tall button is comfortable with a cursor and a coin toss
+   with a thumb; 44px is the size a finger actually hits. These are raised by
+   class rather than with a blanket `button { min-height }`, because the app
+   also uses <button> for inline text ("0 waiting" inside a sentence, "← Back
+   to fleet"). Padding those to 44px would blow the line height apart, and an
+   inline target inside a run of text is the one case the guideline exempts —
+   the sentence around it is the target.
+
+   iOS ZOOM. Safari zooms the whole page when a focused field's font is under
+   16px, and never zooms back out. Every field the user types into or picks
+   from is set to 16px here — it is the only reliable way to stop it, and it
+   costs nothing at this width.
+
+   This block keys on the INPUT DEVICE, not the width. Everything else in this
+   file breaks at a width because it is about how much fits on screen; how big
+   a control needs to be is about what is pointing at it. An iPad in portrait
+   is 768px — wide enough to keep the desktop header, and still a thumb. The
+   width clause stays alongside it so a browser that misreports `pointer` on a
+   phone does not lose the whole block.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 720px), (pointer: coarse) {
+  .btn,
+  .btn-sm,
+  .jb-pill,
+  .work-filter-chip,
+  .hv-now-cell,
+  .fleet-upgrade-link,
+  .unowned-toggle,
+  .account-badge-btn {
+    min-height: 44px;
+  }
+  .btn-sm,
+  .jb-pill,
+  .unowned-toggle {
+    padding-inline: 14px;
+  }
+
+  /* Square icon controls: one size, big enough to hit. */
+  .btn-icon,
+  .btn-icon-sm,
+  .icon-btn,
+  .card-delete-btn,
+  .instance-band-toggle {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  /* The delete control is hover-revealed on desktop; there is no hover on a
+     phone, so it stays visible — and is pulled in so it clears the card's
+     own corner radius. */
+  .card-delete-btn {
+    opacity: 1;
+    top: 4px;
+    right: 4px;
+  }
+
+  input,
+  select,
+  textarea,
+  .text-input,
+  .hv-select {
+    font-size: 16px;
+    min-height: 44px;
+  }
+
+  /* Stat rows: four monospace columns do not fit side by side. Let them wrap
+     into a readable grid instead of setting the card's min-content width. */
+  .agent-card-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+  }
+  .instance-band-stats {
+    gap: 6px 10px;
+    font-size: 11px;
+  }
+  .instance-band-name { max-width: 100%; }
+  .fleet-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---------------------------------------------------------------------------
+   PHONES — density
+   ---------------------------------------------------------------------------
+   Two columns of stat tiles at 390px leaves ~170px per tile. A 22px monospace
+   value written for a quarter of a desktop row wraps to four lines there
+   ("2 need attention of 6 · 4 healthy"), and because grid rows are equal
+   height it drags its neighbour's box along with it. Smaller type and tighter
+   padding keep a row of tiles one glance rather than a paragraph.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .stat-box { padding: 12px 13px; gap: 4px; }
+  .stat-box-value { font-size: 17px; line-height: 1.25; }
+  .stat-box-label { font-size: 10px; letter-spacing: 0.06em; }
+  .stat-box-sub { font-size: 11px; }
+  .fleet-summary { gap: 10px; margin-bottom: 18px; }
+
+  .agents-section-header { flex-wrap: wrap; gap: 8px; }
+  .agent-card { padding: 14px 15px; }
+  .instance-band-main { padding: 10px 8px; gap: 6px; }
+
+  /* The card-corner delete control overlaps the sparkline on a narrow card;
+     give the top row room to end before it. */
+  .agent-card-top { padding-right: 40px; }
+}
+
+/* Very narrow phones (SE, mini). The stat VALUE is the only thing here that
+   is genuinely long — the fleet-health line names four numbers — so it is the
+   only thing that shrinks again. */
+@media (max-width: 480px) {
+  .stat-box-value { font-size: 15px; }
+  .view { padding: 14px 12px 18px; }
+  .tab { font-size: 11.5px; }
+}
+
+/* ---------------------------------------------------------------------------
+   Agent detail — the pieces whose LAYOUT had to leave the inline styles
+   ---------------------------------------------------------------------------
+   AgentDetail.jsx styles itself inline against its own palette. That is fine
+   for colour and type, and impossible for anything a media query has to
+   change: an inline style outranks every stylesheet rule. These two bits do
+   need to change by width, so their layout lives here.
+   --------------------------------------------------------------------------- */
+
+.ad-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.ad-stat {
+  padding-right: 28px;
+  margin-right: 28px;
+  border-right: 1px solid var(--ad-rule, var(--border-default));
+}
+.ad-stat:last-of-type {
+  border-right: none;
+}
+
+@media (max-width: 720px) {
+  /* Two columns, no dividers. A divider is a claim about which stats sit
+     side by side; once the row wraps it stops being true. */
+  .ad-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 12px;
+  }
+  .ad-stat {
+    padding-right: 0;
+    margin-right: 0;
+    border-right: none;
+  }
+  .ad-spark {
+    grid-column: 1 / -1;
+    min-width: 0 !important;
+  }
+  /* The chips and the back link set their own padding inline, so height has
+     to come from min-height, which nothing inline is setting. */
+  .ad-chip,
+  .ad-back {
+    min-height: 44px;
+  }
+  /* The back link is a bare text button; give it something to hit, and keep
+     it left-aligned rather than centring the arrow in a 44px box. */
+  .ad-back {
+    display: inline-flex;
+    align-items: center;
+    padding-right: 12px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   PHONES — the Work board
+   ---------------------------------------------------------------------------
+   The board is four state columns (Working / Waiting on a person / Stuck /
+   Done today) beside the job name. At 390px each column is about 40px wide,
+   so every card wrapped to one word per line and a job title became a vertical
+   stack of letters. Shrinking the type does not fix a four-column layout on a
+   phone; the columns have to go.
+
+   Stacked, each cell carries the column head it lost as its own label —
+   `data-col` on the cell, so the label comes from the same COLUMNS list the
+   heads do rather than a second copy of the strings.
+
+   One desktop rule is deliberately reversed here: empty cells keep their
+   height on the wide board because the SHAPE of the row is the signal (a job
+   with nothing working and one card in Waiting reads at a glance). Stacked in
+   one column there is no shape to read, so an empty cell is just a heading
+   with nothing under it — those are dropped.
+
+   This block breaks at 860px, not at the shell's 720. The shell breaks where
+   the header stops fitting; the board breaks where four state columns stop
+   being readable, which happens earlier — at 768 (an iPad in portrait, a
+   half-screen laptop window) each column is down to about 120px and a run
+   title wraps to one word per line. 860 is also where the column heads were
+   already being hidden, so both halves of that decision now sit together.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 860px) {
+  .jb-colheads { display: none; }
+  .jb-rowgrid,
+  .jb-flat .jb-grid,
+  .jb-flat .jb-colheads {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+  .jb-cell { min-height: 0; }
+  .jb-cell:empty { display: none; }
+  .jb-cell[data-col]::before {
+    content: attr(data-col);
+    display: block;
+    margin: 14px 0 2px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .jb-idle-line {
+    grid-column: 1 / -1;
+    justify-self: start;
+    margin-top: 8px;
+  }
+  .jb-head { margin-bottom: 2px; }
+  .jb-name { font-size: 16px; }
+  .jb-totals { flex-wrap: wrap; row-gap: 4px; }
+  .jb-filters { gap: 6px; }
+
+  /* The board head stacks: a 22px title and a button do not share 390px with
+     the filter row. */
+  .board-head,
+  .jb-bar { flex-wrap: wrap; row-gap: 10px; }
+  .board-filter { margin-left: 0; }
+}
+
+/* ---------------------------------------------------------------------------
+   PHONES — the org chart
+   ---------------------------------------------------------------------------
+   The chart already scrolls sideways rather than shrinking titles into
+   nonsense, and that stays true here: a chart is as wide as the org is broad.
+   What changes on a phone is how much of it a single screen buys. Tighter
+   boxes and gutters fit roughly two more columns before you have to scroll,
+   which is the difference between seeing a manager with their reports and
+   seeing one box.
+
+   No edge fade: the obvious place to hang one is the scroll container, and
+   the scroll container is also the box holding the add-a-role form, so a mask
+   there dims the form's right-hand side along with the chart's. Tighter boxes
+   are the real win anyway — a fade is a hint that the chart is cut off, and
+   fitting more of it is better than labelling the problem.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .org-chart-wrap { padding: 14px 8px 12px; }
+  .oc-box {
+    min-width: 112px;
+    max-width: 150px;
+    padding: 7px 9px;
+    font-size: 12.5px;
+  }
+  .oc-node { padding: 18px 5px 0; }
+  .oc-level { padding-top: 18px; }
+  .oc-person { font-size: 11px; }
+
+  /* Every add/invite form on this page is two fields and a button. Side by
+     side at 390px each field is ~110px — too narrow to read what you typed,
+     let alone a role title. They stack. */
+  /* Both the add-a-role and the invite form are .org-inline-form. */
+  .org-inline-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .org-inline-form > * { width: 100%; }
 }

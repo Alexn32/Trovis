@@ -827,8 +827,16 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
       </div>
       <div className="app-header-right">
         <ThemeToggle />
-        <button type="button" className="btn btn-primary" onClick={onAddAgent}>
-          <PlusIcon /> Add Agent
+        {/* The label is a span so phone widths can drop it and leave the
+            plus — the word costs ~80px the header does not have, and the
+            aria-label keeps the button named for anyone not reading it. */}
+        <button
+          type="button"
+          className="btn btn-primary btn-compact"
+          onClick={onAddAgent}
+          aria-label="Add Agent"
+        >
+          <PlusIcon /> <span className="btn-compact-label">Add Agent</span>
         </button>
         <AccountBadge me={me} onLogout={onLogout} onOpenSettings={onOpenSettings} />
       </div>
