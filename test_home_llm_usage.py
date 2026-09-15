@@ -25,6 +25,7 @@ Run:
   OVERSEE_DISABLE_PRICING_SYNC=1 python3 test_home_llm_usage.py
 (isolated temp SQLite DB; never touches the dev/prod DB, never a network call)
 """
+import email.utils
 import json
 import os
 import tempfile
@@ -575,15 +576,20 @@ with TestClient(main.app) as c:
     }
 
     def scripted_transport(statuses):
-        """Replies with each status in turn; records every request seen."""
+        """Replies with each reply in turn; records every request seen.
+
+        A reply is a status, or `(status, headers)` when the case is about the
+        provider's retry headers rather than its status code.
+        """
         seen = []
 
         def handle(request):
             seen.append(request.url.path)
-            status = statuses[min(len(seen) - 1, len(statuses) - 1)]
+            reply = statuses[min(len(seen) - 1, len(statuses) - 1)]
+            status, headers = reply if isinstance(reply, tuple) else (reply, {})
             if status == 200:
-                return httpx.Response(200, json=OK_BODY)
-            return httpx.Response(status, json={
+                return httpx.Response(200, json=OK_BODY, headers=headers)
+            return httpx.Response(status, headers=headers, json={
                 "type": "error",
                 "error": {"type": "api_error", "message": "upstream trouble"}})
 
@@ -598,9 +604,15 @@ with TestClient(main.app) as c:
             http_client=httpx.Client(transport=httpx.MockTransport(handle)))
         return client, seen
 
+    # Every delay the retry policy asks for is CAPTURED, never slept. The
+    # tests assert on what it asked for; waiting 30 real seconds would prove
+    # the same thing and cost 30 seconds.
+    slept: list[float] = []
+
     def drive(statuses, **kw):
         client, seen = real_client(statuses)
         before = len(ledger_rows())
+        slept.clear()
         err = None
         with home_llm_usage.attributed(account_id=ACCT, analysis_job_id=9001,
                                        job_attempt=1):
@@ -610,7 +622,7 @@ with TestClient(main.app) as c:
                     lambda: client.messages.create(
                         model=investigator.MODEL, max_tokens=16,
                         messages=[{"role": "user", "content": "hi"}]),
-                    model=investigator.MODEL, sleep=lambda _s: None, **kw)
+                    model=investigator.MODEL, sleep=slept.append, **kw)
             except BaseException as exc:  # noqa: BLE001
                 err = exc
         return seen, ledger_rows()[before:], err
@@ -700,6 +712,105 @@ with TestClient(main.app) as c:
           and float(again[0]["estimated_cost_usd"])
           == float(settled["estimated_cost_usd"]),
           f"cost={again[0]['estimated_cost_usd']}")
+
+    # =================================================================
+    print("\n--- the provider's retry headers still decide ---")
+    # =================================================================
+    # Moving the retry out of the SDK moved it away from the headers the SDK
+    # read. Ignoring them means waiting the wrong amount after a rate limit,
+    # hammering a provider that said stop, and giving up on one that said try
+    # again. Same headers, same precedence, same bounds — now with a ledger
+    # row per attempt.
+
+    # 429 + Retry-After: 30. Retryable, and we wait what we were told.
+    seen, rows_429, err = drive([(429, {"Retry-After": "30"})])
+    check("429 with Retry-After is retried to the full budget",
+          len(seen) == 3 and len(rows_429) == 3,
+          f"requests={len(seen)} rows={len(rows_429)}")
+    check("and it waits the 30 seconds the provider asked for, not backoff",
+          slept == [30.0, 30.0], f"slept={slept}")
+    check("each attempt is its own row, all failed and unpriced",
+          [r["http_attempt"] for r in rows_429] == [1, 2, 3]
+          and all(r["outcome"] == home_llm_usage.OUTCOME_FAILED
+                  and r["estimated_cost_usd"] is None for r in rows_429))
+    check("and they are one logical call, not three",
+          len({r["request_seq"] for r in rows_429}) == 1)
+
+    # 500 + x-should-retry: false. The status says retry, the provider says no.
+    seen, rows_no, err = drive([(500, {"x-should-retry": "false"})])
+    check("500 marked x-should-retry:false is NOT retried",
+          len(seen) == 1 and len(rows_no) == 1,
+          f"requests={len(seen)} rows={len(rows_no)}")
+    check("the header overrides the status, and nothing is slept",
+          not home_llm_usage.is_retryable(err) and slept == [],
+          f"slept={slept}")
+    check("the single attempt is still recorded as failed spending",
+          rows_no[0]["outcome"] == home_llm_usage.OUTCOME_FAILED
+          and rows_no[0]["http_attempt"] == 1
+          and rows_no[0]["estimated_cost_usd"] is None)
+
+    # 400 + x-should-retry: true. The status says stop, the provider says try.
+    seen, rows_yes, err = drive([(400, {"x-should-retry": "true"})])
+    check("400 marked x-should-retry:true IS retried",
+          len(seen) == 3 and len(rows_yes) == 3,
+          f"requests={len(seen)} rows={len(rows_yes)}")
+    check("with no delay supplied it falls back to backoff, twice",
+          len(slept) == 2, f"slept={slept}")
+    check("and every attempt is on the ledger",
+          [r["http_attempt"] for r in rows_yes] == [1, 2, 3]
+          and all(r["outcome"] == home_llm_usage.OUTCOME_FAILED
+                  for r in rows_yes))
+    check("a bare 400 is still not retried, so the header did the work",
+          not home_llm_usage.is_retryable(
+              anthropic.BadRequestError(
+                  "bad", response=httpx.Response(
+                      400, request=httpx.Request("POST", "https://x/")),
+                  body=None)))
+
+    # The parser, against the SDK's own precedence and bounds.
+    H = httpx.Headers
+    check("retry-after-ms wins over Retry-After, and is milliseconds",
+          home_llm_usage.parse_retry_after(
+              H({"retry-after-ms": "1500", "Retry-After": "30"})) == 1.5)
+    check("Retry-After is read as seconds, fractional accepted",
+          home_llm_usage.parse_retry_after(H({"Retry-After": "2.5"})) == 2.5)
+    http_date = email.utils.formatdate(time.time() + 20, usegmt=True)
+    as_date = home_llm_usage.parse_retry_after(H({"Retry-After": http_date}))
+    check("an HTTP-date Retry-After becomes a delay from now",
+          as_date is not None and 15 <= as_date <= 25, f"parsed={as_date}")
+    check("an unparseable Retry-After is unknown, not zero",
+          home_llm_usage.parse_retry_after(H({"Retry-After": "soon"})) is None
+          and home_llm_usage.parse_retry_after(H({})) is None
+          and home_llm_usage.parse_retry_after(None) is None)
+    check("headers say nothing about retrying unless they say it",
+          home_llm_usage.should_retry_header(H({})) is None
+          and home_llm_usage.should_retry_header(
+              H({"x-should-retry": "maybe"})) is None
+          and home_llm_usage.should_retry_header(None) is None)
+
+    # Bounds and backoff, matching anthropic._base_client._calculate_retry_timeout.
+    check("a supplied delay is honoured only within the SDK's bound",
+          home_llm_usage.RETRY_AFTER_MAX_S == 60.0
+          and home_llm_usage._backoff(1, H({"Retry-After": "60"})) == 60.0)
+    over = home_llm_usage._backoff(1, H({"Retry-After": "600"}))
+    check("an absurd delay falls back to backoff instead of parking a worker",
+          over <= 0.5, f"delay={over}")
+    for bad in ("0", "-5"):
+        check(f"a Retry-After of {bad} falls back to backoff too",
+              home_llm_usage._backoff(1, H({"Retry-After": bad})) <= 0.5)
+    delays = [home_llm_usage._backoff(n) for n in (1, 2, 3, 4, 5)]
+    check("backoff is exponential from 0.5s and capped at 8s",
+          all(0.75 * base < d <= base for d, base in
+              zip(delays, [0.5, 1.0, 2.0, 4.0, 8.0])),
+          f"delays={delays}")
+    jittered = {round(home_llm_usage._backoff(1), 9) for _ in range(40)}
+    check("and it is jittered, so a rate-limited fleet does not re-converge",
+          len(jittered) > 1 and all(0.375 < d <= 0.5 for d in jittered),
+          f"distinct={len(jittered)}")
+    check("the retry budget and the per-request timeout are unchanged",
+          home_llm_usage.MAX_RETRIES == 2
+          and home_llm_usage._RETRY_BASE_DELAY_S == 0.5
+          and home_llm_usage._RETRY_MAX_DELAY_S == 8.0)
 
     # =================================================================
     print("\n--- an execution's outcome comes from the job, not the window ---")

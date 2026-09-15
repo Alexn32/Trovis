@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import email.utils
 import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from random import random
 from typing import Any, Callable
 
 import database
@@ -220,6 +222,25 @@ def _outcome_for(exc: BaseException) -> str:
 # attempt. The timeout is still the SDK's per-request timeout, so a retry gets
 # a fresh one exactly as before.
 #
+# "The same policy" includes the parts that come from the PROVIDER, not from a
+# status code. `anthropic._base_client` consults the response headers before
+# anything else, and so does this:
+#
+#   `x-should-retry: true|false`  overrides the status decision in BOTH
+#                                 directions. The provider knows whether a 400
+#                                 is worth repeating and whether a 500 is not;
+#                                 ignoring it means retrying requests it told
+#                                 us not to and giving up on ones it told us to
+#                                 repeat.
+#   `retry-after-ms`              milliseconds, preferred — more precise.
+#   `Retry-After`                 seconds, or an HTTP-date.
+#
+# A supplied delay is honoured only within the SDK's own bound (0 < d <= 60s),
+# so a malformed or absurd header falls back to backoff instead of parking a
+# worker. With no usable delay the SDK's exponential backoff WITH JITTER runs:
+# jitter exists so that a fleet retrying a rate limit does not re-converge on
+# the same instant, which is exactly the case `Retry-After` shows up in.
+#
 # Two counters, and they mean different things:
 #   `request_seq`  — the LOGICAL call within a job execution (turn 3 of the
 #                    tool loop). Shared by every attempt of that call.
@@ -229,11 +250,14 @@ def _outcome_for(exc: BaseException) -> str:
 #                    counts the other.
 
 MAX_RETRIES = 2            # matches anthropic._constants.DEFAULT_MAX_RETRIES
-_RETRY_BASE_DELAY_S = 0.5
-_RETRY_MAX_DELAY_S = 8.0
+_RETRY_BASE_DELAY_S = 0.5  # anthropic._constants.INITIAL_RETRY_DELAY
+_RETRY_MAX_DELAY_S = 8.0   # anthropic._constants.MAX_RETRY_DELAY
 # The statuses the SDK itself retries. 408 request-timeout, 409 conflict,
 # 429 rate-limit and any 5xx; everything else is the provider's final answer.
 _RETRY_STATUSES = frozenset({408, 409, 429})
+# The SDK honours a provider-supplied delay only inside this bound. A header of
+# 0, a negative one, or one asking for an hour falls through to backoff.
+RETRY_AFTER_MAX_S = 60.0
 
 
 def _status_of(exc: BaseException) -> int | None:
@@ -246,10 +270,74 @@ def _status_of(exc: BaseException) -> int | None:
     return code if isinstance(code, int) else None
 
 
+def response_headers(exc: BaseException) -> Any | None:
+    """The provider's response headers, when the failure carried a response.
+
+    A connection or timeout failure never got one, and that is not an error —
+    it just means the header rules below have nothing to say.
+    """
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    return headers if headers is not None else None
+
+
+def _header(headers: Any, name: str) -> Any:
+    if headers is None:
+        return None
+    try:
+        return headers.get(name, None)
+    except (AttributeError, TypeError):
+        return None
+
+
+def should_retry_header(headers: Any) -> bool | None:
+    """The provider's explicit verdict, or None when it did not give one.
+
+    Mirrors `_base_client._should_retry`: the header wins over the status in
+    both directions, so a 400 marked retryable is retried and a 500 marked
+    non-retryable is not.
+    """
+    value = _header(headers, "x-should-retry")
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def parse_retry_after(headers: Any) -> float | None:
+    """Seconds to wait, per the provider. Mirrors the SDK's parser exactly.
+
+    Order matters and is the SDK's: `retry-after-ms` first because it is more
+    precise, then `Retry-After` as (possibly fractional) seconds, then
+    `Retry-After` as an HTTP-date, which is converted to a delay from now.
+    Anything unparseable is None, not zero.
+    """
+    if headers is None:
+        return None
+    try:
+        return float(_header(headers, "retry-after-ms")) / 1000
+    except (TypeError, ValueError):
+        pass
+    retry_header = _header(headers, "retry-after")
+    try:
+        # The spec says integer seconds; the SDK accepts a float, so do we.
+        return float(retry_header)
+    except (TypeError, ValueError):
+        pass
+    retry_date_tuple = email.utils.parsedate_tz(retry_header)
+    if retry_date_tuple is None:
+        return None
+    return float(email.utils.mktime_tz(retry_date_tuple) - time.time())
+
+
 def is_retryable(exc: BaseException) -> bool:
     """Would the SDK have retried this? Same rule, at our boundary."""
     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
         return False
+    # The provider's own verdict comes FIRST, ahead of the status.
+    explicit = should_retry_header(response_headers(exc))
+    if explicit is not None:
+        return explicit
     name = type(exc).__name__
     # Connection and timeout failures never reached the provider's answer.
     if "APIConnection" in name or "APITimeout" in name or isinstance(
@@ -261,8 +349,22 @@ def is_retryable(exc: BaseException) -> bool:
     return status in _RETRY_STATUSES or 500 <= status < 600
 
 
-def _backoff(attempt: int) -> float:
-    return min(_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)), _RETRY_MAX_DELAY_S)
+def _backoff(attempt: int, headers: Any = None) -> float:
+    """How long before attempt N+1. The provider's delay, else backoff+jitter.
+
+    `attempt` is 1-based, so the first failure gives `INITIAL_RETRY_DELAY` —
+    the SDK's `nb_retries = 0` case.
+    """
+    retry_after = parse_retry_after(headers)
+    if retry_after is not None and 0 < retry_after <= RETRY_AFTER_MAX_S:
+        return retry_after
+    sleep_seconds = min(_RETRY_BASE_DELAY_S * pow(2.0, attempt - 1),
+                        _RETRY_MAX_DELAY_S)
+    # Plus-or-minus, as the SDK does it: a multiplier in (0.75, 1.0]. Without
+    # it every caller rate-limited at the same moment retries at the same
+    # moment.
+    timeout = sleep_seconds * (1 - 0.25 * random())
+    return timeout if timeout >= 0 else 0.0
 
 
 def call(stage: str, fn: Callable[[], Any], *, model: str,
@@ -313,7 +415,9 @@ def call(stage: str, fn: Callable[[], Any], *, model: str,
                 _settle(request_key, model, None, started, monotonic,
                         outcome=_outcome_for(exc), error_kind=_error_kind(exc))
             if attempt <= max_retries and is_retryable(exc):
-                sleep(_backoff(attempt))
+                # The same response the decision was made from also carries
+                # how long the provider wants us to wait.
+                sleep(_backoff(attempt, response_headers(exc)))
                 continue
             raise
         if opened:

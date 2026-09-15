@@ -7,34 +7,34 @@
 
 ====================================================================
 Trovis Home inference spending — INTERNAL
-window: 2026-09-08T02:17:12.771987+00:00  ->  2026-09-15T02:17:12.771987+00:00  (UTC)
+window: 2026-09-08T17:05:19.168721+00:00  ->  2026-09-15T17:05:19.168721+00:00  (UTC)
 ====================================================================
 
   estimated subtotal        $0.1607   over 19 priced requests
-  + UNKNOWN additional spend over 10 request(s) we could not price
-      no usage reported       10
+  + UNKNOWN additional spend over 17 request(s) we could not price
+      no usage reported       17
       partial usage reported  1   (at least $0.0000, a floor)
       no price for the model  0
       still unresolved        1
     The true total is the subtotal PLUS an unknown amount.
 
-  requests                  29
-      failed                8
+  requests                  36
+      failed                15
       in_flight             1
       succeeded             20
-  usage coverage            62.1%   (COMPLETE billable usage, not 'some field arrived')
-  pricing coverage          65.5%
+  usage coverage            50.0%   (COMPLETE billable usage, not 'some field arrived')
+  pricing coverage          52.8%
 
   by account
-      1                                   $0.1607     29 req   +10 unpriced
+      1                                   $0.1607     36 req   +17 unpriced
 
   by model
-      claude-opus-5                       $0.1607     29 req   +10 unpriced
+      claude-opus-5                       $0.1607     36 req   +17 unpriced
 
   by stage
       investigating                       $0.0751      8 req   +1 unpriced
       composing                           $0.0342      4 req   +1 unpriced
-      proposing                           $0.0335     14 req   +8 unpriced
+      proposing                           $0.0335     21 req   +15 unpriced
       assessing                           $0.0179      3 req
 
   investigations started    6   (one (job, attempt) pair that issued at least one request)
