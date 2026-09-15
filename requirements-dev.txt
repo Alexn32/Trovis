@@ -1,0 +1,21 @@
+# Test-only dependencies. NOT installed in production: nothing here is
+# imported by the server.
+#
+# `test_connect_recipe.py` is the one door test that runs the copy-paste
+# commands the Connect page prints, rather than posting hand-built JSON. The
+# quick recipe tells a user to
+#
+#     pip install opentelemetry-distro opentelemetry-exporter-otlp
+#     opentelemetry-instrument python your_agent.py
+#
+# and the test executes that second line for real. `opentelemetry-instrument`
+# is a console script from opentelemetry-distro's dependency
+# opentelemetry-instrumentation; without it the test raises
+# FileNotFoundError before it can assert anything. That is a missing
+# declaration, not a flaky test: the command we ship to users was never
+# installed in the environment that verifies it.
+#
+# Pinned to the release series matching the opentelemetry-* packages
+# `trovis-agents` resolves, so the CLI and the SDK it instruments agree.
+opentelemetry-distro==0.65b0
+opentelemetry-exporter-otlp-proto-http==1.44.0

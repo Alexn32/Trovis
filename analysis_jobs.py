@@ -52,6 +52,7 @@ from typing import Any
 
 import database
 import findings as findings_mod
+import home_llm_usage
 import home_snapshot
 import investigator
 
@@ -473,7 +474,20 @@ def run_one() -> dict[str, Any] | None:
         token = job.get("claim_token")
         started = time.monotonic()
         try:
-            report = _execute(job)
+            # Everything this execution spends at the provider is attributed to
+            # THIS job and THIS attempt. The block wraps `_execute` rather than
+            # sitting inside the investigator so that a request made anywhere
+            # in the run — including one made while the job later loses its
+            # lease — still lands under the right identity. Each attempt opens
+            # its own context, so a requeue's requests are a second set of rows
+            # rather than an amendment to the first.
+            with home_llm_usage.attributed(
+                account_id=job.get("account_id"),
+                analysis_job_id=job.get("id"),
+                job_attempt=job.get("attempts"),
+                scope_key=job.get("scope_key"),
+            ):
+                report = _execute(job)
         except investigator.NoModelKey as exc:
             # Not retryable — waiting does not configure a key. Fenced anyway:
             # a superseded worker may not fail the job that replaced it.

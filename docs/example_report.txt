@@ -1,0 +1,47 @@
+refusing to run: this report exposes Trovis's own per-account inference spending and is for operators, not tenants.
+Set TROVIS_INTERNAL_OPS=1 to confirm you are running it server-side.
+====================================================================
+Trovis Home inference spending — INTERNAL
+window: 2026-09-08T01:32:28.405133+00:00  ->  2026-09-15T01:32:28.405133+00:00  (UTC)
+====================================================================
+
+  estimated subtotal        $0.1601   over 18 priced requests
+  + UNKNOWN additional spend over 3 request(s) we could not price
+      no usage reported       3
+      no price for the model  0
+      still unresolved        1
+    The true total is the subtotal PLUS an unknown amount.
+
+  requests                  21
+      failed                1
+      in_flight             1
+      succeeded             19
+  usage coverage            85.7%
+  pricing coverage          85.7%
+
+  by account
+      1                                   $0.1601     21 req   +3 unpriced
+
+  by model
+      claude-opus-5                       $0.1601     21 req   +3 unpriced
+
+  by stage
+      investigating                       $0.0751      8 req   +1 unpriced
+      composing                           $0.0342      4 req   +1 unpriced
+      proposing                           $0.0328      6 req   +1 unpriced
+      assessing                           $0.0179      3 req
+
+  investigations started    5   (one (job, attempt) pair that issued at least one request)
+  investigations completed  4   (its job finished 'done')
+  investigations failed     1   (its own attempt did not finish, retries included)
+
+  cost per investigation — the denominator is stated, not assumed:
+      per STARTED execution     $0.0320   (n=5, failures and retries included)
+      per COMPLETED execution   $0.0400   (n=4)
+      no cost-per-user is offered: Home analyses an account's audience scope,
+      not a person, so a headcount denominator would invent a number.
+
+  reconciling against the provider: compare this window's request count
+  and token totals against the provider's usage console for the same
+  UTC window and API key. See this module's docstring for the three
+  causes that legitimately explain a difference.

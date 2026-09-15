@@ -1,0 +1,57 @@
+# Example: the internal Home spending report, over the fixture run in
+# test_home_llm_usage.py. FIXTURE DATA -- invented accounts, a scripted
+# provider (plus a mock HTTP transport for the retry cases), and a price
+# table seeded by the test. Not production spending.
+#
+#   TROVIS_INTERNAL_OPS=1 python3 home_llm_report.py --days 7
+
+====================================================================
+Trovis Home inference spending — INTERNAL
+window: 2026-09-08T17:05:19.168721+00:00  ->  2026-09-15T17:05:19.168721+00:00  (UTC)
+====================================================================
+
+  estimated subtotal        $0.1607   over 19 priced requests
+  + UNKNOWN additional spend over 17 request(s) we could not price
+      no usage reported       17
+      partial usage reported  1   (at least $0.0000, a floor)
+      no price for the model  0
+      still unresolved        1
+    The true total is the subtotal PLUS an unknown amount.
+
+  requests                  36
+      failed                15
+      in_flight             1
+      succeeded             20
+  usage coverage            50.0%   (COMPLETE billable usage, not 'some field arrived')
+  pricing coverage          52.8%
+
+  by account
+      1                                   $0.1607     36 req   +17 unpriced
+
+  by model
+      claude-opus-5                       $0.1607     36 req   +17 unpriced
+
+  by stage
+      investigating                       $0.0751      8 req   +1 unpriced
+      composing                           $0.0342      4 req   +1 unpriced
+      proposing                           $0.0335     21 req   +15 unpriced
+      assessing                           $0.0179      3 req
+
+  investigations started    6   (one (job, attempt) pair that issued at least one request)
+  investigations completed  4   (its job finished 'done')
+  investigations failed     1   (its own attempt did not finish, retries included)
+  outcome unknown           1   (no job row to resolve it against — not guessed)
+
+  cost per investigation — the denominator is stated, not assumed:
+      per STARTED execution     $0.0268   (n=6, failures and retries included)
+      per COMPLETED execution   $0.0402   (n=4)
+      the NUMERATOR is priced spending recorded in THIS WINDOW, so
+      these are window-scoped figures, not the lifetime cost of those
+      executions.
+      no cost-per-user is offered: Home analyses an account's audience scope,
+      not a person, so a headcount denominator would invent a number.
+
+  reconciling against the provider: compare this window's request count
+  and token totals against the provider's usage console for the same
+  UTC window and API key. See this module's docstring for the three
+  causes that legitimately explain a difference.

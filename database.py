@@ -1653,6 +1653,103 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
 )
 """
 
+# TROVIS'S OWN inference spending on Home investigations.
+#
+# Deliberately NOT the `spans` table. `spans` holds what CUSTOMERS' agents
+# cost, which is what the Cost page and Home's cost card report; this holds
+# what Trovis spends running Home's analysis for them. Adding ours to theirs
+# would inflate every customer's bill with our cost of goods, so the two never
+# meet in one query and no customer-facing surface reads this table.
+#
+# One row per PROVIDER REQUEST, not per investigation: a retry is a second
+# potentially billable request and gets its own row. A row is written BEFORE
+# the request goes out (`outcome = 'in_flight'`) and updated when it returns,
+# so a worker killed mid-request leaves an explicit unresolved row rather than
+# a silent gap. Local persistence and the provider's billing are NOT atomic
+# and this shape does not pretend otherwise.
+#
+# `request_key` is generated once per attempt and is UNIQUE, so re-persisting
+# the same request cannot double-count it.
+#
+# Nothing here holds an API key, an authorization header, or prompt/response
+# text. Token counts and outcomes only.
+#
+# NULL is UNKNOWN throughout, never zero: `input_tokens IS NULL` means the
+# provider reported no usage, and `estimated_cost_usd IS NULL` means we could
+# not price it. A caller that coalesces either to 0 is reporting a number
+# nobody measured.
+_HOME_LLM_DDL_PG = """
+CREATE TABLE IF NOT EXISTS home_llm_requests (
+    id                 SERIAL    PRIMARY KEY,
+    request_key        TEXT      NOT NULL UNIQUE,
+    account_id         INTEGER,
+    analysis_job_id    INTEGER,
+    job_attempt        INTEGER,
+    analysis_id        TEXT,
+    scope_key          TEXT,
+    stage              TEXT      NOT NULL,
+    request_seq        INTEGER,
+    http_attempt       INTEGER,
+    model_requested    TEXT,
+    model_served       TEXT,
+    outcome            TEXT      NOT NULL DEFAULT 'in_flight',
+    error_kind         TEXT,
+    started_at         TIMESTAMP,
+    finished_at        TIMESTAMP,
+    latency_ms         INTEGER,
+    input_tokens       INTEGER,
+    output_tokens      INTEGER,
+    cache_creation_input_tokens INTEGER,
+    cache_read_input_tokens     INTEGER,
+    usage_reported     INTEGER   NOT NULL DEFAULT 0,
+    usage_complete     INTEGER   NOT NULL DEFAULT 0,
+    estimated_cost_usd DOUBLE PRECISION,
+    known_subtotal_usd DOUBLE PRECISION,
+    pricing_source     TEXT,
+    pricing_model_key  TEXT,
+    pricing_captured_at TIMESTAMP,
+    price_input_per_1k  DOUBLE PRECISION,
+    price_output_per_1k DOUBLE PRECISION,
+    created_at         TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_HOME_LLM_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS home_llm_requests (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_key        TEXT    NOT NULL UNIQUE,
+    account_id         INTEGER,
+    analysis_job_id    INTEGER,
+    job_attempt        INTEGER,
+    analysis_id        TEXT,
+    scope_key          TEXT,
+    stage              TEXT    NOT NULL,
+    request_seq        INTEGER,
+    http_attempt       INTEGER,
+    model_requested    TEXT,
+    model_served       TEXT,
+    outcome            TEXT    NOT NULL DEFAULT 'in_flight',
+    error_kind         TEXT,
+    started_at         TIMESTAMP,
+    finished_at        TIMESTAMP,
+    latency_ms         INTEGER,
+    input_tokens       INTEGER,
+    output_tokens      INTEGER,
+    cache_creation_input_tokens INTEGER,
+    cache_read_input_tokens     INTEGER,
+    usage_reported     INTEGER NOT NULL DEFAULT 0,
+    usage_complete     INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd REAL,
+    known_subtotal_usd REAL,
+    pricing_source     TEXT,
+    pricing_model_key  TEXT,
+    pricing_captured_at TIMESTAMP,
+    price_input_per_1k  REAL,
+    price_output_per_1k REAL,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 _SAAS_EVENTS_DDL_PG = """
 CREATE TABLE IF NOT EXISTS saas_events (
     id          SERIAL    PRIMARY KEY,
@@ -1684,6 +1781,11 @@ CREATE TABLE IF NOT EXISTS saas_events (
 _ACCOUNT_ID_TABLES = ("spans", "descriptions", "agent_registrations")
 
 _INDEXES = [
+    # The spending report reads by period, then groups by account, model and
+    # stage. `created_at` leads because every query is bounded by it first.
+    "CREATE INDEX IF NOT EXISTS idx_home_llm_created ON home_llm_requests(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_home_llm_job ON home_llm_requests(analysis_job_id, job_attempt)",
+    "CREATE INDEX IF NOT EXISTS idx_home_llm_account_created ON home_llm_requests(account_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_spans_service_name ON spans(service_name)",
     "CREATE INDEX IF NOT EXISTS idx_spans_start_time ON spans(start_time_unix)",
     "CREATE INDEX IF NOT EXISTS idx_spans_service_agent ON spans(service_name, agent_id)",
@@ -1854,6 +1956,7 @@ def init_db() -> None:
             _SAAS_EVENTS_DDL_PG,
             _FINDINGS_DDL_PG,
             _ANALYSIS_JOBS_DDL_PG,
+            _HOME_LLM_DDL_PG,
         ]
     else:
         ddls = [
@@ -1894,6 +1997,7 @@ def init_db() -> None:
             _SAAS_EVENTS_DDL_SQLITE,
             _FINDINGS_DDL_SQLITE,
             _ANALYSIS_JOBS_DDL_SQLITE,
+            _HOME_LLM_DDL_SQLITE,
         ]
 
     with _connect() as conn, _cursor(conn) as cur:
@@ -2793,6 +2897,227 @@ def _load_pricing(cur) -> dict[str, tuple[float, float]]:
         r["model_name"]: (r["input_cost_per_1k"], r["output_cost_per_1k"])
         for r in cur.fetchall()
     }
+
+
+# ---------------------------------------------------------------------------
+# Trovis's own Home inference spending
+# ---------------------------------------------------------------------------
+
+# How a price was matched, most specific first.
+#
+# Two kinds of fallback are deliberately ABSENT here, both of which
+# `_match_pricing` does for customer spans and both of which are wrong for our
+# own ledger:
+#
+#   * the same-TIER fallback (price an unknown id at the newest opus/sonnet
+#     rate) — a sound estimate for a customer's span, fiction in a cost report;
+#   * the unrestricted PREFIX fallback. `claude-opus-4-1` is not a dated alias
+#     of `claude-opus-4`; it is a different model version with its own price.
+#     Prefix matching cannot tell those apart, so it is gone. Only a suffix
+#     that is verifiably a DATE, or an alias we have explicitly declared,
+#     resolves to a base model's row.
+#
+# Anything else stays unknown, which is recoverable: the report counts it and
+# names the model, and somebody adds the row.
+_PRICE_MATCH_EXACT = "exact"
+_PRICE_MATCH_NORMALIZED = "normalized"
+_PRICE_MATCH_DATE_STRIPPED = "date_suffix_stripped"
+_PRICE_MATCH_ALIAS = "declared_alias"
+_PRICE_MATCH_NONE = "unavailable"
+
+# A suffix that is a real calendar date, and nothing else. `-20250514` and
+# `-2025-05-14` qualify; `-1`, `-v2`, `-latest` and `-preview` do not, because
+# none of them says "the same model, dated".
+_LEDGER_DATE_SUFFIX_RE = re.compile(r"[-@:](\d{8}|\d{4}-\d{2}-\d{2})$")
+
+# Ids we have checked by hand to be the SAME model as their target. Empty on
+# purpose: an alias belongs here only once somebody has confirmed the provider
+# bills the two identically, and the entry is the record of that check.
+_HOME_LLM_PRICE_ALIASES: dict[str, str] = {}
+
+
+def _ledger_date_base(name: str) -> str | None:
+    """`claude-opus-4-20250514` -> `claude-opus-4`; otherwise None."""
+    stripped = _LEDGER_DATE_SUFFIX_RE.sub("", name)
+    return stripped if stripped != name else None
+
+
+def resolve_home_llm_price(model: Any) -> dict[str, Any]:
+    """The stored rate for one model id, and HOW it was matched.
+
+    Returns `{rates, source, matched_key, captured_at}`. `rates` is None when
+    no rate for THIS model is known — the caller then stores a NULL cost, which
+    reads as unknown rather than free, and the spending report counts the
+    request as unpriced.
+
+    The rate and the match are captured on the ledger row at request time, so a
+    later price-table update cannot silently rewrite what we thought a past
+    request cost.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn, _cursor(conn) as cur:
+        pricing = _load_pricing(cur)
+    if not model:
+        return {"rates": None, "source": _PRICE_MATCH_NONE,
+                "matched_key": None, "captured_at": now}
+    if model in pricing:
+        return {"rates": pricing[model], "source": _PRICE_MATCH_EXACT,
+                "matched_key": model, "captured_at": now}
+    norm = _normalize_model(model)
+    if norm in pricing:
+        return {"rates": pricing[norm], "source": _PRICE_MATCH_NORMALIZED,
+                "matched_key": norm, "captured_at": now}
+    # A suffix that is verifiably a DATE means the same model, dated:
+    # 'claude-opus-4-20250514' -> 'claude-opus-4'. A suffix that is a version
+    # ('-1'), a channel ('-latest', '-preview') or anything else does NOT, and
+    # falls through to unknown rather than inheriting a neighbour's price.
+    base = _ledger_date_base(norm)
+    if base and base in pricing:
+        return {"rates": pricing[base], "source": _PRICE_MATCH_DATE_STRIPPED,
+                "matched_key": base, "captured_at": now}
+    alias = _HOME_LLM_PRICE_ALIASES.get(norm)
+    if alias and alias in pricing:
+        return {"rates": pricing[alias], "source": _PRICE_MATCH_ALIAS,
+                "matched_key": alias, "captured_at": now}
+    return {"rates": None, "source": _PRICE_MATCH_NONE,
+            "matched_key": None, "captured_at": now}
+
+
+def home_llm_cost(
+    rates: tuple[float, float] | None,
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_creation: int | None,
+    cache_read: int | None,
+) -> dict[str, Any]:
+    """What one request cost, and whether that is the WHOLE cost.
+
+    Returns `{total_usd, known_subtotal_usd, priceable, missing}`.
+
+    `total_usd` is the request's full estimated cost, and is None unless every
+    field the provider bills on is known. Anthropic bills on `input_tokens`
+    and `output_tokens`; both are required. A response that reported input and
+    not output used to price at the input alone — `$0.003` presented as the
+    finished number, always low, and counted as fully covered. It is now None,
+    and the report counts the request as unknown spending.
+
+    `known_subtotal_usd` keeps what we CAN price from what did arrive, so a
+    partial report is not thrown away. It is a floor, never a total, and the
+    ledger and the report keep it in its own column and its own line.
+
+    The cache fields follow the provider's actual contract rather than a blanket
+    rule: they appear when prompt caching is in play and are simply absent
+    otherwise, so with `input_tokens` and `output_tokens` both present an absent
+    cache field means no cached tokens — zero, not unknown. They are billed
+    against the INPUT rate at Anthropic's published multiples (creation 1.25x,
+    read 0.1x) and counted exactly once, because the provider's `input_tokens`
+    already excludes them.
+    """
+    missing = [name for name, value in (("input_tokens", input_tokens),
+                                        ("output_tokens", output_tokens))
+               if value is None]
+    if rates is None:
+        return {"total_usd": None, "known_subtotal_usd": None,
+                "priceable": False, "missing": missing or ["price"]}
+    in_per_1k, out_per_1k = rates
+    subtotal = round(
+        (input_tokens or 0) / 1000.0 * in_per_1k
+        + (output_tokens or 0) / 1000.0 * out_per_1k
+        + (cache_creation or 0) / 1000.0 * in_per_1k * _CACHE_WRITE_MULT
+        + (cache_read or 0) / 1000.0 * in_per_1k * _CACHE_READ_MULT,
+        8,
+    )
+    if missing:
+        # Something billable is unknown. Keep the part we can stand behind,
+        # refuse to present it as the total.
+        return {"total_usd": None, "known_subtotal_usd": subtotal,
+                "priceable": False, "missing": missing}
+    return {"total_usd": subtotal, "known_subtotal_usd": subtotal,
+            "priceable": True, "missing": []}
+
+
+def open_home_llm_request(row: dict[str, Any]) -> bool:
+    """Record a request we are ABOUT to send. Returns False if already present.
+
+    Written before the provider call, so a worker killed mid-request leaves an
+    `in_flight` row instead of nothing. `request_key` is unique, so replaying
+    the same write cannot create a second row for one request.
+    """
+    cols = ("request_key", "account_id", "analysis_job_id", "job_attempt",
+            "analysis_id", "scope_key", "stage", "request_seq", "http_attempt",
+            "model_requested", "started_at")
+    holes = ", ".join([PH] * len(cols))
+    conflict = ("ON CONFLICT (request_key) DO NOTHING" if USE_POSTGRES else "")
+    verb = "INSERT INTO" if USE_POSTGRES else "INSERT OR IGNORE INTO"
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(
+                f"{verb} home_llm_requests ({', '.join(cols)}) "
+                f"VALUES ({holes}) {conflict}",
+                tuple(row.get(c) for c in cols),
+            )
+            return bool(getattr(cur, "rowcount", 1))
+    except Exception:  # noqa: BLE001 — accounting must never break the product
+        logger.warning("[home-llm] could not open usage row", exc_info=True)
+        return False
+
+
+def close_home_llm_request(request_key: str, row: dict[str, Any]) -> bool:
+    """Settle a request that returned (or failed).
+
+    Only ever moves a row OUT of `in_flight`, so a duplicate settle is a no-op
+    rather than a second charge: the UPDATE is fenced on the row still being in
+    flight.
+    """
+    cols = ("model_served", "outcome", "error_kind", "finished_at",
+            "latency_ms", "input_tokens", "output_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens",
+            "usage_reported", "usage_complete", "estimated_cost_usd",
+            "known_subtotal_usd", "pricing_source",
+            "pricing_model_key", "pricing_captured_at",
+            "price_input_per_1k", "price_output_per_1k")
+    sets = ", ".join(f"{c} = {PH}" for c in cols)
+    # The two coverage flags are NOT NULL and a caller that omits one means
+    # "not reported" / "not complete" -- which is 0, the direction that leaves
+    # the request counted as unknown spending. Letting a missing flag raise
+    # would lose the whole settlement, and with it a request that was billed.
+    values = [row.get(c) for c in cols]
+    for flag in ("usage_reported", "usage_complete"):
+        i = cols.index(flag)
+        values[i] = int(bool(values[i]))
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(
+                f"UPDATE home_llm_requests SET {sets} "
+                f"WHERE request_key = {PH} AND outcome = 'in_flight'",
+                tuple(values + [request_key]),
+            )
+            return bool(getattr(cur, "rowcount", 0))
+    except Exception:  # noqa: BLE001
+        logger.warning("[home-llm] could not close usage row", exc_info=True)
+        return False
+
+
+def home_llm_requests_between(
+    start_utc: datetime, end_utc: datetime, account_id: int | None = None
+) -> list[dict[str, Any]]:
+    """Every recorded request in a bounded window. Rows, not conclusions."""
+    acct = f" AND account_id = {PH}" if account_id is not None else ""
+    # The same timestamp format both backends compare against; `created_at` is
+    # written at second granularity, so the upper bound is ceiled or a request
+    # that landed in the current second falls out of a window ending "now".
+    args: list[Any] = [_home_ts(start_utc), _home_ts(end_utc, ceil=True)]
+    if account_id is not None:
+        args.append(account_id)
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT * FROM home_llm_requests "
+            f"WHERE created_at >= {PH} AND created_at < {PH}{acct} "
+            "ORDER BY id",
+            tuple(args),
+        )
+        return [dict(r) for r in (cur.fetchall() or [])]
 
 
 def insert_spans(

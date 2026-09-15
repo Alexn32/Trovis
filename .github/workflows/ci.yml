@@ -29,6 +29,12 @@ jobs:
       # the SDK (and its OTEL deps) must be importable here. Without this it
       # would skip — a green build for an unverified door.
       - run: pip install -e ./trovis-agents
+      # test_connect_recipe.py RUNS the command the Connect page prints
+      # (`opentelemetry-instrument python your_agent.py`). That CLI ships in
+      # opentelemetry-distro, which nothing else here installs, so the test
+      # died on FileNotFoundError before asserting anything — the command we
+      # hand users was never installed in the environment that verifies it.
+      - run: pip install -r requirements-dev.txt
 
       # Every door we advertise has a test_connect_<door>.py. Assert the set
       # is present BEFORE running anything: deleting a door test would
