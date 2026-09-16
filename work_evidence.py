@@ -43,20 +43,35 @@ becomes a vendor. `source_label` is the service/agent route, the person's
 resolved name, or the provider label. Where a record was written without a
 span and predates the span link, connector is None: not recorded.
 
-Correlation — HOW the observation was tied to this run:
+Correlation — the mechanism Trovis KNOWS tied the observation to this run.
+For spans it is read from `spans.loop_link`, which the ingest resolver
+writes at the one moment it knows why it chose the loop (database.
+_LOOP_LINKS). It is never rebuilt afterwards from the span's attributes: a
+span carrying some key is not proof this loop was chosen through it, and a
+keyless span sitting in a loop is not proof the gap rule put it there.
 
-  explicit_key    the observation carried the run's key (trovis.loop.
-                  external_id / trovis.run.id on a span; the same key in the
-                  SaaS object's metadata).
-  time_adjacency  a keyless span was attached by ingest's gap rule (same
-                  service and agent, within the idle window). Trovis really
-                  performs this association, so it is named for what it is
-                  rather than dressed as a key match.
+  explicit_key    the resolver matched the span's key to the loop (the open
+                  loop with that key, a loop closed within the grace window,
+                  the loop the key itself opened, or an earlier span in the
+                  same batch that resolved that same key); for a SaaS event,
+                  the spine resolved the explicit key in the provider
+                  object's metadata to this loop.
+  time_adjacency  the span carried no key and was placed with other keyless
+                  spans of the same service and agent by proximity: the gap
+                  rule (within the idle window) or arrival in the same export
+                  batch as a keyless span so placed. Trovis really performs
+                  this association, so it is named for what it is.
+  origin          the span carried no key and opened this loop itself — the
+                  item exists because of this observation.
   direct          the actor addressed this run by id — a person resolving a
                   handoff or closing it in the product, the sweep abandoning
                   it.
-  None            the event came from ingest before span links existed, so
-                  the method cannot be read back. Missing stays missing.
+  None            not recorded: a span ingested before loop_link existed, or
+                  a lifecycle event from before span links. Missing stays
+                  missing — it is never filled in by guessing.
+
+Execution and cost roll-ups carry one method only when every span rolled up
+agrees; otherwise None, with the set listed in details.
 
 Nothing here is Work Coverage. A run with rich evidence is a run Trovis can
 account for, not a promise that Trovis saw everything.
@@ -79,13 +94,24 @@ EVIDENCE_TYPES: tuple[str, ...] = (
     "cost",
 )
 
-CORRELATION_METHODS: tuple[str, ...] = ("explicit_key", "time_adjacency", "direct")
+CORRELATION_METHODS: tuple[str, ...] = ("explicit_key", "time_adjacency", "origin", "direct")
 
 SOURCE_TYPES: tuple[str, ...] = ("agent", "human", "system")
 
+# spans.loop_link (database._LOOP_LINKS, recorded at ingest) → public method.
+# Anything not in this table — including NULL — is None: not recorded.
+_LINK_TO_METHOD: dict[str, str] = {
+    "key_open": "explicit_key",
+    "key_grace": "explicit_key",
+    "key_created": "explicit_key",
+    "key_batch": "explicit_key",
+    "gap": "time_adjacency",
+    "keyless_batch": "time_adjacency",
+    "created": "origin",
+}
+
 _SAAS_LABELS = {"stripe": "Stripe", "hubspot": "HubSpot", "shopify": "Shopify"}
 _OTLP_STATUS_ERROR = 2
-_LINK_SUFFIXES = ("loop.external_id", "run.id")
 
 
 def _loads(text: Any) -> dict[str, Any]:
@@ -104,25 +130,14 @@ def _iso(ns: Any) -> str | None:
     return database._ns_to_iso(int(ns)) if ns else None
 
 
-def _span_link_key(attrs: dict[str, Any]) -> str | None:
-    for suffix in _LINK_SUFFIXES:
-        v = database.attr(attrs, suffix)
-        if v is not None and str(v).strip():
-            return str(v)
-    return None
-
-
-def _span_correlation(attrs: dict[str, Any], loop_external_id: str | None) -> str:
-    """How ingest tied this span to its loop. A span carrying the loop's own
-    key was matched on it; a keyless span in a loop was placed by the gap
-    rule. A span whose key differs from the loop's cannot happen (the key IS
-    the grouping), so that case is not modelled."""
-    key = _span_link_key(attrs)
-    if key is not None and loop_external_id is not None and key == str(loop_external_id):
-        return "explicit_key"
-    if key is None:
-        return "time_adjacency"
-    return "explicit_key"
+def _span_correlation(loop_link: Any) -> str | None:
+    """The recorded mechanism, normalized — or None when none was recorded.
+    Deliberately takes only the stored link: the span's attributes are not
+    consulted, so nothing is inferred from a key that happens to be present
+    or absent."""
+    if not isinstance(loop_link, str):
+        return None
+    return _LINK_TO_METHOD.get(loop_link)
 
 
 def _record(
@@ -161,7 +176,7 @@ def _record(
 
 
 def _span_evidence(
-    item_id: int, loop_external_id: str | None, spans: list[dict[str, Any]],
+    item_id: int, spans: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """execution (rolled up per source), action_reported (per tool span),
     cost (rolled up per source). Also returns the span index the event pass
@@ -179,7 +194,8 @@ def _span_evidence(
         agent_id = s.get("agent_id") or "main"
         label = lp.agent_actor(service, agent_id)
         at = _iso(s.get("start_time_unix"))
-        corr = _span_correlation(attrs, loop_external_id)
+        link = s.get("loop_link")
+        corr = _span_correlation(link)
         sid = str(s.get("span_id") or "") or None
         tid = str(s.get("trace_id") or "") or None
         if sid:
@@ -224,6 +240,8 @@ def _span_evidence(
                     "error": database._run_error_line(s.get("status_message")) if errored else None,
                     # The worker's report of an action, not its outcome.
                     "proves": "reported",
+                    # The resolver's own word for how this span was placed.
+                    "assignment": link if isinstance(link, str) else None,
                 },
             ))
 
@@ -245,7 +263,11 @@ def _span_evidence(
                 c["last"] = at
 
     for (service, agent_id, connector), ex in execs.items():
-        corr = ex["correlations"].pop() if len(ex["correlations"]) == 1 else None
+        methods = sorted(m for m in ex["correlations"] if m is not None)
+        unrecorded = None in ex["correlations"]
+        # One method only when every rolled-up span carries that same
+        # recorded method; a mix, or any span with none recorded, is None.
+        corr = methods[0] if (len(methods) == 1 and not unrecorded) else None
         out.append(_record(
             rid=f"exec:{service}:{agent_id}:{connector}",
             item_id=item_id,
@@ -261,6 +283,9 @@ def _span_evidence(
                 "error_count": ex["errors"],
                 "last_observed_at": ex["last"],
                 "trace_ids": sorted(ex["traces"])[:50],
+                # Every method seen across the rolled-up spans; "unrecorded"
+                # stands for spans ingested before the link was stored.
+                "correlation_methods": methods + (["unrecorded"] if unrecorded else []),
             },
         ))
 
@@ -404,7 +429,7 @@ def build_work_item_evidence(account_id: int | None, item_id: int) -> dict[str, 
     loop = raw.get("loop")
     if loop is None:
         return None
-    span_records, by_span = _span_evidence(item_id, loop.get("external_id"), raw["spans"])
+    span_records, by_span = _span_evidence(item_id, raw["spans"])
     event_records = _event_evidence(account_id, item_id, raw["events"], by_span)
     evidence = span_records + event_records
     evidence.sort(key=lambda r: (r["observed_at"] or "", r["id"]))

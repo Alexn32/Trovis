@@ -2169,6 +2169,13 @@ def init_db() -> None:
         # FK: SQLite's ALTER ADD COLUMN can't enforce one, and the two
         # backends must stay schema-identical.
         _try_add_column(cur, "spans", "loop_id", "INTEGER DEFAULT NULL")
+        # HOW loop_id was chosen for this span, recorded by the resolver at
+        # the one moment Trovis knows it (_resolve_loop_for_span; values in
+        # _LOOP_LINKS). Set at INSERT only, like loop_id; NULL on every span
+        # ingested before this column existed and on loop-less spans. The
+        # evidence layer reads NULL as "not recorded" — it never rebuilds the
+        # mechanism from the span's attributes afterwards.
+        _try_add_column(cur, "spans", "loop_link", "TEXT DEFAULT NULL")
         # Work Evidence (work_evidence.py): a lifecycle event the ingest path
         # writes because of a span (loop_opened, handoff_*, loop_closed) now
         # names that span, so the claim can point at the observation and the
@@ -2637,9 +2644,9 @@ _INSERT_COLUMNS = (
     "attributes, resource_attributes, account_id, "
     "input_tokens, output_tokens, total_tokens, "
     "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd, "
-    "cost_source, loop_id"
+    "cost_source, loop_id, loop_link"
 )
-_INSERT_COLUMN_COUNT = 22
+_INSERT_COLUMN_COUNT = 23
 
 
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
@@ -3151,11 +3158,14 @@ def _insert_span_rows(
     spans: list[dict[str, Any]],
     account_id: int | None = None,
     loop_ids: list[int | None] | None = None,
+    loop_links: list[str | None] | None = None,
 ) -> int:
     """Insert parsed spans on an open cursor — the caller owns the
     transaction. Tags each row with account_id when provided (None preserves
     the pre-multi-tenant behavior). loop_ids is positionally parallel to
-    spans (None → every row gets loop_id NULL).
+    spans (None → every row gets loop_id NULL); loop_links likewise carries
+    the resolver's assignment mechanism per span (_LOOP_LINKS), NULL when
+    the caller did not resolve loops.
 
     Token usage (`gen_ai.usage.*`) and the model (`gen_ai.request.model`)
     are read off each span's attributes; when both are present and the
@@ -3245,6 +3255,7 @@ def _insert_span_rows(
                 cost,
                 source,
                 loop_ids[i] if loop_ids else None,
+                loop_links[i] if loop_links else None,
             )
         )
 
@@ -3435,6 +3446,23 @@ def _adopt_loop_title_if_untitled(
     )
 
 
+# How a span was tied to its loop — stored on spans.loop_link by the resolver
+# below, at the only moment Trovis knows it. Internal vocabulary; the evidence
+# layer (work_evidence.py) normalizes it for readers.
+#   key_open       the span's key matched the service's open loop with it
+#   key_grace      the span's key matched a loop closed within CLOSE_GRACE_S
+#   key_created    the span's key opened a new loop
+#   key_batch      an earlier span in this batch resolved the same key
+#   gap            keyless; the gap rule found the agent's recent open loop
+#   created        keyless; this span opened a new loop
+#   keyless_batch  keyless; an earlier keyless span of this agent in this
+#                  batch was placed, and this one followed it
+_LOOP_LINKS = (
+    "key_open", "key_grace", "key_created", "key_batch",
+    "gap", "created", "keyless_batch",
+)
+
+
 def _resolve_loop_for_span(
     cur,
     attrs: dict[str, Any],
@@ -3444,8 +3472,9 @@ def _resolve_loop_for_span(
     account_id: int | None,
     cache: dict,
     span_ref: tuple[str | None, str | None] | None = None,
-) -> int:
-    """Find or create the loop a span belongs to.
+) -> tuple[int, str]:
+    """Find or create the loop a span belongs to. Returns (loop_id, link):
+    the loop and the _LOOP_LINKS mechanism that chose it.
 
     Grouping, in order:
       1. Keyed: trovis.loop.external_id, falling back to trovis.run.id
@@ -3478,12 +3507,17 @@ def _resolve_loop_for_span(
     key = str(key) if key else None
     cache_key = (service_name, key) if key else (service_name, agent_id, None)
     if cache_key in cache:
+        # The cache entry was established by an earlier span in this batch
+        # through the same key (or the same keyless agent); this span rides
+        # that resolution, and the link says so rather than claiming the
+        # lookup happened again.
         loop_id = cache[cache_key]
         _adopt_loop_title_if_untitled(cur, loop_id, attrs, account_id)
-        return loop_id
+        return loop_id, ("key_batch" if key else "keyless_batch")
 
     acct_sql, acct_args = _loop_account_clause(account_id)
     row = None
+    link: str | None = None
     if key is not None:
         cur.execute(
             f"SELECT id FROM loops WHERE service_name = {PH} "
@@ -3492,7 +3526,9 @@ def _resolve_loop_for_span(
             tuple([service_name, key, *acct_args]),
         )
         row = cur.fetchone()
-        if row is None:
+        if row is not None:
+            link = "key_open"
+        else:
             # Grace window: the newest CLOSED loop for this key, if it
             # closed recently enough that this is a straggler export, not a
             # new run. A negative age (clock drift) counts as recent.
@@ -3510,6 +3546,7 @@ def _resolve_loop_for_span(
                     and time.time() - closed_epoch <= lp.CLOSE_GRACE_S
                 ):
                     row = crow
+                    link = "key_grace"
     else:
         cutoff = ts_ns - lp.GAP_THRESHOLD_S * _NS_PER_S
         cur.execute(
@@ -3520,11 +3557,13 @@ def _resolve_loop_for_span(
             tuple([service_name, agent_id, cutoff, *acct_args]),
         )
         row = cur.fetchone()
+        if row is not None:
+            link = "gap"
     if row:
         loop_id = row["id"]
         cache[cache_key] = loop_id
         _adopt_loop_title_if_untitled(cur, loop_id, attrs, account_id)
-        return loop_id
+        return loop_id, link or ("key_open" if key else "gap")
 
     title = _provided_loop_title(attrs)
     actor = lp.agent_actor(service_name, agent_id)
@@ -3551,7 +3590,7 @@ def _resolve_loop_for_span(
     )
     _upsert_loop_participant(cur, loop_id, "agent", actor, "initiator")
     cache[cache_key] = loop_id
-    return loop_id
+    return loop_id, ("key_created" if key else "created")
 
 
 # Values of trovis.loop.close that mean a bare "done" (no extra detail).
@@ -3577,6 +3616,7 @@ def ingest_spans_with_loops(
     with _connect() as conn, _cursor(conn) as cur:
         cache: dict = {}
         loop_ids: list[int | None] = []
+        loop_links: list[str | None] = []  # parallel: how each loop_id was chosen
         affected: dict[int, int] = {}  # loop_id -> max event ts in this batch
         executor_pairs: set[tuple[int, str]] = set()
         # loop_id -> (actor, value, ts, span_ref)
@@ -3604,10 +3644,11 @@ def ingest_spans_with_loops(
                 str(s["span_id"]) if s.get("span_id") else None,
                 str(s["trace_id"]) if s.get("trace_id") else None,
             )
-            loop_id = _resolve_loop_for_span(
+            loop_id, link = _resolve_loop_for_span(
                 cur, attrs, svc, aid, ts, account_id, cache, span_ref=span_ref,
             )
             loop_ids.append(loop_id)
+            loop_links.append(link)
             affected[loop_id] = max(affected.get(loop_id, 0), ts)
             actor = lp.agent_actor(svc, aid)
             executor_pairs.add((loop_id, actor))
@@ -3675,7 +3716,7 @@ def ingest_spans_with_loops(
             if close_val is not None:
                 closes[loop_id] = (actor, str(close_val), ts, span_ref)
 
-        _insert_span_rows(cur, spans, account_id, loop_ids)
+        _insert_span_rows(cur, spans, account_id, loop_ids, loop_links)
 
         for loop_id, actor in executor_pairs:
             _upsert_loop_participant(cur, loop_id, "agent", actor, "executor")
@@ -7098,8 +7139,9 @@ def get_work_item_evidence_rows(
     """The raw records behind one work item's evidence (work_evidence.py):
     the loop's external key, its spans (oldest first, bounded, with the
     columns provenance needs — ids, resource stamp, status, cost + source,
-    attributes for the tool and link keys) and its lifecycle events with
-    the span they came from when ingest recorded one.
+    attributes for the tool name, and loop_link: the mechanism the resolver
+    recorded when it chose the loop) and its lifecycle events with the span
+    they came from when ingest recorded one.
 
     Two index-backed reads per item (idx_spans_loop_id, loop_events by
     loop_id); nothing account-wide. `spans_truncated` is set when the loop
@@ -7124,7 +7166,8 @@ def get_work_item_evidence_rows(
         cur.execute(
             "SELECT s.span_id, s.trace_id, s.span_name, s.service_name, s.agent_id, "
             "       s.status_code, s.status_message, s.start_time_unix, "
-            "       s.estimated_cost_usd, s.cost_source, s.attributes, s.resource_attributes "
+            "       s.estimated_cost_usd, s.cost_source, s.attributes, s.resource_attributes, "
+            "       s.loop_link "
             f"FROM spans s WHERE s.loop_id = {PH}{acct_sql} "
             f"ORDER BY s.start_time_unix, s.id LIMIT {PH}",
             tuple(args),

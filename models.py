@@ -2306,8 +2306,12 @@ class WorkEvidence(BaseModel):
                            when not recorded — never guessed from a name.
       source_label         service:agent route, a person's resolved name, or
                            the provider label.
-      correlation_method   explicit_key | time_adjacency | direct; None when
-                           the record predates span links.
+      correlation_method   explicit_key | time_adjacency | origin | direct —
+                           the mechanism Trovis RECORDED when it tied the
+                           observation to this item (spans.loop_link at
+                           ingest; the SaaS link key; a person acting by id).
+                           None when nothing was recorded; never rebuilt
+                           from the span's attributes afterwards.
       event_id / span_id / trace_id   the exact stored record(s) behind it.
       external_object_id / external_event_id   the provider's own ids,
                            exact, for external_state; None otherwise.

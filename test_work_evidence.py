@@ -232,16 +232,72 @@ with TestClient(main.app) as c:
     check("the orphan is not evidence for the refund run",
           not any(e.get("external_event_id") == "evt_orphan" for e in ev))
 
-    # ---- 12: time-adjacency is named as such
-    print("\n12. correlation is truthful: keyless spans read time_adjacency")
-    k1, _ = sp("run", 600, {"trovis.loop.title": "Ad hoc cleanup"})
-    k2, _ = sp("run", 590, {})
+    # ---- 12 / R1–R6: correlation is what the resolver RECORDED, never rebuilt
+    print("\n12. correlation is the recorded assignment mechanism")
+
+    def span_link(span_id):
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT loop_link FROM spans WHERE span_id = ?", (span_id,))
+            r_ = cur.fetchone()
+            return r_["loop_link"] if r_ else None
+
+    # R1 / R6: the refund item's spans — the first opened the loop by key, the
+    # tool span rode the same key from the batch cache.
+    check("R1. keyed loop creation recorded as key_created", span_link(s1["spanId"]) == "key_created")
+    check("R6. same-batch keyed span recorded as key_batch", span_link(s2["spanId"]) == "key_batch")
+    ev = evidence(HA, item["id"]).json()["evidence"]
+    a_s2 = next(e for e in of_type(ev, "action_reported") if e["span_id"] == s2["spanId"])
+    check("R1/R6. both read explicit_key publicly; the raw assignment is kept in details",
+          a_s2["correlation_method"] == "explicit_key" and a_s2["details"]["assignment"] == "key_batch")
+    # A keyed span in a LATER batch matches the open loop: key_open.
+    later, _ = sp("tool_call", 865, {"trovis.loop.external_id": "order-4471", "trovis.tool.name": "lookup_order"})
+    post(KA, "refunds-agent", [later], GROK)
+    check("R1. later keyed batch recorded as key_open", span_link(later["spanId"]) == "key_open")
+    ev = evidence(HA, item["id"]).json()["evidence"]
+    a_later = next(e for e in of_type(ev, "action_reported") if e["span_id"] == later["spanId"])
+    check("R1. key_open reads explicit_key", a_later["correlation_method"] == "explicit_key")
+    gx = next(e for e in of_type(ev, "execution") if e["source_connector_id"] == "grok")
+    check("execution roll-up agrees on one method when all spans do",
+          gx["correlation_method"] == "explicit_key" and gx["details"]["correlation_methods"] == ["explicit_key"])
+
+    # R3: a keyless span that OPENS a loop is origin — not time_adjacency.
+    k1, _ = sp("tool_call", 600, {"trovis.loop.title": "Ad hoc cleanup", "trovis.tool.name": "sweep"})
+    k2, _ = sp("tool_call", 590, {"trovis.tool.name": "sweep"})
     post(KA, "adhoc-agent", [k1, k2])
+    check("R3. keyless creation recorded as created", span_link(k1["spanId"]) == "created")
+    check("R6. same-batch keyless follower recorded as keyless_batch", span_link(k2["spanId"]) == "keyless_batch")
     ki = item_by_title(HA, "Ad hoc cleanup")
     kev = evidence(HA, ki["id"]).json()["evidence"]
+    a_k1 = next(e for e in of_type(kev, "action_reported") if e["span_id"] == k1["spanId"])
+    a_k2 = next(e for e in of_type(kev, "action_reported") if e["span_id"] == k2["spanId"])
+    check("R3. the opening span reads origin", a_k1["correlation_method"] == "origin")
+    check("R6. the same-batch follower reads time_adjacency", a_k2["correlation_method"] == "time_adjacency")
+    # R2: a keyless span in a LATER batch is placed by the gap rule itself.
+    k3, _ = sp("tool_call", 580, {"trovis.tool.name": "sweep"})
+    post(KA, "adhoc-agent", [k3])
+    check("R2. gap-rule placement recorded as gap", span_link(k3["spanId"]) == "gap")
+    kev = evidence(HA, ki["id"]).json()["evidence"]
+    a_k3 = next(e for e in of_type(kev, "action_reported") if e["span_id"] == k3["spanId"])
+    check("R2. gap reads time_adjacency", a_k3["correlation_method"] == "time_adjacency")
     kex = of_type(kev, "execution")
-    check("keyless loop's execution is time_adjacency, not explicit_key",
-          len(kex) == 1 and kex[0]["correlation_method"] == "time_adjacency")
+    check("mixed methods → roll-up None, with the set listed",
+          len(kex) == 1 and kex[0]["correlation_method"] is None
+          and kex[0]["details"]["correlation_methods"] == ["origin", "time_adjacency"])
+    check("R10. grouping unchanged: all three keyless spans are one item", kex[0]["details"]["span_count"] == 3)
+
+    # R4 / R5: a span whose assignment was never recorded stays None — even
+    # though its attributes carry the item's own key.
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("UPDATE spans SET loop_link = NULL WHERE span_id = ?", (later["spanId"],))
+    ev = evidence(HA, item["id"]).json()["evidence"]
+    a_hist = next(e for e in of_type(ev, "action_reported") if e["span_id"] == later["spanId"])
+    check("R4. historical span (no recorded link) → correlation None",
+          a_hist["correlation_method"] is None and a_hist["details"]["assignment"] is None)
+    check("R5. the matching key in its attributes does NOT make it explicit_key",
+          a_hist["correlation_method"] != "explicit_key")
+    gx = next(e for e in of_type(ev, "execution") if e["source_connector_id"] == "grok")
+    check("R4. the roll-up says so too: None, with 'unrecorded' listed",
+          gx["correlation_method"] is None and "unrecorded" in gx["details"]["correlation_methods"])
 
     # ---- human handoff: possession chain preserved, human evidence is direct
     print("\nhuman / holder evidence")
