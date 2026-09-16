@@ -6389,6 +6389,48 @@ select.wf2-input { cursor: pointer; }
   letter-spacing: 0.06em; font-size: 10.5px;
 }
 
+/* Evidence: what supports the record above, quieter than the record.
+   A source list first (who Trovis heard from), then the observations that
+   add something the steps and passes do not already say. Details stay
+   folded; ids are never the default view. */
+.jobd-ev-sources { list-style: none; margin: 0; padding: 0; }
+.jobd-ev-source {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  padding: 7px 0; font-size: 12.5px;
+  border-top: 1px solid var(--border-subtle, var(--border-default));
+}
+.jobd-ev-source:first-child { border-top: none; }
+.jobd-ev-source-name { color: var(--text-primary); font-weight: 600; }
+.jobd-ev-source-hint { color: var(--text-muted); font-size: 11.5px; }
+.jobd-ev-source-lines { color: var(--text-secondary); }
+.jobd-ev-source-lines > span + span::before { content: '·'; margin: 0 6px; color: var(--text-muted); }
+.jobd-ev-source-at { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.jobd-ev-list { list-style: none; margin: 0; padding: 0; }
+.jobd-ev-row {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px 0; font-size: 12.5px;
+  border-top: 1px solid var(--border-subtle, var(--border-default));
+}
+.jobd-ev-row:first-child { border-top: none; }
+.jobd-ev-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.jobd-ev-title { color: var(--text-primary); font-weight: 600; }
+.jobd-ev-row.is-errored .jobd-ev-title { color: var(--error); }
+.jobd-ev-row.kind-external_state .jobd-ev-title { font-weight: 500; }
+.jobd-ev-at { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12px; }
+.jobd-ev-prov { color: var(--text-secondary); font-size: 12px; }
+.jobd-ev-row.kind-external_state .jobd-ev-prov { color: var(--teal, var(--text-secondary)); }
+.jobd-ev-note { margin: 0; color: var(--text-muted); font-size: 12px; }
+.jobd-ev-row.is-errored .jobd-ev-note { color: var(--error); }
+.jobd-ev-details { margin-top: 2px; font-size: 11.5px; color: var(--text-muted); }
+.jobd-ev-details summary { cursor: pointer; list-style: none; width: fit-content; }
+.jobd-ev-details summary::-webkit-details-marker { display: none; }
+.jobd-ev-details summary:hover { color: var(--text-secondary); }
+.jobd-ev-dl { margin: 6px 0 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; }
+.jobd-ev-dl dt { color: var(--text-muted); }
+.jobd-ev-dl dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.jobd-ev-dl dd.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; }
+.jobd-ev-note-trunc { margin: 0; font-size: 11.5px; color: var(--text-muted); }
+.jobd-total-note { color: var(--text-muted); font-size: 11.5px; }
+
 /* Runs: folded away. This screen exists to spare you them. */
 .jobd-runs { border-top: 1px solid var(--border-default); padding-top: 14px; }
 .jobd-runs-toggle {
