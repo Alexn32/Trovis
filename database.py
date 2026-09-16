@@ -3195,6 +3195,18 @@ def _insert_span_rows(
         cc, cr = _extract_cache_tokens(attrs)
         model = model_from_attrs(attrs)
         has_usage = tot is not None or cc is not None or cr is not None
+        # INVARIANT (relied on by the cost aggregates' unpriced_n, by
+        # get_pricing_coverage and by work_coverage.py): a span stores a
+        # non-NULL total_tokens iff ITS OWN attributes carried model usage
+        # (any of the gen_ai / legacy usage keys, cache counts included) —
+        # never from a run-level aggregate, never from a default. A usage
+        # span that reports zero tokens stores 0, not NULL. A span with no
+        # usage attributes stores NULL and is priced NULL below, so
+        # `total_tokens IS NOT NULL AND estimated_cost_usd IS NULL` is
+        # exactly "usage observed, cost not recorded". The unit is the SPAN
+        # as the exporter cut it — a model call for every Trovis door, but
+        # nothing here can prove a third-party exporter did not put usage
+        # on a parent as well.
         # total_tokens counts every billed token, cache included.
         if has_usage:
             tot = (tot or 0) + (cc or 0) + (cr or 0)
@@ -7139,9 +7151,11 @@ def get_work_item_evidence_rows(
     """The raw records behind one work item's evidence (work_evidence.py):
     the loop's external key, its spans (oldest first, bounded, with the
     columns provenance needs — ids, resource stamp, status, cost + source,
-    attributes for the tool name, and loop_link: the mechanism the resolver
-    recorded when it chose the loop) and its lifecycle events with the span
-    they came from when ingest recorded one.
+    total_tokens (NULL when the span carried no model usage — the cost
+    coverage denominator, work_coverage.py), attributes for the tool name,
+    and loop_link: the mechanism the resolver recorded when it chose the
+    loop) and its lifecycle events with the span they came from when ingest
+    recorded one.
 
     Two index-backed reads per item (idx_spans_loop_id, loop_events by
     loop_id); nothing account-wide. `spans_truncated` is set when the loop
@@ -7167,7 +7181,7 @@ def get_work_item_evidence_rows(
             "SELECT s.span_id, s.trace_id, s.span_name, s.service_name, s.agent_id, "
             "       s.status_code, s.status_message, s.start_time_unix, "
             "       s.estimated_cost_usd, s.cost_source, s.attributes, s.resource_attributes, "
-            "       s.loop_link "
+            "       s.loop_link, s.total_tokens "
             f"FROM spans s WHERE s.loop_id = {PH}{acct_sql} "
             f"ORDER BY s.start_time_unix, s.id LIMIT {PH}",
             tuple(args),

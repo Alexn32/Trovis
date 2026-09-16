@@ -422,6 +422,20 @@ def _event_evidence(
     return out
 
 
+def evidence_from_rows(
+    account_id: int | None, item_id: int, raw: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The evidence records for rows already read by
+    database.get_work_item_evidence_rows, oldest first. Shared with
+    work_coverage.py so coverage reads the item once and derives from the
+    same records this endpoint serves."""
+    span_records, by_span = _span_evidence(item_id, raw["spans"])
+    event_records = _event_evidence(account_id, item_id, raw["events"], by_span)
+    evidence = span_records + event_records
+    evidence.sort(key=lambda r: (r["observed_at"] or "", r["id"]))
+    return evidence
+
+
 def build_work_item_evidence(account_id: int | None, item_id: int) -> dict[str, Any] | None:
     """Evidence for one work item, or None when the item is not this
     account's. Deterministic; two bounded reads; no model calls."""
@@ -429,10 +443,7 @@ def build_work_item_evidence(account_id: int | None, item_id: int) -> dict[str, 
     loop = raw.get("loop")
     if loop is None:
         return None
-    span_records, by_span = _span_evidence(item_id, raw["spans"])
-    event_records = _event_evidence(account_id, item_id, raw["events"], by_span)
-    evidence = span_records + event_records
-    evidence.sort(key=lambda r: (r["observed_at"] or "", r["id"]))
+    evidence = evidence_from_rows(account_id, item_id, raw)
     return {
         "item_id": item_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
