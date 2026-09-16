@@ -31,8 +31,14 @@ a verdict, which is the one thing this module must never do.
 Truth rules this module enforces:
   * OAuth authorization alone is `configured`, never `observed`.
   * A stored span or a verified, mapped SaaS webhook is an observation of
-    that source at that timestamp. `last_observed_at` is always that
-    timestamp, never an authorization time.
+    that source at that timestamp. `last_observed_at` is always the newest
+    timestamp among observations ATTRIBUTABLE TO THAT CONNECTOR, never an
+    authorization time and never "the newest span of a service whose
+    latest stamp happens to be this connector".
+  * Attribution belongs to the observation, not to the service name. Spans
+    are grouped by service AND by their exact resource-attribute blob (the
+    stamp), so a service that changed how it exports contributes to each
+    connector it was ever attributable to, each with its own newest time.
   * Connector identity for telemetry comes only from stamps a Trovis-owned
     door writes on the wire (below). A bare `service.name` proves nothing
     about the vendor, so unstamped telemetry is the custom OpenTelemetry
@@ -172,8 +178,25 @@ def _iso_max(a: str | None, b: str | None) -> str | None:
 
 
 def _telemetry_rows(account_id: int) -> dict[str, dict[str, Any]]:
-    """Fold per-service observations into per-connector rows."""
+    """Fold observations into per-connector rows.
+
+    Each observation is one distinct (service, resource-attribute blob)
+    with the newest span time under it (database.get_connector_observations).
+    The blob is the stamp, so attribution is decided per observation: a
+    service that exported Claude-stamped spans and later bare OTEL
+    contributes to BOTH connectors, each with its own newest time, and
+    neither history is reassigned by the other.
+
+      observed          at least one observation is attributable
+      last_observed_at  the newest time among attributable observations
+      source_count      distinct service names with an attributable
+                        observation (a service in two connectors counts
+                        once in each)
+      connection_method one method only when every attributable
+                        observation agrees; otherwise None
+    """
     rows: dict[str, dict[str, Any]] = {}
+    sources: dict[str, set[str]] = {}
     for obs in database.get_connector_observations(account_id):
         cid, method = identify_connector(obs.get("resource_attributes"))
         last = obs.get("last_observed_at")
@@ -192,13 +215,16 @@ def _telemetry_rows(account_id: int) -> dict[str, dict[str, Any]]:
                 "label": None,
                 "source_count": 0,
             }
+            sources[cid] = set()
         else:
             row["last_observed_at"] = _iso_max(row["last_observed_at"], last)
             if row["connection_method"] != method:
-                # Two sources of one connector over different paths: the
+                # Observations of one connector over different paths: the
                 # method is no longer a single fact.
                 row["connection_method"] = None
-        row["source_count"] += 1
+        sources[cid].add(obs.get("service_name"))
+    for cid, row in rows.items():
+        row["source_count"] = len(sources[cid])
     return rows
 
 

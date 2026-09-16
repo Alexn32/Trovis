@@ -245,6 +245,81 @@ with TestClient(main.app) as c:
     r = c.get("/connect/health", headers={"X-Trovis-Api-Key": KA})
     check("API-key sessions can read it too", r.status_code == 200)
 
+    # --- attribution belongs to the observation, not the service ----------
+    cc = c.post("/auth/signup", json={
+        "email": "health-c@t.com", "password": "supersecret123",
+        "name": "Cy", "account_type": "business", "org_name": "C Co",
+    }).json()
+    KC, TC = cc["api_key"], cc["token"]
+    HC = {"Authorization": f"Bearer {TC}"}
+    now_ns = int(time.time() * 1e9)
+    MIN = 60 * 1_000_000_000
+
+    print("\nR1. same service: older Claude-stamped span, newer unstamped span")
+    t_claude = now_ns - 60 * MIN
+    t_plain = now_ns - 5 * MIN
+    post_traces(KC, "refund-worker", {"trovis.sdk.platform": "anthropic"}, [span("run", t_claude)])
+    post_traces(KC, "refund-worker", None, [span("run", t_plain)])
+    h = health(HC)
+    check("claude remains observed", h["claude"]["observed"] is True and h["claude"]["state"] == "connected")
+    check("claude last_observed_at is the Claude-stamped observation, not the newer span",
+          h["claude"]["last_observed_at"] == database._ns_to_iso(t_claude))
+    check("custom-otel is also observed", h["custom-otel"]["observed"] is True)
+    check("custom-otel last_observed_at is the newer generic observation",
+          h["custom-otel"]["last_observed_at"] == database._ns_to_iso(t_plain))
+    check("one source each", h["claude"]["source_count"] == 1 and h["custom-otel"]["source_count"] == 1)
+
+    print("\nR2. same service: older generic span, newer Grok-stamped span")
+    t_plain2 = now_ns - 50 * MIN
+    t_grok = now_ns - 2 * MIN
+    post_traces(KC, "pricing-agent", None, [span("run", t_plain2)])
+    post_traces(KC, "pricing-agent", {"trovis.sdk.platform": "xai"}, [span("run", t_grok)])
+    h = health(HC)
+    check("grok observed from the newer stamped observation",
+          h["grok"]["observed"] and h["grok"]["last_observed_at"] == database._ns_to_iso(t_grok))
+    check("custom-otel still carries the older generic observation of pricing-agent (two sources now)",
+          h["custom-otel"]["source_count"] == 2)
+    check("custom-otel last_observed_at is not moved by the Grok span",
+          h["custom-otel"]["last_observed_at"] == database._ns_to_iso(t_plain))
+    check("grok did not absorb the generic history", h["grok"]["source_count"] == 1)
+
+    print("\nR3. same service: Grok SDK observation and Grok Bot observation")
+    t_sdk = now_ns - 30 * MIN
+    t_bot = now_ns - 1 * MIN
+    post_traces(KC, "grok-thing", {"trovis.sdk.platform": "xai"}, [span("run", t_sdk)])
+    post_traces(KC, "grok-thing", {"trovis.platform": "cursor-grok-bot"}, [span("run", t_bot)])
+    h = health(HC)
+    check("grok and grok-bot both observed", h["grok"]["observed"] and h["grok-bot"]["observed"])
+    check("grok-bot last_observed_at is its own observation",
+          h["grok-bot"]["last_observed_at"] == database._ns_to_iso(t_bot))
+    # The newest Grok SDK observation in this account is pricing-agent's
+    # (R2, two minutes ago). grok-thing's Bot span is NEWER than that and
+    # must not move Grok's time — that would be the Bot leaking into Grok.
+    check("grok last_observed_at is the newest Grok SDK observation, not the Bot's newer span",
+          h["grok"]["last_observed_at"] == database._ns_to_iso(t_grok)
+          and h["grok"]["last_observed_at"] != database._ns_to_iso(t_bot))
+    check("grok now has two sources, grok-bot one",
+          h["grok"]["source_count"] == 2 and h["grok-bot"]["source_count"] == 1)
+    check("methods stay deterministic per connector",
+          h["grok"]["connection_method"] == "sdk" and h["grok-bot"]["connection_method"] == "mcp")
+
+    print("\nR4. source_count is distinct attributable service names")
+    for svc in ("claude-a", "claude-b"):
+        post_traces(KC, svc, {"trovis.sdk.platform": "anthropic"})
+        post_traces(KC, svc, {"trovis.sdk.platform": "claude-agent-sdk"})  # a second blob, same service
+    h = health(HC)
+    check("claude counts refund-worker + claude-a + claude-b = 3 distinct services, not 5 blobs",
+          h["claude"]["source_count"] == 3)
+    check("a service seen under two stamps counts once per connector, not twice",
+          h["custom-otel"]["source_count"] == 2)
+
+    print("\nR5. account isolation still holds under observation-level attribution")
+    ha = health(HA)
+    check("account A's claude unchanged by C's refund-worker", ha["claude"]["source_count"] == 1)
+    hb = health(HB)
+    check("account B still sees only its own source", hb["openai-agents"]["source_count"] == 1
+          and hb["claude"]["state"] == "not_connected")
+
     print("\n12. agent-to-agent /connections is untouched")
     r = c.get("/connections", headers=HA)
     check("/connections still answers (Agent Flow)", r.status_code == 200 and isinstance(r.json(), list))

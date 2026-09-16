@@ -6299,7 +6299,13 @@ def connect_health(request: Request) -> ConnectionHealthResponse:
     account_id = getattr(request.state, "account_id", None)
     if account_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
-    return ConnectionHealthResponse(**connect_health_model.build_connection_health(account_id))
+    try:
+        body = connect_health_model.build_connection_health(account_id)
+    except database.QueryTimeout as exc:
+        # Same bound and same answer as GET /agents: a huge tenant gets a
+        # 504 the page reads as "couldn't check", never a wrong state.
+        raise HTTPException(status_code=504, detail="connection health timed out") from exc
+    return ConnectionHealthResponse(**body)
 
 
 @app.post("/connect/ask", response_model=ConnectAskResponse)

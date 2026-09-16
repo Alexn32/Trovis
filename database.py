@@ -12939,37 +12939,50 @@ def get_saas_activity(account_id: int) -> dict[str, dict[str, Any]]:
 
 
 def get_connector_observations(account_id: int) -> list[dict[str, Any]]:
-    """Per service: when it was last observed and the resource attributes of
-    that latest span (connect_health.py identifies the connector from them).
+    """Every distinct (service, resource-attribute blob) this account has
+    stored, with the newest span time under each — the unit connect_health.py
+    attributes to a connector.
 
-    Same plan as GET /agents' first paint — one GROUP BY on
-    idx_spans_account_service_agent plus one LIMIT 1 lookup per service —
-    with the same statement timeout. Strictly account-scoped; pre-tenant
-    rows with a NULL account_id are excluded.
+    Attribution belongs to the OBSERVATION, not to the service name: a
+    service that once exported Claude-stamped spans and now exports bare
+    OTEL has two rows here, one per stamp, and each keeps its own newest
+    time. Grouping by the exact JSON text is what makes that exact — a
+    span's resource attributes ARE its stamp, and an exporter writes the
+    same blob on every span of a session, so the row count is the number
+    of distinct resources ever seen, not the number of spans.
+
+    Cost, honestly: one aggregate over all of the account's spans on the
+    database side. GET /agents' first paint already scans the same rows
+    through idx_spans_account_service_agent; this one must also read each
+    row's resource_attributes, so it touches the heap where that query did
+    not. Python receives only the distinct blobs. Bounded by the same
+    statement timeout as GET /agents (QueryTimeout on cancel), and fetched
+    once per Connections visit, never polled. Strictly account-scoped;
+    pre-tenant rows with a NULL account_id are excluded.
     """
-    out: list[dict[str, Any]] = []
-    with _connect() as conn, _cursor(conn) as cur:
-        _set_statement_timeout(cur, _AGENTS_LIST_TIMEOUT_MS)
-        cur.execute(
-            "SELECT service_name, MAX(start_time_unix) AS last_seen_ns "
-            f"FROM spans WHERE account_id = {PH} GROUP BY service_name",
-            (account_id,),
-        )
-        services = [(r["service_name"], r["last_seen_ns"]) for r in cur.fetchall()]
-        for service_name, last_ns in services:
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            _set_statement_timeout(cur, _AGENTS_LIST_TIMEOUT_MS)
             cur.execute(
-                "SELECT resource_attributes FROM spans "
-                f"WHERE service_name = {PH} AND account_id = {PH} "
-                "ORDER BY start_time_unix DESC LIMIT 1",
-                (service_name, account_id),
+                "SELECT service_name, resource_attributes, "
+                "       MAX(start_time_unix) AS last_seen_ns, COUNT(*) AS span_count "
+                f"FROM spans WHERE account_id = {PH} "
+                "GROUP BY service_name, resource_attributes",
+                (account_id,),
             )
-            sample = cur.fetchone()
-            out.append({
-                "service_name": service_name,
-                "last_observed_at": _ns_to_iso(last_ns),
-                "resource_attributes": sample["resource_attributes"] if sample else None,
-            })
-    return out
+            return [
+                {
+                    "service_name": r["service_name"],
+                    "resource_attributes": r["resource_attributes"],
+                    "last_observed_at": _ns_to_iso(r["last_seen_ns"]),
+                    "span_count": int(r["span_count"] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+    except Exception as exc:
+        if _is_query_canceled(exc):
+            raise QueryTimeout("connector observations timed out") from exc
+        raise
 
 
 def get_saas_connection(account_id: int, provider: str) -> dict[str, Any] | None:
