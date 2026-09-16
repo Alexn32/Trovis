@@ -42,9 +42,9 @@ const SAAS_DOORS = {
     startError: 'Could not start Stripe Connect.',
     disconnectError: 'Could not disconnect Stripe.',
     fineprint:
-      'Payment events can wait, clear, or flag a job — only when the PaymentIntent, Invoice, '
-      + 'Charge, or Dispute carries a Trovis loop key (trovis_loop_external_id). Trovis never '
-      + 'invents a job from Stripe alone. This is not Trovis billing.',
+      'Trovis only reacts to Stripe payments, invoices, charges, and disputes that an agent has '
+      + 'already tied to a job (the Trovis loop key, trovis_loop_external_id). It never creates a '
+      + 'job from Stripe on its own, and this is not Trovis billing.',
   },
   hubspot: {
     start: () => api.startHubSpotConnect(),
@@ -54,9 +54,9 @@ const SAAS_DOORS = {
     startError: 'Could not start HubSpot Connect.',
     disconnectError: 'Could not disconnect HubSpot.',
     fineprint:
-      'Deal-stage and ticket-status changes can wait, clear, or flag a job — only when that '
-      + 'deal or ticket carries a Trovis loop key (trovis_loop_external_id). Trovis never '
-      + 'invents a job from HubSpot alone. This is not CRM or contact sync.',
+      'Trovis only reacts to deal-stage and ticket-status changes on deals and tickets that an '
+      + 'agent has already tied to a job (the Trovis loop key, trovis_loop_external_id). It never '
+      + 'creates a job from HubSpot on its own. This is not CRM or contact sync.',
   },
   shopify: {
     start: (shop) => api.startShopifyConnect(shop),
@@ -68,10 +68,9 @@ const SAAS_DOORS = {
     needsShop: true,
     shopPlaceholder: 'your-store.myshopify.com',
     fineprint:
-      'Order, payment, and fulfillment events can wait, clear, or flag a job — only when that '
-      + 'order (or fulfillment / refund) carries a Trovis loop key (trovis_loop_external_id). '
-      + 'Trovis never invents a job from Shopify alone. This is not catalog, product, or '
-      + 'customer sync.',
+      'Trovis only reacts to order, fulfillment, and refund events on orders that an agent has '
+      + 'already tied to a job (the Trovis loop key, trovis_loop_external_id). It never creates a '
+      + 'job from Shopify on its own. This is not catalog, product, or customer sync.',
   },
 }
 
