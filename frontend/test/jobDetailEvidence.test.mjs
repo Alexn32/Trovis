@@ -60,6 +60,11 @@ function stub({ evidence = EVIDENCE, evidenceFail = false, runs = RUNS } = {}) {
     if (evidenceFail) throw new Error('evidence down')
     return typeof evidence === 'function' ? evidence() : evidence
   }
+  // The page also reads coverage (its own section, its own tests in
+  // jobDetailCoverage.test.mjs); keep it off the network here.
+  api.getWorkItemCoverage = async (id) => ({
+    item_id: id, generated_at: new Date(NOW).toISOString(), evidence_bounded: false, dimensions: [],
+  })
   return calls
 }
 

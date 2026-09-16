@@ -9,6 +9,7 @@ import {
   jobTotals, runCost, runDuration, runErrorLine, shortHistory,
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
+import { boundedNote, visibilityRows } from './coverage.js'
 
 // ---------------------------------------------------------------------------
 // Job detail — what a work item IS and how it moves, not a second table.
@@ -19,7 +20,10 @@ import { costProvenance, observations, sources, truncationNote } from './evidenc
 //   4. The current handoff, highlighted — with judgment CTAs when it is on you
 //   5. A short handoff history
 //   6. Underlying agent runs, collapsed and fetched only when opened
-//   7. (page only) Evidence — who Trovis heard from and what each source
+//   7. (page only) Visibility — which parts of this run Trovis directly
+//      observed, dimension by dimension; a statement of what was seen,
+//      never a score, and "Unknown" is not "missing"
+//   8. (page only) Evidence — who Trovis heard from and what each source
 //      reported or showed, under the record it supports; never above it
 //
 // Reads GET /work/items/:id (the lean detail), and /work/items/:id?include=runs
@@ -117,6 +121,9 @@ export default function JobDetail({
   const [evidenceReload, setEvidenceReload] = useState(0)
   useEffect(() => {
     if (!isPage) return undefined
+    // Reset on every (re)load so a previous run's evidence never shows
+    // under the next run's title while its own request is in flight.
+    setEvidence(null)
     setEvidenceErr(null)
     return startAbortable(({ signal, isAlive }) => {
       api
@@ -131,6 +138,32 @@ export default function JobDetail({
     setEvidenceReload((n) => n + 1)
   }, [])
   const costNote = isPage ? costProvenance(evidence?.evidence) : null
+
+  // Visibility (coverage) is its own request with its own loading, error
+  // and retry: a coverage failure never hides evidence, and vice versa.
+  // Page-only for the same reason evidence is. A failed request is a failed
+  // section — it is never rendered as five "Unknown" rows, because Unknown
+  // is a thing the server says about a dimension, not a thing the client
+  // says about a request.
+  const [coverage, setCoverage] = useState(null)
+  const [coverageErr, setCoverageErr] = useState(null)
+  const [coverageReload, setCoverageReload] = useState(0)
+  useEffect(() => {
+    if (!isPage) return undefined
+    setCoverage(null)
+    setCoverageErr(null)
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkItemCoverage(item.id, { signal })
+        .then((d) => isAlive() && setCoverage(d && Array.isArray(d.dimensions) ? d : { dimensions: [] }))
+        .catch((e) => isAlive() && setCoverageErr(e))
+    })
+  }, [isPage, item.id, coverageReload])
+  const retryCoverage = useCallback(() => {
+    setCoverage(null)
+    setCoverageErr(null)
+    setCoverageReload((n) => n + 1)
+  }, [])
 
   async function resolve(kind) {
     const handoffId = detail?.awaiting_handoff_event_id
@@ -276,6 +309,16 @@ export default function JobDetail({
             {/* The page's action list already IS these runs, so folding the
                 same rows underneath it would be depth in name only. */}
             {!isPage && <AgentRuns itemId={item.id} onOpenAgent={onOpenAgent} />}
+
+            {/* Visibility sits between the record and its evidence: what
+                Trovis could see, then what it saw. */}
+            {isPage && (
+              <VisibilitySection
+                body={coverage}
+                failed={Boolean(coverageErr)}
+                onRetry={retryCoverage}
+              />
+            )}
 
             {isPage && (
               <EvidenceSection
@@ -425,7 +468,61 @@ function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, 
   )
 }
 
-// --- 7. evidence -------------------------------------------------------------
+// --- 7. visibility -----------------------------------------------------------
+
+/**
+ * Which parts of this run Trovis directly observed — five fixed dimensions,
+ * each with one state and one sentence. Nothing is totalled: five rows are
+ * not a checklist, and there is no percentage, grade, colour or verdict.
+ * "Unknown" reads as exactly that — the record cannot say — never as
+ * "missing" or "failed". Sources belong to Evidence, below, not here.
+ *
+ * Three states that must never blur: loading (skeleton), failed (a local
+ * error with Retry, and NOT five Unknown rows), and a body with no
+ * dimensions (an honest sentence).
+ */
+function VisibilitySection({ body, failed, onRetry }) {
+  const loading = body === null && !failed
+  const rows = visibilityRows(body)
+  const note = boundedNote(body)
+
+  return (
+    <section className="jobd-section jobd-visibility" aria-label="Visibility">
+      <h3 className="dash-caps">Visibility</h3>
+      {loading ? (
+        <div className="dash-skel">
+          <span style={{ width: '45%' }} />
+          <span style={{ width: '60%' }} />
+        </div>
+      ) : failed ? (
+        <p className="dash-empty" role="alert">
+          Visibility couldn&apos;t be loaded.{' '}
+          <button type="button" className="dash-link" onClick={onRetry}>
+            Retry
+          </button>
+        </p>
+      ) : rows.length === 0 ? (
+        <p className="dash-empty">Visibility isn&apos;t available for this run.</p>
+      ) : (
+        <>
+          <p className="jobd-vis-lead">Which parts of this run Trovis directly observed.</p>
+          <ul className="jobd-vis-list">
+            {rows.map((row) => (
+              <li key={row.id} className={`jobd-vis-row state-${row.state}`} data-dimension={row.id}>
+                <span className="jobd-vis-label">{row.label}</span>
+                <span className={`jobd-vis-state state-${row.state}`}>{row.stateLabel}</span>
+                <span className="jobd-vis-text">{row.text}</span>
+              </li>
+            ))}
+          </ul>
+          {note && <p className="jobd-vis-note">{note}</p>}
+        </>
+      )}
+    </section>
+  )
+}
+
+// --- 8. evidence -------------------------------------------------------------
 
 /**
  * What supports the record above. Sources first — who Trovis heard from and
