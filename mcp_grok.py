@@ -291,6 +291,9 @@ def _report_span(
                 "resource_attributes": {
                     "service.name": bot_name,
                     "trovis.platform": PLATFORM,
+                    # Canonical connector identity (connect_health.py). A Grok
+                    # Bot is its own connector, distinct from the xAI SDK.
+                    "trovis.connector.id": "grok-bot",
                 },
             }
         ],

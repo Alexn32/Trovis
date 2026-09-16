@@ -12914,6 +12914,77 @@ def get_saas_connections(account_id: int) -> list[dict[str, Any]]:
         return [_saas_connection_public(dict(r)) for r in cur.fetchall()]
 
 
+def get_saas_activity(account_id: int) -> dict[str, dict[str, Any]]:
+    """Per-provider record of verified, mapped webhooks that reached this
+    account — the only durable SaaS *activity* fact (connect_health.py).
+
+    `saas_events` is the idempotency claim written by `claim_saas_event`
+    BEFORE the link-key and loop lookups, so it records "provider X sent
+    this account a mapped event at T" whether or not the event later moved
+    any work. Unmapped event types and events without an id never reach it.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT provider, COUNT(*) AS event_count, MAX(created_at) AS last_event_at "
+            f"FROM saas_events WHERE account_id = {PH} GROUP BY provider",
+            (account_id,),
+        )
+        return {
+            r["provider"]: {
+                "event_count": int(r["event_count"] or 0),
+                "last_event_at": _ts_to_str(r["last_event_at"]),
+            }
+            for r in cur.fetchall()
+        }
+
+
+def get_connector_observations(account_id: int) -> list[dict[str, Any]]:
+    """Every distinct (service, resource-attribute blob) this account has
+    stored, with the newest span time under each — the unit connect_health.py
+    attributes to a connector.
+
+    Attribution belongs to the OBSERVATION, not to the service name: a
+    service that once exported Claude-stamped spans and now exports bare
+    OTEL has two rows here, one per stamp, and each keeps its own newest
+    time. Grouping by the exact JSON text is what makes that exact — a
+    span's resource attributes ARE its stamp, and an exporter writes the
+    same blob on every span of a session, so the row count is the number
+    of distinct resources ever seen, not the number of spans.
+
+    Cost, honestly: one aggregate over all of the account's spans on the
+    database side. GET /agents' first paint already scans the same rows
+    through idx_spans_account_service_agent; this one must also read each
+    row's resource_attributes, so it touches the heap where that query did
+    not. Python receives only the distinct blobs. Bounded by the same
+    statement timeout as GET /agents (QueryTimeout on cancel), and fetched
+    once per Connections visit, never polled. Strictly account-scoped;
+    pre-tenant rows with a NULL account_id are excluded.
+    """
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            _set_statement_timeout(cur, _AGENTS_LIST_TIMEOUT_MS)
+            cur.execute(
+                "SELECT service_name, resource_attributes, "
+                "       MAX(start_time_unix) AS last_seen_ns, COUNT(*) AS span_count "
+                f"FROM spans WHERE account_id = {PH} "
+                "GROUP BY service_name, resource_attributes",
+                (account_id,),
+            )
+            return [
+                {
+                    "service_name": r["service_name"],
+                    "resource_attributes": r["resource_attributes"],
+                    "last_observed_at": _ns_to_iso(r["last_seen_ns"]),
+                    "span_count": int(r["span_count"] or 0),
+                }
+                for r in cur.fetchall()
+            ]
+    except Exception as exc:
+        if _is_query_canceled(exc):
+            raise QueryTimeout("connector observations timed out") from exc
+        raise
+
+
 def get_saas_connection(account_id: int, provider: str) -> dict[str, Any] | None:
     provider = (provider or "").strip().lower()
     with _connect() as conn, _cursor(conn) as cur:

@@ -42,6 +42,9 @@ import alerts
 import asker
 import billing
 import database
+# Aliased: the /connect/health route handler below is itself named
+# connect_health, and the module must stay reachable from it.
+import connect_health as connect_health_model
 import saas_hubspot
 import saas_shopify
 import saas_stripe
@@ -118,6 +121,7 @@ from models import (
     PulseInsightResponse,
     ClaimRequest,
     ConnectAskResponse,
+    ConnectionHealthResponse,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
@@ -6281,6 +6285,29 @@ def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
     return AskResponse(answer=result["answer"], visual=result.get("visual"))
 
 
+@app.get("/connect/health", response_model=ConnectionHealthResponse)
+def connect_health(request: Request) -> ConnectionHealthResponse:
+    """Normalized connection health for the Connections page.
+
+    A read model over facts already recorded — saas_connections and
+    saas_events for the work systems, stored spans for the telemetry
+    connectors (connect_health.py). Deterministic, no model calls, no Work
+    summary or board scan. Account-scoped like every other read; the
+    Connect surface is a nav courtesy decided client-side (the same rule as
+    Fleet), so the endpoint itself only requires an authenticated account.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    try:
+        body = connect_health_model.build_connection_health(account_id)
+    except database.QueryTimeout as exc:
+        # Same bound and same answer as GET /agents: a huge tenant gets a
+        # 504 the page reads as "couldn't check", never a wrong state.
+        raise HTTPException(status_code=504, detail="connection health timed out") from exc
+    return ConnectionHealthResponse(**body)
+
+
 @app.post("/connect/ask", response_model=ConnectAskResponse)
 def connect_ask(request: Request, body: AskRequest) -> ConnectAskResponse:
     """The guided add-agent chat ("Set up with AI"). Stateless — the client
@@ -6657,6 +6684,9 @@ async def action_connect(request: Request):
         "resource_attributes": {
             "service.name": name,
             "trovis.platform": "chatgpt",
+            # Canonical connector identity (connect_health.py); the legacy
+            # trovis.platform stamp stays so old readers keep working.
+            "trovis.connector.id": "chatgpt",
         },
     }], account_id=account_id)
     return {"status": "connected", "agent_name": name,
@@ -6751,6 +6781,7 @@ def _write_action_span(
         "resource_attributes": {
             "service.name": service,
             "trovis.platform": "chatgpt",
+            "trovis.connector.id": "chatgpt",
         },
     }], account_id=account_id)
 

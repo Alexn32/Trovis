@@ -369,6 +369,10 @@ export const api = {
   // account has never subscribed (no Stripe customer yet).
   billingPortal: () => request('/account/billing-portal', { method: 'POST' }),
 
+  // Normalized connection health for the Connections page — one row per
+  // connector: state, observed, last_observed_at (connect_health.py).
+  getConnectHealth: () => request('/connect/health'),
+
   // SaaS Connect (Stripe / HubSpot / Shopify Work adapters — not Trovis billing).
   getSaasConnections: () => request('/saas/connections'),
   startStripeConnect: () => request('/saas/stripe/oauth/start'),

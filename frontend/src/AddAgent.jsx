@@ -684,7 +684,9 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry import trace
 
-resource = Resource.create({"service.name": "AGENT_NAME"})
+# trovis.connector.id tells Connections this is the Cursor recipe. Without it
+# the traces still arrive, filed under Custom (OpenTelemetry).
+resource = Resource.create({"service.name": "AGENT_NAME", "trovis.connector.id": "cursor"})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
     BatchSpanProcessor(OTLPSpanExporter(

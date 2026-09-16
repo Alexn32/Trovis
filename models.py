@@ -2291,6 +2291,44 @@ class WorkItemDetail(WorkItem):
     runs: list[WorkItemRun] | None = None
 
 
+class ConnectionHealth(BaseModel):
+    """What Trovis knows about one connector right now (connect_health.py).
+
+    Every field has one meaning:
+      state              not_connected | waiting_for_data | connected — the
+                         whole enum; there is no degraded state because no
+                         concrete failure is recorded anywhere yet.
+      configured         a durable authorization exists (OAuth row). None for
+                         telemetry connectors: no door records that setup
+                         happened, so it is not tracked rather than False.
+      observed           Trovis received data attributable to this connector.
+      last_observed_at   the time of that data (a span, a verified webhook) —
+                         never an authorization time. None when unobserved.
+      connection_method  only when it follows deterministically from the
+                         stamp on the wire; None otherwise.
+      label              the provider account id for an authorized OAuth
+                         connector; None otherwise.
+      source_count       distinct telemetry sources (service names) rolled
+                         into this connector; None for OAuth connectors.
+    None of this says how much of the work Trovis can see. That is coverage,
+    a different question.
+    """
+
+    connector_id: str
+    state: str
+    configured: bool | None = None
+    observed: bool = False
+    last_observed_at: str | None = None
+    connection_method: str | None = None
+    label: str | None = None
+    source_count: int | None = None
+
+
+class ConnectionHealthResponse(BaseModel):
+    generated_at: str
+    connectors: list[ConnectionHealth] = Field(default_factory=list)
+
+
 class SaaSConnection(BaseModel):
     """One connected SaaS provider (Stripe / HubSpot / Shopify). Tokens never leave the server."""
 

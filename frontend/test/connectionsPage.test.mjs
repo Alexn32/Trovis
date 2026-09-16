@@ -114,9 +114,12 @@ test('saasStatus reads only what /saas/connections records', () => {
     connected: true, label: 'Connected · shop.myshopify.com',
   })
   // Nothing the backend does not record is claimed anywhere on the page.
-  assert.doesNotMatch(page, /Healthy|Receiving activity|Last observed|Verified|coverage/i)
-  // AI rows claim no installed state: the only status text is on work rows.
-  assert.doesNotMatch(page.match(/function AiRow[\s\S]*?\n}\n/)[0], /cx-status|Connected/)
+  assert.doesNotMatch(page, /Healthy|Receiving activity|Verified|coverage/i)
+  // AI rows claim state only through aiRowState, i.e. only from an
+  // observation the server recorded — never "Installed", never a literal.
+  const aiRow = page.match(/function AiRow[\s\S]*?\n}\n/)[0]
+  assert.match(aiRow, /aiRowState\(health, relativeTime\)/)
+  assert.doesNotMatch(aiRow, /Installed|'Connected'|Not connected/)
 })
 
 test('no Work API and no backend permission atom changed', () => {
@@ -128,4 +131,56 @@ test('no Work API and no backend permission atom changed', () => {
   const seat = src('seat.js')
   assert.match(seat, /'Connect'/)
   assert.doesNotMatch(seat, /'Connections'/)
+})
+
+// --- normalized health helpers ---------------------------------------------
+
+import { HEALTH_STATES, aiRowState, healthFor, workRowState } from '../src/connectionsPage.js'
+
+const rel = (iso) => `REL(${iso})`
+
+test('health rows are looked up by connector id; a failed response has none', () => {
+  const h = { connectors: [{ connector_id: 'grok', state: 'connected', observed: true }] }
+  assert.equal(healthFor(h, 'grok').state, 'connected')
+  assert.equal(healthFor(h, 'grok-bot'), null)
+  assert.equal(healthFor({ error: true }, 'grok'), null)
+  assert.equal(healthFor(null, 'grok'), null)
+  assert.deepEqual([...HEALTH_STATES], ['not_connected', 'waiting_for_data', 'connected'])
+})
+
+test('an AI row claims Connected only from an observation, and never Not connected', () => {
+  assert.deepEqual(aiRowState(null, rel), { status: null, detail: null, action: 'Connect' })
+  assert.deepEqual(aiRowState({ state: 'not_connected', observed: false }, rel),
+    { status: null, detail: null, action: 'Connect' })
+  assert.deepEqual(aiRowState({ state: 'connected', observed: true, last_observed_at: 'T' }, rel),
+    { status: 'Connected', detail: 'Last observed REL(T)', action: 'Connect another' })
+  // observed without a timestamp: Connected, but no invented time.
+  assert.deepEqual(aiRowState({ state: 'connected', observed: true, last_observed_at: null }, rel),
+    { status: 'Connected', detail: null, action: 'Connect another' })
+})
+
+test('a work-system row separates authorization from activity', () => {
+  const connected = { state: 'connected', configured: true, observed: true, last_observed_at: 'T', label: 'acct_1234567890' }
+  assert.deepEqual(workRowState(connected, null, rel, 'Stripe'),
+    { status: 'Connected · …567890', detail: 'Last observed REL(T)', connected: true })
+  const waiting = { state: 'waiting_for_data', configured: true, observed: false, label: 'shop.myshopify.com' }
+  assert.deepEqual(workRowState(waiting, null, rel, 'Shopify'),
+    { status: 'Waiting for data', detail: 'Authorized as shop.myshopify.com · no Shopify activity observed yet', connected: false })
+  assert.deepEqual(workRowState({ state: 'not_connected', configured: false }, null, rel, 'HubSpot'),
+    { status: 'Not connected', detail: null, connected: false })
+  // Health failed: the OAuth row alone says Authorized, never Connected.
+  assert.deepEqual(workRowState(null, { status: 'connected', provider_account_id: 'acct_1234567890' }, rel, 'Stripe'),
+    { status: 'Authorized · …567890', detail: 'Couldn’t check recent activity', connected: false })
+  assert.deepEqual(workRowState(null, { status: 'disconnected' }, rel, 'Stripe'),
+    { status: 'Not connected', detail: null, connected: false })
+  assert.deepEqual(workRowState(null, null, rel, 'Stripe'),
+    { status: 'Not connected', detail: null, connected: false })
+})
+
+test('the health API is one Connections-oriented read; Work and Agent Flow APIs are untouched', () => {
+  const api = src('api.js')
+  assert.match(api, /getConnectHealth: \(\) => request\('\/connect\/health'\)/)
+  assert.match(api, /getConnections: \(\) => request\('\/connections'\)/)
+  assert.match(page, /api\s*\.getConnectHealth\(\)/)
+  assert.doesNotMatch(page, /getWorkOverview|getWorkItems|\/work\//)
 })
