@@ -18,6 +18,7 @@ Run:
 """
 import json
 import os
+import sys
 import tempfile
 
 os.environ.update({
@@ -1653,6 +1654,75 @@ check("adding an unreadable execution to a real run makes it partial",
       runner_gap["payload_capture"] is False
       and runner_gap["payload_capture_partial"] is True
       and runner_gap["executions_without_payload_capture"] == 1)
+
+# ===========================================================================
+# The plan's retry policy is the one a spend estimate turns on
+# ===========================================================================
+print("\n=== the pre-spend plan describes the retries that actually happen ===")
+
+# Trovis moved retrying out of `messages.create()` and into its own recorded
+# boundary. The plan kept reporting a flat `provider_retries: 0`, which reads
+# as "one logical call, one request" — so a reader approving a $5 run was
+# shown a request count that a single retried call could exceed threefold.
+import home_llm_usage
+
+class _Boom(Exception):
+    status_code = 500
+
+
+class _AlwaysFails:
+    class messages:
+        @staticmethod
+        def create(**kw):
+            raise _Boom("upstream")
+
+
+retry_meter = R.Meter(max_calls=60, max_usd=5.0, database=database,
+                      model=investigator.MODEL, priced=False)
+wrapped = retry_meter.wrap(_AlwaysFails())
+try:
+    home_llm_usage.call(
+        home_llm_usage.STAGE_PROPOSING,
+        lambda: wrapped.messages.create(
+            model=investigator.MODEL, max_tokens=16,
+            messages=[{"role": "user", "content": "hi"}]),
+        model=investigator.MODEL, sleep=lambda _s: None)
+except _Boom:
+    pass
+
+check("one logical call can spend more than one metered request",
+      retry_meter.calls == home_llm_usage.MAX_RETRIES + 1)
+check("and every failed attempt is counted, not released",
+      retry_meter.failed_calls == retry_meter.calls)
+
+# The real plan, from the real entry point — a hand-built dict here would pass
+# even with the fix reverted.
+import subprocess
+
+plan_proc = subprocess.run(
+    [sys.executable, "run_home_eval.py", "--mode", "plan",
+     "--scenarios", "A", "--max-usd", "5"],
+    cwd=os.path.dirname(os.path.abspath(__file__)),
+    capture_output=True, text=True, timeout=300,
+    env={**os.environ, "OVERSEE_DISABLE_PRICING_SYNC": "1"},
+)
+out = plan_proc.stdout
+plan = json.loads(out[out.index("{"):out.rindex("}") + 1])
+plan_limits = plan["limits"]
+
+check("the plan no longer claims a flat zero retries",
+      "provider_retries" not in plan_limits)
+check("it reports the SDK's own retries and Trovis's separately",
+      plan_limits["retry_policy"]["sdk_retries"] == 0
+      and plan_limits["retry_policy"]["trovis_boundary_retries"]
+      == home_llm_usage.MAX_RETRIES)
+check("and the requests-per-call figure matches what the meter observed",
+      plan_limits["retry_policy"]["max_requests_per_call"] == retry_meter.calls)
+check("the plan still states the model, the ceilings and the tool budget",
+      plan["model"] == investigator.MODEL
+      and plan_limits["max_model_calls"] > 0
+      and plan_limits["max_estimated_usd"] == 5.0
+      and plan_limits["tool_budget"]["max_calls"] > 0)
 
 CLIENT.__exit__(None, None, None)
 
