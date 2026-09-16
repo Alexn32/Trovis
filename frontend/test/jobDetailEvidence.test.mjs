@@ -96,7 +96,7 @@ test('the record is usable while evidence is still loading', async () => {
   assert.doesNotMatch(m.text(), /No supporting evidence/)
   gate.resolve(EVIDENCE)
   await m.settle()
-  assert.match(m.text(), /Reported by Grok Bot/)
+  assert.match(m.text(), /Reported by refunds-agent · Grok Bot/)
   assert.ok(!m.$('.jobd-evidence .dash-skel'), 'skeleton gone once evidence arrives')
   m.unmount()
 })
@@ -124,25 +124,59 @@ test('an empty evidence response is an honest sentence, not "nothing happened" o
   m.unmount()
 })
 
-test('sources: registry names, Grok distinct from Grok Bot, generic OTEL stays generic', async () => {
+test('sources: the worker first, its connector under it; Grok ≠ Grok Bot; generic OTEL stays generic', async () => {
   stub()
   const m = await mount(page())
   await m.settle()
+  const rows = m.$$('.jobd-ev-source')
   const names = m.$$('.jobd-ev-source-name').map((e) => e.textContent)
-  assert.ok(names.includes('Grok Bot'))
-  assert.ok(names.includes('Grok (xAI SDK)'))
+  assert.ok(names.includes('refunds-agent'), 'the worker is the row, not its connector')
+  assert.ok(names.includes('pricing-agent'))
   assert.ok(names.includes('Stripe'))
   assert.ok(names.includes('Ada Lovelace'), 'human source by resolved name')
-  assert.ok(names.includes('claude-refund-helper'), 'generic OTEL shows the service, nothing more')
-  const otel = m.$$('.jobd-ev-source').find((e) => e.textContent.includes('claude-refund-helper'))
-  assert.match(otel.textContent, /OpenTelemetry/)
-  assert.doesNotMatch(otel.textContent, /Claude Agents/)
-  const bot = m.$$('.jobd-ev-source').find((e) => e.textContent.startsWith('Grok Bot'))
+  assert.ok(names.includes('claude-refund-helper'), 'generic OTEL shows the worker, nothing more')
+  assert.ok(!names.includes('Grok Bot') && !names.includes('Grok (xAI SDK)'), 'no connector-only rows')
+  const bot = rows.find((e) => e.querySelector('.jobd-ev-source-name').textContent === 'refunds-agent' && e.textContent.includes('Grok Bot'))
+  assert.ok(bot, 'refunds-agent carries its connector as context')
   assert.match(bot.textContent, /Execution observed/)
   assert.match(bot.textContent, /2 actions reported · 1 with errors/)
-  // The unrecorded-source handoff shows as such, never as a vendor.
-  const unknown = m.$$('.jobd-ev-source').find((e) => e.textContent.includes('source not recorded'))
+  const grok = rows.find((e) => e.querySelector('.jobd-ev-source-name').textContent === 'pricing-agent')
+  assert.match(grok.textContent, /Grok \(xAI SDK\)/)
+  assert.notEqual(bot, grok)
+  const otel = rows.find((e) => e.textContent.includes('claude-refund-helper'))
+  assert.match(otel.textContent, /OpenTelemetry/)
+  assert.doesNotMatch(otel.textContent, /Claude Agents/)
+  // The unrecorded-source handoff names the worker and says the source is not recorded.
+  const unknown = rows.find((e) => e.textContent.includes('source not recorded'))
   assert.ok(unknown, 'a source that was never recorded is named as such')
+  m.unmount()
+})
+
+test('two workers on the same connector stay two source rows with their own counts', async () => {
+  const two = { ...EVIDENCE, evidence: [
+    r({ id: 'exec:a', evidence_type: 'execution', source_connector_id: 'grok', source_label: 'refund-agent:main', observed_at: ago(30), details: { span_count: 2, last_observed_at: ago(20) } }),
+    r({ id: 'act:a1', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'refund-agent:main', observed_at: ago(25), details: { tool: 'refund_customer', errored: false } }),
+    r({ id: 'act:a2', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'refund-agent:main', observed_at: ago(24), details: { tool: 'lookup_order', errored: false } }),
+    r({ id: 'act:a3', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'refund-agent:main', observed_at: ago(23), details: { tool: 'notify', errored: false } }),
+    r({ id: 'exec:b', evidence_type: 'execution', source_connector_id: 'grok', source_label: 'support-agent:main', observed_at: ago(29), details: { span_count: 1, last_observed_at: ago(21) } }),
+    r({ id: 'act:b1', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'support-agent:main', observed_at: ago(22), details: { tool: 'reply', errored: false } }),
+  ] }
+  stub({ evidence: two })
+  const m = await mount(page())
+  await m.settle()
+  const rows = m.$$('.jobd-ev-source')
+  assert.equal(rows.length, 2)
+  const refund = rows.find((e) => e.textContent.startsWith('refund-agent'))
+  const support = rows.find((e) => e.textContent.startsWith('support-agent'))
+  assert.match(refund.textContent, /Grok \(xAI SDK\)/)
+  assert.match(refund.textContent, /3 actions reported/)
+  assert.match(support.textContent, /Grok \(xAI SDK\)/)
+  assert.match(support.textContent, /1 action reported/)
+  // Observation rows name the worker that reported, not just the connector.
+  const notify = m.$$('.jobd-ev-row').find((e) => e.textContent.includes('Notify'))
+  assert.match(notify.textContent, /Reported by refund-agent · Grok \(xAI SDK\)/)
+  const reply = m.$$('.jobd-ev-row').find((e) => e.textContent.includes('Reply'))
+  assert.match(reply.textContent, /Reported by support-agent · Grok \(xAI SDK\)/)
   m.unmount()
 })
 
@@ -152,11 +186,11 @@ test('actions read as reported; an error reports the error; nothing implies succ
   await m.settle()
   const rows = m.$$('.jobd-ev-row')
   const refund = rows.find((e) => e.textContent.includes('Refund customer'))
-  assert.match(refund.textContent, /Reported by Grok Bot/)
+  assert.match(refund.textContent, /Reported by refunds-agent · Grok Bot/)
   assert.doesNotMatch(visibleText(refund), /complete|succeed|success|\bOK\b/)
   const lookup = rows.find((e) => e.textContent.includes('Lookup order'))
   assert.ok(lookup.classList.contains('is-errored'))
-  assert.match(lookup.textContent, /Reported error by Grok Bot/)
+  assert.match(lookup.textContent, /Reported error by refunds-agent · Grok Bot/)
   assert.match(lookup.textContent, /Card declined/)
   m.unmount()
 })
@@ -182,7 +216,7 @@ test('completion says the record closed, not that the outcome succeeded', async 
   const done = m.$('.jobd-ev-row.kind-completion')
   assert.match(done.textContent, /Work record closed/)
   assert.match(done.textContent, /does not by itself show the outcome/)
-  assert.match(done.textContent, /Reported by Grok Bot/)
+  assert.match(done.textContent, /Reported by refunds-agent · Grok Bot/)
   m.unmount()
 })
 

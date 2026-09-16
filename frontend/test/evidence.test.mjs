@@ -27,34 +27,90 @@ const rec = (over = {}) => ({
   details: {}, ...over,
 })
 
-test('sources are named from the registry, never from a service name', () => {
-  assert.equal(sourceOf(rec()).name, 'Grok Bot')
-  assert.equal(sourceOf(rec({ source_connector_id: 'grok' })).name, 'Grok (xAI SDK)')
-  assert.notEqual(sourceOf(rec({ source_connector_id: 'grok' })).key, sourceOf(rec()).key, 'Grok ≠ Grok Bot')
-  // Generic OTEL: all Trovis knows is the service; say that, with the hint.
+test('a source is the WORKER, with its connector as context — never the connector alone', () => {
+  // Worker from source_label (the stored service:agent actor, ":main" dropped),
+  // connector from the registry as the quiet line under it.
+  const bot = sourceOf(rec())
+  assert.equal(bot.name, 'refunds-agent')
+  assert.equal(bot.hint, 'Grok Bot')
+  assert.equal(bot.key, 'agent:grok-bot:refunds-agent:main')
+  const grok = sourceOf(rec({ source_connector_id: 'grok' }))
+  assert.equal(grok.hint, 'Grok (xAI SDK)')
+  assert.notEqual(grok.key, bot.key, 'Grok ≠ Grok Bot even for the same worker')
+  // A sub-agent keeps its full stored identity.
+  assert.equal(sourceOf(rec({ source_label: 'refunds-agent:reviewer' })).name, 'refunds-agent:reviewer')
+  // Generic OTEL: all Trovis knows is the worker's own name; say that.
   const otel = sourceOf(rec({ source_connector_id: 'custom-otel', source_label: 'claude-refund-helper:main' }))
   assert.equal(otel.name, 'claude-refund-helper')
   assert.equal(otel.hint, 'OpenTelemetry')
-  assert.doesNotMatch(otel.name, /Claude Agents/)
+  assert.doesNotMatch(otel.name + otel.hint, /Claude Agents/)
+  // No worker label → the connector's name, and nothing invented.
+  const nameless = sourceOf(rec({ source_label: '' }))
+  assert.equal(nameless.name, 'Grok Bot')
+  assert.equal(nameless.hint, null)
   // A person by resolved name; the product by its own name.
   assert.equal(sourceOf(rec({ source_type: 'human', source_connector_id: null, source_label: 'Ada Lovelace' })).name, 'Ada Lovelace')
   assert.equal(sourceOf(rec({ source_type: 'system', source_connector_id: 'stripe', source_label: 'Stripe' })).name, 'Stripe')
   assert.equal(sourceOf(rec({ source_type: 'system', source_connector_id: null, source_label: 'Trovis' })).name, 'Trovis')
-  // No recorded source stays unknown — not guessed from the actor string.
+  // No recorded connector: the worker is still named, its source is not guessed.
   const legacy = sourceOf(rec({ source_connector_id: null, source_label: 'claude-refund-helper:main' }))
-  assert.equal(legacy.kind, 'unknown')
+  assert.equal(legacy.name, 'claude-refund-helper')
   assert.equal(legacy.hint, 'source not recorded')
+  assert.equal(sourceOf(rec({ source_connector_id: null, source_label: '' })).name, 'Source not recorded')
+})
+
+test('two workers on one connector are two sources; one worker is one source', () => {
+  const ev = [
+    rec({ id: 'e1', source_connector_id: 'grok', source_label: 'refund-agent:main', details: { span_count: 2 } }),
+    rec({ id: 'a1', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'refund-agent:main', details: { tool: 'refund', errored: false } }),
+    rec({ id: 'a2', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'refund-agent:main', details: { tool: 'lookup', errored: false } }),
+    rec({ id: 'a3', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'refund-agent:main', details: { tool: 'notify', errored: true } }),
+    rec({ id: 'c1', evidence_type: 'completion', source_connector_id: 'grok', source_label: 'refund-agent:main', details: { reason: 'completed_by_agent' } }),
+    rec({ id: 'e2', source_connector_id: 'grok', source_label: 'support-agent:main', details: { span_count: 1 } }),
+    rec({ id: 'a4', evidence_type: 'action_reported', source_connector_id: 'grok', source_label: 'support-agent:main', details: { tool: 'reply', errored: false } }),
+    rec({ id: 'e3', source_connector_id: 'claude', source_label: 'triage-agent:main', details: { span_count: 1 } }),
+    rec({ id: 'e4', source_connector_id: 'claude', source_label: 'drafting-agent:main', details: { span_count: 1 } }),
+    rec({ id: 'e5', source_connector_id: 'grok-bot', source_label: 'refund-agent:main', details: { span_count: 1 } }),
+    rec({ id: 'e6', source_connector_id: 'custom-otel', source_label: 'svc-a:main', details: { span_count: 1 } }),
+    rec({ id: 'e7', source_connector_id: 'custom-otel', source_label: 'svc-b:main', details: { span_count: 1 } }),
+    rec({ id: 'e8', source_connector_id: null, source_label: '', evidence_type: 'handoff', details: { event: 'handoff_initiated' } }),
+    rec({ id: 'h1', evidence_type: 'handoff', source_type: 'human', source_connector_id: null, source_label: 'Ada Lovelace', details: { event: 'handoff_completed' } }),
+    rec({ id: 'x1', evidence_type: 'external_state', source_type: 'system', source_connector_id: 'stripe', source_label: 'Stripe', details: { provider_event_type: 'refund.updated' } }),
+  ]
+  const s = sources(ev)
+  const byName = Object.fromEntries(s.map((x) => [x.name + '|' + (x.hint || ''), x]))
+  // 1. two Grok workers → two rows, with the counts on the right worker
+  assert.deepEqual(byName['refund-agent|Grok (xAI SDK)'].lines, ['Execution observed', '3 actions reported · 1 with errors', 'Record closed'])
+  assert.deepEqual(byName['support-agent|Grok (xAI SDK)'].lines, ['Execution observed', '1 action reported'])
+  assert.ok(!s.some((x) => x.name === 'Grok (xAI SDK)'), 'no combined connector row')
+  // 2. two Claude workers stay distinct
+  assert.ok(byName['triage-agent|Claude Agents'] && byName['drafting-agent|Claude Agents'])
+  // 3/4. one worker's execution + actions + completion is ONE row (asserted above)
+  assert.equal(s.filter((x) => x.name === 'refund-agent' && x.hint === 'Grok (xAI SDK)').length, 1)
+  // 5. Grok vs Grok Bot: the same worker over two connectors is two sources
+  assert.ok(byName['refund-agent|Grok Bot'])
+  // 6. two custom OTEL services stay distinct and generic
+  assert.ok(byName['svc-a|OpenTelemetry'] && byName['svc-b|OpenTelemetry'])
+  // 7. no worker identity → honest fallback, nothing invented
+  assert.ok(s.some((x) => x.name === 'Source not recorded' && x.kind === 'unknown'))
+  // 8. human and system grouping unchanged
+  assert.deepEqual(byName['Ada Lovelace|'].lines, ['1 decision recorded'])
+  assert.deepEqual(byName['Stripe|'].lines, ['1 state observation'])
 })
 
 test('reported vs observed vs recorded — and never verified', () => {
-  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', details: { tool: 'refund_customer', errored: false } })), 'Reported by Grok Bot')
-  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', details: { tool: 'refund_customer', errored: true } })), 'Reported error by Grok Bot')
-  assert.equal(provenanceLine(rec()), 'Observed from Grok Bot')
+  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', details: { tool: 'refund_customer', errored: false } })), 'Reported by refunds-agent · Grok Bot')
+  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', details: { tool: 'refund_customer', errored: true } })), 'Reported error by refunds-agent · Grok Bot')
+  assert.equal(provenanceLine(rec()), 'Observed from refunds-agent · Grok Bot')
+  // The worker is named, not just the connector; without a label, the connector.
+  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', source_label: '', details: { tool: 't' } })), 'Reported by Grok Bot')
   assert.equal(provenanceLine(rec({ evidence_type: 'external_state', source_type: 'system', source_connector_id: 'stripe' })), 'Observed from Stripe')
   assert.equal(provenanceLine(rec({ evidence_type: 'handoff', source_type: 'human', source_connector_id: null, source_label: 'Ada Lovelace' })), 'Recorded by Ada Lovelace')
   assert.equal(provenanceLine(rec({ evidence_type: 'completion', source_type: 'system', source_connector_id: null })), 'Recorded by Trovis')
-  assert.equal(provenanceLine(rec({ evidence_type: 'completion' })), 'Reported by Grok Bot')
-  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', source_connector_id: null })), 'Source not recorded')
+  assert.equal(provenanceLine(rec({ evidence_type: 'completion' })), 'Reported by refunds-agent · Grok Bot')
+  // A worker whose connector was never recorded is named without one.
+  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', source_connector_id: null, details: { tool: 't' } })), 'Reported by refunds-agent')
+  assert.equal(provenanceLine(rec({ evidence_type: 'action_reported', source_connector_id: null, source_label: '' })), 'Source not recorded')
   for (const f of ['evidence.js', 'JobDetail.jsx']) {
     assert.doesNotMatch(strip(src(f)), /Verified by|verified by/i, `${f} never says verified by`)
   }
@@ -68,6 +124,7 @@ test('an action is named from its tool, readable but not translated', () => {
   assert.equal(actionName(''), 'Action')
   const o = observations([rec({ evidence_type: 'action_reported', details: { tool: 'refund_customer', errored: false, proves: 'reported' } })])
   assert.equal(o[0].title, 'Refund customer')
+  assert.equal(o[0].provenance, 'Reported by refunds-agent · Grok Bot', 'the worker is named, the connector is context')
   assert.doesNotMatch(`${o[0].title} ${o[0].provenance} ${o[0].note}`, /complete|succeed|success/i)
 })
 
@@ -77,7 +134,7 @@ test('an errored action reports the error, not a success, and only the message i
     details: { tool: 'refund_customer', errored: true, error: 'Card declined' },
   })])
   assert.equal(o[0].errored, true)
-  assert.equal(o[0].provenance, 'Reported error by Grok Bot')
+  assert.equal(o[0].provenance, 'Reported error by refunds-agent · Grok Bot')
   assert.equal(o[0].note, 'Card declined')
   const silent = observations([rec({ evidence_type: 'action_reported', details: { tool: 't', errored: true, error: null } })])
   assert.equal(silent[0].note, null)
@@ -107,6 +164,7 @@ test('completion says the record closed, not that the outcome succeeded', () => 
   const o = observations([rec({ evidence_type: 'completion', details: { reason: 'completed_by_agent', proves: 'recorded_close' } })])
   assert.equal(o[0].title, 'Work record closed')
   assert.match(o[0].note, /does not by itself show the outcome/)
+  assert.equal(o[0].provenance, 'Reported by refunds-agent · Grok Bot')
   const ab = observations([rec({ evidence_type: 'completion', source_type: 'system', source_connector_id: null, details: { reason: 'abandoned' } })])
   assert.equal(ab[0].title, 'Work record abandoned')
   assert.equal(ab[0].provenance, 'Recorded by Trovis')
@@ -122,8 +180,9 @@ test('execution and cost roll into sources; handoffs are counted, not repeated',
     rec({ id: 'h', evidence_type: 'handoff', source_type: 'human', source_connector_id: null, source_label: 'Ada Lovelace', observed_at: '2026-09-16T10:08:00+00:00', details: { event: 'handoff_completed' } }),
   ]
   const s = sources(ev)
-  assert.deepEqual(s.map((x) => x.name), ['Ada Lovelace', 'Stripe', 'Grok Bot'], 'most recently heard first')
-  const bot = s.find((x) => x.name === 'Grok Bot')
+  assert.deepEqual(s.map((x) => x.name), ['Ada Lovelace', 'Stripe', 'refunds-agent'], 'most recently heard first')
+  const bot = s.find((x) => x.name === 'refunds-agent')
+  assert.equal(bot.hint, 'Grok Bot')
   assert.deepEqual(bot.lines, ['Execution observed', '2 actions reported · 1 with errors'])
   assert.equal(bot.lastAt, '2026-09-16T10:06:00+00:00', 'last observed comes from the execution roll-up')
   assert.deepEqual(s.find((x) => x.name === 'Stripe').lines, ['1 state observation'])

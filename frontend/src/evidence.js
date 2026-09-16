@@ -20,8 +20,12 @@
 // "Verified" does not appear: Trovis has not yet defined which systems are
 // authoritative for which outcomes, so nothing here claims to be one.
 //
+// Sources are WORKERS, not connectors: two agents on the same connector are
+// two rows, each with the connector as its quiet second line (sourceOf).
+//
 // Nothing is inferred. A tool named refund_customer reads as "Refund
-// customer — Reported by Grok Bot", never "Refund completed". An external
+// customer — Reported by refunds-agent · Grok Bot", never "Refund
+// completed". An external
 // state reads as what the provider event type says it is about, or simply
 // "State observed" when the type is not one we can name. Missing source
 // information stays "Source not recorded".
@@ -35,19 +39,29 @@ const TROVIS = 'Trovis'
 
 /**
  * Who a record came from, as a person would name it.
- *   name  registry name for a known connector or provider; the service name
- *         for a custom OpenTelemetry source (all Trovis knows); a person's
- *         resolved name; "Trovis" for the product itself.
+ *
+ * Worker identity is not connector identity. For agent evidence the backend
+ * names the WORKER in `source_label` (`service:agent_id`, the actor idiom
+ * from loops.agent_actor — display and equality only, never parsed apart)
+ * and the CONNECTOR in `source_connector_id` (how the telemetry arrived).
+ * Two workers on the same connector are two sources; the connector is the
+ * quiet line under each. The one cosmetic step is dropping the default
+ * `:main` suffix, the same way the action list shows a main agent by its
+ * service name.
+ *
+ *   name  the worker (its stored label), a person's resolved name, a
+ *         provider's registry name, or "Trovis" for the product itself.
+ *         Falls back to the connector's name when no worker label exists.
+ *   hint  the connector/platform under a worker ("Grok (xAI SDK)",
+ *         "OpenTelemetry" for a generic source, "source not recorded" when
+ *         the event predates span links), else null.
  *   kind  agent | human | system | unknown
- *   hint  a quiet qualifier when the name alone would mislead ("OpenTelemetry"
- *         for a generic source), else null.
- *   key   groups records from the same source.
+ *   key   groups records from the same source: connector + worker.
  */
 export function sourceOf(rec) {
   const type = rec?.source_type || null
   const cid = rec?.source_connector_id || null
   const label = String(rec?.source_label || '').trim()
-  const service = label.includes(':') ? label.slice(0, label.indexOf(':')) : label
 
   if (type === 'human') {
     return { key: `human:${label || '?'}`, name: label || 'A person', kind: 'human', hint: null }
@@ -58,27 +72,39 @@ export function sourceOf(rec) {
     return { key: 'system:trovis', name: TROVIS, kind: 'system', hint: null }
   }
   if (type === 'agent') {
-    if (cid && cid !== 'custom-otel') {
-      const c = getConnector(cid)
-      if (c) return { key: `agent:${cid}`, name: c.name, kind: 'agent', hint: null }
+    const worker = workerName(label)
+    const connector = cid ? getConnector(cid) : null
+    if (connector && cid !== 'custom-otel') {
+      return {
+        key: `agent:${cid}:${label || '?'}`,
+        name: worker || connector.name,
+        kind: 'agent',
+        hint: worker ? connector.name : null,
+      }
     }
     if (cid === 'custom-otel') {
       return {
-        key: `otel:${service || '?'}`,
-        name: service || 'An OpenTelemetry source',
+        key: `agent:custom-otel:${label || '?'}`,
+        name: worker || 'An OpenTelemetry source',
         kind: 'agent',
         hint: 'OpenTelemetry',
       }
     }
     // The event predates span links: the record exists, its source does not.
     return {
-      key: `unknown:${service || '?'}`,
-      name: service || 'Source not recorded',
-      kind: 'unknown',
-      hint: service ? 'source not recorded' : null,
+      key: `agent:unknown:${label || '?'}`,
+      name: worker || 'Source not recorded',
+      kind: worker ? 'agent' : 'unknown',
+      hint: worker ? 'source not recorded' : null,
     }
   }
   return { key: 'unknown', name: 'Source not recorded', kind: 'unknown', hint: null }
+}
+
+/** The stored worker label, minus only the default `:main` sub-agent suffix. */
+function workerName(label) {
+  if (!label) return null
+  return label.endsWith(':main') ? label.slice(0, -':main'.length) || label : label
 }
 
 /**
@@ -118,21 +144,28 @@ export function externalStateHeadline(rec) {
   return 'State observed'
 }
 
-/** The provenance phrase for one record. */
+/**
+ * The provenance phrase for one record. Names the worker when Trovis knows
+ * it, with the connector as trailing context ("Reported by refunds-agent ·
+ * Grok (xAI SDK)"); a worker with no recorded connector is named without one.
+ */
 export function provenanceLine(rec) {
   const src = sourceOf(rec)
   const type = rec?.evidence_type
+  const who = src.kind === 'agent' && src.hint && src.hint !== 'source not recorded'
+    ? `${src.name} · ${src.hint}`
+    : src.name
   if (type === 'action_reported') {
     if (src.kind === 'unknown') return 'Source not recorded'
-    return rec?.details?.errored ? `Reported error by ${src.name}` : `Reported by ${src.name}`
+    return rec?.details?.errored ? `Reported error by ${who}` : `Reported by ${who}`
   }
   if (type === 'execution' || type === 'external_state') {
-    return src.kind === 'unknown' ? 'Source not recorded' : `Observed from ${src.name}`
+    return src.kind === 'unknown' ? 'Source not recorded' : `Observed from ${who}`
   }
   if (type === 'handoff' || type === 'completion') {
     if (src.kind === 'human') return `Recorded by ${src.name}`
     if (src.kind === 'system') return `Recorded by ${src.name}`
-    if (src.kind === 'agent') return `Reported by ${src.name}`
+    if (src.kind === 'agent') return `Reported by ${who}`
     return 'Source not recorded'
   }
   if (type === 'cost') return costProvenanceLine(rec)
