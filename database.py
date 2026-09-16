@@ -2169,6 +2169,22 @@ def init_db() -> None:
         # FK: SQLite's ALTER ADD COLUMN can't enforce one, and the two
         # backends must stay schema-identical.
         _try_add_column(cur, "spans", "loop_id", "INTEGER DEFAULT NULL")
+        # HOW loop_id was chosen for this span, recorded by the resolver at
+        # the one moment Trovis knows it (_resolve_loop_for_span; values in
+        # _LOOP_LINKS). Set at INSERT only, like loop_id; NULL on every span
+        # ingested before this column existed and on loop-less spans. The
+        # evidence layer reads NULL as "not recorded" — it never rebuilds the
+        # mechanism from the span's attributes afterwards.
+        _try_add_column(cur, "spans", "loop_link", "TEXT DEFAULT NULL")
+        # Work Evidence (work_evidence.py): a lifecycle event the ingest path
+        # writes because of a span (loop_opened, handoff_*, loop_closed) now
+        # names that span, so the claim can point at the observation and the
+        # observation's resource stamp can name the connector. Nullable and
+        # only set by ingest; events written by people, sweeps and the SaaS
+        # spine have no span, and every pre-existing row stays NULL — the
+        # evidence layer reads NULL as "source not recorded", never guesses.
+        _try_add_column(cur, "loop_events", "span_id", "TEXT DEFAULT NULL")
+        _try_add_column(cur, "loop_events", "trace_id", "TEXT DEFAULT NULL")
         # Shopify OAuth start stores the shop domain so the callback can
         # reject a shop-swap. NULL on Stripe / HubSpot rows.
         _try_add_column(cur, "saas_oauth_states", "payload", "TEXT")
@@ -2628,9 +2644,9 @@ _INSERT_COLUMNS = (
     "attributes, resource_attributes, account_id, "
     "input_tokens, output_tokens, total_tokens, "
     "cache_creation_input_tokens, cache_read_input_tokens, estimated_cost_usd, "
-    "cost_source, loop_id"
+    "cost_source, loop_id, loop_link"
 )
-_INSERT_COLUMN_COUNT = 22
+_INSERT_COLUMN_COUNT = 23
 
 
 def _agent_id_from_attrs(attrs: dict[str, Any] | None) -> str:
@@ -3142,11 +3158,14 @@ def _insert_span_rows(
     spans: list[dict[str, Any]],
     account_id: int | None = None,
     loop_ids: list[int | None] | None = None,
+    loop_links: list[str | None] | None = None,
 ) -> int:
     """Insert parsed spans on an open cursor — the caller owns the
     transaction. Tags each row with account_id when provided (None preserves
     the pre-multi-tenant behavior). loop_ids is positionally parallel to
-    spans (None → every row gets loop_id NULL).
+    spans (None → every row gets loop_id NULL); loop_links likewise carries
+    the resolver's assignment mechanism per span (_LOOP_LINKS), NULL when
+    the caller did not resolve loops.
 
     Token usage (`gen_ai.usage.*`) and the model (`gen_ai.request.model`)
     are read off each span's attributes; when both are present and the
@@ -3236,6 +3255,7 @@ def _insert_span_rows(
                 cost,
                 source,
                 loop_ids[i] if loop_ids else None,
+                loop_links[i] if loop_links else None,
             )
         )
 
@@ -3326,10 +3346,16 @@ def append_loop_event(
     payload: dict[str, Any] | None = None,
     account_id: int | None = None,
     event_time_unix: int | None = None,
+    span_ref: tuple[str | None, str | None] | None = None,
 ) -> int:
     """Append one loop lifecycle event. The single write path into
     loop_events — the type/actor vocabularies are enforced here (in code,
-    not a CHECK, so they can grow without a SQLite table rebuild)."""
+    not a CHECK, so they can grow without a SQLite table rebuild).
+
+    `span_ref` = (span_id, trace_id) of the span that CAUSED this event,
+    when one did (ingest writers). It is provenance, not payload: the
+    evidence layer follows it to the stored span and reads the connector
+    off that span's resource stamp. Writers with no span leave it None."""
     lp = _loops_mod()
     if event_type not in lp.EVENT_TYPES:
         raise ValueError(f"unknown loop event type: {event_type!r}")
@@ -3337,11 +3363,13 @@ def append_loop_event(
         raise ValueError(f"unknown loop actor type: {actor_type!r}")
     if event_time_unix is None:
         event_time_unix = time.time_ns()
+    span_id, trace_id = span_ref if span_ref else (None, None)
     return _insert_returning_id(
         cur,
         "INSERT INTO loop_events "
-        "(account_id, loop_id, type, actor_type, actor, payload, event_time_unix) "
-        f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+        "(account_id, loop_id, type, actor_type, actor, payload, event_time_unix, "
+        "span_id, trace_id) "
+        f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
         (
             account_id,
             loop_id,
@@ -3350,6 +3378,8 @@ def append_loop_event(
             actor or "",
             json.dumps(payload or {}),
             int(event_time_unix),
+            span_id,
+            trace_id,
         ),
     )
 
@@ -3416,6 +3446,23 @@ def _adopt_loop_title_if_untitled(
     )
 
 
+# How a span was tied to its loop — stored on spans.loop_link by the resolver
+# below, at the only moment Trovis knows it. Internal vocabulary; the evidence
+# layer (work_evidence.py) normalizes it for readers.
+#   key_open       the span's key matched the service's open loop with it
+#   key_grace      the span's key matched a loop closed within CLOSE_GRACE_S
+#   key_created    the span's key opened a new loop
+#   key_batch      an earlier span in this batch resolved the same key
+#   gap            keyless; the gap rule found the agent's recent open loop
+#   created        keyless; this span opened a new loop
+#   keyless_batch  keyless; an earlier keyless span of this agent in this
+#                  batch was placed, and this one followed it
+_LOOP_LINKS = (
+    "key_open", "key_grace", "key_created", "key_batch",
+    "gap", "created", "keyless_batch",
+)
+
+
 def _resolve_loop_for_span(
     cur,
     attrs: dict[str, Any],
@@ -3424,8 +3471,10 @@ def _resolve_loop_for_span(
     ts_ns: int,
     account_id: int | None,
     cache: dict,
-) -> int:
-    """Find or create the loop a span belongs to.
+    span_ref: tuple[str | None, str | None] | None = None,
+) -> tuple[int, str]:
+    """Find or create the loop a span belongs to. Returns (loop_id, link):
+    the loop and the _LOOP_LINKS mechanism that chose it.
 
     Grouping, in order:
       1. Keyed: trovis.loop.external_id, falling back to trovis.run.id
@@ -3458,12 +3507,17 @@ def _resolve_loop_for_span(
     key = str(key) if key else None
     cache_key = (service_name, key) if key else (service_name, agent_id, None)
     if cache_key in cache:
+        # The cache entry was established by an earlier span in this batch
+        # through the same key (or the same keyless agent); this span rides
+        # that resolution, and the link says so rather than claiming the
+        # lookup happened again.
         loop_id = cache[cache_key]
         _adopt_loop_title_if_untitled(cur, loop_id, attrs, account_id)
-        return loop_id
+        return loop_id, ("key_batch" if key else "keyless_batch")
 
     acct_sql, acct_args = _loop_account_clause(account_id)
     row = None
+    link: str | None = None
     if key is not None:
         cur.execute(
             f"SELECT id FROM loops WHERE service_name = {PH} "
@@ -3472,7 +3526,9 @@ def _resolve_loop_for_span(
             tuple([service_name, key, *acct_args]),
         )
         row = cur.fetchone()
-        if row is None:
+        if row is not None:
+            link = "key_open"
+        else:
             # Grace window: the newest CLOSED loop for this key, if it
             # closed recently enough that this is a straggler export, not a
             # new run. A negative age (clock drift) counts as recent.
@@ -3490,6 +3546,7 @@ def _resolve_loop_for_span(
                     and time.time() - closed_epoch <= lp.CLOSE_GRACE_S
                 ):
                     row = crow
+                    link = "key_grace"
     else:
         cutoff = ts_ns - lp.GAP_THRESHOLD_S * _NS_PER_S
         cur.execute(
@@ -3500,11 +3557,13 @@ def _resolve_loop_for_span(
             tuple([service_name, agent_id, cutoff, *acct_args]),
         )
         row = cur.fetchone()
+        if row is not None:
+            link = "gap"
     if row:
         loop_id = row["id"]
         cache[cache_key] = loop_id
         _adopt_loop_title_if_untitled(cur, loop_id, attrs, account_id)
-        return loop_id
+        return loop_id, link or ("key_open" if key else "gap")
 
     title = _provided_loop_title(attrs)
     actor = lp.agent_actor(service_name, agent_id)
@@ -3527,11 +3586,11 @@ def _resolve_loop_for_span(
     )
     append_loop_event(
         cur, loop_id, "loop_opened", "agent", actor,
-        account_id=account_id, event_time_unix=ts_ns,
+        account_id=account_id, event_time_unix=ts_ns, span_ref=span_ref,
     )
     _upsert_loop_participant(cur, loop_id, "agent", actor, "initiator")
     cache[cache_key] = loop_id
-    return loop_id
+    return loop_id, ("key_created" if key else "created")
 
 
 # Values of trovis.loop.close that mean a bare "done" (no extra detail).
@@ -3557,15 +3616,19 @@ def ingest_spans_with_loops(
     with _connect() as conn, _cursor(conn) as cur:
         cache: dict = {}
         loop_ids: list[int | None] = []
+        loop_links: list[str | None] = []  # parallel: how each loop_id was chosen
         affected: dict[int, int] = {}  # loop_id -> max event ts in this batch
         executor_pairs: set[tuple[int, str]] = set()
-        closes: dict[int, tuple[str, str, int]] = {}  # loop_id -> (actor, value, ts)
+        # loop_id -> (actor, value, ts, span_ref)
+        closes: dict[int, tuple[str, str, int, tuple[str | None, str | None]]] = {}
         handoff_loops: set[int] = set()  # first-handoff title trigger (post-tx)
         tool_pairs: set[tuple[int, str]] = set()  # (loop_id, tool) cast upserts
         # Agent-declared handoff resolutions, applied AFTER the span loop so
         # they see every handoff this batch opened and can honor the terminal
-        # freeze: (loop_id, kind, actor, handoff_uuid|None, ts).
-        resolutions: list[tuple[int, str, str, str | None, int]] = []
+        # freeze: (loop_id, kind, actor, handoff_uuid|None, ts, span_ref).
+        resolutions: list[
+            tuple[int, str, str, str | None, int, tuple[str | None, str | None]]
+        ] = []
 
         for s in spans:
             attrs = s.get("attributes") or {}
@@ -3575,8 +3638,17 @@ def ingest_spans_with_loops(
             # idle thresholds survive batched/delayed exports — but clamped:
             # agent clocks are untrusted (the _FIRST_SEEN_FLOOR_NS lesson).
             ts = min(max(int(s.get("start_time_unix") or 0), _FIRST_SEEN_FLOOR_NS), now_ns)
-            loop_id = _resolve_loop_for_span(cur, attrs, svc, aid, ts, account_id, cache)
+            # The span behind every event this span causes — provenance for
+            # the evidence layer (append_loop_event span_ref).
+            span_ref = (
+                str(s["span_id"]) if s.get("span_id") else None,
+                str(s["trace_id"]) if s.get("trace_id") else None,
+            )
+            loop_id, link = _resolve_loop_for_span(
+                cur, attrs, svc, aid, ts, account_id, cache, span_ref=span_ref,
+            )
             loop_ids.append(loop_id)
+            loop_links.append(link)
             affected[loop_id] = max(affected.get(loop_id, 0), ts)
             actor = lp.agent_actor(svc, aid)
             executor_pairs.add((loop_id, actor))
@@ -3606,6 +3678,7 @@ def ingest_spans_with_loops(
                 append_loop_event(
                     cur, loop_id, "handoff_initiated", "agent", actor,
                     payload=payload, account_id=account_id, event_time_unix=ts,
+                    span_ref=span_ref,
                 )
                 handoff_loops.add(loop_id)
 
@@ -3623,7 +3696,7 @@ def ingest_spans_with_loops(
                 if kind in lp.HANDOFF_RESOLUTION_KINDS:
                     hid = attr(attrs, "handoff.id")
                     resolutions.append(
-                        (loop_id, kind, actor, str(hid) if hid is not None else None, ts)
+                        (loop_id, kind, actor, str(hid) if hid is not None else None, ts, span_ref)
                     )
                 else:
                     # Drop, never reject: a malformed attribute must not fail
@@ -3641,9 +3714,9 @@ def ingest_spans_with_loops(
             # mislabels it abandoned 48h later.
             close_val = attr(attrs, "loop.close")
             if close_val is not None:
-                closes[loop_id] = (actor, str(close_val), ts)
+                closes[loop_id] = (actor, str(close_val), ts, span_ref)
 
-        _insert_span_rows(cur, spans, account_id, loop_ids)
+        _insert_span_rows(cur, spans, account_id, loop_ids, loop_links)
 
         for loop_id, actor in executor_pairs:
             _upsert_loop_participant(cur, loop_id, "agent", actor, "executor")
@@ -3666,7 +3739,7 @@ def ingest_spans_with_loops(
         # Handoff resolutions — after `frozen` so the terminal freeze holds,
         # and before the close pass so a batch carrying "resolved, then done"
         # records both in that order.
-        for loop_id, kind, actor, hid, ts in resolutions:
+        for loop_id, kind, actor, hid, ts, span_ref in resolutions:
             if loop_id in frozen:
                 # Same invariant the 409 respects: a terminal loop's record
                 # is final. Never append, never reopen.
@@ -3701,6 +3774,7 @@ def ingest_spans_with_loops(
             append_loop_event(
                 cur, loop_id, f"handoff_{kind}", "agent", actor,
                 payload=res_payload, account_id=account_id, event_time_unix=ts,
+                span_ref=span_ref,
             )
 
         # Workflow matching — same transaction, and deliberately BEFORE the
@@ -3724,7 +3798,7 @@ def ingest_spans_with_loops(
                     _apply_workflow_match(cur, dict(row), hint_sets)
 
         now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
-        for loop_id, (actor, value, ts) in closes.items():
+        for loop_id, (actor, value, ts, span_ref) in closes.items():
             if loop_id in frozen:
                 continue  # already closed — never a second close event
             payload = {"reason": "completed_by_agent"}
@@ -3733,6 +3807,7 @@ def ingest_spans_with_loops(
             append_loop_event(
                 cur, loop_id, "loop_closed", "agent", actor,
                 payload=payload, account_id=account_id, event_time_unix=ts,
+                span_ref=span_ref,
             )
             # cached_state set here (not via the recompute below) so the
             # final pass can skip closed loops uniformly.
@@ -7053,6 +7128,77 @@ def get_work_item_runs(
             "error": _run_error_line(r.get("status_message")) if errored else None,
         })
     return out
+
+
+_WORK_EVIDENCE_SPAN_LIMIT = 2000
+
+
+def get_work_item_evidence_rows(
+    account_id: int | None, item_id: int, span_limit: int = _WORK_EVIDENCE_SPAN_LIMIT,
+) -> dict[str, Any]:
+    """The raw records behind one work item's evidence (work_evidence.py):
+    the loop's external key, its spans (oldest first, bounded, with the
+    columns provenance needs — ids, resource stamp, status, cost + source,
+    attributes for the tool name, and loop_link: the mechanism the resolver
+    recorded when it chose the loop) and its lifecycle events with the span
+    they came from when ingest recorded one.
+
+    Two index-backed reads per item (idx_spans_loop_id, loop_events by
+    loop_id); nothing account-wide. `spans_truncated` is set when the loop
+    has more spans than the bound so the caller can say so instead of
+    presenting a partial roll-up as the whole.
+    """
+    acct_sql = f" AND s.account_id = {PH}" if account_id is not None else ""
+    ev_acct_sql = f" AND account_id = {PH}" if account_id is not None else ""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, external_id, service_name, agent_id FROM loops "
+            f"WHERE id = {PH}" + (f" AND account_id = {PH}" if account_id is not None else ""),
+            (item_id, account_id) if account_id is not None else (item_id,),
+        )
+        loop = cur.fetchone()
+        if loop is None:
+            return {"loop": None, "spans": [], "events": [], "spans_truncated": False}
+        args: list[Any] = [item_id]
+        if account_id is not None:
+            args.append(account_id)
+        args.append(int(span_limit) + 1)
+        cur.execute(
+            "SELECT s.span_id, s.trace_id, s.span_name, s.service_name, s.agent_id, "
+            "       s.status_code, s.status_message, s.start_time_unix, "
+            "       s.estimated_cost_usd, s.cost_source, s.attributes, s.resource_attributes, "
+            "       s.loop_link "
+            f"FROM spans s WHERE s.loop_id = {PH}{acct_sql} "
+            f"ORDER BY s.start_time_unix, s.id LIMIT {PH}",
+            tuple(args),
+        )
+        spans = [dict(r) for r in cur.fetchall()]
+        truncated = len(spans) > int(span_limit)
+        if truncated:
+            spans = spans[: int(span_limit)]
+        ev_args: list[Any] = [item_id]
+        if account_id is not None:
+            ev_args.append(account_id)
+        cur.execute(
+            "SELECT id, type, actor_type, actor, payload, event_time_unix, span_id, trace_id "
+            f"FROM loop_events WHERE loop_id = {PH}{ev_acct_sql} ORDER BY event_time_unix, id",
+            tuple(ev_args),
+        )
+        events = [dict(r) for r in cur.fetchall()]
+        return {
+            "loop": dict(loop),
+            "spans": spans,
+            "events": events,
+            "spans_truncated": truncated,
+        }
+
+
+def resolve_human_label(account_id: int | None, target_id: str) -> str | None:
+    """A person's name for an actor/target id, through the one shared
+    resolver (users → named invite → legacy directory → None). Never the
+    raw address."""
+    with _connect() as conn, _cursor(conn) as cur:
+        return _resolve_human_name(cur, str(target_id), account_id)
 
 
 def get_work_item(
@@ -13294,6 +13440,15 @@ def apply_saas_loop_effect(
                 payload["handoff_id"] = str(hid)
             if reason:
                 payload["reason"] = str(reason)
+            # The provider event that CLEARED the wait is provenance in its
+            # own right ("Stripe showed the payment succeeded"); without
+            # these the clearing event could not name what it saw.
+            if object_id:
+                payload["saas_object_id"] = object_id
+            if event_type:
+                payload["saas_event_type"] = event_type
+            if event_id:
+                payload["saas_event_id"] = event_id
             append_loop_event(
                 cur, loop_id, "handoff_completed", "system", actor,
                 payload=payload, account_id=account_id, event_time_unix=ts,

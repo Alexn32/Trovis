@@ -486,6 +486,14 @@ export const api = {
   },
   // Pending suggestions for the home strip. Empty until a generator inserts
   // rows — never invent titles. Shape: { suggestions: [{ id, title, why, source?, draft_holder? }] }
+  // Work Evidence: the observations behind one item's claims
+  // (work_evidence.py). Per item and opt-in, never fetched by Work home.
+  // Plumbing for the Evidence UX (a later PR); nothing renders it yet.
+  getWorkItemEvidence: (id, { signal = undefined } = {}) =>
+    request(`/work/items/${encodeURIComponent(id)}/evidence`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      signal,
+    }),
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
   // One named item plus the detail spine. `include: 'runs'` adds the
   // underlying agent runs — opt-in, because the job detail folds them away and

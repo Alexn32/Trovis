@@ -34,6 +34,7 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 | `models.py` | Pydantic request/response shapes |
 | `describer.py` / `asker.py` | Claude calls (descriptions, workflows, dashboard, Ask) |
 | `pricing_sync.py` | Daily model-price sync (LiteLLM list) |
+| `work_evidence.py` | `GET /work/items/{id}/evidence`: provenance for one item's claims — a read model over its spans and loop events (types `execution` / `action_reported` / `external_state` / `handoff` / `completion` / `cost`; source connector via `connect_health.identify_connector`; correlation `explicit_key` / `time_adjacency` / `direct`). Persists nothing; `loop_events.span_id/trace_id` (ingest-written events only) and the provider ids on a SaaS clear are the two facts kept so it can. Not verification, not coverage. |
 | `connect_health.py` | `GET /connect/health`: normalized connection state per connector (`not_connected` / `waiting_for_data` / `connected`), a read model over `saas_connections` + `saas_events` and stored spans. Identity comes from the stamp a Trovis-owned door writes (`trovis.connector.id`, or the legacy `trovis.platform` / `trovis.sdk.platform` / OpenClaw stamps) — never from `service.name`. No `degraded`: nothing records a concrete failure yet. Not Work coverage. |
 | `frontend/src/*.jsx` | UI: `App.jsx` shell, `Dashboard.jsx`, `Fleet.jsx`, `Workflows.jsx`/`WorkflowCanvas.jsx`, `AddAgent.jsx`, `Settings.jsx`, `AskVisuals.jsx`, `CostPage.jsx` |
 | `frontend/src/styles.css` | All styling + the CSS theme variables |

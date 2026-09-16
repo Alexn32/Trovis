@@ -45,6 +45,7 @@ import database
 # Aliased: the /connect/health route handler below is itself named
 # connect_health, and the module must stay reachable from it.
 import connect_health as connect_health_model
+import work_evidence
 import saas_hubspot
 import saas_shopify
 import saas_stripe
@@ -122,6 +123,7 @@ from models import (
     ClaimRequest,
     ConnectAskResponse,
     ConnectionHealthResponse,
+    WorkEvidenceResponse,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
@@ -1985,6 +1987,27 @@ def work_item_detail(
     if "runs" in wants:
         row["runs"] = database.get_work_item_runs(account_id, item_id)
     return WorkItemDetail(**row)
+
+
+@app.get("/work/items/{item_id}/evidence", response_model=WorkEvidenceResponse)
+def work_item_evidence(item_id: int, request: Request) -> WorkEvidenceResponse:
+    """The observations behind one work item's claims (work_evidence.py).
+
+    Opt-in and per item, like ?include=runs — the Work home never pays for
+    it. Two index-backed reads on the item's own spans and events; no
+    board scan, no model call. Same visibility rule as GET /work/items/{id}:
+    named work only, and an id outside this account is a 404, never a 403.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    if database.get_work_item(
+        account_id, item_id, viewer_user_id=user["id"] if user else None,
+    ) is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    body = work_evidence.build_work_item_evidence(account_id, item_id)
+    if body is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    return WorkEvidenceResponse(**body)
 
 
 @app.get("/work/suggestions", response_model=WorkSuggestionsResponse)
