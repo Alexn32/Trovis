@@ -2398,6 +2398,166 @@ class WorkCoverageResponse(BaseModel):
     dimensions: list[WorkCoverageDimension] = Field(default_factory=list)
 
 
+class WorkExecutionWorker(BaseModel):
+    """Who performed or reported the activity: the stored service:agent route
+    (display/equality only, never parsed apart). Not the connector."""
+
+    label: str | None = None
+    service_name: str | None = None
+    agent_id: str | None = None
+
+
+class WorkExecutionConnector(BaseModel):
+    """How Trovis received the observation (connect_health.identify_connector
+    on the resource stamp; the provider for a SaaS webhook). Not the worker."""
+
+    id: str | None = None
+    method: str | None = None
+
+
+class WorkExecutionModel(BaseModel):
+    """The model the span's own attributes named (gen_ai.request.model and its
+    aliases) and the provider (gen_ai.system). A name here does not by itself
+    make the node a model node — see the classification basis."""
+
+    name: str | None = None
+    provider: str | None = None
+
+
+class WorkExecutionTool(BaseModel):
+    """The tool as the span carried it. `name` is verbatim; `identifier` is the
+    repo's canonical lowercased id (loops.span_tool); `display_name` is a
+    deterministic string transform (the tool part of an mcp__server__tool
+    triple), never a business step; `reported_success` is the worker's own
+    report when a door records one, never an observed outcome."""
+
+    name: str | None = None
+    identifier: str | None = None
+    display_name: str | None = None
+    mcp_server: str | None = None
+    call_id: str | None = None
+    reported_success: bool | None = None
+
+
+class WorkExecutionUsage(BaseModel):
+    """The span's own stored token counts. Present iff the span carried usage
+    (the ingest invariant); a zero is a real observed zero."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+
+
+class WorkExecutionCost(BaseModel):
+    """Present iff a cost was stored for this span. source: reported (the
+    SDK's figure) | estimated (from tokens and the price table) | covered
+    (subsumed in a reported run total — known, but not priced alone, so
+    amount_usd is None). Absent means unknown, never $0."""
+
+    known: bool = True
+    source: str | None = None
+    amount_usd: float | None = None
+
+
+class WorkExecutionProvenance(BaseModel):
+    """Why Trovis thinks this node exists, from stored fields only.
+
+      record                span | loop_event
+      span_id / trace_id    the stored record (for an event, the span whose
+                            attributes caused it, when ingest recorded one)
+      parent_span_id        the parent id the exporter wrote, verbatim
+      parent_status         attached | none | outside_read_set | self_reference
+                            | cycle_broken (work_execution.py)
+      event_id              the loop_events row
+      evidence_kind         execution | action_reported | external_state |
+                            handoff | completion — PR 209's vocabulary
+      correlation           explicit_key | time_adjacency | origin | direct —
+                            the recorded mechanism; None when none was
+      loop_link             the resolver's raw assignment word
+      classification_basis  event_type | span_name | tool_attribute |
+                            usage_attributes | event_direction | event_actor |
+                            none — what the node's type rests on
+      span_kind             the OTLP span kind, named
+      event_type            the span's trovis.event.type, verbatim
+    """
+
+    record: str
+    span_id: str | None = None
+    trace_id: str | None = None
+    parent_span_id: str | None = None
+    parent_status: str = "none"
+    event_id: int | None = None
+    evidence_kind: str | None = None
+    correlation: str | None = None
+    loop_link: str | None = None
+    classification_basis: str = "none"
+    span_kind: str | None = None
+    event_type: str | None = None
+
+
+class WorkExecutionNode(BaseModel):
+    """One node of one run's Execution Graph (work_execution.py).
+
+      type        worker | model | tool | system | handoff | wait | completion
+                  | other — each with a deterministic basis (provenance).
+      parent_id   STRUCTURE: the node this one is contained by, from the
+                  recorded parent span id; None for a root. Never from timing.
+      started_at / ended_at / duration_ms   the record's own times; an event
+                  has no end.
+      label       the span name or event type, verbatim — technical, not a
+                  business step.
+      worker / connector   two identities, never collapsed.
+      status      ok | error | unset (a span's OTLP status) | recorded (an
+                  event). error is the recorded message's first line.
+      model / tool / usage / cost   present when the span carried them.
+      event       for a loop_event node: type, direction, actor, target
+                  (a person by resolved name only), handoff_id, reason,
+                  waiting_on, and the provider's own ids for a SaaS event.
+    """
+
+    id: str
+    type: str
+    parent_id: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_ms: float | None = None
+    label: str = ""
+    worker: WorkExecutionWorker | None = None
+    connector: WorkExecutionConnector | None = None
+    status: str = "unset"
+    error: str | None = None
+    model: WorkExecutionModel | None = None
+    tool: WorkExecutionTool | None = None
+    usage: WorkExecutionUsage | None = None
+    cost: WorkExecutionCost | None = None
+    event: dict[str, Any] | None = None
+    provenance: WorkExecutionProvenance
+
+
+class WorkExecutionResponse(BaseModel):
+    """GET /work/items/{id}/execution — the technical execution underneath one
+    run. `nodes` carries STRUCTURE (parent_id); `chronology` carries ORDER
+    (node ids by persisted time, ties by id). `roots` are the nodes with no
+    parent in the read set. `bounded` says the run has more spans than the
+    read; parents past the bound read outside_read_set."""
+
+    item_id: int
+    generated_at: str
+    trace_ids: list[str] = Field(default_factory=list)
+    nodes: list[WorkExecutionNode] = Field(default_factory=list)
+    roots: list[str] = Field(default_factory=list)
+    chronology: list[str] = Field(default_factory=list)
+    bounded: bool = False
+    span_limit: int = 0
+    spans_read: int = 0
+    events_read: int = 0
+    duplicate_spans_dropped: int = 0
+    cycles_broken: int = 0
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConnectionHealth(BaseModel):
     """What Trovis knows about one connector right now (connect_health.py).
 

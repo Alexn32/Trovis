@@ -7207,6 +7207,75 @@ def get_work_item_evidence_rows(
         }
 
 
+# The Execution Graph (work_execution.py) reads the same bounded prefix the
+# evidence read does, so the two never disagree about which spans a run has.
+_WORK_EXECUTION_SPAN_LIMIT = _WORK_EVIDENCE_SPAN_LIMIT
+
+
+def get_work_item_execution_rows(
+    account_id: int | None, item_id: int, span_limit: int = _WORK_EXECUTION_SPAN_LIMIT,
+) -> dict[str, Any]:
+    """The raw records behind one work item's Execution Graph
+    (work_execution.py): its spans oldest first, bounded, with every column
+    the graph needs and nothing derived — ids and the recorded parent span
+    id (verbatim from the exporter; NULL when none was sent), the worker
+    route, span kind, both timestamps, status, attributes and the resource
+    stamp, the stored usage counts and cost with its source, and the loop
+    link the resolver recorded — plus the loop's lifecycle events with the
+    span each ingest-written one came from.
+
+    Two index-backed reads per item (idx_spans_loop_id, loop_events by
+    loop_id); nothing account-wide. `spans_truncated` is set when the loop
+    has more spans than the bound so the caller says so instead of
+    presenting a prefix as the whole run.
+    """
+    acct_sql = f" AND s.account_id = {PH}" if account_id is not None else ""
+    ev_acct_sql = f" AND account_id = {PH}" if account_id is not None else ""
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, external_id, service_name, agent_id FROM loops "
+            f"WHERE id = {PH}" + (f" AND account_id = {PH}" if account_id is not None else ""),
+            (item_id, account_id) if account_id is not None else (item_id,),
+        )
+        loop = cur.fetchone()
+        if loop is None:
+            return {"loop": None, "spans": [], "events": [], "spans_truncated": False}
+        args: list[Any] = [item_id]
+        if account_id is not None:
+            args.append(account_id)
+        args.append(int(span_limit) + 1)
+        cur.execute(
+            "SELECT s.id, s.span_id, s.trace_id, s.parent_span_id, s.span_name, "
+            "       s.service_name, s.agent_id, s.kind, s.start_time_unix, s.end_time_unix, "
+            "       s.status_code, s.status_message, s.attributes, s.resource_attributes, "
+            "       s.input_tokens, s.output_tokens, s.total_tokens, "
+            "       s.cache_creation_input_tokens, s.cache_read_input_tokens, "
+            "       s.estimated_cost_usd, s.cost_source, s.loop_link "
+            f"FROM spans s WHERE s.loop_id = {PH}{acct_sql} "
+            f"ORDER BY s.start_time_unix, s.id LIMIT {PH}",
+            tuple(args),
+        )
+        spans = [dict(r) for r in cur.fetchall()]
+        truncated = len(spans) > int(span_limit)
+        if truncated:
+            spans = spans[: int(span_limit)]
+        ev_args: list[Any] = [item_id]
+        if account_id is not None:
+            ev_args.append(account_id)
+        cur.execute(
+            "SELECT id, type, actor_type, actor, payload, event_time_unix, span_id, trace_id "
+            f"FROM loop_events WHERE loop_id = {PH}{ev_acct_sql} ORDER BY event_time_unix, id",
+            tuple(ev_args),
+        )
+        events = [dict(r) for r in cur.fetchall()]
+        return {
+            "loop": dict(loop),
+            "spans": spans,
+            "events": events,
+            "spans_truncated": truncated,
+        }
+
+
 def resolve_human_label(account_id: int | None, target_id: str) -> str | None:
     """A person's name for an actor/target id, through the one shared
     resolver (users → named invite → legacy directory → None). Never the

@@ -36,6 +36,7 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 | `pricing_sync.py` | Daily model-price sync (LiteLLM list) |
 | `work_evidence.py` | `GET /work/items/{id}/evidence`: provenance for one item's claims — a read model over its spans and loop events (types `execution` / `action_reported` / `external_state` / `handoff` / `completion` / `cost`; source connector via `connect_health.identify_connector`; correlation `explicit_key` / `time_adjacency` / `direct`). Persists nothing; `loop_events.span_id/trace_id` (ingest-written events only) and the provider ids on a SaaS clear are the two facts kept so it can. Not verification, not coverage. |
 | `work_coverage.py` | `GET /work/items/{id}/coverage`: which dimensions of one item are observed — `execution` / `actions` / `external_outcomes` / `handoffs` / `cost`, each `observed` / `unknown` (cost also `partial` / `not_observed`, the one dimension with a known denominator: model-usage spans vs priced spans). A read model over that item's evidence; absence is `unknown`, never "nothing happened". No score, no `not_applicable`, no `verified`, not Connection Health. |
+| `work_execution.py` | `GET /work/items/{id}/execution`: the **Execution Graph** — the technical execution underneath one item, a read model over its spans and loop events. Nodes typed `worker` / `model` / `tool` / `system` / `handoff` / `wait` / `completion` / `other`, each with a stated `classification_basis`; STRUCTURE from the recorded `parent_span_id` (attached only when the parent is in the run's read set; cycles broken deterministically; nothing invented from timing) kept separate from CHRONOLOGY (node ids by persisted time). Worker ≠ connector; cost/usage per PR 211 (covered = known, not priced alone; unknown = None). Persists nothing, no model, no retry or success inference, no business steps. Per item only — never Home, the Work table or a job roll-up. |
 | `connect_health.py` | `GET /connect/health`: normalized connection state per connector (`not_connected` / `waiting_for_data` / `connected`), a read model over `saas_connections` + `saas_events` and stored spans. Identity comes from the stamp a Trovis-owned door writes (`trovis.connector.id`, or the legacy `trovis.platform` / `trovis.sdk.platform` / OpenClaw stamps) — never from `service.name`. No `degraded`: nothing records a concrete failure yet. Not Work coverage. |
 | `frontend/src/*.jsx` | UI: `App.jsx` shell, `Dashboard.jsx`, `Fleet.jsx`, `Workflows.jsx`/`WorkflowCanvas.jsx`, `AddAgent.jsx`, `Settings.jsx`, `AskVisuals.jsx`, `CostPage.jsx` |
 | `frontend/src/styles.css` | All styling + the CSS theme variables |
@@ -48,6 +49,15 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
   telemetry (`service.name` / `trovis.agent.id`), never pre-registered.
 - **SQLite now, Postgres-shaped.** ISO timestamps, explicit FKs, no SQLite-only quirks.
 - **Plain-English descriptions are a first-class surface.** Treat the Claude pipeline as core.
+- **Two representations of the same work, not two sources of truth.** A run has one
+  persisted record (its spans and loop events) and two read models over it. The
+  **Execution Graph** (`work_execution.py`) is the technical resolution — which worker ran,
+  which model activity and tool calls it recorded, what called what, in what order, with
+  what usage and cost, each node carrying its provenance. The **Work Graph** (future) is the
+  operational resolution — what happened, who had it, where it waited, how it ended. The
+  Execution Graph must preserve technical truth and provenance verbatim; work reconstruction
+  may later summarize and group execution into manager-readable steps ON TOP of it, never
+  instead of it. Neither may invent structure the record does not hold.
 
 ## Backend conventions (important)
 

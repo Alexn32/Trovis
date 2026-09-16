@@ -502,6 +502,15 @@ export const api = {
       timeoutMs: WORK_TIMEOUT_MS,
       signal,
     }),
+  // Execution Graph: the technical execution underneath one item
+  // (work_execution.py) — structure, chronology, per-node provenance. Per
+  // item, opt-in; plumbing for the engineer/FDE Execution UX (a later PR).
+  // Nothing renders it yet, and Home / Work home never fetch it.
+  getWorkItemExecution: (id, { signal = undefined } = {}) =>
+    request(`/work/items/${encodeURIComponent(id)}/execution`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      signal,
+    }),
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
   // One named item plus the detail spine. `include: 'runs'` adds the
   // underlying agent runs — opt-in, because the job detail folds them away and

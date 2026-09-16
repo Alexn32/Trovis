@@ -47,6 +47,7 @@ import database
 import connect_health as connect_health_model
 import work_evidence
 import work_coverage
+import work_execution
 import saas_hubspot
 import saas_shopify
 import saas_stripe
@@ -126,6 +127,7 @@ from models import (
     ConnectionHealthResponse,
     WorkEvidenceResponse,
     WorkCoverageResponse,
+    WorkExecutionResponse,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
@@ -2030,6 +2032,28 @@ def work_item_coverage(item_id: int, request: Request) -> WorkCoverageResponse:
     if body is None:
         raise HTTPException(status_code=404, detail="work item not found")
     return WorkCoverageResponse(**body)
+
+
+@app.get("/work/items/{item_id}/execution", response_model=WorkExecutionResponse)
+def work_item_execution(item_id: int, request: Request) -> WorkExecutionResponse:
+    """The Execution Graph underneath one work item (work_execution.py): the
+    technical representation of the same run the Work record describes —
+    structure from recorded parent span ids, chronology from persisted
+    times, types with a stated basis. Same shape of access as /evidence and
+    /coverage: per item, opt-in, two bounded account-scoped reads, no model
+    call, no board scan, never fetched by Home or the Work table; named
+    work only, and an id outside this account is a 404, never a 403.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    if database.get_work_item(
+        account_id, item_id, viewer_user_id=user["id"] if user else None,
+    ) is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    body = work_execution.build_work_item_execution(account_id, item_id)
+    if body is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    return WorkExecutionResponse(**body)
 
 
 @app.get("/work/suggestions", response_model=WorkSuggestionsResponse)
