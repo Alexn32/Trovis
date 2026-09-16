@@ -83,7 +83,11 @@ test('Connections exposes Stripe, HubSpot, and Shopify Connect; Add Agent stays 
   // The doors moved from Settings → Integrations to the Connections page;
   // the honesty copy moved with them.
   const connections = readFileSync(new URL('../src/Connections.jsx', import.meta.url), 'utf8')
-  assert.match(connections, /trovis_loop_external_id/)
+  // The product surface explains value and the truth boundary; how
+  // correlation works belongs in setup docs, never on this page.
+  assert.doesNotMatch(connections, /trovis_loop_external_id/)
+  assert.doesNotMatch(connections, /Trovis loop key/)
+  assert.match(connections, /work it can reliably link/)
   assert.match(connections, /not Trovis billing/)
   assert.match(connections, /not CRM or contact sync/)
   assert.match(connections, /not catalog, product, or/)

@@ -47,6 +47,20 @@ test('existing SaaS state renders truthfully: connected, not connected, never in
   m.unmount()
 })
 
+test('the rendered product copy carries no correlation implementation details', async () => {
+  stubSaas()
+  const m = await mount(React.createElement(Connections, { onConnect: () => {} }))
+  await m.settle()
+  // Includes the collapsed fine print — it is in the DOM whether open or not.
+  assert.doesNotMatch(m.text(), /trovis_loop_external_id/)
+  assert.doesNotMatch(m.text(), /Trovis loop key/i)
+  assert.doesNotMatch(m.text(), /loop key|metadata/i)
+  for (const id of ['stripe', 'hubspot', 'shopify']) {
+    assert.match(row(m, id).textContent, /work it can reliably link/, `${id} states the truth boundary`)
+  }
+  m.unmount()
+})
+
 test('a failed status check is reported, not rendered as Not connected', async () => {
   stubSaas()
   api.getSaasConnections = async () => { throw new Error('boom') }

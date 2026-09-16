@@ -42,9 +42,8 @@ const SAAS_DOORS = {
     startError: 'Could not start Stripe Connect.',
     disconnectError: 'Could not disconnect Stripe.',
     fineprint:
-      'Trovis only reacts to Stripe payments, invoices, charges, and disputes that an agent has '
-      + 'already tied to a job (the Trovis loop key, trovis_loop_external_id). It never creates a '
-      + 'job from Stripe on its own, and this is not Trovis billing.',
+      'Stripe helps Trovis understand payment and refund outcomes related to work. Trovis only '
+      + 'associates Stripe activity with work it can reliably link. This is not Trovis billing.',
   },
   hubspot: {
     start: () => api.startHubSpotConnect(),
@@ -54,9 +53,8 @@ const SAAS_DOORS = {
     startError: 'Could not start HubSpot Connect.',
     disconnectError: 'Could not disconnect HubSpot.',
     fineprint:
-      'Trovis only reacts to deal-stage and ticket-status changes on deals and tickets that an '
-      + 'agent has already tied to a job (the Trovis loop key, trovis_loop_external_id). It never '
-      + 'creates a job from HubSpot on its own. This is not CRM or contact sync.',
+      'HubSpot helps Trovis understand deal and ticket changes related to work. Trovis only '
+      + 'associates HubSpot activity with work it can reliably link. This is not CRM or contact sync.',
   },
   shopify: {
     start: (shop) => api.startShopifyConnect(shop),
@@ -68,9 +66,9 @@ const SAAS_DOORS = {
     needsShop: true,
     shopPlaceholder: 'your-store.myshopify.com',
     fineprint:
-      'Trovis only reacts to order, fulfillment, and refund events on orders that an agent has '
-      + 'already tied to a job (the Trovis loop key, trovis_loop_external_id). It never creates a '
-      + 'job from Shopify on its own. This is not catalog, product, or customer sync.',
+      'Shopify helps Trovis understand order, payment, refund, and fulfillment outcomes related '
+      + 'to work. Trovis only associates Shopify activity with work it can reliably link. This is '
+      + 'not catalog, product, or customer sync.',
   },
 }
 
