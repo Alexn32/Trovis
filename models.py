@@ -2291,6 +2291,56 @@ class WorkItemDetail(WorkItem):
     runs: list[WorkItemRun] | None = None
 
 
+class WorkEvidence(BaseModel):
+    """One observation that supports a claim about a work item
+    (work_evidence.py). Every field has one meaning:
+
+      evidence_type        execution | action_reported | external_state |
+                           handoff | completion | cost — the KIND of support,
+                           never the vendor.
+      observed_at          when the observation happened (span start, event
+                           time, provider event time) — never query time.
+      source_type          agent | human | system. None only if unknown.
+      source_connector_id  canonical connector (connectors.js ids) from the
+                           span's resource stamp or the SaaS provider; None
+                           when not recorded — never guessed from a name.
+      source_label         service:agent route, a person's resolved name, or
+                           the provider label.
+      correlation_method   explicit_key | time_adjacency | direct; None when
+                           the record predates span links.
+      event_id / span_id / trace_id   the exact stored record(s) behind it.
+      external_object_id / external_event_id   the provider's own ids,
+                           exact, for external_state; None otherwise.
+      details              type-specific facts (tool, effect, reason, basis…).
+    Nothing here is verification or coverage.
+    """
+
+    id: str
+    item_id: int
+    evidence_type: str
+    observed_at: str | None = None
+    source_type: str | None = None
+    source_connector_id: str | None = None
+    source_label: str | None = None
+    correlation_method: str | None = None
+    event_id: int | None = None
+    span_id: str | None = None
+    trace_id: str | None = None
+    external_object_id: str | None = None
+    external_event_id: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkEvidenceResponse(BaseModel):
+    item_id: int
+    generated_at: str
+    # True when the item has more spans than the evidence read is bounded to;
+    # roll-ups then cover a prefix, and the caller must not present them as
+    # the whole.
+    spans_truncated: bool = False
+    evidence: list[WorkEvidence] = Field(default_factory=list)
+
+
 class ConnectionHealth(BaseModel):
     """What Trovis knows about one connector right now (connect_health.py).
 
