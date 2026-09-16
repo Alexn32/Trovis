@@ -12914,6 +12914,64 @@ def get_saas_connections(account_id: int) -> list[dict[str, Any]]:
         return [_saas_connection_public(dict(r)) for r in cur.fetchall()]
 
 
+def get_saas_activity(account_id: int) -> dict[str, dict[str, Any]]:
+    """Per-provider record of verified, mapped webhooks that reached this
+    account — the only durable SaaS *activity* fact (connect_health.py).
+
+    `saas_events` is the idempotency claim written by `claim_saas_event`
+    BEFORE the link-key and loop lookups, so it records "provider X sent
+    this account a mapped event at T" whether or not the event later moved
+    any work. Unmapped event types and events without an id never reach it.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            "SELECT provider, COUNT(*) AS event_count, MAX(created_at) AS last_event_at "
+            f"FROM saas_events WHERE account_id = {PH} GROUP BY provider",
+            (account_id,),
+        )
+        return {
+            r["provider"]: {
+                "event_count": int(r["event_count"] or 0),
+                "last_event_at": _ts_to_str(r["last_event_at"]),
+            }
+            for r in cur.fetchall()
+        }
+
+
+def get_connector_observations(account_id: int) -> list[dict[str, Any]]:
+    """Per service: when it was last observed and the resource attributes of
+    that latest span (connect_health.py identifies the connector from them).
+
+    Same plan as GET /agents' first paint — one GROUP BY on
+    idx_spans_account_service_agent plus one LIMIT 1 lookup per service —
+    with the same statement timeout. Strictly account-scoped; pre-tenant
+    rows with a NULL account_id are excluded.
+    """
+    out: list[dict[str, Any]] = []
+    with _connect() as conn, _cursor(conn) as cur:
+        _set_statement_timeout(cur, _AGENTS_LIST_TIMEOUT_MS)
+        cur.execute(
+            "SELECT service_name, MAX(start_time_unix) AS last_seen_ns "
+            f"FROM spans WHERE account_id = {PH} GROUP BY service_name",
+            (account_id,),
+        )
+        services = [(r["service_name"], r["last_seen_ns"]) for r in cur.fetchall()]
+        for service_name, last_ns in services:
+            cur.execute(
+                "SELECT resource_attributes FROM spans "
+                f"WHERE service_name = {PH} AND account_id = {PH} "
+                "ORDER BY start_time_unix DESC LIMIT 1",
+                (service_name, account_id),
+            )
+            sample = cur.fetchone()
+            out.append({
+                "service_name": service_name,
+                "last_observed_at": _ns_to_iso(last_ns),
+                "resource_attributes": sample["resource_attributes"] if sample else None,
+            })
+    return out
+
+
 def get_saas_connection(account_id: int, provider: str) -> dict[str, Any] | None:
     provider = (provider or "").strip().lower()
     with _connect() as conn, _cursor(conn) as cur:

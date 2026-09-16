@@ -145,6 +145,8 @@ def _create_span(
                 "resource_attributes": {
                     "service.name": service_name,
                     "trovis.platform": "chatgpt",
+                    # Canonical connector identity (connect_health.py).
+                    "trovis.connector.id": "chatgpt",
                 },
             }
         ],

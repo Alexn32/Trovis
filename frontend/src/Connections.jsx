@@ -2,11 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { BrandMark } from './BrandMarks.jsx'
 import { CATEGORY_LABELS } from './connectors.js'
+import { relativeTime } from './utils.js'
 import {
   aiConnectors,
+  aiRowState,
+  healthFor,
   isConnectable,
   moreConnectors,
   saasStatus,
+  workRowState,
   workSystemConnectors,
 } from './connectionsPage.js'
 
@@ -17,16 +21,19 @@ import {
 // marketplace nor a telemetry console: recognisable marks, one line each,
 // a quiet state, one action.
 //
-// Two kinds of truth, kept apart on purpose:
+// State comes from GET /connect/health, a read model over what the server
+// actually recorded (connect_health.py). Two kinds of truth, kept apart:
 //   - AI workers & platforms are DOORS. Agents are derived from telemetry,
-//     so there is no installation record to read; "Connect" opens the
-//     existing Add Agent setup on that connector and nothing here claims
-//     the connector is "installed".
-//   - Work systems (Stripe / HubSpot / Shopify) have a durable OAuth
-//     connection row on the server (GET /saas/connections), so they can
-//     truthfully read Connected / Not connected. Nothing richer — health,
-//     recent activity, last observed — is asserted, because the backend
-//     does not record it yet.
+//     so there is no installation record; a row reads Connected with a
+//     "last observed" time only when attributable telemetry arrived, and
+//     otherwise it is just a door. Identity comes from the stamp each
+//     Trovis-owned door writes on the wire, never from an agent's name.
+//   - Work systems (Stripe / HubSpot / Shopify) have a durable OAuth row
+//     (configured) and a durable log of verified webhooks (observed), so
+//     they read Connected, Waiting for data, or Not connected.
+// Nothing here is coverage: "Connected" means the data path worked, not
+// that Trovis sees all the work. There is no degraded state because the
+// server records no concrete failure yet, and silence is not one.
 //
 // The connect / disconnect mechanics moved here from Settings → Integrations
 // unchanged; Settings keeps a doorway to this page, not a second manager.
@@ -76,6 +83,9 @@ export default function Connections({ active = true, onConnect }) {
   // SaaS connection rows. null = not asked yet; {error} = the check failed,
   // which must not render as "Not connected" for every system.
   const [saas, setSaas] = useState(null)
+  // Normalized health. null = not asked yet; {error} = the check failed,
+  // which must render as "couldn't check", never as Not connected.
+  const [health, setHealth] = useState(null)
   const [busy, setBusy] = useState(null)
   const alive = useRef(true)
 
@@ -85,13 +95,22 @@ export default function Connections({ active = true, onConnect }) {
       .then((d) => alive.current && setSaas(d || { connections: [] }))
       .catch(() => alive.current && setSaas({ error: true, connections: [] }))
   }
+  function loadHealth() {
+    return api
+      .getConnectHealth()
+      .then((d) => alive.current && setHealth(d && Array.isArray(d.connectors) ? d : { error: true }))
+      .catch(() => alive.current && setHealth({ error: true }))
+  }
+  function reload() {
+    return Promise.all([loadSaas(), loadHealth()])
+  }
 
   // Fetch on mount and again each time the pane comes back on screen (a
-  // person may have connected or disconnected something elsewhere). One GET,
-  // no polling.
+  // person may have connected or disconnected something elsewhere). Two
+  // GETs, no polling.
   useEffect(() => {
     alive.current = true
-    if (active) loadSaas()
+    if (active) reload()
     return () => { alive.current = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active])
@@ -116,9 +135,15 @@ export default function Connections({ active = true, onConnect }) {
           Agents show up in Trovis as soon as they report in. Connect opens
           the setup for that platform.
         </p>
+        {health?.error && (
+          <p className="cx-error" role="status">
+            Couldn’t check which connections have reported in.{' '}
+            <button type="button" className="btn-link-inline" onClick={loadHealth}>Retry</button>
+          </p>
+        )}
         <ul className="cx-list">
           {ai.map((c) => (
-            <AiRow key={c.id} connector={c} onConnect={onConnect} />
+            <AiRow key={c.id} connector={c} health={healthFor(health, c.id)} onConnect={onConnect} />
           ))}
         </ul>
       </section>
@@ -141,9 +166,11 @@ export default function Connections({ active = true, onConnect }) {
               connector={c}
               door={SAAS_DOORS[c.id]}
               saas={saas}
+              health={healthFor(health, c.id)}
+              healthPending={health === null}
               busy={busy}
               setBusy={setBusy}
-              onChanged={loadSaas}
+              onChanged={reload}
             />
           ))}
         </ul>
@@ -184,16 +211,24 @@ function Mark({ connector }) {
   )
 }
 
-// A door. No installed/connected state is claimed — agents are derived from
-// telemetry, and the roster (Agents) is where they appear once they report.
-function AiRow({ connector, onConnect }) {
+// A door, with state only when telemetry proved the path: an observed
+// connector reads Connected and when it was last observed. No "installed"
+// claim — nothing records that setup happened, so nothing is said.
+function AiRow({ connector, health, onConnect }) {
   const connectable = isConnectable(connector)
+  const st = aiRowState(health, relativeTime)
   return (
-    <li className={`cx-row${connectable ? '' : ' is-soon'}`} data-connector={connector.id}>
+    <li className={`cx-row${connectable ? '' : ' is-soon'}${st.status ? ' is-connected' : ''}`} data-connector={connector.id}>
       <span className="cx-mark"><Mark connector={connector} /></span>
       <span className="cx-body">
-        <span className="cx-name">{connector.name}</span>
+        <span className="cx-name">
+          {connector.name}
+          {st.status && <span className="cx-status is-on">{st.status}</span>}
+        </span>
         <span className="cx-desc">{connector.description}</span>
+        {st.detail && (
+          <span className="cx-observed" title={health?.last_observed_at || undefined}>{st.detail}</span>
+        )}
       </span>
       <span className="cx-action">
         {connectable ? (
@@ -201,9 +236,9 @@ function AiRow({ connector, onConnect }) {
             type="button"
             className="btn btn-secondary btn-sm"
             onClick={() => onConnect?.(connector.id)}
-            aria-label={`Connect ${connector.name}`}
+            aria-label={`${st.action} ${connector.name}`}
           >
-            Connect
+            {st.action}
           </button>
         ) : (
           <span className="cx-soon">Coming soon</span>
@@ -215,12 +250,16 @@ function AiRow({ connector, onConnect }) {
 
 // A work system with a durable OAuth row. Connected / Not connected is read
 // from the server; everything else on the row is a door or a disconnect.
-function WorkSystemRow({ connector, door, saas, busy, setBusy, onChanged }) {
+function WorkSystemRow({ connector, door, saas, health, healthPending, busy, setBusy, onChanged }) {
   const [error, setError] = useState(null)
   const [shop, setShop] = useState('')
   const row = (saas?.connections || []).find((c) => c.provider === connector.id)
+  // The OAuth row decides the ACTIONS (connect vs disconnect); the health
+  // row decides the WORDS. Authorization without observed activity is
+  // "Waiting for data", not "Connected".
   const status = saasStatus(row)
-  const checking = saas === null
+  const words = workRowState(health, row, relativeTime, connector.name)
+  const checking = saas === null || healthPending
   const canOauth = door.configured(saas)
   const mine = busy === connector.id
   const needsShop = !!door.needsShop
@@ -269,10 +308,13 @@ function WorkSystemRow({ connector, door, saas, busy, setBusy, onChanged }) {
         <span className="cx-name">
           {connector.name}
           {!checking && !saas?.error && (
-            <span className={`cx-status${status.connected ? ' is-on' : ''}`}>{status.label}</span>
+            <span className={`cx-status${words.connected ? ' is-on' : ''}`}>{words.status}</span>
           )}
         </span>
         <span className="cx-desc">{connector.description}</span>
+        {!checking && !saas?.error && words.detail && (
+          <span className="cx-observed" title={health?.last_observed_at || undefined}>{words.detail}</span>
+        )}
         {!status.connected && needsShop && !checking && (
           <input
             className="text-input cx-shop"

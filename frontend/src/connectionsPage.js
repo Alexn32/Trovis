@@ -59,6 +59,86 @@ export function setupEntryFor(connectorId) {
   return { view: 'guide', platform: null }
 }
 
+// --- normalized connection health (GET /connect/health) ---------------------
+//
+// The server folds what it actually recorded into one row per connector:
+//   state            'not_connected' | 'waiting_for_data' | 'connected'
+//   observed         Trovis received data attributable to the connector
+//   last_observed_at when that data arrived — never an authorization time
+//   configured       an OAuth row exists (work systems); null for telemetry
+//   label            the provider account for an authorized work system
+// There is no degraded state: nothing records a concrete failure yet, and
+// silence is not one. The page shows what is here and nothing more — never
+// a coverage figure, never "healthy" without a fact behind it.
+
+export const HEALTH_STATES = Object.freeze(['not_connected', 'waiting_for_data', 'connected'])
+
+/** The health row for a connector, or null when the response has none / failed. */
+export function healthFor(health, connectorId) {
+  const rows = Array.isArray(health?.connectors) ? health.connectors : null
+  if (!rows) return null
+  return rows.find((r) => r && r.connector_id === connectorId) || null
+}
+
+/**
+ * What an AI / platform row may say. Telemetry proves the data path worked
+ * at last_observed_at, so an observed connector reads Connected with that
+ * time; anything else is a door with no state (there is no record that
+ * setup began, so nothing to claim). `rel` formats a relative time.
+ */
+export function aiRowState(row, rel) {
+  if (!row || !row.observed || row.state !== 'connected') {
+    return { status: null, detail: null, action: 'Connect' }
+  }
+  const when = row.last_observed_at ? rel(row.last_observed_at) : null
+  return {
+    status: 'Connected',
+    detail: when ? `Last observed ${when}` : null,
+    action: 'Connect another',
+  }
+}
+
+/**
+ * What a work-system row may say from the health row, with the OAuth row
+ * as the fallback when the health check itself failed. In the fallback the
+ * word is "Authorized", not "Connected": authorization is the only fact in
+ * hand, and Connected here means activity was observed.
+ */
+export function workRowState(row, saasRow, rel, providerName) {
+  if (row) {
+    const acct = shortAccount(row.label)
+    if (row.state === 'connected') {
+      const when = row.last_observed_at ? rel(row.last_observed_at) : null
+      return {
+        status: acct ? `Connected · ${acct}` : 'Connected',
+        detail: when ? `Last observed ${when}` : null,
+        connected: true,
+      }
+    }
+    if (row.state === 'waiting_for_data') {
+      return {
+        status: 'Waiting for data',
+        detail: `Authorized${acct ? ` as ${acct}` : ''} · no ${providerName} activity observed yet`,
+        connected: false,
+      }
+    }
+    return { status: 'Not connected', detail: null, connected: false }
+  }
+  const s = saasStatus(saasRow)
+  if (!s.connected) return { status: 'Not connected', detail: null, connected: false }
+  return {
+    status: s.label.replace(/^Connected/, 'Authorized'),
+    detail: 'Couldn’t check recent activity',
+    connected: false,
+  }
+}
+
+function shortAccount(acct) {
+  const a = String(acct || '')
+  if (!a) return ''
+  return a.includes('.') ? a : a.length > 8 ? `…${a.slice(-6)}` : a
+}
+
 /**
  * What a work-system row may truthfully say from GET /saas/connections.
  * `status === 'connected'` is the only durable state the backend records;
