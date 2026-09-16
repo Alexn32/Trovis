@@ -8,6 +8,7 @@ import {
   ACTOR_LABEL, askPrompt, canDecide, jobActions, processSteps, runAgentRoute,
   jobTotals, runCost, runDuration, runErrorLine, shortHistory,
 } from './jobDetail.js'
+import { costProvenance, observations, sources, truncationNote } from './evidence.js'
 
 // ---------------------------------------------------------------------------
 // Job detail — what a work item IS and how it moves, not a second table.
@@ -18,6 +19,8 @@ import {
 //   4. The current handoff, highlighted — with judgment CTAs when it is on you
 //   5. A short handoff history
 //   6. Underlying agent runs, collapsed and fetched only when opened
+//   7. (page only) Evidence — who Trovis heard from and what each source
+//      reported or showed, under the record it supports; never above it
 //
 // Reads GET /work/items/:id (the lean detail), and /work/items/:id?include=runs
 // only when someone expands the runs section. Never the fat board, never a
@@ -106,6 +109,29 @@ export default function JobDetail({
   const runsLoading = isPage && runs === null && !runsErr
   const actions = jobActions(runs, { status: view.status })
 
+  // Evidence is supplemental and page-only: it loads for the run being
+  // looked at, never for a Home desk row, and a failure here is a failed
+  // section, never a failed page.
+  const [evidence, setEvidence] = useState(null)
+  const [evidenceErr, setEvidenceErr] = useState(null)
+  const [evidenceReload, setEvidenceReload] = useState(0)
+  useEffect(() => {
+    if (!isPage) return undefined
+    setEvidenceErr(null)
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkItemEvidence(item.id, { signal })
+        .then((d) => isAlive() && setEvidence(d && Array.isArray(d.evidence) ? d : { evidence: [] }))
+        .catch((e) => isAlive() && setEvidenceErr(e))
+    })
+  }, [isPage, item.id, evidenceReload])
+  const retryEvidence = useCallback(() => {
+    setEvidence(null)
+    setEvidenceErr(null)
+    setEvidenceReload((n) => n + 1)
+  }, [])
+  const costNote = isPage ? costProvenance(evidence?.evidence) : null
+
   async function resolve(kind) {
     const handoffId = detail?.awaiting_handoff_event_id
     if (!handoffId || busy) return
@@ -141,6 +167,11 @@ export default function JobDetail({
             {isPage && jobTotals(runs).map((t) => (
               <span key={t} className="jobd-total">{t}</span>
             ))}
+            {/* Where the cost figure comes from — only beside a figure that
+                exists, and only when the evidence says how it was priced. */}
+            {costNote && jobTotals(runs).some((t) => t.startsWith('$')) && (
+              <span className="jobd-total-note">{costNote}</span>
+            )}
           </div>
         </header>
 
@@ -245,6 +276,14 @@ export default function JobDetail({
             {/* The page's action list already IS these runs, so folding the
                 same rows underneath it would be depth in name only. */}
             {!isPage && <AgentRuns itemId={item.id} onOpenAgent={onOpenAgent} />}
+
+            {isPage && (
+              <EvidenceSection
+                body={evidence}
+                failed={Boolean(evidenceErr)}
+                onRetry={retryEvidence}
+              />
+            )}
           </>
         )}
     </>
@@ -383,6 +422,106 @@ function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, 
         ))}
       </ol>
     </section>
+  )
+}
+
+// --- 7. evidence -------------------------------------------------------------
+
+/**
+ * What supports the record above. Sources first — who Trovis heard from and
+ * what kind of thing each said — then the observations that add something
+ * the steps and passes do not already say: an action a worker REPORTED, a
+ * state an external system SHOWED, the record closing. "Reported by" and
+ * "Observed from" are kept apart on purpose, and "verified" is not a word
+ * this section uses. Ids live behind Details.
+ *
+ * Three states that must never blur: loading (skeleton), failed (a local
+ * error with Retry — the page stays), and empty (an honest sentence, not
+ * "nothing happened" and not "not connected").
+ */
+function EvidenceSection({ body, failed, onRetry }) {
+  const loading = body === null && !failed
+  const records = body?.evidence || []
+  const srcs = sources(records)
+  const obs = observations(records)
+  const trunc = truncationNote(body)
+
+  return (
+    <section className="jobd-section jobd-evidence" aria-label="Evidence">
+      <h3 className="dash-caps">Evidence</h3>
+      {loading ? (
+        <div className="dash-skel">
+          <span style={{ width: '55%' }} />
+          <span style={{ width: '40%' }} />
+        </div>
+      ) : failed ? (
+        <p className="dash-empty" role="alert">
+          Evidence couldn&apos;t be loaded.{' '}
+          <button type="button" className="dash-link" onClick={onRetry}>
+            Retry
+          </button>
+        </p>
+      ) : records.length === 0 ? (
+        <p className="dash-empty">No supporting evidence is available for this run.</p>
+      ) : (
+        <>
+          {trunc && <p className="jobd-ev-note-trunc">{trunc}</p>}
+          <ul className="jobd-ev-sources" aria-label="Sources">
+            {srcs.map((s) => (
+              <li key={s.key} className={`jobd-ev-source kind-${s.kind}`}>
+                <span className="jobd-ev-source-name">{s.name}</span>
+                {s.hint && <span className="jobd-ev-source-hint">{s.hint}</span>}
+                <span className="jobd-ev-source-lines">
+                  {s.lines.map((l) => <span key={l}>{l}</span>)}
+                </span>
+                {s.lastAt && (
+                  <span className="jobd-ev-source-at" title={s.lastAt}>
+                    last {workUpdatedLabel(s.lastAt)} ago
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {obs.length > 0 && (
+            <ul className="jobd-ev-list" aria-label="Observations">
+              {obs.map((o) => (
+                <li key={o.id} className={`jobd-ev-row kind-${o.kind}${o.errored ? ' is-errored' : ''}`}>
+                  <div className="jobd-ev-top">
+                    <span className="jobd-ev-title">{o.title}</span>
+                    {o.at && (
+                      <span className="jobd-ev-at" title={o.at}>{workUpdatedLabel(o.at)} ago</span>
+                    )}
+                  </div>
+                  <span className="jobd-ev-prov">{o.provenance}</span>
+                  {o.note && <p className="jobd-ev-note">{o.note}</p>}
+                  {o.details.length > 0 && (
+                    <details className="jobd-ev-details">
+                      <summary>Details</summary>
+                      <dl className="jobd-ev-dl">
+                        {o.details.map(([k, v]) => (
+                          <EvidenceDetail key={k} label={k} value={v} />
+                        ))}
+                      </dl>
+                    </details>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+const MONO_DETAILS = new Set(['Span', 'Trace', 'External object', 'Provider event id', 'Provider event', 'Reported action', 'Operation'])
+
+function EvidenceDetail({ label, value }) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd className={MONO_DETAILS.has(label) ? 'mono' : ''}>{String(value)}</dd>
+    </>
   )
 }
 
