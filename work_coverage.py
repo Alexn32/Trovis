@@ -35,12 +35,11 @@ the states it can prove:
 
   observed       a persisted observation directly supports the dimension.
   partial        Trovis KNOWS the denominator and only part of it is
-                 observed. Cost only: model-usage spans are the
-                 denominator; those priced (a cost, or a reported/covered
-                 source) the numerator.
+                 observed. Cost only: usage spans are the denominator;
+                 those with a recorded cost the numerator (below).
   not_observed   Trovis KNOWS the dimension applies and has no supporting
-                 observation. Cost only: model usage was observed and none
-                 of it was priced.
+                 observation. Cost only: model usage was observed on the
+                 run's spans and no cost was recorded for any of it.
   unknown        the record cannot establish applicability or completeness.
                  The honest default for absence: no execution evidence does
                  not mean no worker ran; no action report does not mean no
@@ -60,18 +59,42 @@ that its outcome was seen. Failure is not coverage either: a run that
 errored can be fully observed, and a closed run with a thin record earns
 nothing from having closed.
 
+The cost denominator, exactly (the invariant is documented where ingest
+writes it, database._insert_span_rows):
+
+  usage span      a span whose OWN attributes carried model usage at ingest
+                  — stored as non-NULL `spans.total_tokens` (0 when the usage
+                  reported zero tokens; NULL only when no usage attribute
+                  was present). Never set from a run-level aggregate or a
+                  default. The unit is the span as the exporter cut it: one
+                  model call for every Trovis-owned door, but Trovis cannot
+                  prove a third-party exporter never put usage on a parent
+                  span too, so the API says "usage spans", not "model
+                  calls".
+  cost known      `estimated_cost_usd IS NOT NULL` — the same predicate the
+                  cost aggregates use for priced_n. It covers three things
+                  ingest records deliberately: a token-derived estimate
+                  (a number, 0.0 included), a cost the SDK reported, and
+                  `cost_source='covered'`: a usage span whose cost is
+                  SUBSUMED in a run total the SDK reported, stored as 0.
+                  Covered means "inside a known total", not "this span was
+                  priced on its own"; the count of such spans is exposed.
+  cost unknown    a usage span with NULL cost — the model was not in the
+                  pricing table, or the row predates pricing. The cost
+                  aggregates call this unpriced_n; it is the one case where
+                  Trovis knows cost applied and has none.
+
 Reasons — a small deterministic vocabulary a UI can explain without a model:
 
   execution_evidence / no_execution_evidence
   action_reports / no_action_reports
   external_observations / no_external_observations
   handoff_records / no_handoff_records
-  reported_cost                 cost was reported although no per-span model
-                                usage was recorded
-  model_usage_priced            every model-usage span carries a price
-  some_model_usage_unpriced     partial: some usage spans have no price
-  model_usage_unpriced          usage observed, none of it priced
-  no_model_usage_observed       no model usage and no cost on the record
+  reported_cost               a cost was reported although no usage span exists
+  usage_cost_known            every usage span has a recorded cost (own or covered)
+  some_usage_cost_unknown     partial: some usage spans have no recorded cost
+  usage_cost_unknown          usage observed, no recorded cost for any of it
+  no_model_usage_observed     no usage span and no cost on the record
 
 Bounded evidence: the evidence read is capped at database.
 _WORK_EVIDENCE_SPAN_LIMIT spans. The span-derived dimensions (execution,
@@ -104,8 +127,8 @@ REASONS: tuple[str, ...] = (
     "action_reports", "no_action_reports",
     "external_observations", "no_external_observations",
     "handoff_records", "no_handoff_records",
-    "reported_cost", "model_usage_priced", "some_model_usage_unpriced",
-    "model_usage_unpriced", "no_model_usage_observed",
+    "reported_cost", "usage_cost_known", "some_usage_cost_unknown",
+    "usage_cost_unknown", "no_model_usage_observed",
 )
 
 # dimension -> (evidence types it counts, reason when present, reason when absent,
@@ -116,9 +139,6 @@ _EVIDENCE_DIMENSIONS: dict[str, tuple[tuple[str, ...], str, str, bool]] = {
     "external_outcomes": (("external_state",), "external_observations", "no_external_observations", False),
     "handoffs": (("handoff",), "handoff_records", "no_handoff_records", False),
 }
-
-_PRICED_SOURCES = ("reported", "covered")
-
 
 def _iso_max(values: list[str | None]) -> str | None:
     present = [v for v in values if v]
@@ -187,13 +207,14 @@ def _evidence_dimension(
 def _cost_dimension(
     spans: list[dict[str, Any]], evidence: list[dict[str, Any]], bounded: bool,
 ) -> dict[str, Any]:
-    """Cost against the observed model usage. Existing cost truth only:
-    a span with model usage stores non-NULL total_tokens; it is priced when
-    it carries a positive cost or a reported/covered cost_source (covered
-    = inside a run total the SDK reported). An unpriced usage span is
-    model usage Trovis saw but could not price. Nothing is summed to zero."""
+    """Cost against the observed model usage, by the predicates the cost
+    aggregates already use (module docstring): a usage span has non-NULL
+    total_tokens; its cost is known when estimated_cost_usd is non-NULL
+    (own estimate, 0.0 included; reported; or covered = subsumed in a
+    reported run total). Nothing is summed to zero."""
     usage = 0
-    priced = 0
+    known = 0
+    covered = 0
     any_cost = False
     for s in spans:
         has_usage = s.get("total_tokens") is not None
@@ -202,25 +223,26 @@ def _cost_dimension(
             cost_f = float(cost) if cost is not None else None
         except (TypeError, ValueError):
             cost_f = None
-        is_priced = (cost_f is not None and cost_f > 0) or (s.get("cost_source") in _PRICED_SOURCES)
         if cost_f is not None and cost_f > 0:
             any_cost = True
         if has_usage:
             usage += 1
-            if is_priced:
-                priced += 1
-    unpriced = usage - priced
+            if cost_f is not None:
+                known += 1
+            if s.get("cost_source") == "covered":
+                covered += 1
+    unknown = usage - known
 
     if usage == 0 and not any_cost:
         state, reason = STATE_UNKNOWN, "no_model_usage_observed"
     elif usage == 0:
         state, reason = STATE_OBSERVED, "reported_cost"
-    elif unpriced == 0:
-        state, reason = STATE_OBSERVED, "model_usage_priced"
-    elif priced == 0:
-        state, reason = STATE_NOT_OBSERVED, "model_usage_unpriced"
+    elif unknown == 0:
+        state, reason = STATE_OBSERVED, "usage_cost_known"
+    elif known == 0:
+        state, reason = STATE_NOT_OBSERVED, "usage_cost_unknown"
     else:
-        state, reason = STATE_PARTIAL, "some_model_usage_unpriced"
+        state, reason = STATE_PARTIAL, "some_usage_cost_unknown"
 
     cost_recs = [r for r in evidence if r.get("evidence_type") == "cost"]
     summary = _summarize(cost_recs)
@@ -241,10 +263,13 @@ def _cost_dimension(
         **summary,
         "from_bounded_evidence": bool(bounded),
         "details": {
-            "model_usage_spans": usage,
-            "priced_spans": priced,
-            "unpriced_spans": unpriced,
-            # None, never 0, when nothing was priced.
+            # Spans, as the exporter cut them — not "model calls".
+            "usage_spans": usage,
+            "cost_known_spans": known,
+            # Of the known: subsumed in a reported run total, not priced alone.
+            "cost_covered_spans": covered,
+            "cost_unknown_spans": unknown,
+            # None, never 0, when no cost was recorded.
             "amount_usd": round(amount, 6) if amount else None,
             "basis": sorted(bases)[0] if len(bases) == 1 else ("mixed" if bases else None),
         },

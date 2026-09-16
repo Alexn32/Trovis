@@ -153,10 +153,10 @@ with TestClient(main.app) as c:
     check("12. no handoff record → handoffs unknown, not deficient",
           d["handoffs"]["state"] == "unknown" and d["handoffs"]["reason"] == "no_handoff_records")
     cost = d["cost"]
-    check("13. cost is PARTIAL: two usage spans, one priced (reported), one unpriced model",
-          cost["state"] == "partial" and cost["reason"] == "some_model_usage_unpriced"
-          and cost["details"]["model_usage_spans"] == 2 and cost["details"]["priced_spans"] == 1
-          and cost["details"]["unpriced_spans"] == 1)
+    check("13. cost is PARTIAL: two usage spans, one with a reported cost, one on an unknown model",
+          cost["state"] == "partial" and cost["reason"] == "some_usage_cost_unknown"
+          and cost["details"]["usage_spans"] == 2 and cost["details"]["cost_known_spans"] == 1
+          and cost["details"]["cost_unknown_spans"] == 1 and cost["details"]["cost_covered_spans"] == 0)
     check("15. the amount is the priced part only, never zero-filled", cost["details"]["amount_usd"] == 0.0042)
     check("24. last_observed_at is the newest supporting observation's own time",
           d["actions"]["last_observed_at"] == database._ns_to_iso(t3)
@@ -226,10 +226,10 @@ with TestClient(main.app) as c:
     post(KA, "writer-agent", [u1, u2], {"trovis.sdk.platform": "anthropic"})
     summ = item_by_title(HA, "Draft summary")
     _, d = dims(HA, summ["id"])
-    check("cost not_observed / model_usage_unpriced with the denominator exposed",
-          d["cost"]["state"] == "not_observed" and d["cost"]["reason"] == "model_usage_unpriced"
-          and d["cost"]["details"] == {"model_usage_spans": 2, "priced_spans": 0, "unpriced_spans": 2,
-                                        "amount_usd": None, "basis": None})
+    check("cost not_observed / usage_cost_unknown with the denominator exposed",
+          d["cost"]["state"] == "not_observed" and d["cost"]["reason"] == "usage_cost_unknown"
+          and d["cost"]["details"] == {"usage_spans": 2, "cost_known_spans": 0, "cost_covered_spans": 0,
+                                        "cost_unknown_spans": 2, "amount_usd": None, "basis": None})
     check("15. missing cost is None, not 0", d["cost"]["details"]["amount_usd"] is None)
     check("execution observed from claude", d["execution"]["sources"][0]["source_connector_id"] == "claude")
 
@@ -240,10 +240,10 @@ with TestClient(main.app) as c:
     post(KA, "pricing-agent", [p1, p2], GROK)
     pc = item_by_title(HA, "Price check")
     _, d = dims(HA, pc["id"])
-    check("13. every usage span priced (reported + covered) → cost observed / model_usage_priced",
-          d["cost"]["state"] == "observed" and d["cost"]["reason"] == "model_usage_priced"
-          and d["cost"]["details"]["priced_spans"] == 2 and d["cost"]["details"]["amount_usd"] == 0.01
-          and d["cost"]["details"]["basis"] == "reported")
+    check("13. every usage span has a recorded cost (one reported, one covered) → observed / usage_cost_known",
+          d["cost"]["state"] == "observed" and d["cost"]["reason"] == "usage_cost_known"
+          and d["cost"]["details"]["cost_known_spans"] == 2 and d["cost"]["details"]["cost_covered_spans"] == 1
+          and d["cost"]["details"]["amount_usd"] == 0.01 and d["cost"]["details"]["basis"] == "reported")
 
     # ---- 11: human handoff
     print("\n11. human handoff")
@@ -327,6 +327,108 @@ with TestClient(main.app) as c:
     check("no loop invented", n_after == n_before)
     _, d = dims(HA, inv["id"])
     check("no coverage change on an unrelated run", d["external_outcomes"]["evidence_count"] == 1)
+
+    # ---- the cost denominator, against the actual ingest path
+    print("\nD. the cost denominator is what ingest recorded, span by span")
+
+    def span_row(span_id):
+        with database._connect() as conn, database._cursor(conn) as cur:
+            cur.execute("SELECT total_tokens, estimated_cost_usd, cost_source FROM spans WHERE span_id = ?", (span_id,))
+            return dict(cur.fetchone())
+
+    PRICED_MODEL = "claude-sonnet-5"  # in _PRICING_SEED
+
+    # D1. a non-model span (a tool call, no usage attributes) is NOT a usage span
+    n1, _ = sp("tool_call", 250, {"trovis.loop.title": "Denominator run", "trovis.loop.external_id": "den-1",
+                                  "trovis.tool.name": "lookup"})
+    # D2. a model span with real usage on a priced model → usage, cost known (own estimate)
+    n2, _ = sp("model_call", 249, {"trovis.loop.external_id": "den-1", "gen_ai.request.model": PRICED_MODEL,
+                                   "gen_ai.usage.input_tokens": "1000", "gen_ai.usage.output_tokens": "100"})
+    # D3. a zero-token usage span on a priced model → usage (total 0, not NULL), cost known (0.0)
+    n3, _ = sp("model_call", 248, {"trovis.loop.external_id": "den-1", "gen_ai.request.model": PRICED_MODEL,
+                                   "gen_ai.usage.input_tokens": "0", "gen_ai.usage.output_tokens": "0"})
+    # D4. a model name but NO usage attributes → not a usage span (no default fills it in)
+    n4, _ = sp("model_call", 247, {"trovis.loop.external_id": "den-1", "gen_ai.request.model": PRICED_MODEL})
+    # D5. cache-only usage → still a usage span (cache counts are billed usage)
+    n5, _ = sp("model_call", 246, {"trovis.loop.external_id": "den-1", "gen_ai.request.model": PRICED_MODEL,
+                                   "gen_ai.usage.cache_read_input_tokens": "500"})
+    post(KA, "den-agent", [n1, n2, n3, n4, n5], {"trovis.sdk.platform": "anthropic"})
+    r1, r2, r3, r4, r5 = (span_row(x["spanId"]) for x in (n1, n2, n3, n4, n5))
+    check("D1. no usage attributes → total_tokens NULL and cost NULL", r1["total_tokens"] is None and r1["estimated_cost_usd"] is None)
+    check("D2. real usage → total_tokens set and a cost estimated", r2["total_tokens"] == 1100 and r2["estimated_cost_usd"] > 0)
+    check("D3. zero-token usage → total_tokens 0 (not NULL) and cost 0.0 (not NULL)",
+          r3["total_tokens"] == 0 and r3["estimated_cost_usd"] == 0.0)
+    check("D4. a model name alone gives no usage — no default value applies", r4["total_tokens"] is None)
+    check("D5. cache-only usage is usage", r5["total_tokens"] == 500 and r5["estimated_cost_usd"] is not None)
+    den = item_by_title(HA, "Denominator run")
+    _, d = dims(HA, den["id"])
+    check("D. denominator counts exactly the three usage spans, cost known for all three → observed",
+          d["cost"]["state"] == "observed" and d["cost"]["reason"] == "usage_cost_known"
+          and d["cost"]["details"]["usage_spans"] == 3 and d["cost"]["details"]["cost_known_spans"] == 3
+          and d["cost"]["details"]["cost_covered_spans"] == 0)
+    check("D. the tool span and the usage-less model span are not in the denominator",
+          d["cost"]["details"]["usage_spans"] == 3)
+    check("D11. amount is the estimated sum, and only that", d["cost"]["details"]["amount_usd"] == round(
+        float(r2["estimated_cost_usd"]) + float(r5["estimated_cost_usd"]), 6))
+
+    # D6. covered: a run total reported on one span, per-turn usage on others → covered, cost known, subsumed
+    c1, _ = sp("agent_run", 240, {"trovis.loop.title": "Covered run", "trovis.loop.external_id": "cov-1",
+                                  "trovis.run.id": "cov-1", "trovis.run.cost_usd": "0.02"})
+    c2, _ = sp("llm_output", 239, {"trovis.loop.external_id": "cov-1", "trovis.run.id": "cov-1",
+                                   "gen_ai.request.model": PRICED_MODEL, "gen_ai.usage.input_tokens": "800",
+                                   "gen_ai.usage.output_tokens": "80"})
+    c3, _ = sp("llm_output", 238, {"trovis.loop.external_id": "cov-1", "trovis.run.id": "cov-1",
+                                   "gen_ai.request.model": "no-such-model-xyz", "gen_ai.usage.input_tokens": "10",
+                                   "gen_ai.usage.output_tokens": "1"})
+    post(KA, "cov-agent", [c1, c2, c3], {"trovis.sdk.platform": "claude-agent-sdk"})
+    rc1, rc2, rc3 = (span_row(x["spanId"]) for x in (c1, c2, c3))
+    check("D6. the run span reports cost with no usage of its own (total_tokens NULL, source reported)",
+          rc1["total_tokens"] is None and rc1["cost_source"] == "reported" and rc1["estimated_cost_usd"] == 0.02)
+    check("D6. per-turn usage inside a reported run is covered: cost 0 stored, source covered — even on an unknown model",
+          rc2["cost_source"] == "covered" and rc2["estimated_cost_usd"] == 0.0
+          and rc3["cost_source"] == "covered" and rc3["estimated_cost_usd"] == 0.0)
+    cov = item_by_title(HA, "Covered run")
+    _, d = dims(HA, cov["id"])
+    check("D6. covered spans are cost-known (subsumed) and counted as such, never as priced alone",
+          d["cost"]["state"] == "observed" and d["cost"]["reason"] == "usage_cost_known"
+          and d["cost"]["details"] == {"usage_spans": 2, "cost_known_spans": 2, "cost_covered_spans": 2,
+                                        "cost_unknown_spans": 0, "amount_usd": 0.02, "basis": "reported"})
+
+    # D9. parent and child both carrying usage: the unit is the span as exported, and it is named so
+    p_parent, _ = sp("agent_turn", 230, {"trovis.loop.title": "Nested usage", "trovis.loop.external_id": "nest-1",
+                                         "gen_ai.request.model": PRICED_MODEL, "gen_ai.usage.input_tokens": "50",
+                                         "gen_ai.usage.output_tokens": "5"})
+    p_child, _ = sp("model_call", 229, {"trovis.loop.external_id": "nest-1",
+                                        "gen_ai.request.model": PRICED_MODEL, "gen_ai.usage.input_tokens": "50",
+                                        "gen_ai.usage.output_tokens": "5"})
+    p_child["parentSpanId"] = p_parent["spanId"]
+    post(KA, "nest-agent", [p_parent, p_child], {"trovis.sdk.platform": "anthropic"})
+    nest = item_by_title(HA, "Nested usage")
+    _, d = dims(HA, nest["id"])
+    check("D9. two usage-bearing spans are two usage SPANS — the API never calls them model calls",
+          d["cost"]["details"]["usage_spans"] == 2 and "model_call" not in str(d["cost"]["details"])
+          and "model_calls" not in str(d["cost"]))
+    check("D9. no field in the response claims a count of independent model invocations",
+          not any("call" in k for k in d["cost"]["details"].keys()))
+
+    # D7/D8 are the earlier "Draft summary" (all unknown → not_observed) and "Refund order" (mixed → partial)
+    # D10. historical rows: usage with no recorded cost reads cost-unknown; NULL usage acquires nothing
+    with database._connect() as conn, database._cursor(conn) as cur:
+        # A pre-pricing row: tokens recorded, cost never computed.
+        cur.execute("UPDATE spans SET estimated_cost_usd = NULL, cost_source = NULL WHERE span_id = ?", (n2["spanId"],))
+    _, d = dims(HA, den["id"])
+    check("D10. a usage span whose cost was never recorded is cost-unknown → the run reads partial (2 of 3 known)",
+          d["cost"]["state"] == "partial" and d["cost"]["details"]["cost_unknown_spans"] == 1
+          and d["cost"]["details"]["cost_known_spans"] == 2)
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute("UPDATE spans SET total_tokens = NULL, estimated_cost_usd = NULL, cost_source = NULL "
+                    "WHERE span_id IN (?, ?, ?)", (n2["spanId"], n3["spanId"], n5["spanId"]))
+    _, d = dims(HA, den["id"])
+    check("D10. rows with NULL usage acquire no applicability: unknown / no_model_usage_observed, amount None",
+          d["cost"]["state"] == "unknown" and d["cost"]["reason"] == "no_model_usage_observed"
+          and d["cost"]["details"]["usage_spans"] == 0 and d["cost"]["details"]["amount_usd"] is None)
+    check("D12. existing cost totals unchanged: the Work runs fold still shows the estimate on the covered run's report",
+          any(x["cost_usd"] == 0.02 for x in c.get(f"/work/items/{cov['id']}?include=runs", headers=HA).json()["runs"]))
 
     # ---- 25/26: isolation and not-found
     print("\n25/26. account isolation and not-found")

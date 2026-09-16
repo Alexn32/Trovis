@@ -3195,6 +3195,18 @@ def _insert_span_rows(
         cc, cr = _extract_cache_tokens(attrs)
         model = model_from_attrs(attrs)
         has_usage = tot is not None or cc is not None or cr is not None
+        # INVARIANT (relied on by the cost aggregates' unpriced_n, by
+        # get_pricing_coverage and by work_coverage.py): a span stores a
+        # non-NULL total_tokens iff ITS OWN attributes carried model usage
+        # (any of the gen_ai / legacy usage keys, cache counts included) —
+        # never from a run-level aggregate, never from a default. A usage
+        # span that reports zero tokens stores 0, not NULL. A span with no
+        # usage attributes stores NULL and is priced NULL below, so
+        # `total_tokens IS NOT NULL AND estimated_cost_usd IS NULL` is
+        # exactly "usage observed, cost not recorded". The unit is the SPAN
+        # as the exporter cut it — a model call for every Trovis door, but
+        # nothing here can prove a third-party exporter did not put usage
+        # on a parent as well.
         # total_tokens counts every billed token, cache included.
         if has_usage:
             tot = (tot or 0) + (cc or 0) + (cr or 0)

@@ -2367,8 +2367,14 @@ class WorkCoverageDimension(BaseModel):
       correlation_methods   distinct recorded methods, "unrecorded" for None.
       from_bounded_evidence the span read was capped; the state is unchanged,
                             the reader should know it was computed from a prefix.
-      details               cost only: model_usage_spans, priced_spans,
-                            unpriced_spans, amount_usd (None, never 0), basis.
+      details               cost only: usage_spans (spans whose own attributes
+                            carried model usage — the denominator, as the
+                            exporter cut them, not "model calls"),
+                            cost_known_spans (a recorded cost: own estimate,
+                            reported, or covered), cost_covered_spans (cost
+                            subsumed in a reported run total, not priced
+                            alone), cost_unknown_spans, amount_usd (None,
+                            never 0), basis.
     Nothing here is a score, a grade, a success verdict or a confidence.
     """
 
