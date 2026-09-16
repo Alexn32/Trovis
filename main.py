@@ -46,6 +46,7 @@ import database
 # connect_health, and the module must stay reachable from it.
 import connect_health as connect_health_model
 import work_evidence
+import work_coverage
 import saas_hubspot
 import saas_shopify
 import saas_stripe
@@ -124,6 +125,7 @@ from models import (
     ConnectAskResponse,
     ConnectionHealthResponse,
     WorkEvidenceResponse,
+    WorkCoverageResponse,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
@@ -2008,6 +2010,26 @@ def work_item_evidence(item_id: int, request: Request) -> WorkEvidenceResponse:
     if body is None:
         raise HTTPException(status_code=404, detail="work item not found")
     return WorkEvidenceResponse(**body)
+
+
+@app.get("/work/items/{item_id}/coverage", response_model=WorkCoverageResponse)
+def work_item_coverage(item_id: int, request: Request) -> WorkCoverageResponse:
+    """Which dimensions of one work item Trovis can actually see
+    (work_coverage.py) — a read model over that item's evidence, not a
+    score. Same shape of access as /evidence: per item, opt-in, the same
+    bounded account-scoped reads, no model call, no board scan; named work
+    only, and an id outside this account is a 404, never a 403.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    if database.get_work_item(
+        account_id, item_id, viewer_user_id=user["id"] if user else None,
+    ) is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    body = work_coverage.build_work_item_coverage(account_id, item_id)
+    if body is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    return WorkCoverageResponse(**body)
 
 
 @app.get("/work/suggestions", response_model=WorkSuggestionsResponse)

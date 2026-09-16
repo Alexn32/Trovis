@@ -494,6 +494,13 @@ export const api = {
       timeoutMs: WORK_TIMEOUT_MS,
       signal,
     }),
+  // Work Coverage: which dimensions of one item Trovis can see
+  // (work_coverage.py). Per item, opt-in; nothing renders it yet.
+  getWorkItemCoverage: (id, { signal = undefined } = {}) =>
+    request(`/work/items/${encodeURIComponent(id)}/coverage`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      signal,
+    }),
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
   // One named item plus the detail spine. `include: 'runs'` adds the
   // underlying agent runs — opt-in, because the job detail folds them away and

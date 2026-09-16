@@ -2345,6 +2345,53 @@ class WorkEvidenceResponse(BaseModel):
     evidence: list[WorkEvidence] = Field(default_factory=list)
 
 
+class WorkCoverageSource(BaseModel):
+    source_type: str | None = None
+    source_connector_id: str | None = None
+    source_label: str | None = None
+
+
+class WorkCoverageDimension(BaseModel):
+    """One dimension of one work item's observability (work_coverage.py).
+
+      id                    execution | actions | external_outcomes | handoffs | cost
+      state                 observed | partial | not_observed | unknown — see the
+                            module for each state's exact meaning; partial and
+                            not_observed are provable for cost only.
+      reason                a small deterministic vocabulary (module docstring).
+      evidence_count        supporting evidence records.
+      last_observed_at      the newest supporting observation's own time — never
+                            query time; None when nothing supports it.
+      evidence_types        the evidence types counted.
+      sources               distinct (type, connector, label) behind the records.
+      correlation_methods   distinct recorded methods, "unrecorded" for None.
+      from_bounded_evidence the span read was capped; the state is unchanged,
+                            the reader should know it was computed from a prefix.
+      details               cost only: model_usage_spans, priced_spans,
+                            unpriced_spans, amount_usd (None, never 0), basis.
+    Nothing here is a score, a grade, a success verdict or a confidence.
+    """
+
+    id: str
+    state: str
+    reason: str
+    evidence_count: int = 0
+    last_observed_at: str | None = None
+    evidence_types: list[str] = Field(default_factory=list)
+    sources: list[WorkCoverageSource] = Field(default_factory=list)
+    correlation_methods: list[str] = Field(default_factory=list)
+    from_bounded_evidence: bool = False
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkCoverageResponse(BaseModel):
+    item_id: int
+    generated_at: str
+    # The evidence read behind the span-derived dimensions was capped.
+    evidence_bounded: bool = False
+    dimensions: list[WorkCoverageDimension] = Field(default_factory=list)
+
+
 class ConnectionHealth(BaseModel):
     """What Trovis knows about one connector right now (connect_health.py).
 
