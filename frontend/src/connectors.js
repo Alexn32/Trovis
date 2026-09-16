@@ -151,7 +151,7 @@ export const CONNECTORS = Object.freeze([
     availability: 'available',
     methods: ['oauth', 'webhook'],
     brandId: 'stripe',
-    description: 'Payment events wait on, clear, or fail work an agent stamped with a loop key.',
+    description: 'See when a job is waiting on a payment, and when that payment clears or fails.',
   },
   {
     id: 'hubspot',
@@ -160,7 +160,7 @@ export const CONNECTORS = Object.freeze([
     availability: 'available',
     methods: ['oauth', 'webhook'],
     brandId: 'hubspot',
-    description: 'Deal-stage and ticket-status changes move work an agent stamped with a loop key.',
+    description: 'See when a job is waiting on a deal or a support ticket, and when it moves.',
   },
   {
     id: 'shopify',
@@ -169,7 +169,7 @@ export const CONNECTORS = Object.freeze([
     availability: 'available',
     methods: ['oauth', 'webhook'],
     brandId: 'shopify',
-    description: 'Order, payment, and fulfillment events move work an agent stamped with a loop key.',
+    description: 'See when a job is waiting on an order, payment, or fulfillment, and when it completes.',
   },
   // Recognised in Work today (brandMarks.js `coming`), no direct door yet.
   {

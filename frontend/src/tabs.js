@@ -12,15 +12,17 @@
 
 import { ALL_SURFACES } from './seat.js'
 
-export const TAB_IDS = ['dashboard', 'fleet', 'work', 'org']
+export const TAB_IDS = ['dashboard', 'fleet', 'work', 'connections', 'org']
 
-// Pane id → the surface name a seat uses for it. 'Ask' and 'Connect' are not
-// tabs (Ask is the ⌘K pill, Connect lives inside Add Agent), so they never
-// appear here; a seat that omits them still hides them where they surface.
+// Pane id → the surface name a seat uses for it. 'Ask' is not a tab (it is
+// the ⌘K pill), so it never appears here; a seat that omits it still hides
+// it where it surfaces. The Connections tab rides the existing 'Connect'
+// atom — the DB name stays, the person reads Connections.
 export const PANE_SURFACE = {
   dashboard: 'Home',
   fleet: 'Fleet',
   work: 'Work',
+  connections: 'Connect',
   org: 'Org',
 }
 
@@ -39,6 +41,9 @@ export function visibleTabs(surfaces) {
     // scope_levels.surfaces); what a person reads is Agents.
     ['fleet', 'Agents'],
     ['work', 'Work'],
+    // The pane id is 'connections' and the scope atom stays 'Connect'
+    // (scope_levels.surfaces); what a person reads is Connections.
+    ['connections', 'Connections'],
     ['org', 'Org'],
   ].filter(([id]) => allowed.has(PANE_SURFACE[id]))
   return tabs.length ? tabs : [['work', 'Work']]

@@ -79,18 +79,30 @@ test('tooltips never claim a coming mark is connected', () => {
   assert.match(brandTooltip('shopify'), /connect today/i)
 })
 
-test('Settings exposes Stripe, HubSpot, and Shopify Connect; Add Agent stays an ingest picker', () => {
+test('Connections exposes Stripe, HubSpot, and Shopify Connect; Add Agent stays an ingest picker', () => {
+  // The doors moved from Settings → Integrations to the Connections page;
+  // the honesty copy moved with them.
+  const connections = readFileSync(new URL('../src/Connections.jsx', import.meta.url), 'utf8')
+  // The product surface explains value and the truth boundary; how
+  // correlation works belongs in setup docs, never on this page.
+  assert.doesNotMatch(connections, /trovis_loop_external_id/)
+  assert.doesNotMatch(connections, /Trovis loop key/)
+  assert.match(connections, /work it can reliably link/)
+  assert.match(connections, /not Trovis billing/)
+  assert.match(connections, /not CRM or contact sync/)
+  assert.match(connections, /not catalog, product, or/)
+  assert.match(connections, /startStripeConnect/)
+  assert.match(connections, /startHubSpotConnect/)
+  assert.match(connections, /startShopifyConnect/)
+  assert.match(connections, /disconnectStripe/)
+  assert.match(connections, /disconnectHubSpot/)
+  assert.match(connections, /disconnectShopify/)
+  // Settings keeps a doorway, not a second manager.
   const settings = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
-  assert.match(settings, /Connect Stripe/)
-  assert.match(settings, /Connect HubSpot/)
-  assert.match(settings, /Connect Shopify/)
-  assert.match(settings, /trovis_loop_external_id/)
-  assert.match(settings, /not Trovis billing/)
-  assert.match(settings, /not CRM or contact sync/)
-  assert.match(settings, /not catalog, product, or/)
-  assert.match(settings, /startStripeConnect/)
-  assert.match(settings, /startHubSpotConnect/)
-  assert.match(settings, /startShopifyConnect/)
+  assert.match(settings, /Manage connections/)
+  assert.doesNotMatch(settings, /startStripeConnect|startHubSpotConnect|startShopifyConnect/)
+  assert.doesNotMatch(settings, /disconnectStripe|disconnectHubSpot|disconnectShopify/)
+  assert.doesNotMatch(settings, /getSaasConnections/)
 })
 
 test('Add Agent live tiles stay the real doors; SaaS is not a picker door', () => {

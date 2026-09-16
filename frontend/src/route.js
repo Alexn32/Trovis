@@ -19,10 +19,13 @@ export const TAB_PATHS = {
   fleet: '/fleet',
   org: '/org',
   work: '/work',
+  connections: '/connections',
 }
 // `team` is the pane Org replaced. An old bookmark still resolves — tabs.js
 // maps it on to 'org' — but nothing builds a /team URL any more.
-const PATH_TABS = { '': 'dashboard', fleet: 'fleet', org: 'org', team: 'org', work: 'work' }
+const PATH_TABS = {
+  '': 'dashboard', fleet: 'fleet', org: 'org', team: 'org', work: 'work', connections: 'connections',
+}
 
 /**
  * Read a pathname into view state.

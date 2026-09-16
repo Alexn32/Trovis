@@ -16,7 +16,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { ALL_SURFACES, FULL_SEAT, hasReports, hasSurface, seatOf, showsTechnicalFolds } from '../src/seat.js'
-import { resolveTab, visibleTabs } from '../src/tabs.js'
+import { PANE_SURFACE, resolveTab, visibleTabs } from '../src/tabs.js'
 import { TAB_PATHS, parsePath } from '../src/route.js'
 import {
   buildForest,
@@ -69,11 +69,28 @@ test('the Whose-work options only exist when there are reports to list', () => {
 
 test('nav shows exactly the surfaces in the seat', () => {
   const ids = (s) => visibleTabs(s).map(([id]) => id)
-  assert.deepEqual(ids(ALL_SURFACES), ['dashboard', 'fleet', 'work', 'org'])
+  assert.deepEqual(ids(ALL_SURFACES), ['dashboard', 'fleet', 'work', 'connections', 'org'])
   // A glance-only manager: no Fleet door.
   assert.deepEqual(ids(['Home', 'Work', 'Org']), ['dashboard', 'work', 'org'])
-  // Ask and Connect are not tabs, so a seat naming them adds nothing.
-  assert.deepEqual(ids(['Work', 'Ask', 'Connect']), ['work'])
+  // Ask is not a tab, so a seat naming it adds nothing. Connect IS one now:
+  // the Connections tab rides the existing atom, no new atom was minted.
+  assert.deepEqual(ids(['Work', 'Ask', 'Connect']), ['work', 'connections'])
+  assert.deepEqual(ids(['Work', 'Ask']), ['work'])
+})
+
+test('the Connections tab is the Connect atom, read as Connections', () => {
+  const byId = Object.fromEntries(visibleTabs(ALL_SURFACES))
+  assert.equal(byId.connections, 'Connections')
+  assert.equal(PANE_SURFACE.connections, 'Connect')
+  assert.ok(ALL_SURFACES.includes('Connect'))
+  assert.ok(!ALL_SURFACES.includes('Connections'), 'no new permission atom')
+  assert.equal(TAB_PATHS.connections, '/connections')
+  assert.equal(parsePath('/connections').tab, 'connections')
+  // A seat without Connect loses the tab AND the header's quick Add Agent
+  // door — both are the same surface. App reads the seat, never asserts one.
+  assert.ok(!visibleTabs(['Home', 'Work']).some(([id]) => id === 'connections'))
+  assert.match(app, /hasSurface\(seat, 'Connect'\)/)
+  assert.match(app, /\{canConnect && \(\s*<button[\s\S]*?aria-label="Add Agent"/)
 })
 
 test('the Fleet pane reads Agents in the nav, while the atom stays Fleet', () => {
@@ -110,12 +127,13 @@ test('Org is a nav item now, and Team is gone', () => {
   assert.ok(!visibleTabs(ALL_SURFACES).some(([, label]) => label === 'Team'))
   // Nav is built from the seat, not from the account type — a Business flag
   // decided this before, and that is the thing this ship replaced.
-  assert.match(app, /visibleTabs\(seatOf\(me\)\.surfaces\)/)
+  assert.match(app, /visibleTabs\(seat\.surfaces\)/)
+  assert.match(app, /const seat = seatOf\(me\)\s*\n\s*const tabs = visibleTabs\(seat\.surfaces\)/)
   assert.doesNotMatch(app, /isBusiness/)
 })
 
 test('a seat that names nothing still leaves a way to navigate', () => {
-  assert.deepEqual(visibleTabs([]).map(([id]) => id), ['dashboard', 'fleet', 'work', 'org'])
+  assert.deepEqual(visibleTabs([]).map(([id]) => id), ['dashboard', 'fleet', 'work', 'connections', 'org'])
   assert.ok(visibleTabs(['Nonsense']).length >= 1)
   assert.equal(resolveTab('anything', { surfaces: ['Nonsense'] }), 'work')
 })
