@@ -495,7 +495,8 @@ export const api = {
       signal,
     }),
   // Work Coverage: which dimensions of one item Trovis can see
-  // (work_coverage.py). Per item, opt-in; nothing renders it yet.
+  // (work_coverage.py). Per item and opt-in: the Run page's Visibility
+  // section reads it; Work home and the Home desk panel never do.
   getWorkItemCoverage: (id, { signal = undefined } = {}) =>
     request(`/work/items/${encodeURIComponent(id)}/coverage`, {
       timeoutMs: WORK_TIMEOUT_MS,

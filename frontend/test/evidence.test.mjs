@@ -219,16 +219,21 @@ test('truncation is stated in the backend\'s own terms, quietly', () => {
   assert.match(backend, /_WORK_EVIDENCE_SPAN_LIMIT = 2000/)
 })
 
-test('no coverage, no recommendations, no model call, and the API is the existing one', () => {
+test('no recommendations, no model call, and the API is the existing one', () => {
+  // The evidence helper knows nothing of coverage. The page reads coverage
+  // for its Visibility section (coverage.js, jobDetailCoverage.test.mjs),
+  // but the word "coverage" is an API name there, never rendered text — the
+  // mounted test checks the page's text.
+  assert.doesNotMatch(strip(src('evidence.js')), /coverage/i, 'evidence.js')
   for (const f of ['evidence.js', 'JobDetail.jsx']) {
     const code = strip(src(f))
     // (Skeleton widths like '70%' are layout, not a coverage figure; the
     // mounted test checks the rendered text for percentages.)
-    assert.doesNotMatch(code, /coverage|Connect Stripe|Connect Shopify|recommend|Verified/i, f)
+    assert.doesNotMatch(code, /Connect Stripe|Connect Shopify|recommend|Verified/i, f)
     assert.doesNotMatch(code, /anthropic|askFleet|summariz|api\s*\.ask/i, f)
   }
   const page = strip(src('JobDetail.jsx'))
   assert.match(page, /api\s*\.getWorkItemEvidence\(item\.id, \{ signal \}\)/)
-  assert.match(page, /if \(!isPage\) return undefined\s*\n\s*setEvidenceErr\(null\)/, 'the panel (Home desk) never fetches evidence')
+  assert.match(page, /if \(!isPage\) return undefined\s*\n\s*setEvidence\(null\)\s*\n\s*setEvidenceErr\(null\)/, 'the panel (Home desk) never fetches evidence; the page resets before each load')
   assert.doesNotMatch(src('HomeView.jsx') + src('WorkTab.jsx'), /getWorkItemEvidence/, 'Work home never fetches evidence')
 })
