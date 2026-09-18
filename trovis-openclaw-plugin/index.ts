@@ -16,9 +16,17 @@
  * loop; `trovis.loop.title` is set from the inbound message when
  * captureOutputs is on (or via trovisSetLoopTitle); agent_end auto-closes
  * the loop as done; handoffs are declared via the exported trovisHandoff()
- * helper or the handoffTools config mapping.
- * Attribute-only — span structure and the export path are unchanged, and
- * older backends simply ignore the extra attributes.
+ * helper or the handoffTools config mapping. Older backends simply ignore
+ * the extra attributes.
+ *
+ * Execution structure (see "Execution structure" section): the gateway
+ * stamps its runId on the hook events of one run and ends the run with
+ * agent_end, so it KNOWS which tool calls, model calls and outputs happened
+ * inside which run. Since 0.6.4 that known containment is carried as
+ * standard OTEL parentage — one `agent_run` span per runId, every hook span
+ * of that run a child of it, all in one trace — instead of being dropped
+ * into unrelated root spans. Hooks that carry no runId stay roots: unknown
+ * structure stays unknown, and nothing is ever parented by timing.
  *
  * Privacy:
  *   - Conversation telemetry captures metadata only: message content
@@ -36,9 +44,11 @@
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry"
 import {
+  context,
   trace,
   SpanKind,
   SpanStatusCode,
+  type Context,
   type Span,
   type Tracer,
 } from "@opentelemetry/api"
@@ -54,7 +64,7 @@ import { randomUUID } from "node:crypto"
 // Constants
 // ---------------------------------------------------------------------------
 
-const PLUGIN_VERSION = "0.6.3"
+const PLUGIN_VERSION = "0.6.4"
 // No hardcoded default endpoint — the plugin is inert until the operator
 // explicitly configures where telemetry should go.
 //
@@ -1659,6 +1669,122 @@ function drainSessionUsage(
 // Hook wiring
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Execution structure: the run as the parent of what happened inside it
+// ---------------------------------------------------------------------------
+//
+// What the gateway knows, and what it does not.
+//
+// KNOWS: the run. OpenClaw stamps one `runId` on the hook events of a single
+// message-handling cycle (before_tool_call, model_call_*, llm_output,
+// agent_end, and message_received on gateways that carry it) and terminates
+// the run with agent_end. A tool call carrying runId R happened inside run R
+// — that is the runtime's own assertion, not an inference of ours.
+//
+// DOES NOT KNOW (and so neither do we): which model call issued which tool
+// call, which tool result fed which model call, whether one call was a retry
+// of another, and where exactly the run began — there is no agent_start hook,
+// so the earliest thing we can observe is the first hook that carries the
+// runId. The `trovis.run.start_basis` attribute says so.
+//
+// Hence the shape emitted since 0.6.4, and no deeper:
+//
+//     agent_run (one per runId; trace root)
+//     ├── message_received        (when the gateway put runId on it)
+//     ├── model_call
+//     ├── tool_call
+//     ├── llm_output
+//     └── agent_run_complete
+//
+// Hook spans with no runId keep their previous shape — each its own root,
+// its own trace — because a span we cannot place in a run is not placed in
+// one. Nothing here reads timing, names or session keys to decide parentage.
+//
+// Work correlation is untouched: children carry exactly the trovis.run.id /
+// trovis.loop.external_id attributes they carried before, and the root
+// carries the same two, so it lands in the same loop as its children.
+
+interface RunRoot {
+  span: Span
+  ctx: Context
+  startedAtMs: number
+  timer?: ReturnType<typeof setTimeout>
+}
+
+// runId -> the open run root. Bounded like every other run-keyed map here.
+const runRoots = new Map<string, RunRoot>()
+const RUN_ROOT_MAX = 500
+// A run whose agent_end never arrives (gateway crash mid-run, or a hook set
+// that omits agent_end) still gets its root exported, closed on this timer.
+const RUN_ROOT_TIMEOUT_MS = 30 * 60_000
+
+/** The run root for this hook's runId, opened on first sight. Undefined when
+ * the hook carries no runId — the caller then starts a root span exactly as
+ * before. */
+function runRootFor(
+  tracer: Tracer,
+  event: unknown,
+  ctx: OpenClawContext | undefined,
+  { create }: { create: boolean },
+): RunRoot | undefined {
+  const runId = pickRunId(event, ctx)
+  if (!runId) return undefined
+  const existing = runRoots.get(runId)
+  if (existing || !create) return existing
+  if (runRoots.size >= RUN_ROOT_MAX) {
+    const oldest = runRoots.keys().next().value
+    if (oldest !== undefined) endRunRoot(oldest, "evicted")
+  }
+  const span = tracer.startSpan("agent_run", { kind: SpanKind.INTERNAL }, context.active())
+  span.setAttribute("trovis.event.type", "agent_run")
+  span.setAttribute("trovis.run.id", runId)
+  // Same loop key the children carry (see applyLoopSignals) — never the
+  // one-shot title/handoff/close signals, which belong to the hook spans.
+  setIfPresent(span, "trovis.loop.external_id", sessionKeyOf(event, ctx))
+  setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
+  // Honest about the start: the run began at or before this hook fired.
+  span.setAttribute("trovis.run.start_basis", "first_observed_hook")
+  const root: RunRoot = {
+    span,
+    ctx: trace.setSpan(context.active(), span),
+    startedAtMs: Date.now(),
+  }
+  const timer = setTimeout(() => endRunRoot(runId, "timeout"), RUN_ROOT_TIMEOUT_MS)
+  if (typeof timer.unref === "function") timer.unref()
+  root.timer = timer
+  runRoots.set(runId, root)
+  return root
+}
+
+/** The OTEL context a hook span should be started in: the run root's when
+ * the hook carries a runId, else undefined (= the active context, i.e. a
+ * new root — exactly the pre-0.6.4 behaviour). */
+function runContext(
+  tracer: Tracer,
+  event: unknown,
+  ctx: OpenClawContext | undefined,
+): Context | undefined {
+  return runRootFor(tracer, event, ctx, { create: true })?.ctx
+}
+
+/** End a run root. `endBasis` records WHY it ended: agent_end (the gateway
+ * said so), timeout (never saw agent_end), evicted (bookkeeping bound). */
+function endRunRoot(
+  runId: string,
+  endBasis: "agent_end" | "timeout" | "evicted",
+  failure?: { message: string },
+): void {
+  const root = runRoots.get(runId)
+  if (!root) return
+  runRoots.delete(runId)
+  if (root.timer) clearTimeout(root.timer)
+  root.span.setAttribute("trovis.run.end_basis", endBasis)
+  if (failure) {
+    root.span.setStatus({ code: SpanStatusCode.ERROR, message: failure.message })
+  }
+  root.span.end()
+}
+
 function wireEvents(api: OpenClawApi): void {
   // Tool start/end correlation. Model-call spans live in module-scope
   // `openModelSpans` because they're enriched later from transcript usage.
@@ -1676,7 +1802,11 @@ function wireEvents(api: OpenClawApi): void {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
-    const span = tracer.startSpan("message_received", { kind: SpanKind.SERVER })
+    const span = tracer.startSpan(
+      "message_received",
+      { kind: SpanKind.SERVER },
+      runContext(tracer, event, ctx),
+    )
     span.setAttribute("trovis.event.type", "message_received")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(
@@ -1756,7 +1886,11 @@ function wireEvents(api: OpenClawApi): void {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
-    const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT })
+    const span = tracer.startSpan(
+      "message_sending",
+      { kind: SpanKind.CLIENT },
+      runContext(tracer, event, ctx),
+    )
     span.setAttribute("trovis.event.type", "message_sending")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
@@ -1790,7 +1924,11 @@ function wireEvents(api: OpenClawApi): void {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
-    const span = tracer.startSpan("message_sent", { kind: SpanKind.CLIENT })
+    const span = tracer.startSpan(
+      "message_sent",
+      { kind: SpanKind.CLIENT },
+      runContext(tracer, event, ctx),
+    )
     const success = event?.success ?? !event?.error
     span.setAttribute("trovis.event.type", "message_sent")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
@@ -1812,7 +1950,14 @@ function wireEvents(api: OpenClawApi): void {
     const tracer = ensureInit(hookCtx ?? event?.context)
     if (!tracer) return
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
-    const span = tracer.startSpan("tool_call", { kind: SpanKind.INTERNAL })
+    // Started in the run's context: the gateway put runId on this event, so
+    // the call happened inside that run. Which model turn issued it, the
+    // gateway does not say — so the run, not a model_call, is the parent.
+    const span = tracer.startSpan(
+      "tool_call",
+      { kind: SpanKind.INTERNAL },
+      runContext(tracer, event, ctx),
+    )
     span.setAttribute("trovis.event.type", "tool_call")
     span.setAttribute("trovis.tool.name", event.toolName)
     span.setAttribute("trovis.tool.call_id", event.toolCallId)
@@ -1889,7 +2034,11 @@ function wireEvents(api: OpenClawApi): void {
     if (!tracer) return
     state.sawConversationHook = true
     const ctx = ((hookCtx ?? event?.context) as OpenClawContext | undefined) ?? ({} as OpenClawContext)
-    const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT })
+    const span = tracer.startSpan(
+      "model_call",
+      { kind: SpanKind.CLIENT },
+      runContext(tracer, event, ctx),
+    )
     span.setAttribute("trovis.event.type", "model_call")
     setIfPresent(span, "gen_ai.system", event?.provider)
     setIfPresent(span, "gen_ai.request.model", event?.model)
@@ -1983,7 +2132,11 @@ function wireEvents(api: OpenClawApi): void {
     // A response just landed → its usage line is likely written. Reconcile
     // open model_call spans for this session against the transcript.
     drainSessionUsage(tracer, ctx)
-    const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL })
+    const span = tracer.startSpan(
+      "llm_output",
+      { kind: SpanKind.INTERNAL },
+      runContext(tracer, event, ctx),
+    )
     span.setAttribute("trovis.event.type", "llm_output")
     setIfPresent(span, "trovis.session.key", ctx.sessionKey)
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
@@ -2019,9 +2172,15 @@ function wireEvents(api: OpenClawApi): void {
     // Run finished → all of its usage lines are written. Final reconcile so
     // every model_call span in this session gets its tokens before export.
     drainSessionUsage(tracer, ctx)
-    const span = tracer.startSpan("agent_run_complete", {
-      kind: SpanKind.INTERNAL,
-    })
+    // Under the run root when one is open. agent_end alone does not OPEN a
+    // root: a run of which we saw nothing but its end has no structure to
+    // carry, and a root containing only its own completion says nothing.
+    const root = runRootFor(tracer, event, ctx, { create: false })
+    const span = tracer.startSpan(
+      "agent_run_complete",
+      { kind: SpanKind.INTERNAL },
+      root?.ctx,
+    )
     span.setAttribute("trovis.event.type", "agent_run_complete")
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx))
     // Drains any trovisCloseLoop() the agent queued late in the run, so
@@ -2093,6 +2252,19 @@ function wireEvents(api: OpenClawApi): void {
     setIfPresent(span, "trovis.run.channel_id", ctx.channelId)
     setIfPresent(span, "trovis.run.job_id", ctx.jobId)
     span.end()
+    // The gateway said the run is over: close its root, after its last
+    // child. A failed run marks the root too — that is the runtime's own
+    // verdict on the run, not an inference from its children.
+    const runId = pickRunId(event, ctx)
+    if (runId && root) {
+      endRunRoot(
+        runId,
+        "agent_end",
+        success === false
+          ? { message: typeof event?.error === "string" ? event.error : "run failed" }
+          : undefined,
+      )
+    }
   })
 }
 
@@ -2415,7 +2587,13 @@ export const __internal = {
     pendingHandoff = null
     pendingClose = null
     pendingTitle = null
+    for (const root of runRoots.values()) {
+      if (root.timer) clearTimeout(root.timer)
+    }
+    runRoots.clear()
   },
+  /** Test-only: the open run roots, keyed by runId. */
+  runRoots,
 }
 
 // ---------------------------------------------------------------------------

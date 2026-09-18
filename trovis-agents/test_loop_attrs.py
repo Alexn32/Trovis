@@ -84,10 +84,19 @@ class FakeTracer:
     def __init__(self):
         self.spans = []
 
-    def start_as_current_span(self, name):
+    # `context=` is the run span's context the adapters pass since 0.5.2 so
+    # event spans export as children of the run; the attribute assertions
+    # here do not depend on it.
+    def start_as_current_span(self, name, context=None):
         s = FakeSpan(name)
+        s.context = context
         self.spans.append(s)
         return _CM(s)
+
+    def start_span(self, name):
+        s = FakeSpan(name)
+        self.spans.append(s)
+        return s
 
 
 # ---------------------------------------------------------------------------

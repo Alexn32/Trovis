@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.6.4
+
+### Changed
+
+- **Known execution structure is now carried as OTEL parentage.** The
+  gateway stamps one `runId` on every hook event of a run and ends the run
+  with `agent_end`, so it knows which tool calls, model calls and outputs
+  happened inside which run. Until now every hook span was started as its
+  own root in its own trace and that containment was dropped. The plugin
+  now opens one `agent_run` span per `runId` on the first hook that carries
+  it and starts every later hook span of that run as its child, in the same
+  trace; `agent_end` closes the root after the `agent_run_complete` child
+  (a failed run marks the root's status too). The root carries
+  `trovis.run.start_basis=first_observed_hook` (there is no agent_start
+  hook, so the run began at or before the first hook we saw) and
+  `trovis.run.end_basis=agent_end|timeout|evicted`.
+- Hooks that carry no `runId` are unchanged: each stays its own root.
+  Nothing is parented by timing, span name or session key; the gateway does
+  not say which model turn issued which tool call, so tool and model spans
+  are siblings under the run, not nested in each other.
+- Work correlation is unchanged: children carry exactly the `trovis.run.id`
+  / `trovis.loop.external_id` they carried before, and the root carries the
+  same two, so it lands in the same loop.
+- `trovis.trace.parent_span_id` (the gateway's own parent id, copied as a
+  plain attribute on `message_received`) is kept as-is; its semantics are
+  not documented, so it is not translated into OTEL parentage.
+
 ## 0.6.3
 
 ### Added

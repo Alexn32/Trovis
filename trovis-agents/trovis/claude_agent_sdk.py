@@ -136,36 +136,101 @@ def _patch_client_stream() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _start_run_span(tracer: Any, agent_name: str) -> Any:
+    """The root of one `query()` / `receive_response()` stream — the run.
+
+    The SDK yields every message of one query through one iterator and ends
+    it with a ResultMessage, so the stream IS the execution that contains
+    the messages: known containment, carried as standard OTEL parentage.
+    The SDK does not say which assistant turn's tool use produced which
+    later message, so message spans are siblings under the run — nothing
+    deeper is encoded. Returns None (messages stay roots, as before 0.5.2)
+    if the span cannot be started."""
+    try:
+        span = tracer.start_span("agent_run")
+        span.set_attribute("trovis.event.type", "agent_run")
+        span.set_attribute("trovis.agent.id", agent_name)
+        span.set_attribute("trovis.run.start_basis", "query_opened")
+        return span
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[Trovis] run span start failed: {e}")
+        return None
+
+
+def _stamp_run(state: dict[str, Any]) -> None:
+    """Put the session id on the run span once the SDK reveals it (the init
+    SystemMessage, or the ResultMessage) — the same run id / loop key the
+    message spans carry, so the root lands in the same loop. One-shot
+    title / handoff signals are never consumed here."""
+    run = state.get("run")
+    sid = state.get("session_id")
+    if run is None or not sid or state.get("run_stamped"):
+        return
+    try:
+        apply_loop_attrs(
+            run, run_id=sid, external_id=sid, consume_title=False, consume_handoff=False,
+        )
+        state["run_stamped"] = True
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[Trovis] run span stamp failed: {e}")
+
+
 async def _instrumented_stream(
     inner: AsyncIterator[Any], call_kwargs: dict[str, Any]
 ) -> AsyncIterator[Any]:
     """Yield every message from the underlying iterator while emitting a
-    span per message. Span failures are swallowed — the user's loop
-    keeps receiving messages no matter what.
+    span per message, each a child of one `agent_run` span for the stream.
+    Span failures are swallowed — the user's loop keeps receiving messages
+    no matter what.
 
     `last_model` is threaded across messages so the ResultMessage (which
     carries the run's token totals but not the model) can be tagged with
     the model seen on the AssistantMessages. Per-turn token usage is captured
     on each AssistantMessage's llm_output span; `run_usage_captured` tracks
     that so ResultMessage usage is only a fallback (no double-counting).
+
+    The run span is started explicitly, never made *current* — an async
+    generator that attached it would leak it across every `yield`; children
+    are parented through an explicit context (`state["run_ctx"]`).
     """
     _maybe_register(call_kwargs)
     agent_name = _agent_name(call_kwargs)
     # query(prompt=...) is the user task. Used as a title fallback on the
     # first UserMessage when capture is on (prompt text is user content).
     prompt = call_kwargs.get("prompt")
+    tracer = trace.get_tracer("trovis.claude_agent_sdk")
+    run = _start_run_span(tracer, agent_name)
     state: dict[str, Any] = {
         "last_model": None,
         "session_id": None,
         "prompt": prompt if isinstance(prompt, str) else None,
+        "run": run,
+        "run_ctx": trace.set_span_in_context(run) if run is not None else None,
     }
 
-    async for message in inner:
-        try:
-            _emit_for_message(message, agent_name, state)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Trovis] message span emit failed: {e}")
-        yield message
+    try:
+        async for message in inner:
+            try:
+                _emit_for_message(message, agent_name, state)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Trovis] message span emit failed: {e}")
+            yield message
+    except Exception as e:
+        if run is not None:
+            try:
+                run.set_status(StatusCode.ERROR, type(e).__name__)
+                run.set_attribute("trovis.run.end_basis", "stream_error")
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+    finally:
+        if run is not None:
+            try:
+                if not state.get("run_end_basis_set"):
+                    run.set_attribute("trovis.run.end_basis", "stream_closed")
+                run.end()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _emit_for_message(
@@ -173,6 +238,7 @@ def _emit_for_message(
 ) -> None:
     kind = type(message).__name__
     tracer = trace.get_tracer("trovis.claude_agent_sdk")
+    run_ctx = state.get("run_ctx")
 
     if kind == "SystemMessage":
         # init system message carries session_id + model + tools.
@@ -181,6 +247,7 @@ def _emit_for_message(
             sid = data.get("session_id")
             if sid:
                 state["session_id"] = sid
+                _stamp_run(state)
             model = data.get("model")
             if model:
                 state["last_model"] = model
@@ -193,7 +260,7 @@ def _emit_for_message(
         title = None
         if is_capture_enabled():
             title = first_user_text(text) or human_title(state.get("prompt"))
-        with tracer.start_as_current_span("message_received") as span:
+        with tracer.start_as_current_span("message_received", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "message_received")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(
@@ -223,7 +290,7 @@ def _emit_for_message(
                 if isinstance(t, str):
                     text_parts.append(t)
             elif btype == "ToolUseBlock":
-                _emit_tool_use(tracer, block, agent_name, run_id)
+                _emit_tool_use(tracer, block, agent_name, run_id, run_ctx)
         text = "\n".join(text_parts)
         # Per-turn token usage rides on each AssistantMessage. Capturing it here
         # — not only on the final ResultMessage — is what makes multi-step
@@ -247,7 +314,7 @@ def _emit_for_message(
         # Emit the llm_output span when there's text OR usage (a tool-use turn
         # has no text but still billed tokens we must not drop).
         if text or has_usage:
-            with tracer.start_as_current_span("llm_output") as span:
+            with tracer.start_as_current_span("llm_output", context=run_ctx) as span:
                 span.set_attribute("trovis.event.type", "llm_output")
                 span.set_attribute("trovis.agent.id", agent_name)
                 apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
@@ -282,9 +349,9 @@ def _emit_for_message(
 
 
 def _emit_tool_use(
-    tracer: Any, block: Any, agent_name: str, run_id: str
+    tracer: Any, block: Any, agent_name: str, run_id: str, run_ctx: Any = None,
 ) -> None:
-    with tracer.start_as_current_span("tool_call") as span:
+    with tracer.start_as_current_span("tool_call", context=run_ctx) as span:
         span.set_attribute("trovis.event.type", "tool_call")
         span.set_attribute("trovis.agent.id", agent_name)
         apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
@@ -310,9 +377,20 @@ def _emit_result(
     sid = _get(message, "session_id") or state.get("session_id") or ""
     if sid:
         state["session_id"] = sid
+        _stamp_run(state)
     is_error = bool(_get(message, "is_error"))
+    run = state.get("run")
+    if run is not None:
+        # The SDK's own verdict on the run, recorded on the run span too.
+        try:
+            run.set_attribute("trovis.run.end_basis", "result_message")
+            state["run_end_basis_set"] = True
+            if is_error:
+                run.set_status(StatusCode.ERROR)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Trovis] run span status failed: {e}")
 
-    with tracer.start_as_current_span("agent_run_complete") as span:
+    with tracer.start_as_current_span("agent_run_complete", context=state.get("run_ctx")) as span:
         span.set_attribute("trovis.event.type", "agent_run_complete")
         span.set_attribute("trovis.agent.id", agent_name)
         apply_loop_attrs(span, run_id=sid or None, external_id=sid or None)

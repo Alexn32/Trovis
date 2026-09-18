@@ -1,5 +1,32 @@
 # Changelog — trovis-agents
 
+## 0.5.2
+
+**Known execution structure is carried as OTEL parentage.** The two
+adapters that wrap a run's event stream — Claude Managed Agents
+(`sessions.stream()`) and the Claude Agent SDK (`query()` /
+`receive_response()`) — know that every event they yield belongs to the one
+call the user opened. Until now each event span was its own root in its own
+trace and that containment was dropped. Each stream now opens one
+`agent_run` span and starts every event span in its context, so the
+exported spans share the run's trace id and name the run span as parent;
+the run span ends when the stream ends (or fails, which marks it).
+
+- Nothing deeper is encoded: neither SDK says which model turn issued which
+  tool use, so `message_received` / `llm_output` / `tool_call` /
+  `agent_run_complete` are siblings under the run. Nothing is parented by
+  timing or name.
+- Work correlation is unchanged: event spans carry exactly the
+  `trovis.run.id` / `trovis.loop.external_id` they carried before, and the
+  run span carries the same two (never the one-shot title / handoff
+  signals), so it lands in the same loop.
+- The run span is never made *current* — a generator that attached it to
+  the caller's context would leak it across every `yield` — so user code
+  that reads the active span sees exactly what it saw before.
+- OpenAI Agents SDK: unchanged. The official OpenTelemetry adapter already
+  emits the SDK's own hierarchy; `CaptureProcessor` still adds content spans
+  beside it. Grok (xAI SDK): unchanged — the SDK owns its spans.
+
 ## 0.5.1
 
 `init(agent_role="…")` — one line on what an agent is FOR, registered as its

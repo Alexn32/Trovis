@@ -24,6 +24,16 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 - **Distribution:** `trovis-agents/` (pip SDK for OpenAI Agents SDK / Claude Agent SDK /
   Claude Managed Agents), `trovis-openclaw-plugin/` (TS plugin), `mcp_server.py`
   (MCP server for ChatGPT, mounted on the FastAPI app — currently unlisted in the UI).
+  **Execution structure in the doors we own:** where the runtime itself knows that
+  activity happened inside a run (OpenClaw's `runId` per hook, ended by `agent_end`;
+  one Managed Agents `stream()`; one Claude Agent SDK `query()`), the door opens one
+  `agent_run` span and starts the run's hook/event spans in its OTEL context, so ingest
+  stores the real `parent_span_id` and `work_execution.py` reconstructs the tree with no
+  heuristics. Nothing deeper is encoded than the runtime asserts (tool and model spans
+  are siblings under the run); hooks with no run id stay roots; the root carries only
+  the run id / loop key its children carry, never the one-shot title/handoff/close
+  signals, so Work correlation is unchanged. The Grok Bot and ChatGPT MCP doors, the xAI
+  SDK and the OpenAI adapter are deliberately untouched (see PR 214's audit).
 
 ## Repo map
 
@@ -36,7 +46,7 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 | `pricing_sync.py` | Daily model-price sync (LiteLLM list) |
 | `work_evidence.py` | `GET /work/items/{id}/evidence`: provenance for one item's claims — a read model over its spans and loop events (types `execution` / `action_reported` / `external_state` / `handoff` / `completion` / `cost`; source connector via `connect_health.identify_connector`; correlation `explicit_key` / `time_adjacency` / `direct`). Persists nothing; `loop_events.span_id/trace_id` (ingest-written events only) and the provider ids on a SaaS clear are the two facts kept so it can. Not verification, not coverage. |
 | `work_coverage.py` | `GET /work/items/{id}/coverage`: which dimensions of one item are observed — `execution` / `actions` / `external_outcomes` / `handoffs` / `cost`, each `observed` / `unknown` (cost also `partial` / `not_observed`, the one dimension with a known denominator: model-usage spans vs priced spans). A read model over that item's evidence; absence is `unknown`, never "nothing happened". No score, no `not_applicable`, no `verified`, not Connection Health. |
-| `work_execution.py` | `GET /work/items/{id}/execution`: the **Execution Graph** — the technical execution underneath one item, a read model over its spans and loop events. Nodes typed `worker` / `model` / `tool` / `system` / `handoff` / `wait` / `completion` / `other`, each with a stated `classification_basis`; STRUCTURE from the recorded `parent_span_id` (attached only when the parent is in the run's read set; cycles broken deterministically; nothing invented from timing) kept separate from CHRONOLOGY (node ids by persisted time). Worker ≠ connector; cost/usage per PR 211 (covered = known, not priced alone; unknown = None). Persists nothing, no model, no retry or success inference, no business steps. Per item only — never Home, the Work table or a job roll-up. |
+| `work_execution.py` | `GET /work/items/{id}/execution`: the **Execution Graph** — the technical execution underneath one item, a read model over its spans and loop events. Nodes typed `worker` / `model` / `tool` / `system` / `handoff` / `wait` / `completion` / `other`, each with a stated `classification_basis` (the run root the doors emit, `trovis.event.type=agent_run`, is `worker` by that explicit event type alone — never by span name); STRUCTURE from the recorded `parent_span_id` (attached only when the parent is in the run's read set; cycles broken deterministically; nothing invented from timing) kept separate from CHRONOLOGY (node ids by persisted time). Worker ≠ connector; cost/usage per PR 211 (covered = known, not priced alone; unknown = None). Persists nothing, no model, no retry or success inference, no business steps. Per item only — never Home, the Work table or a job roll-up. |
 | `connect_health.py` | `GET /connect/health`: normalized connection state per connector (`not_connected` / `waiting_for_data` / `connected`), a read model over `saas_connections` + `saas_events` and stored spans. Identity comes from the stamp a Trovis-owned door writes (`trovis.connector.id`, or the legacy `trovis.platform` / `trovis.sdk.platform` / OpenClaw stamps) — never from `service.name`. No `degraded`: nothing records a concrete failure yet. Not Work coverage. |
 | `frontend/src/*.jsx` | UI: `App.jsx` shell, `Dashboard.jsx`, `Fleet.jsx`, `Workflows.jsx`/`WorkflowCanvas.jsx`, `AddAgent.jsx`, `Settings.jsx`, `AskVisuals.jsx`, `CostPage.jsx` |
 | `frontend/src/styles.css` | All styling + the CSS theme variables |

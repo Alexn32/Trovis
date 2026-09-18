@@ -37,6 +37,12 @@ plugin.register({
 function makeFakeTracer(spans) {
   return {
     startSpan(name) {
+      // This suite is about the HOOK spans' attributes. Since 0.6.4 a run
+      // also opens one `agent_run` root ahead of its first hook span; it is
+      // recorded but kept out of `spans` so the positional assertions below
+      // keep reading the hook span they were written for. Root behaviour is
+      // covered by execution-structure.test.mjs.
+      const sink = name === "agent_run" ? [] : spans
       const span = {
         name,
         attributes: {},
@@ -54,7 +60,7 @@ function makeFakeTracer(spans) {
           this.ended = true
         },
       }
-      spans.push(span)
+      sink.push(span)
       return span
     },
   }
