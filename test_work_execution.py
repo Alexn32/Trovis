@@ -238,6 +238,15 @@ with TestClient(main.app) as c:
           and terr["tool"]["display_name"] == "stripe.refunds.create" and terr["tool"]["mcp_server"] is None)
     check("18. an unnamed span with no basis is 'other', not a worker or a model",
           r_n["type"] == "other" and r_n["provenance"]["classification_basis"] == "none")
+    check("18. a span merely NAMED agent_run by some exporter, with no Trovis event type, is still 'other'",
+          r_n["label"] == "agent_run" and r_n["type"] == "other")
+    RUN_ROOT = sp("agent_run", 867, {**KEY, "trovis.event.type": "agent_run"}, trace=T1, span="000000000000000b")
+    post(KA, "refunds-agent", [RUN_ROOT], GROK)
+    _, nodes = graph(HA, item["id"])
+    rr = node_of(nodes, RUN_ROOT)
+    check("the doors' explicit trovis.event.type=agent_run classifies as a worker lifecycle node, by event type only",
+          rr["type"] == "worker" and rr["provenance"]["classification_basis"] == "event_type"
+          and rr["provenance"]["event_type"] == "agent_run")
     check("19. model classification from the span's own usage / name — not from a model name in the resource",
           m1["type"] == "model" and m1["provenance"]["classification_basis"] == "span_name"
           and r_n["model"] is None and r_n["type"] != "model")

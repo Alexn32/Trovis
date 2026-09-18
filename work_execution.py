@@ -35,7 +35,11 @@ is stated on the node (`provenance.classification_basis`):
               the span name) is one of message_received / message_sent /
               message_sending / agent_run_complete / agent_error /
               agent_registration / heartbeat / handoff, or a Grok Bot report
-              (job_started / job_waiting / job_finished / job_failed).
+              (job_started / job_waiting / job_finished / job_failed); or the
+              run itself — `trovis.event.type=agent_run`, the root span the
+              Trovis-owned doors emit for a known run lifecycle (PR 214),
+              classified from that explicit event type ONLY, never from a
+              span that merely bears the name.
   model       `trovis.event.type` or span name is model_call / llm_output, OR
               the span's OWN attributes carried model usage (the ingest
               invariant behind spans.total_tokens IS NOT NULL). A model NAME
@@ -133,6 +137,12 @@ _WORKER_EVENTS = frozenset({
     "agent_error", "agent_registration", "heartbeat", "handoff",
     "job_started", "job_waiting", "job_finished", "job_failed",
 })
+# The run itself, as the Trovis-owned doors emit it since PR 214: one span
+# per known run lifecycle (`trovis.event.type=agent_run`), the structural
+# root its hook/event spans hang off. Classified from that EXPLICIT event
+# type only — a span merely NAMED "agent_run" by an arbitrary exporter is
+# not the doors' assertion and stays `other`.
+_WORKER_EVENT_TYPES_ONLY = frozenset({"agent_run"})
 _MODEL_EVENTS = frozenset({"model_call", "llm_output"})
 _TOOL_EVENTS = frozenset({"tool_call"})
 
@@ -185,6 +195,8 @@ def _classify_span(span_name: str, event_type: Any, tool_name: Any, has_usage: b
     that same vocabulary, then a tool attribute, then the span's own usage.
     Nothing else classifies."""
     et = str(event_type) if isinstance(event_type, str) and event_type else None
+    if et in _WORKER_EVENT_TYPES_ONLY:
+        return "worker", "event_type"
     for candidate, basis in ((et, "event_type"), (span_name, "span_name")):
         if not candidate:
             continue

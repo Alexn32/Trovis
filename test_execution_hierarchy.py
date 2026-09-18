@@ -304,8 +304,9 @@ with TestClient(main.app) as c:
           msg["cost"] is None and root_node["cost"] is None and root_node["usage"] is None)
     check("chronology still lists the root first and does not create the parentage",
           body["chronology"][0] == root_node["id"] and body["chronology"] != [n["parent_id"] for n in body["nodes"]])
-    check("the run root is typed neutrally by the unchanged read model (its vocabulary predates agent_run)",
-          root_node["type"] == "other" and root_node["provenance"]["classification_basis"] == "none")
+    check("the run root is a worker lifecycle node, classified from the explicit event type the door emits",
+          root_node["type"] == "worker" and root_node["provenance"]["classification_basis"] == "event_type"
+          and root_node["provenance"]["event_type"] == "agent_run")
     cov = c.get(f"/work/items/{item['id']}/coverage", headers=HA).json()
     check("Work Coverage unchanged: execution observed, actions observed",
           {d["id"]: d["state"] for d in cov["dimensions"]}["execution"] == "observed"
@@ -320,6 +321,9 @@ with TestClient(main.app) as c:
           len(r2) == 1 and r2[0]["label"] == "agent_run"
           and sorted(n["label"] for n in body2["nodes"] if n["parent_id"] == r2[0]["id"])
           == ["agent_run_complete", "llm_output", "llm_output", "message_received", "tool_call"])
+    check("the Claude Agent SDK run root is a worker node by its explicit event type",
+          r2[0]["type"] == "worker" and r2[0]["provenance"]["classification_basis"] == "event_type"
+          and r2[0]["provenance"]["event_type"] == "agent_run")
     done = next(n for n in body2["nodes"] if n["label"] == "agent_run_complete")
     outs = [n for n in body2["nodes"] if n["label"] == "llm_output"]
     check("22. reported run cost on the completion span; the per-turn usage spans are covered, not priced alone",
@@ -359,8 +363,10 @@ with TestClient(main.app) as c:
           all(k["parent_id"] == r1["id"] for k in r1_kids if k["type"] == "tool"))
     check("5. chronology is by time, structure is by parent: the second run's spans are not children of the first",
           all(k["parent_id"] != r1["id"] for k in oc_body["nodes"] if k["provenance"]["trace_id"] != r1["provenance"]["trace_id"]))
-    check("the root says the start was the first observed hook and the end was agent_end",
-          r1["provenance"]["event_type"] == "agent_run" and r1["status"] in ("unset", "ok"))
+    check("the OpenClaw run roots are worker nodes by their explicit event type",
+          all(n["type"] == "worker" and n["provenance"]["classification_basis"] == "event_type"
+              and n["provenance"]["event_type"] == "agent_run" for n in run_roots)
+          and r1["status"] in ("unset", "ok"))
     check("8/9. correlation unchanged: all twelve spans of both runs (2 roots + 8 + 2) are on this one item by its explicit session key",
           oc_body["spans_read"] == 12 and all(n["provenance"]["correlation"] == "explicit_key" for n in oc_body["nodes"] if n["provenance"]["record"] == "span"))
     check("the orphan tool call (no runId, no session) is NOT on this item and is nobody's child",
