@@ -2558,6 +2558,147 @@ class WorkExecutionResponse(BaseModel):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class WorkGraphActor(BaseModel):
+    """Who performed or reported a record: agent (the stored worker label,
+    never the connector), human (resolved name or "a person"), or system."""
+
+    type: str
+    label: str | None = None
+
+
+class WorkGraphSystem(BaseModel):
+    """The external system a wait or exception concerns, when explicitly
+    declared: label, provider id, and the declared target."""
+
+    label: str | None = None
+    provider: str | None = None
+    target_id: str | None = None
+
+
+class WorkGraphProvenance(BaseModel):
+    """Where a Work Step comes from — enough for Work Graph → Evidence →
+    Execution drill-through without a new inference layer.
+
+      event_id              the loop event the step came from — always set
+      evidence_id / execution_node_id   references into the Evidence and
+                            Execution read models (both `event:<id>`), set
+                            ONLY when that read model actually holds the
+                            record; None means no such record exists there
+                            (e.g. Evidence has none for stall_detected), never
+                            a reference by naming convention
+      evidence_kind         handoff | external_state | completion, or None
+                            with evidence_id
+      span_id / trace_id    the span whose attributes declared the event,
+                            when ingest recorded one
+      correlation           the recorded mechanism (explicit_key / direct /
+                            time_adjacency / origin) or None
+      source_type / source_connector_id   who wrote it and, for an agent,
+                            through which connector — kept apart from the
+                            actor's worker identity
+      external_object_id / external_event_id   the provider's own ids on a
+                            SaaS-spine record
+    """
+
+    event_id: int
+    evidence_id: str | None = None
+    evidence_kind: str | None = None
+    execution_node_id: str | None = None
+    span_id: str | None = None
+    trace_id: str | None = None
+    correlation: str | None = None
+    source_type: str | None = None
+    source_connector_id: str | None = None
+    external_object_id: str | None = None
+    external_event_id: str | None = None
+
+
+class WorkGraphStep(BaseModel):
+    """One meaningful operational change (work_graph.py).
+
+      id        `work-step:event:<loop event id>` — source-derived, stable.
+      type      progress | handoff | wait | exception | completed.
+      at        the event's persisted time.
+      label     a conservative generic sentence ("Handed to a person",
+                "Waiting on Stripe", "Work record closed") — never an
+                outcome, never provider-specific business language.
+      actor     who performed or reported it. system: the external system a
+                wait/exception concerns, when declared. details: the
+                recorded facts (direction, target, reason, waiting_on, the
+                SaaS effect and ids, close reason, `outcome: record_closed`).
+    """
+
+    id: str
+    type: str
+    at: str | None = None
+    label: str
+    actor: WorkGraphActor
+    system: WorkGraphSystem | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    provenance: WorkGraphProvenance
+
+
+class WorkGraphSegment(BaseModel):
+    """One link of the canonical possession chain (loops.compute_loop_segments):
+    who held the work, from when to when (None = still holding), whether
+    they were waited on, and the tools touched while holding it."""
+
+    holder_type: str
+    holder: str | None = None
+    start: str | None = None
+    end: str | None = None
+    waiting: bool = False
+    touches: list[dict[str, Any]] = Field(default_factory=list)
+    event_count: int = 0
+
+
+class WorkGraphPossession(BaseModel):
+    segments: list[WorkGraphSegment] = Field(default_factory=list)
+    current_holder: WorkGraphSegment | None = None
+
+
+class WorkGraphLifecycleEvent(BaseModel):
+    """Every loop event, as provenance: the ones that earned a step name it
+    (`step_id`); the ones that only moved possession (accept / complete /
+    a SaaS clear) say so; loop_opened is bookkeeping."""
+
+    id: str
+    event_id: int
+    type: str
+    at: str | None = None
+    actor: WorkGraphActor
+    direction: str | None = None
+    handoff_id: str | None = None
+    saas_provider: str | None = None
+    saas_effect: str | None = None
+    saas_event_type: str | None = None
+    external_object_id: str | None = None
+    external_event_id: str | None = None
+    step_id: str | None = None
+    possession_only: bool = False
+
+
+class WorkGraphResponse(BaseModel):
+    """GET /work/items/{id}/graph — the operational projection of one run.
+    `steps` are the meaningful changes Trovis can state, in `chronology`
+    order (time, then event id — order, not causality); `possession` is the
+    existing possession chain; `lifecycle` is every loop event for
+    provenance; `summary.execution_only` counts the technical record that
+    deliberately did not become steps. `bounded` says the span read was
+    capped — every step is still present (events are read whole)."""
+
+    item_id: int
+    generated_at: str
+    steps: list[WorkGraphStep] = Field(default_factory=list)
+    chronology: list[str] = Field(default_factory=list)
+    possession: WorkGraphPossession = Field(default_factory=WorkGraphPossession)
+    lifecycle: list[WorkGraphLifecycleEvent] = Field(default_factory=list)
+    bounded: bool = False
+    span_limit: int = 0
+    spans_read: int = 0
+    events_read: int = 0
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConnectionHealth(BaseModel):
     """What Trovis knows about one connector right now (connect_health.py).
 
