@@ -455,10 +455,11 @@ with TestClient(main.app) as c:
     import work_execution
     src = inspect.getsource(work_execution)
     check("27. no LLM in the read model", not any(w in src for w in ("anthropic", "asker", "describer")))
-    # The architectural boundary after PR 215: the Execution UI exists and is
+    # The architectural boundary after PR 216: the Execution UI exists and is
     # the ONLY reader of the endpoint (the Run page, never Home or the Work
-    # home); Work Graph reconstruction — business steps derived from
-    # execution — still does not exist anywhere, frontend or backend.
+    # home). The Work Graph is a backend read model (work_graph.py) that
+    # projects Work Steps from LIFECYCLE EVENTS only; it has no frontend yet,
+    # and nothing anywhere derives business steps from execution spans.
     fe_src = os.path.join(HERE, "frontend", "src")
     fe_files = {f: open(os.path.join(fe_src, f), encoding="utf-8").read()
                 for f in os.listdir(fe_src) if f.endswith((".jsx", ".js"))}
@@ -469,10 +470,16 @@ with TestClient(main.app) as c:
           and "getWorkItemExecution" not in fe_files.get("WorkTab.jsx", ""))
     graph_words = ("work_graph", "WorkGraph", "workGraph", "business_step", "businessStep")
     py_files = [f for f in os.listdir(HERE) if f.endswith(".py") and not f.startswith("test_")]
-    check("26. no Work Graph reconstruction anywhere: no module, identifier or business-step generator for it",
-          not any(f.startswith(("work_graph", "WorkGraph")) for f in list(fe_files) + py_files)
+    py_text = {f: open(os.path.join(HERE, f), encoding="utf-8").read() for f in py_files}
+    graph_py = sorted(f for f, text in py_text.items() if any(w in text for w in graph_words))
+    check("26. no Work Graph UI yet, and no business-step generator anywhere: the backend read model is the only "
+          "Work Graph code, wired through models and the route, and it never reads the execution read model",
+          not any(f.startswith(("work_graph", "WorkGraph")) for f in fe_files)
           and not any(w in text for text in fe_files.values() for w in graph_words)
-          and not any(w in open(os.path.join(HERE, f), encoding="utf-8").read() for f in py_files for w in graph_words))
+          and "work_graph.py" in py_text and set(graph_py) <= {"main.py", "models.py", "work_graph.py"}
+          and not any("business_step" in text or "businessStep" in text for text in py_text.values())
+          and "import work_execution" not in py_text["work_graph.py"]
+          and "from work_execution" not in py_text["work_graph.py"])
 
 print()
 if failures:

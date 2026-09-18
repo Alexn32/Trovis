@@ -48,6 +48,7 @@ import connect_health as connect_health_model
 import work_evidence
 import work_coverage
 import work_execution
+import work_graph
 import saas_hubspot
 import saas_shopify
 import saas_stripe
@@ -128,6 +129,7 @@ from models import (
     WorkEvidenceResponse,
     WorkCoverageResponse,
     WorkExecutionResponse,
+    WorkGraphResponse,
     Connection,
     ConnectionCreate,
     ConnectionStatusUpdate,
@@ -2054,6 +2056,29 @@ def work_item_execution(item_id: int, request: Request) -> WorkExecutionResponse
     if body is None:
         raise HTTPException(status_code=404, detail="work item not found")
     return WorkExecutionResponse(**body)
+
+
+@app.get("/work/items/{item_id}/graph", response_model=WorkGraphResponse)
+def work_item_graph(item_id: int, request: Request) -> WorkGraphResponse:
+    """The Work Graph of one work item (work_graph.py): the deterministic
+    operational projection of the same run the Execution Graph shows
+    technically — the meaningful changes Trovis can state, the possession
+    chain, and every lifecycle record as provenance. Same shape of access as
+    /evidence, /coverage and /execution: per item, opt-in, the same bounded
+    account-scoped reads, no model call, no board scan, never fetched by
+    Home or the Work table; named work only, and an id outside this account
+    is a 404, never a 403.
+    """
+    account_id = getattr(request.state, "account_id", None)
+    user = getattr(request.state, "user", None)
+    if database.get_work_item(
+        account_id, item_id, viewer_user_id=user["id"] if user else None,
+    ) is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    body = work_graph.build_work_item_graph(account_id, item_id)
+    if body is None:
+        raise HTTPException(status_code=404, detail="work item not found")
+    return WorkGraphResponse(**body)
 
 
 @app.get("/work/suggestions", response_model=WorkSuggestionsResponse)
