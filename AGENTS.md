@@ -24,6 +24,16 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 - **Distribution:** `trovis-agents/` (pip SDK for OpenAI Agents SDK / Claude Agent SDK /
   Claude Managed Agents), `trovis-openclaw-plugin/` (TS plugin), `mcp_server.py`
   (MCP server for ChatGPT, mounted on the FastAPI app — currently unlisted in the UI).
+  **Execution structure in the doors we own:** where the runtime itself knows that
+  activity happened inside a run (OpenClaw's `runId` per hook, ended by `agent_end`;
+  one Managed Agents `stream()`; one Claude Agent SDK `query()`), the door opens one
+  `agent_run` span and starts the run's hook/event spans in its OTEL context, so ingest
+  stores the real `parent_span_id` and `work_execution.py` reconstructs the tree with no
+  heuristics. Nothing deeper is encoded than the runtime asserts (tool and model spans
+  are siblings under the run); hooks with no run id stay roots; the root carries only
+  the run id / loop key its children carry, never the one-shot title/handoff/close
+  signals, so Work correlation is unchanged. The Grok Bot and ChatGPT MCP doors, the xAI
+  SDK and the OpenAI adapter are deliberately untouched (see PR 214's audit).
 
 ## Repo map
 

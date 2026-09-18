@@ -350,21 +350,95 @@ def _record_session(
         _SESSION_TO_MODEL[session_id] = model
 
 
+def _start_run_span(tracer: Any, session_id: Optional[str]) -> Any:
+    """The root of one `stream()` call — the run.
+
+    What the runtime knows: every event this iterator yields belongs to the
+    one session stream the caller opened, so the stream IS the execution
+    context that contains them. Emitting that as a root span and starting
+    each per-event span in its context is standard OTEL parentage for a
+    relationship the SDK asserts, not one we infer. What the runtime does
+    NOT tell us — which model turn issued which tool use, whether a later
+    event retried an earlier one — is not encoded: every event span hangs
+    directly off the run.
+
+    Work correlation is unchanged: the root carries the same run id / loop
+    key the event spans carry (never the one-shot title / handoff signals,
+    which stay on the event spans), so it lands in the same loop.
+
+    Returns None (and the events stay roots, as before 0.5.2) if the span
+    cannot be started — telemetry never breaks the agent.
+    """
+    try:
+        span = tracer.start_span("agent_run")
+        span.set_attribute("trovis.event.type", "agent_run")
+        span.set_attribute(
+            "trovis.agent.id",
+            _SESSION_TO_AGENT.get(session_id, "main") if session_id else "main",
+        )
+        # The run began when the stream was opened — this span's own start.
+        span.set_attribute("trovis.run.start_basis", "stream_opened")
+        apply_loop_attrs(
+            span,
+            run_id=session_id or None,
+            external_id=session_id or None,
+            consume_title=False,
+            consume_handoff=False,
+        )
+        return span
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[Trovis] run span start failed: {e}")
+        return None
+
+
 def _instrumented_iterator(
     iterator: Iterator[Any], session_id: Optional[str]
 ) -> Iterator[Any]:
     """Yield events from the underlying iterator while emitting one
-    OTEL span per event. Span emission failure never breaks the
-    iteration — user code keeps getting events."""
-    for event in iterator:
-        try:
-            _emit_event_span(event, session_id)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[Trovis] event span emit failed: {e}")
-        yield event
+    OTEL span per event, each a child of one `agent_run` span for the
+    stream. Span emission failure never breaks the iteration — user code
+    keeps getting events.
+
+    The run span is started explicitly (never made *current*): a generator
+    that attached it to the caller's context would leak it across every
+    `yield`. Children are parented through an explicit context instead."""
+    tracer = trace.get_tracer("trovis.anthropic")
+    run = _start_run_span(tracer, session_id)
+    run_ctx = trace.set_span_in_context(run) if run is not None else None
+    end_basis = "stream_closed"
+    try:
+        for event in iterator:
+            try:
+                _emit_event_span(event, session_id, run_ctx)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[Trovis] event span emit failed: {e}")
+            yield event
+    except Exception as e:
+        # The stream itself failed: that is the run's own error, recorded
+        # on the run. Re-raised untouched — instrumentation changes nothing
+        # about what the caller sees.
+        end_basis = "stream_error"
+        if run is not None:
+            try:
+                run.set_status(StatusCode.ERROR, type(e).__name__)
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+    finally:
+        if run is not None:
+            try:
+                run.set_attribute("trovis.run.end_basis", end_basis)
+                run.end()
+            except Exception:  # noqa: BLE001
+                pass
 
 
-def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
+def _emit_event_span(
+    event: Any, session_id: Optional[str], run_ctx: Any = None,
+) -> None:
+    """One span per SDK event, started in `run_ctx` (the agent_run span's
+    context) when the iterator supplies one, so the exported span carries
+    the run's trace id and the run span as its parent."""
     event_type = _get(event, "type") or ""
     agent_name = (
         _SESSION_TO_AGENT.get(session_id, "main")
@@ -381,7 +455,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
         # (prompt text is user content). set_loop_title() still applies
         # via apply_loop_attrs regardless of the capture flag.
         title = human_title(text) if (text and is_capture_enabled()) else None
-        with tracer.start_as_current_span("message_received") as span:
+        with tracer.start_as_current_span("message_received", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "message_received")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(
@@ -400,7 +474,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
 
     elif event_type == "agent.message":
         text = _extract_text(_get(event, "content"))
-        with tracer.start_as_current_span("message_sent") as span:
+        with tracer.start_as_current_span("message_sent", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "message_sent")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
@@ -439,7 +513,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
                     )
 
     elif event_type == "agent.tool_use":
-        with tracer.start_as_current_span("tool_call") as span:
+        with tracer.start_as_current_span("tool_call", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "tool_call")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
@@ -451,7 +525,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
                 span.set_attribute("trovis.tool.call_id", str(tool_id))
 
     elif event_type == "session.status_idle":
-        with tracer.start_as_current_span("agent_run_complete") as span:
+        with tracer.start_as_current_span("agent_run_complete", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "agent_run_complete")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
@@ -467,7 +541,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
             or _get(event, "to")
             or _get(event, "agent")
         )
-        with tracer.start_as_current_span("handoff") as span:
+        with tracer.start_as_current_span("handoff", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "handoff")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)
@@ -481,7 +555,7 @@ def _emit_event_span(event: Any, session_id: Optional[str]) -> None:
             )
 
     elif event_type and event_type.startswith("agent.error"):
-        with tracer.start_as_current_span("agent_error") as span:
+        with tracer.start_as_current_span("agent_error", context=run_ctx) as span:
             span.set_attribute("trovis.event.type", "agent_error")
             span.set_attribute("trovis.agent.id", agent_name)
             apply_loop_attrs(span, run_id=run_id or None, external_id=run_id or None)

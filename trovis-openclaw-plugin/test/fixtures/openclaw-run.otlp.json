@@ -1,0 +1,986 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "openclaw-refunds"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.25.1"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.6.4"
+            }
+          },
+          {
+            "key": "trovis.plugin.version",
+            "value": {
+              "stringValue": "0.6.4"
+            }
+          },
+          {
+            "key": "openclaw.gateway.version",
+            "value": {
+              "stringValue": "test-gateway"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "@trovis/openclaw-plugin",
+            "version": "0.6.4"
+          },
+          "spans": [
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "16ed9c5e56394092",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "message_received",
+              "kind": 2,
+              "startTimeUnixNano": "1789743951944000000",
+              "endTimeUnixNano": "1789743951944222395",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "message_received"
+                  }
+                },
+                {
+                  "key": "trovis.session.key",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.message.sender_id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                },
+                {
+                  "key": "trovis.message.content_length",
+                  "value": {
+                    "intValue": 18
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.loop.title",
+                  "value": {
+                    "stringValue": "Refund order #4471"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "42705805cc1647b0",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "model_call",
+              "kind": 3,
+              "startTimeUnixNano": "1789743951944000000",
+              "endTimeUnixNano": "1789743951945000000",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "model_call"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "xai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "grok-4"
+                  }
+                },
+                {
+                  "key": "trovis.model.call_id",
+                  "value": {
+                    "stringValue": "m1"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.model.duration_ms",
+                  "value": {
+                    "intValue": 40
+                  }
+                },
+                {
+                  "key": "trovis.model.outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": 120
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": 30
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.total_tokens",
+                  "value": {
+                    "intValue": 150
+                  }
+                },
+                {
+                  "key": "trovis.model.usage_source",
+                  "value": {
+                    "stringValue": "transcript"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "c6fb8c91b0b9a774",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "tool_call",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951945000000",
+              "endTimeUnixNano": "1789743951945042247",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "trovis.tool.name",
+                  "value": {
+                    "stringValue": "mcp__shopify__lookup_orders_by_email"
+                  }
+                },
+                {
+                  "key": "trovis.tool.call_id",
+                  "value": {
+                    "stringValue": "t1"
+                  }
+                },
+                {
+                  "key": "trovis.tool.param_keys",
+                  "value": {
+                    "stringValue": "[\"email\"]"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.tool.success",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "trovis.tool.duration_ms",
+                  "value": {
+                    "intValue": 12
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "f8b6231d35b9aafb",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "tool_call",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951945000000",
+              "endTimeUnixNano": "1789743951945058189",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "trovis.tool.name",
+                  "value": {
+                    "stringValue": "stripe.refunds.create"
+                  }
+                },
+                {
+                  "key": "trovis.tool.call_id",
+                  "value": {
+                    "stringValue": "t2"
+                  }
+                },
+                {
+                  "key": "trovis.tool.param_keys",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.tool.success",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "trovis.tool.duration_ms",
+                  "value": {
+                    "intValue": 7
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 2,
+                "message": "Card declined"
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "f844386a9762fab5",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "tool_call",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951945000000",
+              "endTimeUnixNano": "1789743951945021288",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "trovis.tool.name",
+                  "value": {
+                    "stringValue": "stripe.refunds.create"
+                  }
+                },
+                {
+                  "key": "trovis.tool.call_id",
+                  "value": {
+                    "stringValue": "t3"
+                  }
+                },
+                {
+                  "key": "trovis.tool.param_keys",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.tool.success",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "trovis.tool.duration_ms",
+                  "value": {
+                    "intValue": 9
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "a0d5a99fe2b859aa",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "model_call",
+              "kind": 3,
+              "startTimeUnixNano": "1789743951945000000",
+              "endTimeUnixNano": "1789743951945000000",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "model_call"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "xai"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "grok-4"
+                  }
+                },
+                {
+                  "key": "trovis.model.call_id",
+                  "value": {
+                    "stringValue": "m2"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.model.duration_ms",
+                  "value": {
+                    "intValue": 30
+                  }
+                },
+                {
+                  "key": "trovis.model.outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.total_tokens",
+                  "value": {
+                    "intValue": 0
+                  }
+                },
+                {
+                  "key": "trovis.model.usage_source",
+                  "value": {
+                    "stringValue": "transcript"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "f00c5964ddde319e",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "llm_output",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951946000000",
+              "endTimeUnixNano": "1789743951946039276",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "llm_output"
+                  }
+                },
+                {
+                  "key": "trovis.session.key",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.response.content_length",
+                  "value": {
+                    "intValue": 9
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "9956c169197a28bb",
+              "parentSpanId": "e3e5e73adf110a22",
+              "name": "agent_run_complete",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951946000000",
+              "endTimeUnixNano": "1789743951946162387",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "agent_run_complete"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.run.success",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "trovis.handoff.direction",
+                  "value": {
+                    "stringValue": "to_human"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.id",
+                  "value": {
+                    "stringValue": "9d0be33a-8003-47b6-a920-ace1d2e3b66f"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.reason",
+                  "value": {
+                    "stringValue": "turn_end"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.target_id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "499d80eaaa3952793018f3a709e48127",
+              "spanId": "e3e5e73adf110a22",
+              "name": "agent_run",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951943000000",
+              "endTimeUnixNano": "1789743951946116105",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "agent_run"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-1"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.start_basis",
+                  "value": {
+                    "stringValue": "first_observed_hook"
+                  }
+                },
+                {
+                  "key": "trovis.run.end_basis",
+                  "value": {
+                    "stringValue": "agent_end"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "48da63203e73c3532b4254bb7eb132d7",
+              "spanId": "7922e859b107996d",
+              "parentSpanId": "0794d90fdf3f1f83",
+              "name": "message_received",
+              "kind": 2,
+              "startTimeUnixNano": "1789743951947000000",
+              "endTimeUnixNano": "1789743951947027800",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "message_received"
+                  }
+                },
+                {
+                  "key": "trovis.session.key",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.message.sender_id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                },
+                {
+                  "key": "trovis.message.content_length",
+                  "value": {
+                    "intValue": 6
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-2"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.resolve",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.id",
+                  "value": {
+                    "stringValue": "9d0be33a-8003-47b6-a920-ace1d2e3b66f"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "48da63203e73c3532b4254bb7eb132d7",
+              "spanId": "e06a00505438480a",
+              "parentSpanId": "0794d90fdf3f1f83",
+              "name": "agent_run_complete",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951947000000",
+              "endTimeUnixNano": "1789743951947054206",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "agent_run_complete"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-2"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.run.success",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "trovis.handoff.direction",
+                  "value": {
+                    "stringValue": "to_human"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.id",
+                  "value": {
+                    "stringValue": "aed9edf2-189c-4349-8a48-6cbae86fdb2a"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.reason",
+                  "value": {
+                    "stringValue": "turn_end"
+                  }
+                },
+                {
+                  "key": "trovis.handoff.target_id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "48da63203e73c3532b4254bb7eb132d7",
+              "spanId": "0794d90fdf3f1f83",
+              "name": "agent_run",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951947000000",
+              "endTimeUnixNano": "1789743951947289720",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "agent_run"
+                  }
+                },
+                {
+                  "key": "trovis.run.id",
+                  "value": {
+                    "stringValue": "run-real-2"
+                  }
+                },
+                {
+                  "key": "trovis.loop.external_id",
+                  "value": {
+                    "stringValue": "agent:main:s-real"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.run.start_basis",
+                  "value": {
+                    "stringValue": "first_observed_hook"
+                  }
+                },
+                {
+                  "key": "trovis.run.end_basis",
+                  "value": {
+                    "stringValue": "agent_end"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            },
+            {
+              "traceId": "fc00d2365ccd2fef63504587f688cd92",
+              "spanId": "b03e2e0857689f66",
+              "name": "tool_call",
+              "kind": 1,
+              "startTimeUnixNano": "1789743951947000000",
+              "endTimeUnixNano": "1789743951947017680",
+              "attributes": [
+                {
+                  "key": "trovis.event.type",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "trovis.tool.name",
+                  "value": {
+                    "stringValue": "orphan_tool"
+                  }
+                },
+                {
+                  "key": "trovis.tool.call_id",
+                  "value": {
+                    "stringValue": "t9"
+                  }
+                },
+                {
+                  "key": "trovis.tool.param_keys",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "trovis.agent.id",
+                  "value": {
+                    "stringValue": "main"
+                  }
+                },
+                {
+                  "key": "trovis.tool.success",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "trovis.tool.duration_ms",
+                  "value": {
+                    "intValue": 0
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "status": {
+                "code": 0
+              },
+              "links": [],
+              "droppedLinksCount": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

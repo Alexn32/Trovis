@@ -66034,7 +66034,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
-var PLUGIN_VERSION = "0.6.3";
+var PLUGIN_VERSION = "0.6.4";
 var LOG = "[Trovis]";
 var OBSERVATION_PRIORITY = 0;
 var ATTR_BYTE_LIMIT = 32 * 1024;
@@ -66788,6 +66788,49 @@ function drainSessionUsage(tracer, ctx) {
     }
   }
 }
+var runRoots = /* @__PURE__ */ new Map();
+var RUN_ROOT_MAX = 500;
+var RUN_ROOT_TIMEOUT_MS = 30 * 6e4;
+function runRootFor(tracer, event, ctx, { create }) {
+  const runId = pickRunId(event, ctx);
+  if (!runId) return void 0;
+  const existing = runRoots.get(runId);
+  if (existing || !create) return existing;
+  if (runRoots.size >= RUN_ROOT_MAX) {
+    const oldest = runRoots.keys().next().value;
+    if (oldest !== void 0) endRunRoot(oldest, "evicted");
+  }
+  const span = tracer.startSpan("agent_run", { kind: SpanKind.INTERNAL }, context.active());
+  span.setAttribute("trovis.event.type", "agent_run");
+  span.setAttribute("trovis.run.id", runId);
+  setIfPresent(span, "trovis.loop.external_id", sessionKeyOf(event, ctx));
+  setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
+  span.setAttribute("trovis.run.start_basis", "first_observed_hook");
+  const root = {
+    span,
+    ctx: trace.setSpan(context.active(), span),
+    startedAtMs: Date.now()
+  };
+  const timer = setTimeout(() => endRunRoot(runId, "timeout"), RUN_ROOT_TIMEOUT_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  root.timer = timer;
+  runRoots.set(runId, root);
+  return root;
+}
+function runContext(tracer, event, ctx) {
+  return runRootFor(tracer, event, ctx, { create: true })?.ctx;
+}
+function endRunRoot(runId, endBasis, failure) {
+  const root = runRoots.get(runId);
+  if (!root) return;
+  runRoots.delete(runId);
+  if (root.timer) clearTimeout(root.timer);
+  root.span.setAttribute("trovis.run.end_basis", endBasis);
+  if (failure) {
+    root.span.setStatus({ code: SpanStatusCode.ERROR, message: failure.message });
+  }
+  root.span.end();
+}
 function wireEvents(api) {
   const toolSpans = /* @__PURE__ */ new Map();
   safeOn(api, "gateway_start", (event, hookCtx) => {
@@ -66799,7 +66842,11 @@ function wireEvents(api) {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
     const ctx = hookCtx ?? event?.context ?? {};
-    const span = tracer.startSpan("message_received", { kind: SpanKind.SERVER });
+    const span = tracer.startSpan(
+      "message_received",
+      { kind: SpanKind.SERVER },
+      runContext(tracer, event, ctx)
+    );
     span.setAttribute("trovis.event.type", "message_received");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
     setIfPresent(
@@ -66849,7 +66896,11 @@ function wireEvents(api) {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
     const ctx = hookCtx ?? event?.context ?? {};
-    const span = tracer.startSpan("message_sending", { kind: SpanKind.CLIENT });
+    const span = tracer.startSpan(
+      "message_sending",
+      { kind: SpanKind.CLIENT },
+      runContext(tracer, event, ctx)
+    );
     span.setAttribute("trovis.event.type", "message_sending");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
@@ -66872,7 +66923,11 @@ function wireEvents(api) {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
     const ctx = hookCtx ?? event?.context ?? {};
-    const span = tracer.startSpan("message_sent", { kind: SpanKind.CLIENT });
+    const span = tracer.startSpan(
+      "message_sent",
+      { kind: SpanKind.CLIENT },
+      runContext(tracer, event, ctx)
+    );
     const success = event?.success ?? !event?.error;
     span.setAttribute("trovis.event.type", "message_sent");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
@@ -66891,7 +66946,11 @@ function wireEvents(api) {
     const tracer = ensureInit(hookCtx ?? event?.context);
     if (!tracer) return;
     const ctx = hookCtx ?? event?.context ?? {};
-    const span = tracer.startSpan("tool_call", { kind: SpanKind.INTERNAL });
+    const span = tracer.startSpan(
+      "tool_call",
+      { kind: SpanKind.INTERNAL },
+      runContext(tracer, event, ctx)
+    );
     span.setAttribute("trovis.event.type", "tool_call");
     span.setAttribute("trovis.tool.name", event.toolName);
     span.setAttribute("trovis.tool.call_id", event.toolCallId);
@@ -66947,7 +67006,11 @@ function wireEvents(api) {
     if (!tracer) return;
     state.sawConversationHook = true;
     const ctx = hookCtx ?? event?.context ?? {};
-    const span = tracer.startSpan("model_call", { kind: SpanKind.CLIENT });
+    const span = tracer.startSpan(
+      "model_call",
+      { kind: SpanKind.CLIENT },
+      runContext(tracer, event, ctx)
+    );
     span.setAttribute("trovis.event.type", "model_call");
     setIfPresent(span, "gen_ai.system", event?.provider);
     setIfPresent(span, "gen_ai.request.model", event?.model);
@@ -67007,7 +67070,11 @@ function wireEvents(api) {
     state.sawConversationHook = true;
     const ctx = hookCtx ?? event?.context ?? {};
     drainSessionUsage(tracer, ctx);
-    const span = tracer.startSpan("llm_output", { kind: SpanKind.INTERNAL });
+    const span = tracer.startSpan(
+      "llm_output",
+      { kind: SpanKind.INTERNAL },
+      runContext(tracer, event, ctx)
+    );
     span.setAttribute("trovis.event.type", "llm_output");
     setIfPresent(span, "trovis.session.key", ctx.sessionKey);
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
@@ -67035,9 +67102,12 @@ function wireEvents(api) {
     state.sawConversationHook = true;
     const ctx = hookCtx ?? event?.context ?? {};
     drainSessionUsage(tracer, ctx);
-    const span = tracer.startSpan("agent_run_complete", {
-      kind: SpanKind.INTERNAL
-    });
+    const root = runRootFor(tracer, event, ctx, { create: false });
+    const span = tracer.startSpan(
+      "agent_run_complete",
+      { kind: SpanKind.INTERNAL },
+      root?.ctx
+    );
     span.setAttribute("trovis.event.type", "agent_run_complete");
     setIfPresent(span, "trovis.agent.id", pickAgentId(event, ctx));
     applyLoopSignals(span, event, ctx);
@@ -67076,6 +67146,14 @@ function wireEvents(api) {
     setIfPresent(span, "trovis.run.channel_id", ctx.channelId);
     setIfPresent(span, "trovis.run.job_id", ctx.jobId);
     span.end();
+    const runId = pickRunId(event, ctx);
+    if (runId && root) {
+      endRunRoot(
+        runId,
+        "agent_end",
+        success === false ? { message: typeof event?.error === "string" ? event.error : "run failed" } : void 0
+      );
+    }
   });
 }
 function maskKey(key) {
@@ -67298,7 +67376,13 @@ var __internal = {
     pendingHandoff = null;
     pendingClose = null;
     pendingTitle = null;
-  }
+    for (const root of runRoots.values()) {
+      if (root.timer) clearTimeout(root.timer);
+    }
+    runRoots.clear();
+  },
+  /** Test-only: the open run roots, keyed by runId. */
+  runRoots
 };
 var index_default = definePluginEntry({
   id: "trovis",
