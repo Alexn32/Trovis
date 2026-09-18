@@ -455,10 +455,24 @@ with TestClient(main.app) as c:
     import work_execution
     src = inspect.getsource(work_execution)
     check("27. no LLM in the read model", not any(w in src for w in ("anthropic", "asker", "describer")))
-    check("25/26. no execution UI or Work Graph: the frontend still only has the API helper",
-          "getWorkItemExecution" in open(os.path.join(HERE, "frontend", "src", "api.js"), encoding="utf-8").read()
-          and not any("getWorkItemExecution" in open(os.path.join(HERE, "frontend", "src", f), encoding="utf-8").read()
-                      for f in os.listdir(os.path.join(HERE, "frontend", "src")) if f.endswith((".jsx", ".js")) and f != "api.js"))
+    # The architectural boundary after PR 215: the Execution UI exists and is
+    # the ONLY reader of the endpoint (the Run page, never Home or the Work
+    # home); Work Graph reconstruction — business steps derived from
+    # execution — still does not exist anywhere, frontend or backend.
+    fe_src = os.path.join(HERE, "frontend", "src")
+    fe_files = {f: open(os.path.join(fe_src, f), encoding="utf-8").read()
+                for f in os.listdir(fe_src) if f.endswith((".jsx", ".js"))}
+    readers = sorted(f for f, text in fe_files.items() if "getWorkItemExecution" in text)
+    check("25. the Execution UI exists and only the Run page reads the endpoint",
+          readers == ["JobDetail.jsx", "api.js"] and "ExecutionView.jsx" in fe_files
+          and "getWorkItemExecution" not in fe_files.get("HomeView.jsx", "")
+          and "getWorkItemExecution" not in fe_files.get("WorkTab.jsx", ""))
+    graph_words = ("work_graph", "WorkGraph", "workGraph", "business_step", "businessStep")
+    py_files = [f for f in os.listdir(HERE) if f.endswith(".py") and not f.startswith("test_")]
+    check("26. no Work Graph reconstruction anywhere: no module, identifier or business-step generator for it",
+          not any(f.startswith(("work_graph", "WorkGraph")) for f in list(fe_files) + py_files)
+          and not any(w in text for text in fe_files.values() for w in graph_words)
+          and not any(w in open(os.path.join(HERE, f), encoding="utf-8").read() for f in py_files for w in graph_words))
 
 print()
 if failures:
