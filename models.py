@@ -2579,10 +2579,15 @@ class WorkGraphProvenance(BaseModel):
     """Where a Work Step comes from — enough for Work Graph → Evidence →
     Execution drill-through without a new inference layer.
 
-      event_id / evidence_id / execution_node_id   the loop event, its
-                            Evidence record and its Execution node (both
-                            `event:<id>`)
-      evidence_kind         handoff | external_state | completion | None
+      event_id              the loop event the step came from — always set
+      evidence_id / execution_node_id   references into the Evidence and
+                            Execution read models (both `event:<id>`), set
+                            ONLY when that read model actually holds the
+                            record; None means no such record exists there
+                            (e.g. Evidence has none for stall_detected), never
+                            a reference by naming convention
+      evidence_kind         handoff | external_state | completion, or None
+                            with evidence_id
       span_id / trace_id    the span whose attributes declared the event,
                             when ingest recorded one
       correlation           the recorded mechanism (explicit_key / direct /
@@ -2595,9 +2600,9 @@ class WorkGraphProvenance(BaseModel):
     """
 
     event_id: int
-    evidence_id: str
+    evidence_id: str | None = None
     evidence_kind: str | None = None
-    execution_node_id: str
+    execution_node_id: str | None = None
     span_id: str | None = None
     trace_id: str | None = None
     correlation: str | None = None

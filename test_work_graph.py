@@ -123,6 +123,28 @@ with TestClient(main.app) as c:
     def types(g):
         return [s["type"] for s in g["steps"]]
 
+    def references_hold(h, item_id, label):
+        """The provenance contract, for EVERY Work Step of one item: a
+        non-null evidence_id / execution_node_id must be an id the Evidence /
+        Execution read model actually serves for this item (no dangling
+        reference), and a record those read models DO serve for the step's
+        event must not be reported as missing (no withheld reference).
+        evidence_kind is None exactly when evidence_id is. Returns the graph."""
+        g = graph(h, item_id)
+        ev_ids = {e["id"] for e in c.get(f"/work/items/{item_id}/evidence", headers=h).json()["evidence"]}
+        ex_ids = {n["id"] for n in c.get(f"/work/items/{item_id}/execution", headers=h).json()["nodes"]}
+        dangling = [s["id"] for s in g["steps"]
+                    if (s["provenance"]["evidence_id"] is not None and s["provenance"]["evidence_id"] not in ev_ids)
+                    or (s["provenance"]["execution_node_id"] is not None and s["provenance"]["execution_node_id"] not in ex_ids)]
+        withheld = [s["id"] for s in g["steps"]
+                    if (s["provenance"]["evidence_id"] is None and f"event:{s['provenance']['event_id']}" in ev_ids)
+                    or (s["provenance"]["execution_node_id"] is None and f"event:{s['provenance']['event_id']}" in ex_ids)]
+        kinds = [s["id"] for s in g["steps"]
+                 if (s["provenance"]["evidence_id"] is None) != (s["provenance"]["evidence_kind"] is None)]
+        check(f"provenance holds for '{label}': no dangling reference {dangling}, none withheld {withheld}, kind ↔ id {kinds}",
+              not dangling and not withheld and not kinds)
+        return g
+
     def no_business_words(text):
         # Provider event types are the provider's own records, kept verbatim
         # (Stripe's payment_intent.succeeded is Stripe's state, not a Trovis
@@ -376,6 +398,18 @@ with TestClient(main.app) as c:
           len(stalls) == 2 and stalls[0]["details"] == {"reason": "no activity for 4h", "detail": None}
           and stalls[1]["details"] == {"reason": None, "detail": None} and stalls[0]["actor"] == {"type": "system", "label": "Trovis"})
     check("11. a stall changes no possession (the existing rule)", g["possession"]["current_holder"]["holder_type"] == "agent")
+    ev = c.get(f"/work/items/{si['id']}/evidence", headers=HA).json()["evidence"]
+    ex = c.get(f"/work/items/{si['id']}/execution", headers=HA).json()["nodes"]
+    stall_event_ids = {f"event:{s['provenance']['event_id']}" for s in stalls}
+    check("11. Evidence holds no record for a stall today, and the step says so: evidence_id and evidence_kind are None",
+          all(s["provenance"]["evidence_id"] is None and s["provenance"]["evidence_kind"] is None for s in stalls)
+          and not (stall_event_ids & {e["id"] for e in ev}))
+    check("11. Execution does represent the stall event: execution_node_id is a real node (type 'other'), never a name-convention guess",
+          all(s["provenance"]["execution_node_id"] == f"event:{s['provenance']['event_id']}" for s in stalls)
+          and all(any(n["id"] == s["provenance"]["execution_node_id"] and n["type"] == "other" for n in ex) for s in stalls))
+    check("11. the source event id is always kept even when no other read model holds the record",
+          all(isinstance(s["provenance"]["event_id"], int) for s in stalls))
+    references_hold(HA, si["id"], "Slow job")
 
     # ------------------------------------------------------------------
     # 20. Flat Grok Bot telemetry
@@ -453,11 +487,21 @@ with TestClient(main.app) as c:
           and [s["waiting"] for s in ours] == [bool(s["waiting"]) for s in canonical]
           and [s["start"] for s in ours] == [database._ns_to_iso(s["start_ns"]) for s in canonical]
           and [s["end"] for s in ours] == [database._ns_to_iso(s["end_ns"]) if s["end_ns"] else None for s in canonical])
-    check("Evidence and Execution ids line up: every step's evidence id is an Evidence record and an Execution node",
-          {s["provenance"]["evidence_id"] for s in g["steps"]}
-          <= {e["id"] for e in c.get(f"/work/items/{item['id']}/evidence", headers=HA).json()["evidence"]}
-          and {s["provenance"]["execution_node_id"] for s in g["steps"]}
-          <= {n["id"] for n in c.get(f"/work/items/{item['id']}/execution", headers=HA).json()["nodes"]})
+    # The provenance contract across EVERY fixture: a reference into Evidence /
+    # Execution exists iff that read model serves the record; never dangling,
+    # never withheld. The refund run covers handoff_initiated (to_human),
+    # handoff_declined, the SaaS wait / stuck and loop_closed; the others cover
+    # to_agent, explicit to_system, an abandoned close, stall_detected, a flat
+    # bot close and malformed records.
+    print("\nprovenance contract across all fixtures")
+    for fixture_id, fixture_label in ((item["id"], "Refund order #4471"), (ti["id"], "Triage inbox"), (ei["id"], "Nightly export"),
+                                      (fi["id"], "Forgotten job"), (si["id"], "Slow job"), (gi["id"], "Return #9"), (oi["id"], "Odd job")):
+        references_hold(HA, fixture_id, fixture_label)
+    g = graph(HA, item["id"])
+    check("every Work Step-producing event type in this PR is exercised with a non-null Evidence reference where Evidence holds it",
+          {s["provenance"]["evidence_kind"] for s in g["steps"]} == {"handoff", "external_state", "completion"}
+          and all(s["provenance"]["evidence_id"] == f"event:{s['provenance']['event_id']}" for s in g["steps"])
+          and all(s["provenance"]["execution_node_id"] == f"event:{s['provenance']['event_id']}" for s in g["steps"]))
 
 print()
 if failures:

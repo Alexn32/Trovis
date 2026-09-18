@@ -10,10 +10,16 @@ loop events):
                     the work, where it waited, how the record ended.
 
 They are not separate records. Every Work Step here points back at the
-loop event it came from, at the Evidence record for that event (`event:<id>`,
-work_evidence.py), and at the Execution node for it (also `event:<id>`,
-work_execution.py) — so Work Graph → Evidence → Execution is a lookup, not
-an inference.
+loop event it came from (`event_id`). References INTO the other read models
+are exposed only when those read models actually contain that record:
+`evidence_id` (`event:<id>`, work_evidence.py) only for an event Evidence
+represents (a handoff, a SaaS-spine record, a close); `execution_node_id`
+(`event:<id>`, work_execution.py) only for an event Execution represents
+(every lifecycle event except `loop_opened`). A `stall_detected` step, for
+example, has an Execution node and NO Evidence record today, so its
+`evidence_id` is None — a missing reference is reported as missing, never
+manufactured because its id would conventionally be `event:<id>`. So Work
+Graph → Evidence → Execution is a lookup, not an inference.
 
 THE RULE. A record enters the Work Graph only when Trovis has evidence of a
 meaningful change in the work — never merely evidence that computation
@@ -48,6 +54,8 @@ What becomes a Work Step, exactly (loop_events only — no span ever does):
   handoff_declined              → `exception` an explicit decline; reason
                                               only when one was recorded
   stall_detected                → `exception` with the recorded reason only
+                                              (Execution node yes; Evidence
+                                              record none → evidence_id None)
   loop_closed                   → `completed` "Work record closed" — the
                                               record ended; reason/detail as
                                               stored; NEVER an outcome
@@ -192,7 +200,31 @@ def _actor(e: dict[str, Any], payload: dict[str, Any], by_span: dict[str, dict[s
     return {"type": "agent", "label": (src or {}).get("worker") or actor}
 
 
-def _provenance(e: dict[str, Any], payload: dict[str, Any], by_span: dict[str, dict[str, Any]], evidence_kind: str) -> dict[str, Any]:
+def _evidence_kind(e: dict[str, Any], payload: dict[str, Any]) -> str | None:
+    """The Evidence type work_evidence._event_evidence gives this lifecycle
+    event, or None when Evidence emits no record for it. This mirrors that
+    function's rules exactly (the SaaS spine first, then any handoff_*, then
+    a close; loop_opened, stall_detected and unknown types earn nothing) —
+    the Evidence/Execution alignment test holds the two together."""
+    etype = str(e.get("type") or "")
+    if etype == "loop_opened":
+        return None
+    if e.get("actor_type") == "system" and payload.get("saas_provider"):
+        return "external_state"
+    if etype.startswith("handoff_"):
+        return "handoff"
+    if etype == "loop_closed":
+        return "completion"
+    return None
+
+
+def _has_execution_node(e: dict[str, Any]) -> bool:
+    """work_execution._event_node makes a node (`event:<id>`) for every
+    lifecycle event except loop_opened."""
+    return str(e.get("type") or "") != "loop_opened"
+
+
+def _provenance(e: dict[str, Any], payload: dict[str, Any], by_span: dict[str, dict[str, Any]]) -> dict[str, Any]:
     eid = int(e["id"])
     span_id = _str(e.get("span_id"))
     src = by_span.get(span_id) if span_id else None
@@ -205,11 +237,14 @@ def _provenance(e: dict[str, Any], payload: dict[str, Any], by_span: dict[str, d
         connector = (src or {}).get("connector")
     else:
         correlation, connector = "direct", None
+    # References into the other read models exist only when those read
+    # models hold the record. Never a reference by naming convention.
+    evidence_kind = _evidence_kind(e, payload)
     return {
         "event_id": eid,
-        "evidence_id": f"event:{eid}",
+        "evidence_id": f"event:{eid}" if evidence_kind else None,
         "evidence_kind": evidence_kind,
-        "execution_node_id": f"event:{eid}",
+        "execution_node_id": f"event:{eid}" if _has_execution_node(e) else None,
         "span_id": span_id,
         "trace_id": _str(e.get("trace_id")),
         "correlation": correlation,
@@ -257,7 +292,7 @@ def _step_for_event(
             "handoff_id": _str(payload.get("handoff_id")),
             "reason": reason,
         }
-        prov = _provenance(e, payload, by_span, "external_state" if (e.get("actor_type") == "system" and provider) else "handoff")
+        prov = _provenance(e, payload, by_span)
         if direction == "to_human":
             # A person's address is never echoed: their resolved name, or
             # "a person". target_id is omitted for people on purpose.
@@ -313,14 +348,16 @@ def _step_for_event(
         return _step(
             e, step_type="exception", label="Handoff declined", actor=actor, system=None,
             details={"handoff_id": _str(payload.get("handoff_id")), "reason": reason},
-            provenance=_provenance(e, payload, by_span, "handoff"),
+            provenance=_provenance(e, payload, by_span),
         )
 
     if etype == "stall_detected":
         return _step(
             e, step_type="exception", label="Stall detected", actor=actor, system=None,
             details={"reason": reason, "detail": _str(payload.get("detail"))},
-            provenance=_provenance(e, payload, by_span, None),
+            # Execution has a node for this event; Evidence has no record
+            # for a stall today, so evidence_id / evidence_kind come back None.
+            provenance=_provenance(e, payload, by_span),
         )
 
     if etype == "loop_closed":
@@ -337,7 +374,7 @@ def _step_for_event(
                 # is not something this record can say.
                 "outcome": "record_closed",
             },
-            provenance=_provenance(e, payload, by_span, "completion"),
+            provenance=_provenance(e, payload, by_span),
         )
 
     # loop_opened, handoff_accepted, handoff_completed, anything unknown:
