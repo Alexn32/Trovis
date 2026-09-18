@@ -10,6 +10,7 @@ import {
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
 import { boundedNote, visibilityRows } from './coverage.js'
+import ExecutionView from './ExecutionView.jsx'
 
 // ---------------------------------------------------------------------------
 // Job detail — what a work item IS and how it moves, not a second table.
@@ -25,6 +26,13 @@ import { boundedNote, visibilityRows } from './coverage.js'
 //      never a score, and "Unknown" is not "missing"
 //   8. (page only) Evidence — who Trovis heard from and what each source
 //      reported or showed, under the record it supports; never above it
+//   9. (page only) Execution — a second VIEW of the same run, switched with
+//      the Run | Execution control under the header: the technical tree from
+//      GET /work/items/:id/execution (ExecutionView.jsx). The header, title,
+//      status and back link stay; sections 3–8 are the Run view. Its fetch is
+//      its own — independent of the detail, runs, evidence and coverage
+//      reads — and, like theirs, resets on every item change so Run A never
+//      shows inside Run B.
 //
 // Reads GET /work/items/:id (the lean detail), and /work/items/:id?include=runs
 // only when someone expands the runs section. Never the fat board, never a
@@ -165,6 +173,37 @@ export default function JobDetail({
     setCoverageReload((n) => n + 1)
   }, [])
 
+  // Execution: the technical view of the same run. Fetched only while that
+  // view is open, page-only, its own request with its own failure. Every
+  // item change clears the body AND the selected node before anything is
+  // requested, and a late response for the previous item is dropped by
+  // startAbortable's isAlive — so an inspector open on Run A's tool call
+  // can never sit under Run B's title.
+  const [pageView, setPageView] = useState('run')
+  const [execution, setExecution] = useState(null)
+  const [executionErr, setExecutionErr] = useState(null)
+  const [executionReload, setExecutionReload] = useState(0)
+  const [selectedNode, setSelectedNode] = useState(null)
+  useEffect(() => {
+    if (!isPage) return undefined
+    setExecution(null)
+    setExecutionErr(null)
+    setSelectedNode(null)
+    if (pageView !== 'execution') return undefined
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkItemExecution(item.id, { signal })
+        .then((d) => isAlive() && setExecution(d && Array.isArray(d.nodes) ? d : { nodes: [], roots: [], chronology: [], trace_ids: [] }))
+        .catch((e) => isAlive() && setExecutionErr(e))
+    })
+  }, [isPage, item.id, pageView, executionReload])
+  const retryExecution = useCallback(() => {
+    setExecution(null)
+    setExecutionErr(null)
+    setExecutionReload((n) => n + 1)
+  }, [])
+  const showExecution = isPage && pageView === 'execution'
+
   async function resolve(kind) {
     const handoffId = detail?.awaiting_handoff_event_id
     if (!handoffId || busy) return
@@ -206,9 +245,41 @@ export default function JobDetail({
               <span className="jobd-total-note">{costNote}</span>
             )}
           </div>
+          {/* Two views of one run. The record above this line is shared;
+              only what sits below it changes. */}
+          {isPage && (
+            <nav className="jobd-views" role="tablist" aria-label="Run views">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={pageView === 'run'}
+                className={`jobd-view${pageView === 'run' ? ' is-active' : ''}`}
+                onClick={() => setPageView('run')}
+              >
+                Run
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={pageView === 'execution'}
+                className={`jobd-view${pageView === 'execution' ? ' is-active' : ''}`}
+                onClick={() => setPageView('execution')}
+              >
+                Execution
+              </button>
+            </nav>
+          )}
         </header>
 
-        {err && !detail ? (
+        {showExecution ? (
+          <ExecutionView
+            body={execution}
+            failed={Boolean(executionErr)}
+            onRetry={retryExecution}
+            selectedId={selectedNode}
+            onSelect={setSelectedNode}
+          />
+        ) : err && !detail ? (
           <WorkLoadFailed
             lead="Can't load this job"
             onRetry={() => {

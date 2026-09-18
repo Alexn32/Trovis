@@ -6410,6 +6410,128 @@ select.wf2-input { cursor: pointer; }
 .jobd-vis-text { grid-column: 1 / -1; margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 .jobd-vis-note { margin: 0; font-size: 11.5px; color: var(--text-muted); }
 
+/* --- Run | Execution: two views of one run ------------------------------- */
+/* A quiet local switch under the header. Execution is a view UNDER the run,
+   so the title, status and back link above it never change. */
+.jobd-views { display: flex; gap: 4px; align-self: flex-start; }
+.jobd-view {
+  font: inherit; font-size: 12.5px; font-weight: 600; color: var(--text-muted);
+  background: none; border: 1px solid transparent; border-radius: 999px;
+  padding: 4px 12px; cursor: pointer;
+}
+.jobd-view:hover { color: var(--text-primary); }
+.jobd-view.is-active {
+  color: var(--text-primary); background: var(--bg-elevated); border-color: var(--border-default);
+}
+
+/* --- Execution: a vertical technical record, quiet by default ------------- */
+/* Tokens only. Normal nodes carry no colour at all; an error is the one thing
+   that stands out. Structure is drawn with one thin left rule per level —
+   an execution record, not a grid of cards. */
+.exec { gap: 12px; }
+.exec-head { display: flex; flex-direction: column; gap: 4px; }
+.exec-lead { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+.exec-facts-row {
+  margin: 2px 0 0; font-size: 12px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; gap: 0 4px;
+}
+.exec-facts-row > span + span::before { content: '·'; margin: 0 6px 0 2px; color: var(--text-muted); }
+.exec-note { margin: 0; font-size: 11.5px; color: var(--text-muted); }
+
+.exec-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 20px; align-items: start; }
+.exec-main { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.exec-group + .exec-group { margin-top: 12px; }
+.exec-group-title {
+  margin: 0 0 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-muted); display: flex; gap: 8px; align-items: baseline;
+}
+.exec-group-count { font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 11px; }
+
+.exec-roots, .exec-children { list-style: none; margin: 0; padding: 0; }
+.exec-children { margin-left: 8px; padding-left: 14px; border-left: 1px solid var(--border-default); }
+.exec-node { position: relative; }
+.exec-row { display: flex; align-items: flex-start; gap: 2px; }
+.exec-toggle {
+  flex: none; width: 18px; height: 22px; margin-top: 3px; padding: 0;
+  font: inherit; font-size: 11px; line-height: 22px; text-align: center;
+  color: var(--text-muted); background: none; border: none; cursor: pointer; border-radius: 4px;
+}
+.exec-toggle:hover { color: var(--text-primary); background: var(--bg-surface-hover); }
+.exec-toggle.is-leaf { display: inline-block; }
+.exec-select {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px; margin: 0; text-align: left; font: inherit; font-size: 12.5px;
+  color: var(--text-secondary); background: none; border: 1px solid transparent; border-radius: 7px;
+  cursor: pointer;
+}
+.exec-select:hover { background: var(--bg-surface-hover); }
+.exec-node.is-selected > .exec-row > .exec-select,
+.exec-chrono-row.is-selected > .exec-select {
+  background: var(--bg-elevated); border-color: var(--border-hover);
+}
+.exec-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.exec-line-sub { gap: 10px; flex-wrap: wrap; }
+.exec-type {
+  flex: none; font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-muted); min-width: 44px;
+}
+.exec-title { color: var(--text-primary); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.exec-node.type-worker > .exec-row .exec-title { font-size: 13.5px; }
+.exec-dur { margin-left: auto; flex: none; color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.exec-sub { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+.exec-facts { color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.exec-error { color: var(--error); font-weight: 600; font-size: 12px; }
+.exec-node.has-error > .exec-row .exec-title,
+.exec-chrono-row.has-error .exec-title { color: var(--error); }
+.exec-root-note, .exec-collapsed { font-size: 11px; color: var(--text-muted); }
+
+/* Chronology fallback: time order only — no indent, no rule, no arrow. */
+.exec-chrono-wrap { display: flex; flex-direction: column; gap: 8px; }
+.exec-chrono { list-style: none; margin: 0; padding: 0; }
+.exec-chrono-row > .exec-select { flex-direction: row; gap: 12px; align-items: flex-start; width: 100%; }
+.exec-at {
+  flex: none; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+  color: var(--text-muted); font-variant-numeric: tabular-nums; padding-top: 1px;
+}
+.exec-chrono-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* The inspector: one column to the right, sticky under the app header. */
+.exec-inspector {
+  position: sticky; top: 82px; display: flex; flex-direction: column; gap: 14px;
+  padding: 14px 16px; border-radius: 10px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+  font-size: 12.5px; max-height: calc(100vh - 100px); overflow-y: auto;
+}
+.exec-inspector.is-empty { background: transparent; border-style: dashed; }
+.exec-insp-head { position: relative; display: flex; flex-direction: column; gap: 3px; padding-right: 26px; }
+.exec-insp-type { font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.exec-insp-title { margin: 0; font-size: 14px; font-weight: 650; color: var(--text-primary); overflow-wrap: anywhere; }
+.exec-insp-sub { margin: 0; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+.exec-insp-close {
+  position: absolute; top: -4px; right: -6px; width: 26px; height: 26px;
+  font: inherit; font-size: 16px; line-height: 26px; color: var(--text-muted);
+  background: none; border: none; border-radius: 6px; cursor: pointer;
+}
+.exec-insp-close:hover { color: var(--text-primary); background: var(--bg-surface-hover); }
+.exec-insp-section { display: flex; flex-direction: column; gap: 5px; }
+.exec-insp-section .jobd-ev-dl { margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.exec-insp-row { display: grid; grid-template-columns: minmax(84px, max-content) minmax(0, 1fr); gap: 0 10px; }
+.exec-insp-row dt { color: var(--text-muted); font-size: 12px; }
+.exec-insp-row dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.exec-insp-row dd.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; }
+.exec-insp-tech .jobd-ev-dl { display: flex; flex-direction: column; gap: 3px; }
+
+/* Under 860px — the same width the Work board gives up its columns — the
+   inspector stacks under the tree instead of squeezing beside it, and the
+   empty placeholder is dropped because a "select a node" box under a list
+   you can already tap is noise. */
+@media (max-width: 860px) {
+  .exec-body { grid-template-columns: minmax(0, 1fr); }
+  .exec-inspector { position: static; max-height: none; }
+  .exec-inspector.is-empty { display: none; }
+}
+
 /* Evidence: what supports the record above, quieter than the record.
    A source list first (who Trovis heard from), then the observations that
    add something the steps and passes do not already say. Details stay
