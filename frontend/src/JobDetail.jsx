@@ -10,7 +10,11 @@ import {
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
 import { boundedNote, visibilityRows } from './coverage.js'
-import { ACTOR_KIND_LABELS, holderLine, possessionRows, situationEyebrow, situationFor } from './workGraph.js'
+import {
+  ACTOR_KIND_LABELS, elapsedLabel, holderLine, holderStrip, possessionRows, runTiming, situationEyebrow,
+  situationFor, stepClock, stepDay,
+} from './workGraph.js'
+import { connectorName } from './execution.js'
 import ExecutionView from './ExecutionView.jsx'
 import WorkGraphView from './WorkGraphView.jsx'
 
@@ -293,17 +297,17 @@ export default function JobDetail({
   // evidence_id. Nothing is matched by time, actor or label; a row Evidence
   // does not draw is simply not offered (WorkGraphView decides that).
   const [highlightEvidence, setHighlightEvidence] = useState(null)
-  // Details is closed by default; a step's "View evidence" opens it so the
-  // row it points at can be seen.
-  const [detailsOpen, setDetailsOpen] = useState(false)
+  // The Evidence fold is closed by default; a step's "View evidence" opens
+  // it so the row it points at can be seen.
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
   const showEvidence = useCallback((id) => {
-    setDetailsOpen(true)
+    setEvidenceOpen(true)
     setHighlightEvidence(id)
   }, [])
   const bodyRef = useRef(null)
   useEffect(() => {
     setHighlightEvidence(null)
-    setDetailsOpen(false)
+    setEvidenceOpen(false)
   }, [item.id])
   useEffect(() => {
     if (!highlightEvidence) return undefined
@@ -333,32 +337,58 @@ export default function JobDetail({
   const ask = () => openAsk(askPrompt(view))
   const jobName = String(view.workflow_name || '').trim()
   const canOpenJob = Boolean(onOpenJob && view.workflow_id)
+  // The back link already names the job when the run was opened from its
+  // job page; the crumb between it and the title is only for the other way in.
+  const backNamesJob = Boolean(jobName) && String(backLabel || '').replace(/^←\s*/, '') === jobName
+  const timing = isPage ? runTiming(view, graph) : null
+  const startedLabel = timing?.startedAt ? `${stepDay(timing.startedAt)}, ${stepClock(timing.startedAt)}` : null
+  const elapsed = timing ? elapsedLabel(timing.elapsedMs) : null
 
   const body = (
     <>
-        <header className="jobd-head">
+        <header className={`jobd-head${isPage ? ' run-head' : ''}`}>
+          {/* The page header carries identity only: where you are (a
+              breadcrumb), the title, and one line of recorded bookkeeping —
+              run id, when it started, how long since. What is happening is
+              the Current situation's one statement. The panel keeps its
+              compact status line. */}
+          {isPage ? (
+            <>
+              <div className="run-head-top">
+                <nav className="run-crumbs" aria-label="Breadcrumb">
+                  <button type="button" className="jobd-close run-crumb" onClick={onClose}>{backLabel}</button>
+                  {jobName && !backNamesJob && (
+                    <>
+                      <span className="run-crumb-sep" aria-hidden="true">/</span>
+                      {canOpenJob ? (
+                        <button type="button" className="run-crumb run-job-link" onClick={() => onOpenJob(view.workflow_id)}>{jobName}</button>
+                      ) : (
+                        <span className="run-crumb run-job-name">{jobName}</span>
+                      )}
+                    </>
+                  )}
+                  <span className="run-crumb-sep" aria-hidden="true">/</span>
+                  <span className="run-crumb is-current" aria-current="page">{view.title}</span>
+                </nav>
+                {canOpenJob && (
+                  <button type="button" className="btn btn-ghost run-view-job" onClick={() => onOpenJob(view.workflow_id)}>
+                    View job →
+                  </button>
+                )}
+              </div>
+              <h2 className="jobd-title">{view.title}</h2>
+              <p className="run-meta">
+                <span>Run #{view.id}</span>
+                {startedLabel && <span>Started {startedLabel}</span>}
+                {elapsed && <span>{timing.open ? `${elapsed} so far` : `closed after ${elapsed}`}</span>}
+              </p>
+            </>
+          ) : (
+            <>
           <button type="button" className="jobd-close" onClick={onClose}>
-            {isPage ? backLabel : '← Back'}
+            ← Back
           </button>
           <h2 className="jobd-title">{view.title}</h2>
-          {/* The page header carries identity only: the title above, the
-              job it belongs to here. What is happening is the Current
-              situation's one statement, not a pill and a holder line
-              repeating it. The panel keeps its compact status line. */}
-          {isPage ? (
-            jobName && (
-              <p className="run-job">
-                Part of{' '}
-                {canOpenJob ? (
-                  <button type="button" className="run-job-link" onClick={() => onOpenJob(view.workflow_id)}>
-                    {jobName}
-                  </button>
-                ) : (
-                  <span className="run-job-name">{jobName}</span>
-                )}
-              </p>
-            )
-          ) : (
             <div className="jobd-status">
               <span className={`work-status-pill ${view.status || ''}`}>
                 {workItemStatusLabel(view.status)}
@@ -368,6 +398,7 @@ export default function JobDetail({
                 <span className="jobd-age">{workUpdatedLabel(view.updated_at)}</span>
               )}
             </div>
+            </>
           )}
           {/* Two views of one run. The record above this line is shared;
               only what sits below it changes. */}
@@ -412,76 +443,91 @@ export default function JobDetail({
             }}
           />
         ) : isPage ? (
-          <>
-            {/* LEVEL 1 — what is happening now, said once. */}
-            <RunSituation
-              situation={situation}
-              view={view}
-              held={held}
-              decidable={decidable}
-              busy={busy}
-              actionErr={actionErr}
-              onApprove={() => resolve('approve')}
-              onSendBack={() => resolve('decline')}
-            />
+          <div className="run-grid">
+            <div className="run-main">
+              {/* LEVEL 1 — what is happening now, said once, with who has it,
+                  since when, and who had it before — all from possession. */}
+              <RunSituation
+                situation={situation}
+                view={view}
+                held={held}
+                strip={holderStrip(graph?.possession)}
+                decidable={decidable}
+                busy={busy}
+                actionErr={actionErr}
+                onApprove={() => resolve('approve')}
+                onSendBack={() => resolve('decline')}
+              />
 
-            {/* LEVEL 2 — what meaningful things happened, from the Work Graph. */}
-            <WorkGraphView
-              body={graph}
-              failed={Boolean(graphErr)}
-              onRetry={retryGraph}
-              evidence={evidence}
-              selectedId={selectedStep}
-              onSelect={setSelectedStep}
-              onOpenExecution={openExecutionAt}
-              onShowEvidence={showEvidence}
-            />
+              {/* LEVEL 2 — what meaningful things happened, from the Work Graph. */}
+              <WorkGraphView
+                body={graph}
+                failed={Boolean(graphErr)}
+                onRetry={retryGraph}
+                evidence={evidence}
+                selectedId={selectedStep}
+                onSelect={setSelectedStep}
+                onOpenExecution={openExecutionAt}
+                onShowEvidence={showEvidence}
+              />
 
-            {/* LEVEL 3 — the record Trovis keeps, one disclosure away. */}
-            <details
-              className="jobd-section run-details"
-              aria-label="Details"
-              open={detailsOpen}
-              onToggle={(e) => setDetailsOpen(Boolean(e.currentTarget.open))}
-            >
-              <summary className="run-details-summary">
-                <span className="run-details-title">Details</span>
-              </summary>
-              <div className="run-details-body">
-                <RunInformation
-                  view={view}
-                  runs={runs}
-                  costNote={costNote}
-                  jobName={jobName}
-                  canOpenJob={canOpenJob}
-                  onOpenJob={onOpenJob}
-                />
-                <VisibilitySection
-                  body={coverage}
-                  failed={Boolean(coverageErr)}
-                  onRetry={retryCoverage}
-                />
-                <PossessionHistory possession={graph?.possession} />
+              {/* LEVEL 3 — the record Trovis keeps, each one fold away. */}
+              <details
+                className="jobd-section run-fold"
+                aria-label="Evidence"
+                open={evidenceOpen}
+                onToggle={(e) => setEvidenceOpen(Boolean(e.currentTarget.open))}
+              >
+                <summary className="run-fold-summary">
+                  <span className="run-fold-title">Evidence</span>
+                  <span className="run-fold-hint">Recorded observations that support this record.</span>
+                </summary>
                 <EvidenceSection
                   body={evidence}
                   failed={Boolean(evidenceErr)}
                   onRetry={retryEvidence}
                   highlightId={highlightEvidence}
+                  embedded
                 />
-                <ActionList
-                  actions={actions}
-                  loading={runsLoading}
-                  failed={Boolean(runsErr)}
-                  onRetry={retryRuns}
-                  steps={steps}
-                  hidden={hidden}
-                  detail={detail}
-                  onOpenAgent={onOpenAgent}
-                  folded
-                />
-              </div>
-            </details>
-          </>
+              </details>
+              <ActionList
+                actions={actions}
+                loading={runsLoading}
+                failed={Boolean(runsErr)}
+                onRetry={retryRuns}
+                steps={steps}
+                hidden={hidden}
+                detail={detail}
+                onOpenAgent={onOpenAgent}
+                folded
+              />
+            </div>
+
+            {/* The record at a glance, beside the story on wide screens and
+                under it on narrow ones. Every row is a recorded field; none
+                repeats the situation or the timeline. */}
+            <aside className="run-aside" aria-label="Run record">
+              <RunDetailsPanel
+                view={view}
+                runs={runs}
+                evidence={evidence}
+                costNote={costNote}
+                jobName={jobName}
+                canOpenJob={canOpenJob}
+                onOpenJob={onOpenJob}
+                startedLabel={startedLabel}
+                elapsed={elapsed}
+                open={timing ? timing.open : view.status !== 'done'}
+              />
+              <VisibilitySection
+                body={coverage}
+                failed={Boolean(coverageErr)}
+                onRetry={retryCoverage}
+                embedded
+              />
+              <PossessionHistory possession={graph?.possession} />
+            </aside>
+          </div>
         ) : (
           <>
             <CurrentHandoff
@@ -733,14 +779,16 @@ function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, 
  * error with Retry, and NOT five Unknown rows), and a body with no
  * dimensions (an honest sentence).
  */
-function VisibilitySection({ body, failed, onRetry }) {
+function VisibilitySection({ body, failed, onRetry, embedded = false }) {
   const loading = body === null && !failed
   const rows = visibilityRows(body)
   const note = boundedNote(body)
 
   return (
-    <section className="jobd-section jobd-visibility" aria-label="Visibility">
-      <h3 className="dash-caps">Visibility</h3>
+    <section className={`jobd-section jobd-visibility${embedded ? ' run-panel' : ''}`} aria-label="Visibility">
+      {/* Same name and lead beside the story as on its own; the rail only
+          changes the surface and folds each row's sentence until pointed at. */}
+      <h3 className={embedded ? 'run-h run-h-sm' : 'dash-caps'}>Visibility</h3>
       {loading ? (
         <div className="dash-skel">
           <span style={{ width: '45%' }} />
@@ -788,7 +836,7 @@ function VisibilitySection({ body, failed, onRetry }) {
  * error with Retry — the page stays), and empty (an honest sentence, not
  * "nothing happened" and not "not connected").
  */
-function EvidenceSection({ body, failed, onRetry, highlightId = null }) {
+function EvidenceSection({ body, failed, onRetry, highlightId = null, embedded = false }) {
   const loading = body === null && !failed
   const records = body?.evidence || []
   const srcs = sources(records)
@@ -796,8 +844,9 @@ function EvidenceSection({ body, failed, onRetry, highlightId = null }) {
   const trunc = truncationNote(body)
 
   return (
-    <section className="jobd-section jobd-evidence" aria-label="Evidence">
-      <h3 className="dash-caps">Evidence</h3>
+    <section className="jobd-section jobd-evidence" aria-label={embedded ? 'Evidence records' : 'Evidence'}>
+      {/* Inside the Evidence fold the summary is the heading. */}
+      {!embedded && <h3 className="dash-caps">Evidence</h3>}
       {loading ? (
         <div className="dash-skel">
           <span style={{ width: '55%' }} />
@@ -890,7 +939,7 @@ function EvidenceDetail({ label, value }) {
  * line, no second phrasing of the same state, and no Ask here (the page
  * already has the global Ask pill; Ask is not a disposition of the work).
  */
-function RunSituation({ situation, view, held, decidable, busy, actionErr, onApprove, onSendBack }) {
+function RunSituation({ situation, view, held, strip, decidable, busy, actionErr, onApprove, onSendBack }) {
   const waitingOnYou = view.status === 'waiting_on_you'
   if (!situation) {
     return (
@@ -905,66 +954,116 @@ function RunSituation({ situation, view, held, decidable, busy, actionErr, onApp
   // One quiet word from the lean status ("Waiting", "Needs attention",
   // "Closed"); dropped when it would only repeat the headline.
   const eyebrow = situationEyebrow(view.status, situation.headline)
+  const sinceClock = strip?.since ? stepClock(strip.since) : null
+  const sinceAgo = strip?.since ? workUpdatedLabel(strip.since) : ''
   return (
     <section
       className={`run-now${waitingOnYou ? ' is-you' : ''}`}
       aria-label="Current situation"
       data-holder={held ? held.label : undefined}
     >
-      {eyebrow && <p className="run-now-eyebrow">{eyebrow}</p>}
-      <p className="run-now-state">{situation.headline}</p>
-      {situation.support && (
-        <p className="run-now-support">
-          {situation.support.text}
-          {ago ? ` ${ago} ago` : ''}.
-        </p>
-      )}
-      {waitingOnYou && decidable && (
-        <div className="run-now-actions">
-          <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onApprove}>
-            {busy === 'approve' ? 'Approving…' : 'Approve'}
-          </button>
-          <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onSendBack}>
-            {busy === 'decline' ? 'Sending back…' : 'Send back'}
-          </button>
+      <div className="run-now-top">
+        <div className="run-now-text">
+          {eyebrow && <p className="run-now-eyebrow">{eyebrow}</p>}
+          <p className="run-now-state">{situation.headline}</p>
+          {situation.support && (
+            <p className="run-now-support">
+              {situation.support.text}
+              {ago ? ` ${ago} ago` : ''}.
+            </p>
+          )}
         </div>
-      )}
+        {waitingOnYou && decidable && (
+          <div className="run-now-actions">
+            <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onApprove}>
+              {busy === 'approve' ? 'Approving…' : 'Approve'}
+            </button>
+            <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onSendBack}>
+              {busy === 'decline' ? 'Sending back…' : 'Send back'}
+            </button>
+          </div>
+        )}
+      </div>
       {waitingOnYou && actionErr && (
         <p className="jobd-action-err" role="alert">
           {actionErr}
         </p>
+      )}
+      {/* Who has it, since when, who had it before — possession's own
+          fields (current_holder, its start, the preceding segment). Shown
+          only when the endpoint names a current holder. */}
+      {strip && (
+        <dl className="run-now-strip">
+          <div className="run-now-cell">
+            <dt>Current holder</dt>
+            <dd>
+              <span className="run-now-cell-main">{strip.holder.label}</span>
+              <span className="run-now-cell-sub">{ACTOR_KIND_LABELS[strip.holder.kind]}</span>
+            </dd>
+          </div>
+          {sinceClock && (
+            <div className="run-now-cell">
+              <dt>{held?.waiting ? 'Waiting since' : 'Held since'}</dt>
+              <dd>
+                <span className="run-now-cell-main">{sinceClock}</span>
+                {sinceAgo && <span className="run-now-cell-sub">{sinceAgo} ago</span>}
+              </dd>
+            </div>
+          )}
+          {strip.previous && (
+            <div className="run-now-cell">
+              <dt>Previously held by</dt>
+              <dd>
+                <span className="run-now-cell-main">{strip.previous.label}</span>
+                <span className="run-now-cell-sub">{ACTOR_KIND_LABELS[strip.previous.kind]}</span>
+              </dd>
+            </div>
+          )}
+        </dl>
       )}
     </section>
   )
 }
 
 /**
- * Run information, inside Details: the identity and bookkeeping the header
- * no longer carries. Every row exists only when the record has the value;
- * nothing here is a priority, an owner, a source name or a verdict.
+ * Run details, beside the story: the identity and bookkeeping the header
+ * does not carry. Every row exists only when the record has the value —
+ * status (the lean status word), job, run id, started, elapsed, the worker
+ * the runs name, the connector the telemetry arrived through, recorded
+ * totals. Nothing here is a priority, an owner or a verdict.
  */
-function RunInformation({ view, runs, costNote, jobName, canOpenJob, onOpenJob }) {
+function RunDetailsPanel({ view, runs, evidence, costNote, jobName, canOpenJob, onOpenJob, startedLabel, elapsed, open }) {
   const totals = jobTotals(runs)
   const rows = []
+  if (view.status) rows.push(['Status', workItemStatusLabel(view.status)])
   if (jobName) {
     rows.push(['Job', canOpenJob ? (
       <button type="button" className="run-job-link" onClick={() => onOpenJob(view.workflow_id)}>{jobName}</button>
     ) : jobName])
   }
-  if (view.id) rows.push(['Run ID', String(view.id)])
-  if (view.status) rows.push(['Status', workItemStatusLabel(view.status)])
-  if (view.updated_at) rows.push(['Last updated', `${workUpdatedLabel(view.updated_at)} ago`])
+  if (view.id) rows.push(['Run ID', `#${view.id}`])
+  if (startedLabel) rows.push(['Started', startedLabel])
+  if (elapsed) rows.push([open ? 'Elapsed' : 'Closed after', elapsed])
+  // The worker: the agent label the runs payload names, never parsed apart.
+  const workers = [...new Set((runs || []).map((r) => String(r?.agent || '').trim()).filter(Boolean))]
+  if (workers.length) rows.push([workers.length === 1 ? 'Worker' : 'Workers', workers.join(', ')])
+  // The connector the run's telemetry arrived through, from Evidence's
+  // execution records — how Trovis heard, not who did the work.
+  const connectors = [...new Set((evidence?.evidence || [])
+    .filter((r) => r?.evidence_type === 'execution' && r.source_connector_id)
+    .map((r) => connectorName(r.source_connector_id)).filter(Boolean))]
+  if (connectors.length) rows.push([connectors.length === 1 ? 'Source' : 'Sources', connectors.join(', ')])
   // Totals for the whole job, and only when the record has them. Same rule
   // as a run's own line: $0.00 is not a cost. The cost's provenance rides
   // beside the figure, only when the evidence says how it was priced.
   for (const t of totals) {
     const isCost = t.startsWith('$')
-    rows.push([isCost ? 'Cost' : 'Duration', isCost && costNote ? `${t} · ${costNote}` : t])
+    rows.push([isCost ? 'Cost' : 'Run time', isCost && costNote ? `${t} · ${costNote}` : t])
   }
   if (rows.length === 0) return null
   return (
-    <section className="jobd-section run-info" aria-label="Run information">
-      <h3 className="dash-caps">Run information</h3>
+    <section className="jobd-section run-info run-panel" aria-label="Run details">
+      <h3 className="run-h run-h-sm">Run details</h3>
       <dl className="run-info-dl">
         {rows.map(([k, v]) => (
           <div key={k} className="run-info-row">
@@ -979,24 +1078,38 @@ function RunInformation({ view, runs, costNote, jobName, canOpenJob, onOpenJob }
 
 /**
  * Who held the work, in order — possession.segments as history and nothing
- * more: holder, kind, each segment's own waiting flag. No row is "now":
- * current possession is the situation's, from possession.current_holder.
+ * more: holder, kind, each segment's own waiting flag and recorded length.
+ * Most recent first, because the reader has just read who has it now. No
+ * row is "now": current possession is the situation's, from
+ * possession.current_holder.
  */
 function PossessionHistory({ possession }) {
   const rows = possessionRows(possession)
   if (rows.length === 0) return null
+  const [shown, setShown] = useState(false)
+  const recent = [...rows].reverse()
+  const visible = shown ? recent : recent.slice(0, 4)
   return (
-    <section className="jobd-section run-held" aria-label="Who held the work">
-      <h3 className="dash-caps">Who held the work</h3>
-      <ol className="jobd-work-history-list" aria-label="Who held the work, in order">
-        {rows.map((h) => (
+    <section className="jobd-section run-held run-panel" aria-label="Who held the work">
+      <h3 className="run-h run-h-sm">Who held the work</h3>
+      <ol className="jobd-work-history-list" aria-label="Who held the work, most recent first">
+        {visible.map((h) => (
           <li key={h.key} className={`kind-${h.kind}`}>
-            <span className="jobd-work-kind">{ACTOR_KIND_LABELS[h.kind]}</span>
             <span className="jobd-work-history-holder">{h.label}</span>
-            {h.waiting && <span className="jobd-work-history-flag">waiting</span>}
+            <span className="jobd-work-history-meta">
+              {ACTOR_KIND_LABELS[h.kind]}
+              {h.waiting ? ' · waiting' : ''}
+              {elapsedLabel(h.durationMs) ? ` · ${elapsedLabel(h.durationMs)}` : ''}
+            </span>
+            {h.start && <span className="jobd-work-history-at">{stepClock(h.start)}</span>}
           </li>
         ))}
       </ol>
+      {recent.length > 4 && !shown && (
+        <button type="button" className="dash-link" onClick={() => setShown(true)}>
+          Show all {recent.length}
+        </button>
+      )}
     </section>
   )
 }

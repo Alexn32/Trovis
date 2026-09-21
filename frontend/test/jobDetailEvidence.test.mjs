@@ -100,7 +100,9 @@ test('the page loads evidence once, for the viewed item only, and stays a Run pa
   // The work comes first: title, situation, Activity — then, inside Details, evidence.
   assert.ok(text.indexOf('Refund order #4471') < text.indexOf('Evidence'))
   assert.ok(text.indexOf('Activity') < text.indexOf('Evidence'))
-  assert.ok(m.$('.run-details').contains(m.$('.jobd-evidence')), 'Evidence is inside Details')
+  const fold = m.$('.run-fold[aria-label="Evidence"]')
+  assert.ok(fold && fold.contains(m.$('.jobd-evidence')), 'Evidence is inside its fold')
+  assert.ok(!fold.hasAttribute('open'), 'closed by default')
   assert.match(text, /← Refunds/)
   m.unmount()
 })

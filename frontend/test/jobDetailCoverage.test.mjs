@@ -110,7 +110,7 @@ test('1. the page fetches coverage once, for the viewed item, and renders a Visi
   m.unmount()
 })
 
-test('2. Visibility lives inside Details, after Run information and before Evidence — the work first, the record Trovis keeps one disclosure away', async () => {
+test('2. Visibility is a panel in the record rail beside the story, after Run details — the work first in the main column', async () => {
   stub()
   const m = await mount(page())
   await m.settle()
@@ -118,10 +118,12 @@ test('2. Visibility lives inside Details, after Run information and before Evide
   assert.ok(text.indexOf('Refund order #4471') < text.indexOf('Activity'))
   assert.ok(text.indexOf('Activity') < text.indexOf('Visibility'))
   const sections = m.$$('.jobd-section').map((s) => s.getAttribute('aria-label'))
-  assert.deepEqual(sections, ['Activity', 'Details', 'Run information', 'Visibility', 'Evidence', 'How this job ran'])
-  const details = m.$('.run-details')
-  assert.ok(details && details.tagName === 'DETAILS' && !details.hasAttribute('open'), 'Details is closed by default')
-  assert.ok(details.contains(m.$('.jobd-visibility')), 'Visibility is inside Details')
+  assert.deepEqual(sections, ['Activity', 'Evidence', 'Evidence records', 'How this job ran', 'Run details', 'Visibility'])
+  const aside = m.$('.run-aside')
+  assert.ok(aside && aside.contains(m.$('.jobd-visibility')), 'Visibility sits in the rail')
+  assert.ok(m.$('.run-main').contains(m.$('.jobd-work')) && !m.$('.run-main').contains(m.$('.jobd-visibility')))
+  const ev = m.$('.run-fold[aria-label="Evidence"]')
+  assert.ok(ev && ev.tagName === 'DETAILS' && !ev.hasAttribute('open'), 'the Evidence fold is closed by default')
   m.unmount()
 })
 

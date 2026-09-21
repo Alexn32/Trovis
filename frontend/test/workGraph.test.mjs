@@ -4,8 +4,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import {
-  STEP_TYPES, STEP_TYPE_LABELS, actorDisplay, boundedNote, evidenceRecordFor, evidenceRowShown,
-  holderLine, isEmptyGraph, normalizeGraph, possessionRows, situationEyebrow, situationFor, stepContext, stepDetailRows,
+  STEP_TYPES, STEP_TYPE_LABELS, actorDisplay, boundedNote, elapsedLabel, evidenceRecordFor, evidenceRowShown,
+  holderLine, holderStrip, isEmptyGraph, normalizeGraph, possessionRows, runTiming, situationEyebrow, situationFor, stepContext, stepDetailRows,
   stepHeadline, stepLine, stepTechnicalRows, stepTimeLabels, supportLine,
 } from '../src/workGraph.js'
 
@@ -165,6 +165,31 @@ test('stepHeadline / stepLine: who → whom, then the endpoint’s label with th
   const closed = step({ type: 'completed', label: 'Work record closed', details: { reason: 'completed_by_agent', outcome: 'record_closed' } })
   assert.equal(stepHeadline(closed), 'returns-bot')
   assert.equal(stepLine(closed), 'Work record closed', 'the closure reason is bookkeeping, not a second line')
+})
+
+test('elapsedLabel / runTiming / holderStrip: recorded bounds, plain subtraction, possession fields only', () => {
+  assert.equal(elapsedLabel(20_000), 'under a minute')
+  assert.equal(elapsedLabel(12 * 60_000), '12m')
+  assert.equal(elapsedLabel((60 + 32) * 60_000), '1h 32m')
+  assert.equal(elapsedLabel((3 * 24 + 4) * 3_600_000), '3d 4h')
+  assert.equal(elapsedLabel(null), null)
+  assert.equal(elapsedLabel(-5), null)
+  const segs = [{ holder_type: 'agent', holder: 'bot:main', start: '2026-09-21T10:32:00Z', end: '2026-09-21T10:39:00Z', waiting: false },
+    { holder_type: 'human', holder: 'Alex', start: '2026-09-21T10:39:00Z', end: null, waiting: true }]
+  const now = Date.parse('2026-09-21T12:04:00Z')
+  const open = runTiming({ status: 'waiting_on_other' }, { steps: [], possession: { segments: segs, current_holder: segs[1] } }, now)
+  assert.deepEqual(open, { startedAt: '2026-09-21T10:32:00Z', endedAt: null, elapsedMs: 92 * 60_000, open: true })
+  const closedStep = step({ type: 'completed', label: 'Work record closed', at: '2026-09-21T10:44:00Z' })
+  const done = runTiming({ status: 'done', updated_at: '2026-09-21T13:00:00Z' }, { steps: [closedStep], possession: { segments: segs } }, now)
+  assert.deepEqual(done, { startedAt: '2026-09-21T10:32:00Z', endedAt: '2026-09-21T10:44:00Z', elapsedMs: 12 * 60_000, open: false })
+  const fromTimeline = runTiming({ status: 'moving', timeline: [{ at: '2026-09-21T10:00:00Z', text: 'Started' }] }, null, now)
+  assert.equal(fromTimeline.startedAt, '2026-09-21T10:00:00Z')
+  assert.equal(runTiming({ status: 'moving', timeline: [] }, null, now), null)
+  const strip = holderStrip({ segments: segs, current_holder: segs[1] })
+  assert.deepEqual(strip, { holder: { label: 'Alex', kind: 'human' }, since: '2026-09-21T10:39:00Z', previous: { label: 'bot', kind: 'agent' } })
+  assert.equal(holderStrip({ segments: segs, current_holder: null }), null, 'an open-ended segment never becomes a holder strip')
+  assert.equal(possessionRows({ segments: segs })[0].durationMs, 7 * 60_000)
+  assert.equal(possessionRows({ segments: segs })[1].durationMs, null, 'an open bound is not a duration')
 })
 
 test('situationEyebrow: one word from the lean status, never when it repeats the headline, never inferred', () => {
