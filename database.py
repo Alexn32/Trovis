@@ -8748,8 +8748,8 @@ def _record_title(
     """What this record was, in the agent's own words, when there is no
     transcript to summarize.
 
-    Order: the job title the agent reported (`trovis.loop.title` — the same
-    attribute Work names jobs from), then a step description, then a step
+    Order: the run title the agent reported (`trovis.loop.title` — the same
+    attribute Work names runs from), then a step description, then a step
     name, then the first non-system operation. None when the record says
     nothing about itself.
     """

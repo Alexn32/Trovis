@@ -45,6 +45,7 @@ import database
 # Aliased: the /connect/health route handler below is itself named
 # connect_health, and the module must stay reachable from it.
 import connect_health as connect_health_model
+import connectors as connector_registry
 import work_evidence
 import work_coverage
 import work_execution
@@ -95,6 +96,7 @@ except Exception as _grok_mcp_err:  # noqa: BLE001 — never fatal
     )
     grok_mcp = grok_mcp_app = None
 from models import (
+    ConnectorsResponse,
     AgentCosts,
     AgentDeleteResponse,
     AgentDescription,
@@ -1056,9 +1058,15 @@ async def ingest_traces(request: Request) -> IngestResponse:
     the wire format is OTLP. Every key is read with the trovis./oversee.
     dual-prefix via database.attr()):
 
-      trovis.loop.external_id   explicit loop grouping key
+      Vocabulary: a loop is one RUN — one occurrence of work. A JOB is the
+      recurring kind of work (a versioned `workflows` declaration) that
+      recognises its runs by service / agent / title hints; nothing on the
+      wire names the job.
+
+      trovis.loop.external_id   explicit run grouping key
                                 (falls back to trovis.run.id)
-      trovis.loop.title         plain-English title. Stamped at loop
+      trovis.loop.title         plain-English title OF THE RUN ("Approve
+                                refund for order #4821"). Stamped at loop
                                 creation as title_source=provided, or
                                 adopted onto an existing untitled open
                                 loop (NULL/empty → provided). Never
@@ -6379,6 +6387,19 @@ def dashboard_ask(request: Request, body: AskRequest) -> AskResponse:
     return AskResponse(answer=result["answer"], visual=result.get("visual"))
 
 
+@app.get("/connect/connectors", response_model=ConnectorsResponse)
+def connect_connectors(request: Request) -> ConnectorsResponse:
+    """The canonical connector registry (connectors.py): identity, setup
+    shape and capabilities per connector. Static and account-independent;
+    served so the client can check its committed snapshot against the
+    server it talks to, and so later Connect surfaces read capabilities
+    from one place. Authenticated like the rest of /connect."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    return ConnectorsResponse(connectors=connector_registry.to_public())
+
+
 @app.get("/connect/health", response_model=ConnectionHealthResponse)
 def connect_health(request: Request) -> ConnectionHealthResponse:
     """Normalized connection health for the Connections page.
@@ -6801,14 +6822,17 @@ _ACTION_JOB_SENTINEL = "__chatgpt_job__"
 def _action_job(
     account_id: int, service: str, body: dict[str, Any]
 ) -> tuple[str, str | None]:
-    """(job_id, title) for this GPT's current job.
+    """(job_id, title) for this GPT's current run.
 
-    A GPT that sends `job_title` starts (or renames) a job; one that sends
-    nothing keeps reporting into the job it already had. The id is remembered
-    per account+agent so a GPT never has to echo it back — it has enough to
-    remember without that.
+    Vocabulary: what the Actions wire calls a "job" is one RUN in Trovis (one
+    loop, titled by `trovis.loop.title`); the field names are kept for the
+    GPTs already configured with them. `run_title` is accepted as the
+    honest alias. A GPT that sends a title starts (or renames) a run; one
+    that sends nothing keeps reporting into the run it already had. The id
+    is remembered per account+agent so a GPT never has to echo it back — it
+    has enough to remember without that.
     """
-    title = str(body.get("job_title") or "").strip()[:200] or None
+    title = str(body.get("run_title") or body.get("job_title") or "").strip()[:200] or None
     explicit = str(body.get("job_id") or "").strip()[:120]
     row = database.get_insight(account_id, _ACTION_JOB_SENTINEL, "main", service)
     remembered = (row or {}).get("data") if row else None
@@ -7087,7 +7111,7 @@ def actions_openapi():
                                 "schema": {
                                     "type": "object",
                                     "properties": {
-                                        "job_title": {"type": "string", "description": "What you are working on for the user, in plain English, as you'd say it to a colleague (e.g. 'Draft the Q3 board update'). Send it on the first step of a task — it becomes the job's name in Trovis. Send a new one only when you move on to a different task."},
+                                        "job_title": {"type": "string", "description": "What you are working on for the user, in plain English, as you'd say it to a colleague (e.g. 'Draft the Q3 board update'). Send it on the first step of a task — it becomes the run's name in Trovis (one task = one run). Send a new one only when you move on to a different task. `run_title` is accepted as an alias."},
                                         "step_name": {"type": "string", "description": "Name of the step completed"},
                                         "description": {"type": "string", "description": "What happened"},
                                         "duration_seconds": {"type": "number", "description": "How long it took"},

@@ -147,7 +147,7 @@ init(
 from xai_sdk import Client
 from xai_sdk.chat import user
 
-set_loop_title("Triage refund for order #4821")   # names the Work item
+set_loop_title("Triage refund for order #4821")   # names this RUN on Work
 
 client = Client()
 chat = client.chat.create(model="grok-4.20-non-reasoning")
@@ -169,8 +169,8 @@ Two things to know:
 
 - **Don't create an `xai_sdk.telemetry.Telemetry()`.** It installs its own
   tracer provider, which names *every* Grok agent `xai-sdk` — so they all
-  collapse into one agent in Trovis, and none of them carries your job titles
-  or handoffs. `init()` already does that job, and OTEL won't let a second
+  collapse into one agent in Trovis, and none of them carries your run titles
+  or handoffs. `init()` already does that work, and OTEL won't let a second
   provider take over, so ordering is the whole fix: if one got there first,
   `init()` warns.
 - **`XAI_SDK_DISABLE_TRACING=1` silences the SDK entirely.** With it set, a
@@ -224,6 +224,13 @@ span. Trovis then surfaces "Agent A → Agent B" automatically. There's also
 
 ## Named Work (`trovis.loop.title`)
 
+**Vocabulary.** A **run** is one occurrence of work — "Approve refund for
+order #4821". A **job** is the recurring kind of work those runs belong to —
+"Process customer returns". `trovis.loop.title` names the **run**. Jobs are
+declared in Trovis (Work → jobs) and recognise their runs by service, agent
+or title pattern; nothing in this SDK names the job, and the title should
+say what this run is doing, not what kind of work it is.
+
 New runs land as **named Work** on Trovis (`GET /work/items`,
 `title_source=provided`) when the **creating span** carries
 `trovis.loop.title`. Ingest stamps the title only at loop INSERT — set it
@@ -245,9 +252,9 @@ set_loop_title("Refund order 42")          # named Work, capture still off
 mark_handoff("to_human", "ops@acme.com")   # optional; also auto-emitted on SDK handoffs
 ```
 
-Raw OTLP (no SDK): put `trovis.loop.title` on the first span of the loop,
-optionally with `trovis.run.id` or `trovis.loop.external_id` to group
-later spans. LLM-generated titles are **not** named Work — only
+Raw OTLP (no SDK): put `trovis.loop.title` on the first span of the run,
+with `trovis.run.id` or `trovis.loop.external_id` on every span so they
+group into one run. LLM-generated titles are **not** named Work — only
 `title_source=provided` counts.
 
 ## What gets captured

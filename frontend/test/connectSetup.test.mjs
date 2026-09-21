@@ -3,11 +3,17 @@
 //
 // #137 locked the brand catalog itself (see brandMarks.test.mjs). These cover
 // the surfaces a first-run user actually walks through, and the guidance that
-// decides whether their work arrives as named jobs or as an unnamed trace.
+// decides whether their work arrives as named runs or as an unnamed trace.
+//
+// Vocabulary pinned here: a RUN is one occurrence of work and is what
+// trovis.loop.title names; a JOB is the recurring kind of work, declared in
+// Work. Setup copy that calls a titled loop a "job" teaches the wrong
+// contract (see AGENTS.md "Work vocabulary").
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { BRANDS, LIVE_BRAND_IDS, RECIPE_BRAND_IDS, COMING_BRAND_IDS } from '../src/brandMarks.js'
+import { allTiles, guideOpeningOptions } from '../src/connectSetup.js'
 
 const read = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
 const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
@@ -63,22 +69,22 @@ test('the recognition brands are coming, and the doors are not', () => {
 })
 
 test('a recognition brand never becomes a clickable door in the picker', () => {
-  // The picker is built from PLATFORMS / RECIPE_PLATFORMS. A SaaS logo showing
-  // up there would promise an agent-setup flow that does not exist — Stripe
-  // lives in Settings, not Add Agent.
-  const picker = addAgent.slice(
-    addAgent.indexOf('const PLATFORMS'),
-    addAgent.indexOf('function '),
-  )
+  // The picker is derived from the registry (connectSetup.js). A SaaS logo
+  // showing up there would promise an agent-setup flow that does not exist —
+  // Stripe lives on the Connections page, not Add Agent.
+  assert.match(addAgent, /const PLATFORMS = pickerTiles\(\)/)
+  assert.match(addAgent, /const RECIPE_PLATFORMS = recipeTiles\(\)/)
+  const picker = allTiles().map((t) => t.id)
   for (const id of [...COMING_BRAND_IDS, 'stripe', 'hubspot', 'shopify']) {
-    assert.doesNotMatch(picker, new RegExp(`id: '${id}'`), `${id} is not a door`)
+    assert.ok(!picker.includes(id), `${id} is not a door`)
   }
 })
 
 // --- named work: the one rule a builder has to follow -----------------------
 
 test('the raw OTEL recipe teaches the title as a required step, not a footnote', () => {
-  assert.match(addAgent, /title="Name the job \(required for named Work\)"/)
+  assert.match(addAgent, /title="Name the run \(required for named Work\)"/)
+  assert.doesNotMatch(addAgent, /title="Name the job/)
   assert.match(addAgent, /<NamedWorkGuidance \/>/)
 })
 
@@ -88,7 +94,7 @@ test('the OTEL snippet a builder copies already sets a human title', () => {
   const block = addAgent.slice(addAgent.indexOf('function otelSetupBlock'))
   assert.match(block, /trovis\.loop\.title/)
   assert.match(block, /Approve refund for order #4821/)
-  // Grouping too, or every step becomes its own job.
+  // Grouping too, or every step becomes its own run.
   assert.match(block, /trovis\.loop\.external_id/)
   assert.doesNotMatch(block.slice(0, block.indexOf('}')), /custom\.key/)
 })
@@ -105,7 +111,24 @@ test('the guidance says what a good title is — and what gets filtered out', ()
   assert.match(g, /trovis capture on/)
 })
 
-test('every live door explains how its jobs get named', () => {
+test('the guidance teaches Run, not Job: the title names one occurrence of work', () => {
+  const g = addAgent.slice(addAgent.indexOf('function NamedWorkGuidance'))
+  const body = g.slice(0, g.indexOf('\n}'))
+  // The title is a run's; the job is the recurring kind of work, declared in
+  // Work and matched by hint — never named from instrumentation.
+  assert.match(body, /groups spans into <strong>runs<\/strong>/)
+  assert.match(body, /one run is one\s+occurrence of work/)
+  assert.match(body, /job is declared in Work/)
+  assert.match(body, /Process customer returns/)
+  assert.doesNotMatch(body, /groups spans into <strong>jobs/)
+  assert.doesNotMatch(body, /one job is one piece of/)
+  // No recipe page anywhere calls the titled unit a job.
+  assert.doesNotMatch(addAgent, /named job on Work/)
+  assert.doesNotMatch(addAgent, /becomes the job'?s name in Trovis/)
+  assert.doesNotMatch(addAgent, /becomes the job name in Trovis/)
+})
+
+test('every live door explains how its runs get named', () => {
   // A door that never mentions titles ships silent unnamed work.
   for (const fn of [
     'OpenAIAgentsInstructions',
@@ -152,12 +175,15 @@ test('the two Grok doors are named apart and never blur together', () => {
   // an app built on xai-sdk; "Grok Bot" is a desktop assistant that
   // reports over MCP. Calling either by the other's name sends a builder down
   // a path that cannot work for them.
-  assert.match(addAgent, /label: 'Grok \(xAI SDK\)'/)
-  assert.match(addAgent, /label: 'Grok Bot'/)
+  const labels = allTiles().map((t) => t.label)
+  assert.ok(labels.includes('Grok (xAI SDK)'))
+  assert.ok(labels.includes('Grok Bot'))
   assert.match(addAgent, /Connect Grok \(xAI SDK\)/)
   assert.match(addAgent, /Connect a Grok Bot/)
-  assert.match(guide, /'Grok \(xAI SDK\)'/)
-  assert.match(guide, /'Grok Bot'/)
+  const chips = guideOpeningOptions()
+  assert.ok(chips.includes('Grok (xAI SDK)'))
+  assert.ok(chips.includes('Grok Bot'))
+  assert.ok(guide.includes('guideOpeningOptions()'))
 
   // The SDK door never calls its user's app a bot...
   const sdkDoor = addAgent.slice(
@@ -241,7 +267,7 @@ test('no page asks Python for the http/json exporter it does not ship', () => {
   assert.match(py, /opentelemetry-instrument python/)
 })
 
-test('the Actions door tells the GPT how to name its jobs', () => {
+test('the Actions door tells the GPT how to name its runs', () => {
   // /actions/log takes a job_title now, so the door produces named Work like
   // every other one. The page used to admit it could not; what it must not do
   // is claim titles happen by themselves — a GPT that never sends one still
@@ -274,9 +300,9 @@ test('setup copy never sends anyone to the desktop table', () => {
   }
 })
 
-test('success copy promises named jobs, not a telemetry dump', () => {
+test('success copy promises named runs, not a telemetry dump', () => {
   const s = addAgent.slice(addAgent.indexOf('function SuccessCallout'))
-  assert.match(s, /named jobs/)
+  assert.match(s, /named runs/)
   assert.doesNotMatch(s.slice(0, s.indexOf('\n}')), /span|trace|OTel/i)
 })
 

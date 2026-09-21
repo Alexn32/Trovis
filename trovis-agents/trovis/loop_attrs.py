@@ -1,5 +1,10 @@
 """Workloop attributes shared by every trovis-agents platform adapter.
 
+Vocabulary: a loop is one RUN — one occurrence of work ("Approve refund for
+order #4821"). `trovis.loop.title` names the run. A JOB is the recurring kind
+of work a run belongs to; jobs are declared in Trovis and recognise their runs
+by service / agent / title pattern — this package never names the job.
+
 Named Work on the Trovis dashboard is a loop whose *creating* span carried
 `trovis.loop.title`. Ingest stamps `title_source=provided` at INSERT only
 (adopt-onto-open-untitled is a backend follow-on, not this package).

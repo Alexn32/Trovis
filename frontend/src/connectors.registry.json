@@ -1,0 +1,385 @@
+[
+  {
+    "id": "openclaw",
+    "name": "OpenClaw",
+    "category": "agent_platform",
+    "availability": "available",
+    "methods": [
+      "plugin"
+    ],
+    "setup_type": "plugin",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs",
+      "cost"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "remove_plugin",
+    "explicit_method": "plugin",
+    "stamps": [
+      "trovis.connector.id=openclaw",
+      "openclaw.gateway.version present"
+    ],
+    "tile_label": "OpenClaw",
+    "tile_subtitle": "AI agent platform — agents connect themselves",
+    "guide_label": "OpenClaw",
+    "variants": [],
+    "setup_notes": "The trovis plugin runs inside the OpenClaw gateway; one plugin install can expose every agent the gateway runs. /trovis capture on is what makes runs land as named Work."
+  },
+  {
+    "id": "openai-agents",
+    "name": "OpenAI Agents SDK",
+    "category": "agent_platform",
+    "availability": "available",
+    "methods": [
+      "sdk"
+    ],
+    "setup_type": "sdk",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs",
+      "cost"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "revoke_key",
+    "explicit_method": "sdk",
+    "stamps": [
+      "trovis.connector.id=openai-agents",
+      "trovis.sdk.platform=openai"
+    ],
+    "tile_label": "OpenAI Agents SDK",
+    "tile_subtitle": "OpenAI native agent framework",
+    "guide_label": "OpenAI Agents SDK",
+    "variants": [],
+    "setup_notes": "pip install trovis-agents[openai]; init() before the framework import."
+  },
+  {
+    "id": "claude",
+    "name": "Claude Agents",
+    "category": "agent_platform",
+    "availability": "available",
+    "methods": [
+      "sdk"
+    ],
+    "setup_type": "sdk",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs",
+      "cost"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "revoke_key",
+    "explicit_method": "sdk",
+    "stamps": [
+      "trovis.connector.id=claude",
+      "trovis.sdk.platform=anthropic",
+      "trovis.sdk.platform=claude-agent-sdk"
+    ],
+    "tile_label": "Claude Agents",
+    "tile_subtitle": "Claude Agent SDK or Managed Agents",
+    "guide_label": "Claude Agent SDK / Claude Code",
+    "variants": [
+      {
+        "id": "claude-agent-sdk",
+        "label": "Claude Agent SDK",
+        "subtitle": "query() + ClaudeSDKClient — the Claude Code engine"
+      },
+      {
+        "id": "claude-agents",
+        "label": "Claude Managed Agents",
+        "subtitle": "client.beta.agents + beta.sessions API"
+      }
+    ],
+    "setup_notes": "Two variants under one connector: the Claude Agent SDK (query()/ClaudeSDKClient — pip install trovis-agents[claude-agent-sdk]) and Anthropic Managed Agents (client.beta.agents — pip install trovis-agents[anthropic]). Claude Code the CLI exports OTEL itself."
+  },
+  {
+    "id": "chatgpt",
+    "name": "ChatGPT custom GPT",
+    "category": "ai_worker",
+    "availability": "available",
+    "methods": [
+      "actions",
+      "oauth"
+    ],
+    "setup_type": "actions",
+    "observes": [
+      "execution",
+      "actions"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "remove_action",
+    "explicit_method": null,
+    "stamps": [
+      "trovis.connector.id=chatgpt",
+      "trovis.platform=chatgpt (legacy)"
+    ],
+    "tile_label": "ChatGPT (custom GPT)",
+    "tile_subtitle": "Monitor + query a GPT via Actions — no code",
+    "guide_label": "ChatGPT (custom GPT)",
+    "variants": [],
+    "setup_notes": "No code, no pip, no API key: the GPT gets Trovis as an Action over OAuth and reports its own activity (connectAgent / logActivity / reportComplete) — it can also ask about the fleet (askFleet). No token-level cost is visible; the GPT runs on OpenAI's side."
+  },
+  {
+    "id": "grok",
+    "name": "Grok (xAI SDK)",
+    "category": "agent_platform",
+    "availability": "available",
+    "methods": [
+      "sdk",
+      "otel"
+    ],
+    "setup_type": "sdk",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs",
+      "cost"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "revoke_key",
+    "explicit_method": "sdk",
+    "stamps": [
+      "trovis.connector.id=grok",
+      "trovis.sdk.platform=xai"
+    ],
+    "tile_label": "Grok (xAI SDK)",
+    "tile_subtitle": "Already OpenTelemetry-instrumented — two lines",
+    "guide_label": "Grok (xAI SDK)",
+    "variants": [],
+    "setup_notes": "For apps built on the xai-sdk package, which already emits OpenTelemetry: pip install trovis-agents[xai] and init() before the xAI Client is created. NOT the Grok Bot door."
+  },
+  {
+    "id": "grok-bot",
+    "name": "Grok Bot",
+    "category": "ai_worker",
+    "availability": "available",
+    "methods": [
+      "mcp"
+    ],
+    "setup_type": "mcp",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "remove_mcp",
+    "explicit_method": "mcp",
+    "stamps": [
+      "trovis.connector.id=grok-bot",
+      "trovis.platform=grok-bot / cursor-grok-bot (legacy)"
+    ],
+    "tile_label": "Grok Bot",
+    "tile_subtitle": "Desktop assistant — it reports in over MCP",
+    "guide_label": "Grok Bot",
+    "variants": [],
+    "setup_notes": "A desktop assistant (the kind someone runs in Cursor) that exports nothing, so it REPORTS to Trovis over MCP; nothing is recorded unless the Bot calls the report_job_* tools. NOT the xAI SDK door."
+  },
+  {
+    "id": "cursor",
+    "name": "Cursor",
+    "category": "ai_worker",
+    "availability": "available",
+    "methods": [
+      "otel"
+    ],
+    "setup_type": "recipe",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs",
+      "cost"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "stop_exporter",
+    "explicit_method": "otel",
+    "stamps": [
+      "trovis.connector.id=cursor (set by the recipe)"
+    ],
+    "tile_label": "Cursor",
+    "tile_subtitle": "Send traces over OpenTelemetry — no plugin",
+    "guide_label": "Cursor (OpenTelemetry)",
+    "variants": [],
+    "setup_notes": "A recipe, not a plugin: anything run from Cursor that emits OpenTelemetry points its exporter at Trovis."
+  },
+  {
+    "id": "custom-otel",
+    "name": "Custom (OpenTelemetry)",
+    "category": "custom",
+    "availability": "available",
+    "methods": [
+      "otel"
+    ],
+    "setup_type": "guide",
+    "observes": [
+      "execution",
+      "actions",
+      "handoffs",
+      "cost"
+    ],
+    "discovers_agents": true,
+    "supports_multiple_instances": true,
+    "management": "stop_exporter",
+    "explicit_method": "otel",
+    "stamps": [
+      "any telemetry with no Trovis-owned stamp"
+    ],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": "Custom Python / other",
+    "variants": [],
+    "setup_notes": "Anything that emits OpenTelemetry spans: Python via pip install trovis-agents + init(platform=\"auto\"), or any OTLP/HTTP exporter pointed at POST /v1/traces with the X-Trovis-Api-Key header."
+  },
+  {
+    "id": "stripe",
+    "name": "Stripe",
+    "category": "work_system",
+    "availability": "available",
+    "methods": [
+      "oauth",
+      "webhook"
+    ],
+    "setup_type": "oauth",
+    "observes": [
+      "external_outcomes"
+    ],
+    "discovers_agents": false,
+    "supports_multiple_instances": true,
+    "management": "oauth_disconnect",
+    "explicit_method": null,
+    "stamps": [],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": null,
+    "variants": [],
+    "setup_notes": "Independent evidence of payment and refund outcomes, linked to a run only through an explicit trovis_loop_external_id / trovis_run_id in the Stripe object's metadata. Not Trovis billing."
+  },
+  {
+    "id": "hubspot",
+    "name": "HubSpot",
+    "category": "work_system",
+    "availability": "available",
+    "methods": [
+      "oauth",
+      "webhook"
+    ],
+    "setup_type": "oauth",
+    "observes": [
+      "external_outcomes"
+    ],
+    "discovers_agents": false,
+    "supports_multiple_instances": true,
+    "management": "oauth_disconnect",
+    "explicit_method": null,
+    "stamps": [],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": null,
+    "variants": [],
+    "setup_notes": "Independent evidence of deal and ticket state, linked to a run only through an explicit link key on the HubSpot object."
+  },
+  {
+    "id": "shopify",
+    "name": "Shopify",
+    "category": "work_system",
+    "availability": "available",
+    "methods": [
+      "oauth",
+      "webhook"
+    ],
+    "setup_type": "oauth",
+    "observes": [
+      "external_outcomes"
+    ],
+    "discovers_agents": false,
+    "supports_multiple_instances": true,
+    "management": "oauth_disconnect",
+    "explicit_method": null,
+    "stamps": [],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": null,
+    "variants": [],
+    "setup_notes": "Independent evidence of order, payment and fulfillment state, linked to a run only through an explicit link key on the order."
+  },
+  {
+    "id": "slack",
+    "name": "Slack",
+    "category": "communication",
+    "availability": "coming_soon",
+    "methods": [
+      "oauth"
+    ],
+    "setup_type": "none",
+    "observes": [
+      "handoffs"
+    ],
+    "discovers_agents": false,
+    "supports_multiple_instances": true,
+    "management": "none",
+    "explicit_method": null,
+    "stamps": [],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": null,
+    "variants": [],
+    "setup_notes": null
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "category": "work_system",
+    "availability": "coming_soon",
+    "methods": [
+      "oauth"
+    ],
+    "setup_type": "none",
+    "observes": [
+      "external_outcomes"
+    ],
+    "discovers_agents": false,
+    "supports_multiple_instances": true,
+    "management": "none",
+    "explicit_method": null,
+    "stamps": [],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": null,
+    "variants": [],
+    "setup_notes": null
+  },
+  {
+    "id": "intercom",
+    "name": "Intercom",
+    "category": "communication",
+    "availability": "coming_soon",
+    "methods": [
+      "oauth"
+    ],
+    "setup_type": "none",
+    "observes": [
+      "handoffs",
+      "external_outcomes"
+    ],
+    "discovers_agents": false,
+    "supports_multiple_instances": true,
+    "management": "none",
+    "explicit_method": null,
+    "stamps": [],
+    "tile_label": null,
+    "tile_subtitle": null,
+    "guide_label": null,
+    "variants": [],
+    "setup_notes": null
+  }
+]

@@ -2737,6 +2737,35 @@ class ConnectionHealthResponse(BaseModel):
     connectors: list[ConnectionHealth] = Field(default_factory=list)
 
 
+class ConnectorSpec(BaseModel):
+    """One entry of the canonical connector registry (connectors.py):
+    identity, setup shape and capabilities. Capabilities (`observes`) say
+    what a connection of this kind CAN contribute to Work Coverage, never
+    what a given run has observed."""
+
+    id: str
+    name: str
+    category: str
+    availability: str
+    methods: list[str] = Field(default_factory=list)
+    setup_type: str
+    observes: list[str] = Field(default_factory=list)
+    discovers_agents: bool
+    supports_multiple_instances: bool
+    management: str
+    explicit_method: str | None = None
+    stamps: list[str] = Field(default_factory=list)
+    tile_label: str | None = None
+    tile_subtitle: str | None = None
+    guide_label: str | None = None
+    variants: list[dict[str, str]] = Field(default_factory=list)
+    setup_notes: str | None = None
+
+
+class ConnectorsResponse(BaseModel):
+    connectors: list[ConnectorSpec] = Field(default_factory=list)
+
+
 class SaaSConnection(BaseModel):
     """One connected SaaS provider (Stripe / HubSpot / Shopify). Tokens never leave the server."""
 

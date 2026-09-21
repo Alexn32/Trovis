@@ -11,6 +11,7 @@ import {
   brandTooltip,
   resolveBrand,
 } from '../src/brandMarks.js'
+import { allTiles, guideOpeningOptions, pickerTiles, recipeTiles } from '../src/connectSetup.js'
 
 const V1 = [
   'openclaw',
@@ -106,26 +107,23 @@ test('Connections exposes Stripe, HubSpot, and Shopify Connect; Add Agent stays 
 })
 
 test('Add Agent live tiles stay the real doors; SaaS is not a picker door', () => {
-  const src = readFileSync(new URL('../src/AddAgent.jsx', import.meta.url), 'utf8')
-  // Live PLATFORMS block — the four doors that work today.
-  const liveBlock = src.match(/const PLATFORMS = \[([\s\S]*?)\]/)
-  assert.ok(liveBlock, 'PLATFORMS array exists')
-  const live = liveBlock[1]
+  // The picker is derived from the registry (connectSetup.js), so assert on
+  // the derived tiles rather than a literal array in the component.
+  const live = pickerTiles().map((t) => t.id)
   for (const id of ['openclaw', 'openai-agents', 'claude', 'chatgpt', 'grok']) {
-    assert.match(live, new RegExp(`id: '${id}'`))
+    assert.ok(live.includes(id), `${id} is a live door`)
   }
   for (const id of ['slack', 'github', 'hubspot', 'stripe', 'intercom', 'shopify', 'zendesk']) {
-    assert.doesNotMatch(live, new RegExp(`id: '${id}'`))
+    assert.ok(!live.includes(id), `${id} is not a picker door`)
   }
   // Cursor may be a recipe tile, never a fake plugin.
-  const recipe = src.match(/const RECIPE_PLATFORMS = \[([\s\S]*?)\]/)
-  assert.ok(recipe, 'RECIPE_PLATFORMS exists')
-  assert.match(recipe[1], /id: 'cursor'/)
+  assert.deepEqual(recipeTiles().map((t) => t.id), ['cursor'])
+  const src = readFileSync(new URL('../src/AddAgent.jsx', import.meta.url), 'utf8')
   assert.match(src, /OpenTelemetry/)
   assert.match(src, /no plugin/i)
   assert.doesNotMatch(src, /Install the Cursor plugin/i)
   for (const id of COMING_BRAND_IDS) {
-    assert.doesNotMatch(src, new RegExp(`id: '${id}'`))
+    assert.ok(!allTiles().some((t) => t.id === id), `${id} has no tile`)
   }
 })
 
@@ -151,10 +149,11 @@ test('Work table brand marks are muted; Connect tiles stay loud', () => {
 })
 
 test('Connect opening chips are live/recipe only — no SaaS doors', () => {
+  // The chips come from the registry's guide_label (connectSetup.js); the
+  // guide reads them, it does not keep its own list.
   const src = readFileSync(new URL('../src/ConnectGuide.jsx', import.meta.url), 'utf8')
-  const opts = src.match(/options: \[([\s\S]*?)\]/)
-  assert.ok(opts, 'opening options exist')
-  const block = opts[1]
+  assert.match(src, /options: guideOpeningOptions\(\)/)
+  const block = guideOpeningOptions().join('\n')
   assert.match(block, /OpenClaw/)
   assert.match(block, /OpenAI/)
   assert.match(block, /Claude/)

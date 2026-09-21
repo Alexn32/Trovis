@@ -27,6 +27,8 @@ from typing import Any
 
 import anthropic
 
+import connectors
+
 import database
 import loops
 
@@ -143,12 +145,36 @@ Rules:
 # What the assistant knows about setting Trovis up — kept factually in sync
 # with the Add-Agent wizard and the trovis-agents SDK. This is what lets the
 # pill walk a user through connecting an agent, not just read telemetry.
+def _registry_roster() -> str:
+    """The connector roster the assistant may offer, from the canonical
+    registry (connectors.py) — the same rows the Connections page, the
+    manual wizard's tiles and the guide's opening chips read. One line per
+    available connector: name, how it connects, and its setup notes. The
+    exact commands stay in _CONNECT_SETUP_EXTRAS below; this is the WHAT and
+    the disambiguation, so the roster can never drift from the product."""
+    lines = []
+    for c in connectors.available():
+        how = {
+            "sdk": "trovis-agents SDK",
+            "plugin": "first-party plugin",
+            "actions": "GPT Actions + OAuth, no code",
+            "mcp": "the worker reports in over MCP",
+            "recipe": "OpenTelemetry exporter recipe",
+            "guide": "any OpenTelemetry exporter",
+            "oauth": "OAuth into the system + webhooks (a work system, not an agent)",
+        }.get(c.setup_type, c.setup_type)
+        note = f" {c.setup_notes}" if c.setup_notes else ""
+        lines.append(f"  * {c.name} [{c.id}] — {how}.{note}")
+    return "\n".join(lines)
+
+
 _SETUP_KNOWLEDGE = (
     "\n\nYou are also the Trovis setup expert. Facts you know:\n"
     "- Connecting an agent: the Add Agent button (top right) has guided steps "
-    "for OpenClaw, OpenAI Agents SDK, Claude Agents (Claude Agent SDK or "
-    "Anthropic Managed Agents), Grok (xAI SDK), a Grok Bot, and a "
-    "custom GPT built in ChatGPT.\n"
+    "for every connector below with a tile; the Connections page connects the "
+    "work systems (Stripe, HubSpot, Shopify) over OAuth. The connectors "
+    "Trovis supports today, exactly (never offer one that is not listed):\n"
+    + _registry_roster() + "\n"
     "- Two different Grok doors, never conflate them: \"Grok (xAI SDK)\" is for "
     "apps built on the xai-sdk package (they emit OpenTelemetry themselves); "
     "\"Grok Bot\" is a desktop assistant (the kind someone runs in Cursor) "
@@ -178,6 +204,13 @@ _SETUP_KNOWLEDGE = (
     "<endpoint>, /trovis apikey <key>, /trovis capture on, /trovis status — "
     "or via CLI: openclaw config set plugins.entries.trovis.config.endpoint/"
     "apiKey.\n"
+    "- Work vocabulary, never blur it: a RUN is one occurrence of work "
+    "(\"Approve refund for order #4821\"); trovis.loop.title / "
+    "set_loop_title() name the RUN. A JOB is the recurring kind of work "
+    "(\"Process customer returns\"); jobs are declared in Work and recognise "
+    "their runs by service, agent or title pattern — instrumentation never "
+    "names the job. trovis.loop.external_id / trovis.run.id group the spans "
+    "of one run.\n"
     "- Agents appear on the dashboard automatically within seconds of their "
     "first telemetry — no pre-registration. Message/output content is only "
     "captured when the user opts in (capture on / TROVIS_CAPTURE_OUTPUTS=true) "
@@ -233,9 +266,10 @@ _CONNECT_SETUP_EXTRAS = (
     "  from trovis import init\n"
     "  init(api_key=\"TROVIS_API_KEY\", endpoint=\"TROVIS_ENDPOINT\", "
     "agent_name=\"<their-agent-name>\")\n"
-    "  Optional: trovis.set_loop_title(\"<human task>\") so the run lands as "
-    "named Work (trovis.loop.title → title_source=provided), or "
-    "capture_outputs=True to name Work from the first user task.\n"
+    "  Optional: trovis.set_loop_title(\"<human task>\") names the RUN so it "
+    "lands as named Work (trovis.loop.title → title_source=provided), or "
+    "capture_outputs=True to name the run from the first user task. The "
+    "job it belongs to is declared in Work, not in code.\n"
     "- Claude Agent SDK (query()/ClaudeSDKClient): pip install "
     "trovis-agents[claude-agent-sdk]; same init() lines with "
     "platform=\"claude-agent-sdk\", and init() MUST run before importing "
@@ -253,21 +287,22 @@ _CONNECT_SETUP_EXTRAS = (
     "installs with a PLACEHOLDER in the auth header, so the tools appear but "
     "every call fails auth — the fix is to remove and re-add it with the real "
     "key, then prove it with one start/finish job. The reporting rules: it calls "
-    "report_job_started (with a plain-English title — that title IS the job "
-    "name on Work — plus bot_role on the first report, one line on what the "
+    "report_job_started (with a plain-English title — that title IS the run's "
+    "name on Work; the tool is named job_* for compatibility, each call is one "
+    "run — plus bot_role on the first report, one line on what the "
     "bot is FOR, so Trovis describes it by its real job instead of whatever "
     "task it happens to run first, plus request: one line on what the user "
     "actually asked for), report_job_waiting when it stops to ask the user "
     "something, and report_job_finished (with result: one or two lines on what "
     "it told the user back, plus details: a short paragraph on what it "
     "looked at, found, and could not do — shown only when someone clicks "
-    "\"Get more details\" on the job) / report_job_failed at the end, "
+    "\"Get more details\" on the run) / report_job_failed at the end, "
     "passing back the job_id it was given. Say plainly that nothing is "
     "recorded unless the Bot calls these tools — Trovis cannot pull from a "
     "Grok Bot.\n"
     "- What request/result/details do: they are the only content Trovis sees from a "
     "Grok Bot, and they are what the Work Feed shows and writes its "
-    "one-line summaries from. Without them a job is a bare title with no "
+    "one-line summaries from. Without them a run is a bare title with no "
     "outcome. If the user does not want Trovis to hold what they said to "
     "the bot, tell them to drop those two from the bot's instructions — "
     "everything else (titles, waiting, finished) still works.\n"

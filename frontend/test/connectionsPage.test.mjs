@@ -2,7 +2,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { CONNECTORS, getConnector } from '../src/connectors.js'
+import { CONNECTORS, TILE_SETUP_TYPES, getConnector } from '../src/connectors.js'
+import { allTiles } from '../src/connectSetup.js'
 import {
   AI_CATEGORIES,
   SETUP_TILE_IDS,
@@ -89,16 +90,23 @@ test('Connect on an AI connector reuses the existing Add Agent flow', () => {
 })
 
 test('the setup tile list is the Add Agent picker, exactly', () => {
-  const addAgent = src('AddAgent.jsx')
-  const tiles = []
-  for (const block of ['PLATFORMS', 'RECIPE_PLATFORMS']) {
-    const m = addAgent.match(new RegExp(`const ${block} = \\[([\\s\\S]*?)\\n\\]`))
-    assert.ok(m, `${block} exists`)
-    for (const id of m[1].matchAll(/id:\s*'([a-z-]+)'/g)) tiles.push(id[1])
-  }
+  // Both derive from the registry's setup_type, so they cannot drift — but
+  // pin it, because setupEntryFor routes on one and the wizard renders the
+  // other.
+  const tiles = allTiles().map((t) => t.id)
   assert.deepEqual([...tiles].sort(), [...SETUP_TILE_IDS].sort())
-  // And every tile is a registry connector.
-  for (const id of SETUP_TILE_IDS) assert.ok(getConnector(id), id)
+  assert.ok(tiles.length >= 7)
+  // And every tile is an available registry connector with a tile setup type.
+  for (const id of SETUP_TILE_IDS) {
+    const c = getConnector(id)
+    assert.ok(c, id)
+    assert.equal(c.availability, 'available', id)
+    assert.ok(TILE_SETUP_TYPES.includes(c.setup_type), `${id}: ${c.setup_type}`)
+  }
+  // The AddAgent picker reads the same derivation.
+  const addAgent = src('AddAgent.jsx')
+  assert.match(addAgent, /const PLATFORMS = pickerTiles\(\)/)
+  assert.match(addAgent, /const RECIPE_PLATFORMS = recipeTiles\(\)/)
 })
 
 test('saasStatus reads only what /saas/connections records', () => {
