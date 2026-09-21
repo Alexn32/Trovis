@@ -280,6 +280,9 @@ export function possessionRows(possession) {
       waiting: Boolean(s.waiting),
       start: s.start || null,
       end: s.end || null,
+      // How long that segment lasted, from its own recorded bounds; null
+      // while it has no recorded end (an open bound is not a duration).
+      durationMs: ms(s.start) !== null && ms(s.end) !== null && ms(s.end) >= ms(s.start) ? ms(s.end) - ms(s.start) : null,
     }))
 }
 
@@ -468,6 +471,72 @@ function recordNamesHolder(step, who) {
     return str(step.system?.label) === who || actorDisplay(step.actor)?.label === who
   }
   return false
+}
+
+// --- timing and the holder strip -----------------------------------------------------------
+
+/** "under a minute" / "12m" / "1h 32m" / "3d 4h" — null for nothing measurable. */
+export function elapsedLabel(msValue) {
+  // Guard the coercion: Number(null) is 0, and a missing duration must not
+  // read as a measured "under a minute".
+  if (msValue === null || msValue === undefined || msValue === '') return null
+  const n = Number(msValue)
+  if (!Number.isFinite(n) || n < 0) return null
+  const m = Math.floor(n / 60000)
+  if (m < 1) return 'under a minute'
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${m - h * 60}m`
+  const d = Math.floor(h / 24)
+  return `${d}d ${h - d * 24}h`
+}
+
+/**
+ * When the run started and, for a closed record, when it closed — both
+ * recorded: the start is the first possession segment's `start` (the record
+ * opening), falling back to the lean timeline's first entry; the end is the
+ * closure step's `at`, falling back to `updated_at`. Elapsed is a plain
+ * subtraction — "now minus start" while open, "close minus start" once
+ * closed. Nothing here says what the run did with the time.
+ *
+ * Returns { startedAt, endedAt, elapsedMs, open } or null when no start is recorded.
+ */
+export function runTiming(view, graph, now = Date.now()) {
+  const g = normalizeGraph(graph)
+  const segs = isObj(g.possession) && Array.isArray(g.possession.segments) ? g.possession.segments : []
+  const firstSeg = segs.find((s) => isObj(s) && str(s.start))
+  const timeline = Array.isArray(view?.timeline) ? view.timeline : []
+  const firstEntry = timeline.find((e) => isObj(e) && str(e.at))
+  const startedAt = firstSeg?.start || firstEntry?.at || null
+  const startMs = ms(startedAt)
+  if (startMs === null) return null
+  const open = str(view?.status) !== 'done'
+  const closure = open ? null : [...g.steps].reverse().find((s) => s.type === 'completed') || null
+  const endedAt = open ? null : closure?.at || str(view?.updated_at) || null
+  const endMs = open ? now : ms(endedAt)
+  const elapsedMs = endMs !== null && endMs >= startMs ? endMs - startMs : null
+  return { startedAt, endedAt, elapsedMs, open }
+}
+
+/**
+ * The three cells under the situation statement, from possession alone:
+ * who holds it (current_holder), since when (current_holder.start), and
+ * who held it just before (the segment preceding the one that matches the
+ * current holder's start — history, shown as history). Null when the
+ * endpoint names no current holder: the strip never guesses one.
+ */
+export function holderStrip(possession) {
+  const held = holderLine(possession)
+  if (!held) return null
+  const cur = possession.current_holder
+  const segs = Array.isArray(possession.segments) ? possession.segments.filter(isObj) : []
+  const idx = str(cur.start) ? segs.findIndex((s) => s.start === cur.start && s.holder === cur.holder) : -1
+  const prev = idx > 0 ? segs[idx - 1] : null
+  return {
+    holder: { label: held.label, kind: held.kind },
+    since: str(cur.start),
+    previous: prev ? { label: holderLabel(prev) || 'Unknown holder', kind: prev.holder_type === 'human' || prev.holder_type === 'system' ? prev.holder_type : 'agent' } : null,
+  }
 }
 
 // --- notes ------------------------------------------------------------------------------

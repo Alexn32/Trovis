@@ -189,7 +189,8 @@ const work = (m) => m.$('.jobd-work')
 const now = (m) => m.$('.run-now')
 const state = (m) => m.$('.run-now-state')?.textContent ?? null
 const support = (m) => m.$('.run-now-support')?.textContent ?? null
-const details = (m) => m.$('.run-details')
+const evidenceFold = (m) => m.$('.run-fold[aria-label="Evidence"]')
+const aside = (m) => m.$('.run-aside')
 async function select(m, id) {
   await m.click(stepEl(m, id).querySelector(':scope > .jobd-work-row'))
   return stepEl(m, id).querySelector('.jobd-work-details')
@@ -199,7 +200,7 @@ const VERDICTS = /succeeded|successful|success\b|resolved|done successfully|veri
 
 // --- 1, 2, 13: entry, the page-only read, and the information architecture ------------------
 
-test('1. the full Run page fetches the Work Graph once and reads in three levels: situation, Activity, then Details closed', async () => {
+test('1. the full Run page fetches the Work Graph once and reads as a story column beside a record rail: situation, Activity, folds | run details, Visibility, who held it', async () => {
   const calls = stub()
   const m = await mount(page())
   await m.settle()
@@ -211,21 +212,27 @@ test('1. the full Run page fetches the Work Graph once and reads in three levels
   assert.ok(now(m), 'the current situation comes first')
   assert.ok(now(m).compareDocumentPosition(sec) & 4, 'situation before Activity')
   const sections = m.$$('.jobd-section').map((s) => s.getAttribute('aria-label'))
-  assert.deepEqual(sections, ['Activity', 'Details', 'Run information', 'Visibility', 'Who held the work', 'Evidence', 'How this job ran'])
-  const d = details(m)
-  assert.ok(d && d.tagName === 'DETAILS' && !d.hasAttribute('open'), 'Details is one closed disclosure')
-  assert.ok(d.contains(m.$('.jobd-visibility')) && d.contains(m.$('.jobd-evidence')) && d.contains(m.$('.jobd-moves')) && d.contains(m.$('.run-held')))
+  assert.deepEqual(sections, ['Activity', 'Evidence', 'Evidence records', 'How this job ran', 'Run details', 'Visibility', 'Who held the work'])
+  const main = m.$('.run-main')
+  assert.ok(main.contains(now(m)) && main.contains(sec) && main.contains(evidenceFold(m)) && main.contains(m.$('.jobd-moves')), 'the story column')
+  assert.ok(aside(m).contains(m.$('.run-info')) && aside(m).contains(m.$('.jobd-visibility')) && aside(m).contains(m.$('.run-held')), 'the record rail')
+  assert.ok(!m.$('.run-details'), 'no generic Details wrapper any more — each fold names itself')
+  for (const fold of [evidenceFold(m), m.$('.jobd-moves')]) {
+    assert.ok(fold.tagName === 'DETAILS' && !fold.hasAttribute('open'), 'folds are closed by default')
+  }
   assert.ok(tab(m, 'Activity') && tab(m, 'Execution'), 'Activity | Execution — no third tab')
   assert.equal(m.$$('.jobd-view').length, 2)
   assert.ok(!m.$$('.jobd-view').some((b) => b.textContent === 'Run'), 'the Run tab is now Activity')
   assert.ok(!m.text().includes('Recent passes'), 'the page tells the story once: no Recent passes beside it')
-  // The header carries identity only: no status pill, no holder line, no ids, no source.
+  // The header: breadcrumb, title, one recorded meta line; no pill, no holder, no connector, no telemetry words.
   const head = m.$('.jobd-head')
   assert.ok(!head.querySelector('.work-status-pill') && !head.querySelector('.jobd-holder'))
-  assert.doesNotMatch(head.textContent, /Grok|grok-bot|event:|span|Held by|Waiting/)
-  assert.match(head.textContent, /Part of\s*Returns/)
-  const moves = m.$('.jobd-moves')
-  assert.ok(moves && moves.tagName === 'DETAILS' && !moves.hasAttribute('open'), 'How this job ran stays a closed fold inside Details')
+  assert.doesNotMatch(head.textContent, /Grok|grok-bot|event:|span|trace|Held by|Waiting|Observed/)
+  const meta = [...head.querySelectorAll('.run-meta > span')].map((s) => s.textContent)
+  assert.equal(meta[0], 'Run #41')
+  assert.match(meta[1], /^Started [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM)$/)
+  assert.match(meta[2], /^(under a minute|\d+m|\d+h \d+m|\d+d \d+h) so far$/)
+  assert.ok(!head.querySelector('.run-view-job'), 'no job route handed in → no View job button')
   m.unmount()
 })
 
@@ -574,8 +581,9 @@ test('decisions: secondary, under the statement, functional, and only when the w
   await m.settle()
   const sec = now(m)
   // Structure: statement, sentence, then the controls — the statement leads.
-  const kids = [...sec.children].map((c) => c.className)
-  assert.deepEqual(kids, ['run-now-eyebrow', 'run-now-state', 'run-now-support', 'run-now-actions'])
+  const top = sec.querySelector('.run-now-top')
+  assert.deepEqual([...top.querySelector('.run-now-text').children].map((c) => c.className), ['run-now-eyebrow', 'run-now-state', 'run-now-support'])
+  assert.deepEqual([...top.children].map((c) => c.className), ['run-now-text', 'run-now-actions'], 'the statement leads; the decisions sit beside it, after it in reading order')
   assert.equal(state(m), 'Waiting for you')
   assert.match(support(m), /^Chief of Staff handed this to you .* ago\.$/)
   const buttons = [...sec.querySelectorAll('button')]
@@ -625,17 +633,21 @@ test('14d. a stuck run reads “Needs attention”, with the holder’s own exce
   m.unmount()
 })
 
-test('15. the holder history sits inside Details as history: the endpoint’s segments, in order, each with its own waiting flag — never a “now”', async () => {
+test('15. the holder history is a rail panel: the endpoint’s segments most recent first, each with its own waiting flag and recorded length — never a “now”', async () => {
   stub({ graph: OPEN_GRAPH })
   const m = await mount(page())
   await m.settle()
   const hist = m.$('.run-held')
-  assert.ok(hist && details(m).contains(hist), 'inside Details, not beside the story')
+  assert.ok(hist && aside(m).contains(hist), 'in the rail, beside the story, not inside it')
   assert.equal(hist.querySelector('h3').textContent, 'Who held the work')
-  const rows = [...hist.querySelectorAll('li')].map((li) => [...li.children].map((c) => c.textContent).join(' '))
+  const rows = [...hist.querySelectorAll('li')].map((li) => [li.querySelector('.jobd-work-history-holder').textContent, li.querySelector('.jobd-work-history-meta').textContent])
   assert.deepEqual(rows, [
-    'Agent returns-bot', 'Person Sarah Chen waiting', 'Agent returns-bot', 'System Stripe waiting',
+    ['Stripe', 'System · waiting'],
+    ['returns-bot', 'Agent · 1m'],
+    ['Sarah Chen', 'Person · waiting · 2m'],
+    ['returns-bot', 'Agent · 1m'],
   ])
+  assert.ok(hist.querySelectorAll('.jobd-work-history-at').length === 4, 'each segment shows when it began')
   assert.doesNotMatch(hist.textContent, /\bnow\b|current/i, 'who has it now is the situation’s, from current_holder — the history does not repeat or re-derive it')
   assert.doesNotMatch(hist.textContent, /because|caused|led to|→/, 'history, not causality')
   assert.equal(state(m), 'Waiting for Stripe', 'the situation answers "now", from possession.current_holder')
@@ -647,13 +659,37 @@ test('15b/B. an open-ended last segment with no current_holder: the history list
   stub({ graph: graphFor(41, { steps: [S_HANDOFF, S_WAIT], chronology: [S_HANDOFF.id, S_WAIT.id], possession: { segments: openSegs, current_holder: null } }) })
   const m = await mount(page())
   await m.settle()
-  const rows = [...m.$('.run-held').querySelectorAll('li')].map((li) => [...li.children].map((c) => c.textContent).join(' '))
-  assert.equal(rows[3], 'System Stripe waiting')
+  const first = m.$('.run-held li')
+  assert.equal(first.querySelector('.jobd-work-history-holder').textContent, 'Stripe')
+  assert.equal(first.querySelector('.jobd-work-history-meta').textContent, 'System · waiting', 'an open bound is no duration and no "now"')
   assert.doesNotMatch(m.$('.run-held').textContent, /\bnow\b|current/i)
   assert.equal(state(m), 'Waiting on someone', 'no current holder from the endpoint → the status alone, not the open segment')
   assert.equal(support(m), null)
   assert.doesNotMatch(now(m).textContent, /Stripe|Held by|Waiting for|has this/)
+  assert.ok(!now(m).querySelector('.run-now-strip'), 'no holder strip without a current holder')
   m.unmount()
+})
+
+test('strip: current holder, since when, and who had it before — all three from possession, shown only with a current holder', async () => {
+  stub({ graph: OPEN_GRAPH })
+  const m = await mount(page())
+  await m.settle()
+  const cells = [...now(m).querySelectorAll('.run-now-cell')].map((c) => [c.querySelector('dt').textContent, c.querySelector('.run-now-cell-main').textContent, c.querySelector('.run-now-cell-sub')?.textContent || null])
+  assert.equal(cells[0][0], 'Current holder')
+  assert.deepEqual(cells[0].slice(1), ['Stripe', 'System'])
+  assert.equal(cells[1][0], 'Waiting since')
+  assert.match(cells[1][1], /^\d{1,2}:\d{2} (AM|PM)$/)
+  assert.match(cells[1][2], /ago$/)
+  assert.deepEqual(cells[2], ['Previously held by', 'returns-bot', 'Agent'])
+  assert.equal(now(m).dataset.holder, 'Stripe')
+  m.unmount()
+  // Holder present but no start recorded on it, and no preceding segment: one cell only.
+  const lone = { holder_type: 'human', holder: 'Alex', start: null, end: null, waiting: true }
+  stub({ graph: graphFor(41, { steps: [S_HANDOFF], chronology: [S_HANDOFF.id], possession: { segments: [lone], current_holder: lone } }) })
+  const m2 = await mount(page())
+  await m2.settle()
+  assert.deepEqual([...m2.$$('.run-now-cell dt')].map((d) => d.textContent), ['Current holder'])
+  m2.unmount()
 })
 
 // --- 16, 30: lifecycle stays out of the timeline --------------------------------------------------
@@ -749,7 +785,7 @@ test('19. “View evidence” uses the step’s exact evidence_id: it marks and 
   assert.ok(btn)
   await m.click(btn)
   await m.settle(5)
-  assert.ok(details(m).hasAttribute('open'), 'Details opens so the row can be seen')
+  assert.ok(evidenceFold(m).hasAttribute('open'), 'the Evidence fold opens so the row can be seen')
   const hit = m.$('.jobd-ev-row.is-highlighted')
   assert.ok(hit)
   assert.equal(hit.dataset.evidenceId, 'event:13')
@@ -910,15 +946,15 @@ test('polish: a real timeline — Activity heading, time · marker · text per r
     const kids = [...li.querySelector('.jobd-work-row').children].map((c) => c.className.split(' ')[0])
     assert.deepEqual(kids, ['jobd-work-at', 'jobd-work-dot', 'jobd-work-main'], 'time column, marker column, then the event')
   }
-  const summary = details(m).querySelector('summary')
-  assert.equal(summary.textContent.trim(), 'Details', 'no inventory of internal sections in the collapsed summary')
-  assert.ok(!details(m).hasAttribute('open'))
-  assert.ok(!m.$('.run-details-hint'))
-  // Opened, everything PR 218 put inside is still there.
+  const summary = evidenceFold(m).querySelector('summary')
+  assert.equal(summary.querySelector('.run-fold-title').textContent, 'Evidence')
+  assert.match(summary.querySelector('.run-fold-hint').textContent, /^Recorded observations that support this record\.$/)
+  assert.ok(!evidenceFold(m).hasAttribute('open'))
   await m.click(summary)
   await m.settle()
-  const inside = [...details(m).querySelectorAll('.jobd-section')].map((s) => s.getAttribute('aria-label'))
-  assert.deepEqual(inside, ['Run information', 'Visibility', 'Who held the work', 'Evidence', 'How this job ran'])
+  assert.ok(evidenceFold(m).hasAttribute('open') && evidenceFold(m).querySelector('.jobd-ev-row'), 'opened, the Evidence records are there')
+  const moves = m.$('.jobd-moves')
+  assert.match(moves.querySelector('summary').textContent, /How this job ran/)
   m.unmount()
 })
 
@@ -928,7 +964,7 @@ test('polish: the situation carries one eyebrow word from the status, and none w
   await m.settle()
   assert.equal(now(m).querySelector('.run-now-eyebrow')?.textContent, 'Waiting')
   assert.equal(state(m), 'Waiting for Stripe')
-  assert.deepEqual([...now(m).children].map((c) => c.className), ['run-now-eyebrow', 'run-now-state', 'run-now-support'])
+  assert.deepEqual([...now(m).querySelector('.run-now-text').children].map((c) => c.className), ['run-now-eyebrow', 'run-now-state', 'run-now-support'])
   m.unmount()
   stub({ graph: OPEN_GRAPH, details: { 41: detailFor(41, 'Return #4471', { status: 'stuck' }) } })
   const m2 = await mount(page())
@@ -945,12 +981,13 @@ test('polish: the situation carries one eyebrow word from the status, and none w
   m3.unmount()
 })
 
-test('H. Visibility inside Details keeps its states: Unknown stays Unknown, and observed execution earns no “healthy” verdict anywhere', async () => {
+test('H. Visibility in the rail keeps its states: Unknown stays Unknown, and observed execution earns no “healthy” verdict anywhere', async () => {
   stub()
   const m = await mount(page())
   await m.settle()
   const vis = m.$('.jobd-visibility')
-  assert.ok(details(m).contains(vis))
+  assert.ok(aside(m).contains(vis))
+  assert.equal(vis.querySelector('h3').textContent, 'Visibility')
   const actions = vis.querySelector('[data-dimension="actions"]')
   assert.match(actions.textContent, /Unknown/)
   assert.match(actions.textContent, /can.t determine action visibility/)
@@ -980,38 +1017,67 @@ test('I. no fake controls: the only buttons are navigation, rows, the two record
   m.unmount()
 })
 
-test('header: title dominates; the job it belongs to is one link; no ids, source names or observability metadata', async () => {
+test('header: breadcrumb, title, one recorded meta line, View job — no connector, telemetry, holder or status words', async () => {
   let opened = null
   stub()
-  const m = await mount(page({ onOpenJob: (id) => { opened = id } }))
+  // Opened from Work home: the crumb names the job between Work and the title.
+  const m = await mount(page({ backLabel: '← Work', onOpenJob: (id) => { opened = id } }))
   await m.settle()
   const head = m.$('.jobd-head')
   assert.equal(head.querySelector('.jobd-title').textContent, 'Return #4471')
-  const job = head.querySelector('.run-job-link')
-  assert.equal(job.textContent, 'Returns')
-  await m.click(job)
-  assert.equal(opened, 7, 'opens the job by the workflow id the detail carries')
-  assert.doesNotMatch(head.textContent, /Run ID|event:|span|trace|grok|Grok|telemetry|Observed|Held by|Waiting|\$/)
-  // Run information keeps the bookkeeping inside Details.
+  const crumbs = [...head.querySelectorAll('.run-crumb')].map((c) => c.textContent)
+  assert.deepEqual(crumbs, ['← Work', 'Returns', 'Return #4471'])
+  await m.click(head.querySelector('.run-crumbs .run-job-link'))
+  assert.equal(opened, 7, 'the crumb opens the job by the workflow id the detail carries')
+  opened = null
+  await m.click(head.querySelector('.run-view-job'))
+  assert.equal(opened, 7, 'so does View job')
+  assert.doesNotMatch(head.textContent, /event:|span|trace|grok|Grok|telemetry|Observed|Held by|Waiting|Stuck|\$/)
+  assert.match(head.querySelector('.run-meta').textContent, /Run #41/)
+  // The rail's Run details carries the bookkeeping: recorded fields only.
   const info = m.$('.run-info')
-  assert.ok(details(m).contains(info))
-  assert.match(info.textContent, /Job\s*Returns/)
-  assert.match(info.textContent, /Run ID\s*41/)
-  assert.match(info.textContent, /Status\s*Waiting on someone/)
-  assert.match(info.textContent, /Last updated\s*\S+ ago/)
-  assert.doesNotMatch(info.textContent, /Priority|Owner|Outcome|Source|Confirmed/i)
+  assert.ok(aside(m).contains(info))
+  assert.equal(info.querySelector('h3').textContent, 'Run details')
+  const rows = Object.fromEntries([...info.querySelectorAll('.run-info-row')].map((r) => [r.querySelector('dt').textContent, r.querySelector('dd').textContent]))
+  assert.equal(rows.Status, 'Waiting on someone')
+  assert.equal(rows.Job, 'Returns')
+  assert.equal(rows['Run ID'], '#41')
+  assert.match(rows.Started, /^[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM)$/)
+  assert.match(rows.Elapsed, /^(under a minute|\d+m|\d+h \d+m|\d+d \d+h)$/)
+  assert.equal(rows.Worker, 'returns-bot', 'the agent the runs name')
+  assert.equal(rows.Source, 'Grok Bot', 'the connector Evidence says the telemetry arrived through — how Trovis heard, not who did the work')
+  assert.equal(rows['Run time'], '1.4s')
+  assert.doesNotMatch(info.textContent, /Priority|Owner|Outcome|Confirmed|Last updated/i)
   m.unmount()
 })
 
-test('header without a job link: the job name stays text; without a job, no line at all', async () => {
+test('header from the job page: the back link already names the job, so no duplicate crumb; without a job, no job crumb and no View job', async () => {
   stub()
-  const m = await mount(page({ onOpenJob: undefined }))
+  const m = await mount(page({ onOpenJob: () => {} }))
   await m.settle()
-  assert.ok(!m.$('.run-job-link') && m.$('.run-job-name')?.textContent === 'Returns')
+  assert.deepEqual([...m.$$('.run-crumb')].map((c) => c.textContent), ['← Returns', 'Return #4471'])
+  assert.ok(m.$('.run-view-job'))
   m.unmount()
   stub({ details: { 41: detailFor(41, 'Return #4471', { workflow_id: null, workflow_name: null }) } })
+  const m2 = await mount(page({ backLabel: '← Work' }))
+  await m2.settle()
+  assert.deepEqual([...m2.$$('.run-crumb')].map((c) => c.textContent), ['← Work', 'Return #4471'])
+  assert.ok(!m2.$('.run-view-job') && !m2.$('.run-job-link') && !m2.$('.run-job-name'))
+  m2.unmount()
+})
+
+test('timing: a closed record reads "closed after", from the closure step; no start recorded → no meta timing at all', async () => {
+  stub({ graph: graphFor(41), details: { 41: detailFor(41, 'Return #4471', { status: 'done' }) } })
+  const m = await mount(page())
+  await m.settle()
+  assert.match(m.$('.run-meta').textContent, /closed after (\d+m|\d+h \d+m|under a minute)$/)
+  assert.doesNotMatch(m.$('.run-meta').textContent, /so far/)
+  assert.ok(m.$('.run-info').textContent.includes('Closed after'))
+  m.unmount()
+  const noTimes = graphFor(41, { possession: { segments: [], current_holder: null } })
+  stub({ graph: noTimes, details: { 41: detailFor(41, 'Return #4471', { timeline: [] }) } })
   const m2 = await mount(page())
   await m2.settle()
-  assert.ok(!m2.$('.run-job'))
+  assert.equal(m2.$('.run-meta').textContent, 'Run #41')
   m2.unmount()
 })
