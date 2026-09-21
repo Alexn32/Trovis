@@ -39,7 +39,7 @@ export default function WorkGraphView({
 
   return (
     <section className="jobd-section jobd-work" aria-label="Activity">
-      <h3 className="dash-caps">Activity</h3>
+      <h3 className="run-h">Activity</h3>
       {loading ? (
         <div className="dash-skel">
           <span style={{ width: '62%' }} />
@@ -101,7 +101,6 @@ function WorkStep({ step, time, selected, onSelect, evidence, onOpenExecution, o
 
   return (
     <li className={`jobd-work-step type-${step.type}${selected ? ' is-selected' : ''}`} data-step-id={step.id}>
-      <span className="jobd-work-dot" aria-hidden="true" />
       <button
         type="button"
         className="jobd-work-row"
@@ -109,11 +108,10 @@ function WorkStep({ step, time, selected, onSelect, evidence, onOpenExecution, o
         aria-controls={detailsId}
         onClick={() => onSelect(selected ? null : step.id)}
       >
-        {time && (
-          <time className="jobd-work-at" dateTime={step.at || undefined} title={step.at || undefined}>
-            {time}
-          </time>
-        )}
+        <time className="jobd-work-at" dateTime={step.at || undefined} title={step.at || undefined}>
+          {time || '—'}
+        </time>
+        <span className="jobd-work-dot" aria-hidden="true" />
         <span className="jobd-work-main">
           <span className="jobd-work-headline">{stepHeadline(step)}</span>
           <span className="jobd-work-line">{stepLine(step)}</span>

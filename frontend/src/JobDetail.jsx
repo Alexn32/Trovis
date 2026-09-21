@@ -10,7 +10,7 @@ import {
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
 import { boundedNote, visibilityRows } from './coverage.js'
-import { ACTOR_KIND_LABELS, holderLine, possessionRows, situationFor } from './workGraph.js'
+import { ACTOR_KIND_LABELS, holderLine, possessionRows, situationEyebrow, situationFor } from './workGraph.js'
 import ExecutionView from './ExecutionView.jsx'
 import WorkGraphView from './WorkGraphView.jsx'
 
@@ -446,7 +446,6 @@ export default function JobDetail({
             >
               <summary className="run-details-summary">
                 <span className="run-details-title">Details</span>
-                <span className="run-details-hint">run information · visibility · who held the work · evidence</span>
               </summary>
               <div className="run-details-body">
                 <RunInformation
@@ -903,12 +902,16 @@ function RunSituation({ situation, view, held, decidable, busy, actionErr, onApp
     )
   }
   const ago = situation.support?.at ? workUpdatedLabel(situation.support.at) : ''
+  // One quiet word from the lean status ("Waiting", "Needs attention",
+  // "Closed"); dropped when it would only repeat the headline.
+  const eyebrow = situationEyebrow(view.status, situation.headline)
   return (
     <section
       className={`run-now${waitingOnYou ? ' is-you' : ''}`}
       aria-label="Current situation"
       data-holder={held ? held.label : undefined}
     >
+      {eyebrow && <p className="run-now-eyebrow">{eyebrow}</p>}
       <p className="run-now-state">{situation.headline}</p>
       {situation.support && (
         <p className="run-now-support">

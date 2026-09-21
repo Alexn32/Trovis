@@ -311,15 +311,47 @@ export function stepHeadline(step) {
 
 /**
  * The second line: the endpoint's own label, then the one recorded detail
- * that adds something the headline does not already say — a handoff's
- * recorded reason (its target is in the headline), a wait's `waiting_on`,
- * an exception's reason. Nothing is reworded into an outcome.
+ * that adds something the headline does not already say — a wait's
+ * `waiting_on`, an exception's reason. Nothing is reworded into an outcome.
+ *
+ * A handoff whose headline already reads "who → whom" does not repeat the
+ * mechanics ("Handed to a person"): the line is the recorded reason when
+ * one exists, else the plain "Handed off" — allowed only because the
+ * endpoint itself typed the step `handoff`. Presentation deduplication;
+ * nothing ("for review", "needs approval") is invented. A handoff with no
+ * target in the headline keeps the endpoint's label so the row still says
+ * what happened.
  */
 export function stepLine(step) {
   const label = str(step?.label) || STEP_TYPE_LABELS[step?.type] || STEP_TYPE_LABELS.other
   const d = step?.details || {}
-  const extra = step?.type === 'handoff' ? str(d.reason) : stepContext(step)
+  if (step?.type === 'handoff') {
+    const reason = str(d.reason)
+    const who = actorDisplay(step.actor)?.label || null
+    const to = stepContext(step)
+    if (who && to) return reason || 'Handed off'
+    return reason ? `${label} · ${reason}` : label
+  }
+  const extra = stepContext(step)
   return extra ? `${label} · ${extra}` : label
+}
+
+// The situation's eyebrow: the lean status in one word, and only that —
+// no inference. Omitted when it would repeat the headline.
+const STATUS_EYEBROWS = Object.freeze({
+  waiting_on_you: 'Waiting',
+  waiting_on_other: 'Waiting',
+  moving: 'In progress',
+  stuck: 'Needs attention',
+  done: 'Closed',
+})
+
+/** "Waiting" / "In progress" / "Needs attention" / "Closed", or null. */
+export function situationEyebrow(status, headline) {
+  const word = STATUS_EYEBROWS[str(status)] || null
+  if (!word) return null
+  if (str(headline) && str(headline).toLowerCase() === word.toLowerCase()) return null
+  return word
 }
 
 // --- the current situation -----------------------------------------------------------------
