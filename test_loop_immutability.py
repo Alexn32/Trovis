@@ -64,11 +64,18 @@ for path in SOURCES:
     check(f"{path}: no UPDATE workflow_versions", count(path, "UPDATE workflow_versions") == 0)
     check(f"{path}: no DELETE FROM workflow_versions", count(path, "DELETE FROM workflow_versions") == 0)
 
-# workflows allows EXACTLY TWO mutations, both in database.py:
+# workflows allows EXACTLY THREE mutations, all in database.py:
 #   1. the current_version bump in create_workflow_version
 #   2. the archived_at set in archive_workflow (archive, never delete)
-check("database.py: UPDATE workflows pinned at 2 (version bump + archive)",
-      count("database.py", "UPDATE workflows") == 2)
+#   3. PROMOTION in create_workflow_version: a person describing a DERIVED
+#      job clears derived_from and may name it — the only write that ever
+#      touches a job's name, because a derived job's name was Trovis's
+#      placeholder (the agent's service.name), never a person's choice.
+check("database.py: UPDATE workflows pinned at 3 (version bump + archive + promotion)",
+      count("database.py", "UPDATE workflows") == 3)
+check("database.py: the name write is the promotion and nothing else",
+      count("database.py", "SET derived_from = NULL, name = COALESCE") == 1
+      and "UPDATE workflows SET name" not in text["database.py"])
 for path in [p for p in SOURCES if p != "database.py"]:
     check(f"{path}: no UPDATE workflows", count(path, "UPDATE workflows") == 0)
 
@@ -84,10 +91,12 @@ check("database.py: the legacy sweep is version-guarded",
 for path in [p for p in SOURCES if p != "database.py"]:
     check(f"{path}: no DELETE FROM workflows", count(path, "DELETE FROM workflows") == 0)
 
-# Two writers only into workflow_versions: create_workflow (v1) and
-# create_workflow_version (v2+).
-check("database.py: exactly two INSERT INTO workflow_versions",
-      count("database.py", "INSERT INTO workflow_versions") == 2)
+# Three writers only into workflow_versions: create_workflow (v1),
+# create_workflow_version (v2+), and _ensure_derived_workflow (the v1 of a
+# job Trovis derives from an agent when nobody declared one — still a full,
+# append-only version row, never edited afterwards).
+check("database.py: exactly three INSERT INTO workflow_versions",
+      count("database.py", "INSERT INTO workflow_versions") == 3)
 
 # --- Loop titles ---------------------------------------------------------------
 # Two NULL/empty-guarded writers, both first-title-wins:

@@ -7604,7 +7604,7 @@ def create_workflow_version(
              json.dumps(match_hints), note, created_by or "",
              *_expectation_values(expectation)),
         )
-        # ALLOWED WRITE 1 of 2 on workflows: the current_version bump.
+        # ALLOWED WRITE 1 of 3 on workflows: the current_version bump.
         cur.execute(
             f"UPDATE workflows SET current_version = {PH} WHERE id = {PH}",
             (next_version, workflow_id),
@@ -7613,17 +7613,15 @@ def create_workflow_version(
         # declared job. Clearing derived_from is what lets the matcher rank
         # it as a declaration, and the name a person gives it replaces the
         # service name Trovis filed it under.
+        # ALLOWED WRITE 3 of 3 on workflows, and the only one that can touch
+        # the name — a derived job's name was Trovis's placeholder, not a
+        # person's choice. COALESCE keeps the placeholder when no name came.
         if row["derived_from"] is not None:
-            if new_name is not None:
-                cur.execute(
-                    f"UPDATE workflows SET derived_from = NULL, name = {PH} WHERE id = {PH}",
-                    (new_name, workflow_id),
-                )
-            else:
-                cur.execute(
-                    f"UPDATE workflows SET derived_from = NULL WHERE id = {PH}",
-                    (workflow_id,),
-                )
+            cur.execute(
+                f"UPDATE workflows SET derived_from = NULL, name = COALESCE({PH}, name) "
+                f"WHERE id = {PH}",
+                (new_name, workflow_id),
+            )
     return get_workflow(workflow_id, account_id)
 
 
