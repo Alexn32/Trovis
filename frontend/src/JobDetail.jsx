@@ -423,7 +423,6 @@ export default function JobDetail({
               actionErr={actionErr}
               onApprove={() => resolve('approve')}
               onSendBack={() => resolve('decline')}
-              onAsk={ask}
             />
 
             {/* LEVEL 2 — what meaningful things happened, from the Work Graph. */}
@@ -885,11 +884,14 @@ function EvidenceDetail({ label, value }) {
 
 /**
  * LEVEL 1. One statement of what is happening now (workGraph.situationFor),
- * one supporting sentence when the record itself supports one, and the
- * decision buttons when the work is waiting on the reader. Nothing else:
- * no pill, no holder line, no second phrasing of the same state.
+ * one supporting sentence when the record itself supports one, and — only
+ * when the work is waiting on the reader AND the server gave us the handoff
+ * to resolve — the two genuine decisions on that handoff, as quiet
+ * secondary controls under the sentence. Nothing else: no pill, no holder
+ * line, no second phrasing of the same state, and no Ask here (the page
+ * already has the global Ask pill; Ask is not a disposition of the work).
  */
-function RunSituation({ situation, view, held, decidable, busy, actionErr, onApprove, onSendBack, onAsk }) {
+function RunSituation({ situation, view, held, decidable, busy, actionErr, onApprove, onSendBack }) {
   const waitingOnYou = view.status === 'waiting_on_you'
   if (!situation) {
     return (
@@ -914,15 +916,20 @@ function RunSituation({ situation, view, held, decidable, busy, actionErr, onApp
           {ago ? ` ${ago} ago` : ''}.
         </p>
       )}
-      {waitingOnYou && (
-        <DecisionActions
-          decidable={decidable}
-          busy={busy}
-          actionErr={actionErr}
-          onApprove={onApprove}
-          onSendBack={onSendBack}
-          onAsk={onAsk}
-        />
+      {waitingOnYou && decidable && (
+        <div className="run-now-actions">
+          <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onApprove}>
+            {busy === 'approve' ? 'Approving…' : 'Approve'}
+          </button>
+          <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onSendBack}>
+            {busy === 'decline' ? 'Sending back…' : 'Send back'}
+          </button>
+        </div>
+      )}
+      {waitingOnYou && actionErr && (
+        <p className="jobd-action-err" role="alert">
+          {actionErr}
+        </p>
       )}
     </section>
   )
@@ -1031,10 +1038,9 @@ function CurrentHandoff({ view, decidable, busy, actionErr, onApprove, onSendBac
 }
 
 /**
- * The decisions a person can actually take on an open handoff — the same
- * two real calls the product has had, plus Ask. Shared by the panel's
- * current-handoff block and the page's Current situation, so the page adds
- * no control that does not already work.
+ * The panel's decision block: the two real calls on an open handoff, plus
+ * the panel's own Ask (the panel has no global pill). The page's Current
+ * situation renders the two decisions itself, quieter and without Ask.
  */
 function DecisionActions({ decidable, busy, actionErr, onApprove, onSendBack, onAsk }) {
   return (

@@ -540,7 +540,8 @@ test('14c/G. “Waiting for you” and “Work record closed” are the session�
   await m.settle()
   assert.equal(state(m), 'Waiting for you')
   assert.ok(now(m).classList.contains('is-you'))
-  assert.ok([...now(m).querySelectorAll('button')].map((b) => b.textContent).includes('Approve'), 'the real decision buttons live here')
+  assert.deepEqual([...now(m).querySelectorAll('button')].map((b) => b.textContent), ['Approve', 'Send back'],
+    'the two genuine decisions on the handoff, and nothing else — Ask is the page’s global pill, not a disposition of the work')
   m.unmount()
   stub({ graph: graphFor(41), details: { 41: detailFor(41, 'Return #4471', { status: 'done' }) } })
   const m2 = await mount(page())
@@ -557,6 +558,58 @@ test('14c/G. “Waiting for you” and “Work record closed” are the session�
   assert.equal(state(m3), 'Work record closed')
   assert.equal(support(m3), null)
   m3.unmount()
+})
+
+test('decisions: secondary, under the statement, functional, and only when the work is on you with a handoff to resolve', async () => {
+  const calls = { complete: [], decline: [] }
+  api.completeHandoff = async (loopId, eventId) => { calls.complete.push([loopId, eventId]); return { ok: true } }
+  api.declineHandoff = async (loopId, eventId) => { calls.decline.push([loopId, eventId]); return { ok: true } }
+  const onYou = { 41: detailFor(41, 'Return #4471', { status: 'waiting_on_you', awaiting_handoff_event_id: 10, holder: { kind: 'human', name: 'Alex' } }) }
+  const handoff = { ...S_HANDOFF, actor: { type: 'agent', label: 'Chief of Staff:main' }, details: { ...S_HANDOFF.details, target_label: 'Alex', reason: 'for review' } }
+  const graph = graphFor(41, { steps: [handoff], chronology: [handoff.id] })
+  let resolved = 0
+  stub({ graph, details: onYou })
+  const m = await mount(page({ onResolved: () => { resolved += 1 } }))
+  await m.settle()
+  const sec = now(m)
+  // Structure: statement, sentence, then the controls — the statement leads.
+  const kids = [...sec.children].map((c) => c.className)
+  assert.deepEqual(kids, ['run-now-state', 'run-now-support', 'run-now-actions'])
+  assert.equal(state(m), 'Waiting for you')
+  assert.match(support(m), /^Chief of Staff handed this to you .* ago\.$/)
+  const buttons = [...sec.querySelectorAll('button')]
+  assert.deepEqual(buttons.map((b) => b.textContent), ['Approve', 'Send back'])
+  assert.ok(buttons.every((b) => b.classList.contains('btn-ghost') && !b.classList.contains('btn-primary')), 'secondary controls, none dressed as the primary thing on the page')
+  assert.ok(!sec.textContent.includes('Ask'), 'no Ask in the situation block')
+  await m.click(buttons[0])
+  await m.settle()
+  assert.deepEqual(calls.complete, [[41, 10]], 'Approve completes the open handoff by its id')
+  assert.equal(resolved, 1)
+  m.unmount()
+  // Send back declines the same handoff.
+  stub({ graph, details: onYou })
+  const m2 = await mount(page({ onResolved: () => { resolved += 1 } }))
+  await m2.settle()
+  await m2.click([...now(m2).querySelectorAll('button')].find((b) => b.textContent === 'Send back'))
+  await m2.settle()
+  assert.deepEqual(calls.decline, [[41, 10]])
+  m2.unmount()
+  // On you but with no handoff id from the server: no controls at all, no dead buttons.
+  stub({ graph, details: { 41: detailFor(41, 'Return #4471', { status: 'waiting_on_you', awaiting_handoff_event_id: null, holder: { kind: 'human', name: 'Alex' } }) } })
+  const m3 = await mount(page())
+  await m3.settle()
+  assert.equal(state(m3), 'Waiting for you')
+  assert.equal(m3.$$('.run-now button').length, 0)
+  assert.ok(!m3.$('.run-now-actions'))
+  m3.unmount()
+  // Not on you: no decision group in any state.
+  for (const status of ['waiting_on_other', 'moving', 'stuck', 'done']) {
+    stub({ graph: OPEN_GRAPH, details: { 41: detailFor(41, 'Return #4471', { status, awaiting_handoff_event_id: 10 }) } })
+    const mx = await mount(page())
+    await mx.settle()
+    assert.ok(!mx.$('.run-now-actions') && mx.$$('.run-now button').length === 0, `no decision group when ${status}`)
+    mx.unmount()
+  }
 })
 
 test('14d. a stuck run reads “Needs attention”, with the holder’s own exception record when the last step is one', async () => {
@@ -863,7 +916,7 @@ test('I. no fake controls: the only buttons are navigation, rows, the two record
   assert.doesNotMatch(labels.join('|'), /Take action|Reassign|Add note|Approve|Resolve|Send back|Escalate|Mark/i, 'no decision controls when the work is not on you, none invented at all')
   await select(m, S_WAIT.id)
   const after = m.$$('button').map((b) => b.textContent.trim())
-  const allowed = /^(← Returns|Returns|Activity|Execution|View in Execution|View evidence|Retry|Ask|)$/
+  const allowed = /^(← Returns|Returns|Activity|Execution|View in Execution|View evidence|Retry|)$/
   for (const l of after) {
     if (l && !allowed.test(l)) {
       const isRow = m.$$('.jobd-work-row').some((r) => r.textContent.trim() === l)

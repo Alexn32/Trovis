@@ -6450,7 +6450,10 @@ select.wf2-input { cursor: pointer; }
   color: var(--text-primary); overflow-wrap: anywhere;
 }
 .run-now-support { margin: 0; font-size: 14px; color: var(--text-secondary); line-height: 1.45; }
-.run-now .jobd-actions { margin-top: 8px; }
+/* The two decisions on an open handoff, when the work is on you: secondary,
+   under the sentence, never competing with the statement above them. */
+.run-now-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.run-now-actions .btn { font-size: 12.5px; padding: 5px 12px; }
 
 /* LEVEL 2 — Activity: a vertical story. Time at the left, who and what to
    the right; one thin rule joins the rows. */
