@@ -293,7 +293,7 @@ test('the story and navigation are unchanged: Activity tells the passes, the bac
   const m = await mount(page({ onClose: () => { closed += 1 } }))
   await m.settle()
   assert.match(m.text(), /Activity/)
-  assert.match(m.text(), /refunds-agent → Ada Lovelace\s*Handed to a person/)
+  assert.match(m.text(), /refunds-agent → Ada Lovelace\s*Handed off/)
   assert.match(m.text(), /Work record closed/)
   assert.doesNotMatch(m.text(), /Recent passes/, 'the page tells the story once')
   await m.click(m.$('.jobd-close'))

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import {
   STEP_TYPES, STEP_TYPE_LABELS, actorDisplay, boundedNote, evidenceRecordFor, evidenceRowShown,
-  holderLine, isEmptyGraph, normalizeGraph, possessionRows, situationFor, stepContext, stepDetailRows,
+  holderLine, isEmptyGraph, normalizeGraph, possessionRows, situationEyebrow, situationFor, stepContext, stepDetailRows,
   stepHeadline, stepLine, stepTechnicalRows, stepTimeLabels, supportLine,
 } from '../src/workGraph.js'
 
@@ -143,8 +143,16 @@ test('an open-ended last segment does not make the client name a current holder:
 
 test('stepHeadline / stepLine: who → whom, then the endpoint’s label with the one detail the headline lacks', () => {
   assert.equal(stepHeadline(step()), 'returns-bot → Sarah Chen')
-  assert.equal(stepLine(step()), 'Handed to a person · over limit')
-  assert.equal(stepLine(step({ details: { direction: 'to_human', target_label: 'Sarah Chen', reason: null } })), 'Handed to a person')
+  // A who → whom headline already says it was handed over: the line is the recorded reason, else the plain "Handed off".
+  assert.equal(stepLine(step()), 'over limit')
+  assert.equal(stepLine(step({ details: { direction: 'to_human', target_label: 'Sarah Chen', reason: null } })), 'Handed off')
+  assert.equal(stepLine(step({ details: { direction: 'to_agent', target_label: 'research-agent:main', reason: null } })), 'Handed off')
+  // No target in the headline → the endpoint's label stays, so the row still says what happened.
+  assert.equal(stepLine(step({ details: { direction: 'sideways', target_label: null, reason: null } })), 'Handed to a person')
+  assert.equal(stepLine(step({ details: { direction: 'sideways', target_label: null, reason: 'over limit' } })), 'Handed to a person · over limit')
+  for (const s of [step(), step({ details: { direction: 'to_human', target_label: 'Sarah Chen', reason: null } })]) {
+    assert.doesNotMatch(stepLine(s), /for review|needs approval|requested a decision/i, 'nothing invented')
+  }
   const saas = step({ type: 'wait', label: 'Waiting on Stripe', actor: { type: 'system', label: 'Stripe' }, system: { label: 'Stripe' }, details: { waiting_on: 'payment processing' } })
   assert.equal(stepHeadline(saas), 'Stripe', 'a system acting on its own record is named once')
   assert.equal(stepLine(saas), 'Waiting on Stripe · payment processing')
@@ -157,6 +165,17 @@ test('stepHeadline / stepLine: who → whom, then the endpoint’s label with th
   const closed = step({ type: 'completed', label: 'Work record closed', details: { reason: 'completed_by_agent', outcome: 'record_closed' } })
   assert.equal(stepHeadline(closed), 'returns-bot')
   assert.equal(stepLine(closed), 'Work record closed', 'the closure reason is bookkeeping, not a second line')
+})
+
+test('situationEyebrow: one word from the lean status, never when it repeats the headline, never inferred', () => {
+  assert.equal(situationEyebrow('waiting_on_other', 'Waiting for Alex'), 'Waiting')
+  assert.equal(situationEyebrow('waiting_on_you', 'Waiting for you'), 'Waiting')
+  assert.equal(situationEyebrow('moving', 'returns-bot is working on this'), 'In progress')
+  assert.equal(situationEyebrow('moving', 'In progress'), null)
+  assert.equal(situationEyebrow('stuck', 'Needs attention'), null)
+  assert.equal(situationEyebrow('done', 'Work record closed'), 'Closed')
+  assert.equal(situationEyebrow(null, 'Waiting for Alex'), null)
+  assert.equal(situationEyebrow('mystery', 'x'), null)
 })
 
 test('situationFor: the status and possession.current_holder only — never a segment, the latest step, or an actor', () => {

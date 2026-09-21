@@ -6336,10 +6336,10 @@ select.wf2-input { cursor: pointer; }
    whole page (not just its sections) keeps the header and the body on the
    same edge. */
 .job-page {
-  display: flex; flex-direction: column; gap: 20px;
-  max-width: 980px; margin: 0 auto; width: 100%;
+  display: flex; flex-direction: column; gap: 28px;
+  max-width: 960px; margin: 0; width: 100%;
 }
-.job-page .jobd-head { gap: 8px; }
+.job-page .jobd-head { gap: 10px; }
 .job-page .jobd-title {
   font-size: 30px; letter-spacing: -0.03em; line-height: 1.2;
 }
@@ -6425,11 +6425,12 @@ select.wf2-input { cursor: pointer; }
 }
 
 /* --- The Run page: current situation, Activity, Details ------------------ */
-/* Three levels, one reading flow. The work dominates: a title, one plain
-   statement of what is happening, a calm vertical story, and the record
-   Trovis keeps folded under "Details". Tokens only; types are told apart by
-   the marker's shape, never by a traffic light. */
-.run-job { margin: -2px 0 0; font-size: 13px; color: var(--text-muted); }
+/* Three levels, one left-oriented reading column. The work dominates: a
+   title, one plain statement of what is happening on a quiet surface, a
+   real vertical timeline, and the record Trovis keeps folded under
+   "Details". Tokens only; step types are told apart by the marker's shape,
+   never by a traffic light. */
+.run-job { margin: -4px 0 0; font-size: 13px; color: var(--text-muted); }
 .run-job-link {
   font: inherit; font-weight: 600; color: var(--text-secondary); background: none; border: none;
   padding: 0; cursor: pointer; text-decoration: underline; text-decoration-color: var(--border-hover);
@@ -6437,65 +6438,73 @@ select.wf2-input { cursor: pointer; }
 }
 .run-job-link:hover { color: var(--text-primary); }
 .run-job-name { font-weight: 600; color: var(--text-secondary); }
+.job-page .jobd-views { margin-top: 2px; }
 
-/* LEVEL 1 — the current situation: one statement, one supporting sentence,
-   the real decisions when the work is on you. */
-.run-now { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 2px; }
-.run-now.is-you {
-  padding: 14px 16px; border-radius: 10px; background: var(--warm-fill);
-  box-shadow: inset 3px 0 0 var(--warning);
+/* Section headings on the Run page: one size, clear, not shouting. */
+.run-h { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-primary); }
+
+/* LEVEL 1 — the current situation: the most important thing on the page,
+   on a restrained surface. One eyebrow word from the status, the statement,
+   one supporting sentence, and the two real decisions when the work is on
+   you — secondary, under the sentence. */
+.run-now {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 18px 22px 20px; border-radius: 12px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+}
+.run-now.is-you { box-shadow: inset 3px 0 0 var(--warning); }
+.run-now-eyebrow {
+  margin: 0 0 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-muted);
 }
 .run-now-state {
-  margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25;
+  margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.2;
   color: var(--text-primary); overflow-wrap: anywhere;
 }
-.run-now-support { margin: 0; font-size: 14px; color: var(--text-secondary); line-height: 1.45; }
-/* The two decisions on an open handoff, when the work is on you: secondary,
-   under the sentence, never competing with the statement above them. */
-.run-now-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.run-now-support { margin: 2px 0 0; font-size: 14.5px; color: var(--text-secondary); line-height: 1.5; }
+.run-now-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .run-now-actions .btn { font-size: 12.5px; padding: 5px 12px; }
 
-/* LEVEL 2 — Activity: a vertical story. Time at the left, who and what to
-   the right; one thin rule joins the rows. */
-.jobd-work { gap: 10px; }
-.jobd-work-steps { list-style: none; margin: 0; padding: 0; max-width: 760px; }
-.jobd-work-step { position: relative; padding: 0 0 0 28px; }
+/* LEVEL 2 — Activity: a vertical timeline. A fixed time column, a marker
+   column with one thin rule joining consecutive events (and nothing drawn
+   past the last one), then who and what. One event is a complete story. */
+.jobd-work { gap: 14px; }
+.jobd-work-steps { list-style: none; margin: 0; padding: 0; }
+.jobd-work-step { position: relative; }
 .jobd-work-step:not(:last-child)::before {
-  content: ''; position: absolute; left: 6px; top: 26px; bottom: -2px;
+  content: ''; position: absolute; left: 89px; top: 30px; bottom: -4px;
   width: 1px; background: var(--border-default);
 }
-.jobd-work-dot {
-  position: absolute; left: 0; top: 15px; width: 13px; height: 13px; box-sizing: border-box;
-  border-radius: 50%; background: var(--bg-surface); border: 2px solid var(--text-dim);
-}
-.jobd-work-step.type-handoff .jobd-work-dot { border-color: var(--wf-human, var(--brand-accent)); }
-.jobd-work-step.type-wait .jobd-work-dot { border-style: dashed; border-color: var(--text-muted); }
-.jobd-work-step.type-exception .jobd-work-dot { border-color: var(--error); border-width: 3px; }
-.jobd-work-step.type-completed .jobd-work-dot { border-radius: 3px; background: var(--text-dim); }
-.jobd-work-step.type-progress .jobd-work-dot { background: var(--text-muted); border-color: var(--text-muted); }
 .jobd-work-row {
-  display: flex; align-items: flex-start; gap: 18px; width: 100%;
-  padding: 9px 10px 9px 0; margin: 0; text-align: left; font: inherit; font-size: 13px;
+  display: grid; grid-template-columns: 76px 14px minmax(0, 1fr); column-gap: 12px; align-items: start;
+  width: 100%; padding: 10px 10px 12px 0; margin: 0; text-align: left; font: inherit; font-size: 13px;
   color: var(--text-secondary); background: none; border: 1px solid transparent; border-radius: 8px;
   cursor: pointer;
 }
 .jobd-work-row:hover { background: var(--bg-surface-hover); }
 .jobd-work-row:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 1px; }
-.jobd-work-step.is-selected > .jobd-work-row {
-  background: var(--bg-elevated); border-color: var(--border-hover); padding-left: 10px;
-}
+.jobd-work-step.is-selected > .jobd-work-row { background: var(--bg-elevated); border-color: var(--border-hover); }
 .jobd-work-at {
-  flex: none; min-width: 64px; padding-top: 2px; font-size: 12px; color: var(--text-muted);
+  padding-top: 3px; font-size: 12.5px; color: var(--text-muted);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.jobd-work-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.jobd-work-headline { font-size: 14.5px; font-weight: 650; color: var(--text-primary); overflow-wrap: anywhere; }
-.jobd-work-line { font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.jobd-work-dot {
+  width: 13px; height: 13px; margin-top: 4px; box-sizing: border-box; position: relative; z-index: 1;
+  border-radius: 50%; background: var(--bg-surface); border: 2px solid var(--text-dim);
+}
+.jobd-work-step.type-handoff .jobd-work-dot { border-color: var(--wf-human, var(--brand-accent)); background: var(--wf-human, var(--brand-accent)); }
+.jobd-work-step.type-wait .jobd-work-dot { border-color: var(--text-muted); background: transparent; }
+.jobd-work-step.type-exception .jobd-work-dot { border-color: var(--error); border-width: 3px; }
+.jobd-work-step.type-completed .jobd-work-dot { border-radius: 3px; background: var(--text-dim); }
+.jobd-work-step.type-progress .jobd-work-dot { background: var(--text-muted); border-color: var(--text-muted); }
+.jobd-work-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.jobd-work-headline { font-size: 15px; font-weight: 650; color: var(--text-primary); overflow-wrap: anywhere; line-height: 1.35; }
+.jobd-work-line { font-size: 13.5px; color: var(--text-secondary); overflow-wrap: anywhere; line-height: 1.45; }
 
-/* The details area under a selected step: recorded context, the record it
-   rests on, the two doors (Execution / Evidence), the ids folded away. */
+/* The details area under a selected step, aligned with its text column:
+   recorded context, the record it rests on, the two doors, the ids folded. */
 .jobd-work-details {
-  margin: 2px 0 10px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
+  margin: 0 0 12px 102px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
   background: var(--bg-elevated); border: 1px solid var(--border-default);
   display: flex; flex-direction: column; gap: 8px;
 }
@@ -6510,25 +6519,29 @@ select.wf2-input { cursor: pointer; }
 .jobd-work-tech .jobd-work-dl { margin-top: 4px; }
 
 /* Zero steps: a truthful sparse record, said calmly. */
-.jobd-work-empty { display: flex; flex-direction: column; gap: 3px; }
-.jobd-work-empty .dash-empty { margin: 0; }
-.jobd-work-empty-sub { margin: 0; font-size: 12px; color: var(--text-muted); }
+.jobd-work-empty { display: flex; flex-direction: column; gap: 4px; padding: 2px 0; }
+.jobd-work-empty .dash-empty { margin: 0; font-size: 13.5px; color: var(--text-secondary); }
+.jobd-work-empty-sub { margin: 0; font-size: 12.5px; color: var(--text-muted); }
 .jobd-work-note { margin: 0; font-size: 11.5px; color: var(--text-muted); }
 
-/* LEVEL 3 — Details: one closed disclosure for the record Trovis keeps. */
+/* LEVEL 3 — Details: one closed disclosure for the record Trovis keeps,
+   under a rule, with a chevron and nothing else in its summary. */
+.run-details { border-top: 1px solid var(--border-default); padding-top: 6px; }
 .run-details > summary {
-  cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
-  width: fit-content; padding: 6px 0;
+  cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 0; border-radius: 6px;
 }
 .run-details > summary::-webkit-details-marker { display: none; }
-.run-details > summary::before { content: '▸'; font-size: 11px; color: var(--text-muted); }
-.run-details[open] > summary::before { content: '▾'; }
-.run-details-title { font-size: 13px; font-weight: 650; color: var(--text-primary); }
-.run-details-hint { font-size: 11.5px; color: var(--text-muted); }
-.run-details-body {
-  display: flex; flex-direction: column; gap: 22px; margin-top: 10px; padding-top: 14px;
-  border-top: 1px solid var(--border-subtle, var(--border-default));
+.run-details > summary::after {
+  content: ''; width: 7px; height: 7px; flex: none; margin-right: 6px;
+  border-right: 1.5px solid var(--text-muted); border-bottom: 1.5px solid var(--text-muted);
+  transform: rotate(-45deg); transition: transform 120ms ease;
 }
+.run-details[open] > summary::after { transform: rotate(45deg); }
+.run-details > summary:hover .run-details-title { color: var(--text-primary); }
+.run-details-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--text-secondary); }
+.run-details[open] .run-details-title { color: var(--text-primary); }
+.run-details-body { display: flex; flex-direction: column; gap: 24px; margin-top: 6px; padding-top: 6px; }
 .run-info-dl { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
 .run-info-row { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); gap: 0 12px; }
 .run-info-row dt { color: var(--text-muted); }
@@ -6562,17 +6575,24 @@ select.wf2-input { cursor: pointer; }
 }
 .jobd-ev-row.is-highlighted:focus { outline: none; }
 
-/* Phones: the same three levels; a row stacks its time over who/what, and
-   the tap target grows where a thumb is pointing at it. */
+/* Phones: the same three levels. The time column folds above the text —
+   marker left, time then who/what to its right — and tap targets grow where
+   a thumb is pointing at them. */
 @media (max-width: 720px) {
-  .run-now-state { font-size: 19px; }
-  .jobd-work-row { flex-direction: column; gap: 3px; }
-  .jobd-work-at { min-width: 0; padding-top: 0; }
+  .job-page { gap: 22px; }
+  .run-now { padding: 16px 16px 18px; }
+  .run-now-state { font-size: 20px; }
+  .jobd-work-row { grid-template-columns: 14px minmax(0, 1fr); column-gap: 12px; }
+  .jobd-work-at { grid-column: 2; grid-row: 1; padding-top: 0; font-size: 12px; }
+  .jobd-work-dot { grid-column: 1; grid-row: 1 / span 2; margin-top: 3px; }
+  .jobd-work-main { grid-column: 2; grid-row: 2; }
+  .jobd-work-step:not(:last-child)::before { left: 6px; top: 28px; }
+  .jobd-work-details { margin-left: 26px; }
   .jobd-work-dl-row, .run-info-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
 @media (pointer: coarse) {
-  .jobd-work-row { padding-top: 12px; padding-bottom: 12px; }
-  .run-details > summary { padding: 10px 0; }
+  .jobd-work-row { padding-top: 12px; padding-bottom: 13px; }
+  .run-details > summary { padding: 12px 0; }
 }
 
 /* --- Execution: a vertical technical record, quiet by default ------------- */
