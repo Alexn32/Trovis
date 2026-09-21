@@ -110,20 +110,18 @@ test('1. the page fetches coverage once, for the viewed item, and renders a Visi
   m.unmount()
 })
 
-test('2. Visibility sits after What happened (and the demoted moves) and before Evidence — the record first, then what could be seen, then what was seen', async () => {
+test('2. Visibility lives inside Details, after Run information and before Evidence — the work first, the record Trovis keeps one disclosure away', async () => {
   stub()
   const m = await mount(page())
   await m.settle()
   const text = m.text()
-  assert.ok(text.indexOf('Refund order #4471') < text.indexOf('Visibility'))
-  assert.ok(text.indexOf('What happened') < text.indexOf('Visibility'))
-  assert.ok(text.indexOf('How this job ran') < text.indexOf('Visibility'))
-  assert.ok(text.indexOf('Visibility') < text.indexOf('Evidence'))
+  assert.ok(text.indexOf('Refund order #4471') < text.indexOf('Activity'))
+  assert.ok(text.indexOf('Activity') < text.indexOf('Visibility'))
   const sections = m.$$('.jobd-section').map((s) => s.getAttribute('aria-label'))
-  const vis = sections.indexOf('Visibility')
-  assert.equal(sections[vis - 2], 'What happened')
-  assert.equal(sections[vis - 1], 'How this job ran')
-  assert.equal(sections[vis + 1], 'Evidence')
+  assert.deepEqual(sections, ['Activity', 'Details', 'Run information', 'Visibility', 'Evidence', 'How this job ran'])
+  const details = m.$('.run-details')
+  assert.ok(details && details.tagName === 'DETAILS' && !details.hasAttribute('open'), 'Details is closed by default')
+  assert.ok(details.contains(m.$('.jobd-visibility')), 'Visibility is inside Details')
   m.unmount()
 })
 

@@ -97,9 +97,10 @@ test('the page loads evidence once, for the viewed item only, and stays a Run pa
   await m.settle()
   assert.deepEqual(calls.evidence, [41])
   const text = m.text()
-  // The record comes first: title, status, steps — then evidence.
+  // The work comes first: title, situation, Activity — then, inside Details, evidence.
   assert.ok(text.indexOf('Refund order #4471') < text.indexOf('Evidence'))
-  assert.ok(text.indexOf('How this job ran') < text.indexOf('Evidence'))
+  assert.ok(text.indexOf('Activity') < text.indexOf('Evidence'))
+  assert.ok(m.$('.run-details').contains(m.$('.jobd-evidence')), 'Evidence is inside Details')
   assert.match(text, /← Refunds/)
   m.unmount()
 })
@@ -266,14 +267,15 @@ test('truncation is stated plainly and cost gets its provenance; a missing cost 
   const m = await mount(page())
   await m.settle()
   assert.match(m.text(), /Showing evidence from this run's first 2,000 observations\./)
-  assert.match(m.$('.jobd-status').textContent, /\$0\.0042/)
-  assert.match(m.$('.jobd-status').textContent, /Cost as reported by the agent SDK/)
+  // The figure and its provenance live in Details → Run information now, not the header.
+  assert.match(m.$('.run-info').textContent, /Cost\s*\$0\.0042 · Cost as reported by the agent SDK/)
+  assert.doesNotMatch(m.$('.jobd-head').textContent, /\$|Cost/)
   m.unmount()
   // No priced run → no figure and no provenance line.
   stub({ runs: [{ ...RUNS[0], cost_usd: null }] })
   const m2 = await mount(page())
   await m2.settle()
-  assert.doesNotMatch(m2.$('.jobd-status').textContent, /\$|Cost/)
+  assert.doesNotMatch(m2.$('.run-info').textContent, /\$|Cost/)
   m2.unmount()
 })
 
@@ -285,13 +287,13 @@ test('the page never speaks of coverage, verification or connecting a system', a
   m.unmount()
 })
 
-test('the story and navigation are unchanged: What happened tells the passes, the back link and decision block stay', async () => {
+test('the story and navigation are unchanged: Activity tells the passes, the back link stays', async () => {
   let closed = 0
   stub()
   const m = await mount(page({ onClose: () => { closed += 1 } }))
   await m.settle()
-  assert.match(m.text(), /What happened/)
-  assert.match(m.text(), /Handed to a person\s*Ada Lovelace/)
+  assert.match(m.text(), /Activity/)
+  assert.match(m.text(), /refunds-agent → Ada Lovelace\s*Handed to a person/)
   assert.match(m.text(), /Work record closed/)
   assert.doesNotMatch(m.text(), /Recent passes/, 'the page tells the story once')
   await m.click(m.$('.jobd-close'))
