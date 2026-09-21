@@ -77,6 +77,12 @@ function stub({ coverage = COVERAGE, coverageFail = false, evidence = EVIDENCE, 
     if (typeof coverageFail === 'function' ? coverageFail() : coverageFail) throw new Error('coverage down')
     return typeof coverage === 'function' ? coverage(id) : coverage
   }
+  // The page also reads the Work Graph (its own section, its own tests in
+  // jobDetailWorkGraph.test.mjs); keep it off the network here.
+  api.getWorkItemGraph = async (id) => ({
+    item_id: id, generated_at: new Date(NOW).toISOString(), steps: [], chronology: [],
+    possession: { segments: [], current_holder: null }, lifecycle: [], bounded: false, span_limit: 2000, spans_read: 0, events_read: 0, summary: {},
+  })
   return calls
 }
 
@@ -104,18 +110,19 @@ test('1. the page fetches coverage once, for the viewed item, and renders a Visi
   m.unmount()
 })
 
-test('2. Visibility sits after Recent passes and before Evidence — the record first, then what could be seen, then what was seen', async () => {
+test('2. Visibility sits after What happened (and the demoted moves) and before Evidence — the record first, then what could be seen, then what was seen', async () => {
   stub()
   const m = await mount(page())
   await m.settle()
   const text = m.text()
   assert.ok(text.indexOf('Refund order #4471') < text.indexOf('Visibility'))
+  assert.ok(text.indexOf('What happened') < text.indexOf('Visibility'))
   assert.ok(text.indexOf('How this job ran') < text.indexOf('Visibility'))
-  assert.ok(text.indexOf('Recent passes') < text.indexOf('Visibility'))
   assert.ok(text.indexOf('Visibility') < text.indexOf('Evidence'))
   const sections = m.$$('.jobd-section').map((s) => s.getAttribute('aria-label'))
   const vis = sections.indexOf('Visibility')
-  assert.equal(sections[vis - 1], 'Recent passes')
+  assert.equal(sections[vis - 2], 'What happened')
+  assert.equal(sections[vis - 1], 'How this job ran')
   assert.equal(sections[vis + 1], 'Evidence')
   m.unmount()
 })

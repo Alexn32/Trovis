@@ -10,7 +10,9 @@ import {
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
 import { boundedNote, visibilityRows } from './coverage.js'
+import { holderLine } from './workGraph.js'
 import ExecutionView from './ExecutionView.jsx'
+import WorkGraphView from './WorkGraphView.jsx'
 
 // ---------------------------------------------------------------------------
 // Job detail — what a work item IS and how it moves, not a second table.
@@ -33,6 +35,17 @@ import ExecutionView from './ExecutionView.jsx'
 //      its own — independent of the detail, runs, evidence and coverage
 //      reads — and, like theirs, resets on every item change so Run A never
 //      shows inside Run B.
+//  10. (page only) What happened — the Run view's operational story, from
+//      GET /work/items/:id/graph (WorkGraphView.jsx + pure workGraph.js):
+//      the endpoint's Work Steps as a vertical timeline, who holds the work
+//      now (possession.current_holder, folded into the header's holder
+//      line), and a details area per step that opens the exact Execution
+//      node or Evidence record the step's own provenance names. The Run view
+//      IS the Work view — there is no third tab. On the page it replaces the
+//      old "Recent passes" log (the same lifecycle events, now the story)
+//      and demotes "How this job ran" (the agent's reported moves) to a fold
+//      under it. The panel keeps its steps, passes and runs fold, and never
+//      fetches the graph.
 //
 // Reads GET /work/items/:id (the lean detail), and /work/items/:id?include=runs
 // only when someone expands the runs section. Never the fat board, never a
@@ -184,6 +197,12 @@ export default function JobDetail({
   const [executionErr, setExecutionErr] = useState(null)
   const [executionReload, setExecutionReload] = useState(0)
   const [selectedNode, setSelectedNode] = useState(null)
+  // A Work Step's "View in Execution" names the node to select by the step's
+  // own execution_node_id. The view switch refetches and resets the
+  // selection, so the id waits here and is applied only once the body is
+  // in — and only when that body contains exactly that node. A node the
+  // read set lacks selects nothing: normal Execution, no guessed match.
+  const pendingNodeRef = useRef(null)
   useEffect(() => {
     if (!isPage) return undefined
     setExecution(null)
@@ -193,7 +212,14 @@ export default function JobDetail({
     return startAbortable(({ signal, isAlive }) => {
       api
         .getWorkItemExecution(item.id, { signal })
-        .then((d) => isAlive() && setExecution(d && Array.isArray(d.nodes) ? d : { nodes: [], roots: [], chronology: [], trace_ids: [] }))
+        .then((d) => {
+          if (!isAlive()) return
+          const body = d && Array.isArray(d.nodes) ? d : { nodes: [], roots: [], chronology: [], trace_ids: [] }
+          setExecution(body)
+          const want = pendingNodeRef.current
+          pendingNodeRef.current = null
+          if (want && body.nodes.some((n) => n && n.id === want)) setSelectedNode(want)
+        })
         .catch((e) => isAlive() && setExecutionErr(e))
     })
   }, [isPage, item.id, pageView, executionReload])
@@ -203,6 +229,66 @@ export default function JobDetail({
     setExecutionReload((n) => n + 1)
   }, [])
   const showExecution = isPage && pageView === 'execution'
+
+  // What happened: the Work Graph, page-only, its own request with its own
+  // loading, failure and Retry — a graph failure is a failed section, never
+  // a failed page, and never a timeline of invented "Unknown" steps. Every
+  // item change clears the body AND the selected step before anything is
+  // requested; a late response for the previous item is dropped by
+  // startAbortable's isAlive, so Run A's story never flashes under Run B.
+  const [graph, setGraph] = useState(null)
+  const [graphErr, setGraphErr] = useState(null)
+  const [graphReload, setGraphReload] = useState(0)
+  const [selectedStep, setSelectedStep] = useState(null)
+  useEffect(() => {
+    if (!isPage) return undefined
+    setGraph(null)
+    setGraphErr(null)
+    setSelectedStep(null)
+    pendingNodeRef.current = null
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkItemGraph(item.id, { signal })
+        .then((d) => isAlive() && setGraph(d && Array.isArray(d.steps) ? d : { steps: [], possession: null }))
+        .catch((e) => isAlive() && setGraphErr(e))
+    })
+  }, [isPage, item.id, graphReload])
+  const retryGraph = useCallback(() => {
+    setGraph(null)
+    setGraphErr(null)
+    setGraphReload((n) => n + 1)
+  }, [])
+  // Who has the work now — the endpoint's possession.current_holder and
+  // nothing else. Null until the graph is in, or when the record names no
+  // current holder; the header then keeps the lean detail's own sentence.
+  const held = isPage ? holderLine(graph?.possession) : null
+
+  // Work → Execution: switch views and hand the step's node id to the
+  // execution fetch above. Null (from the empty state's "View Execution")
+  // just switches.
+  const openExecutionAt = useCallback((nodeId) => {
+    pendingNodeRef.current = typeof nodeId === 'string' && nodeId ? nodeId : null
+    setPageView('execution')
+  }, [])
+
+  // Work → Evidence: mark and scroll to the row whose id IS the step's
+  // evidence_id. Nothing is matched by time, actor or label; a row Evidence
+  // does not draw is simply not offered (WorkGraphView decides that).
+  const [highlightEvidence, setHighlightEvidence] = useState(null)
+  const bodyRef = useRef(null)
+  useEffect(() => {
+    setHighlightEvidence(null)
+  }, [item.id])
+  useEffect(() => {
+    if (!highlightEvidence) return undefined
+    const frame = requestAnimationFrame(() => {
+      const el = bodyRef.current?.querySelector(`[data-evidence-id="${highlightEvidence}"]`)
+      if (!el) return
+      if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' })
+      if (typeof el.focus === 'function') el.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [highlightEvidence])
 
   async function resolve(kind) {
     const handoffId = detail?.awaiting_handoff_event_id
@@ -230,7 +316,16 @@ export default function JobDetail({
             <span className={`work-status-pill ${view.status || ''}`}>
               {workItemStatusLabel(view.status)}
             </span>
-            <span className="jobd-holder">{holderSentence(view)}</span>
+            {/* The holder line reads from the Work Graph's canonical
+                possession once it is in ("Held by Stripe · waiting"); until
+                then, and whenever the record names no current holder, the
+                lean detail's own sentence stands. "With you" and
+                "Finished" are the session's and the status's to say. */}
+            <span className="jobd-holder">
+              {view.status === 'waiting_on_you' || view.status === 'done' || !held
+                ? holderSentence(view)
+                : held.text}
+            </span>
             {view.updated_at && (
               <span className="jobd-age">{workUpdatedLabel(view.updated_at)}</span>
             )}
@@ -299,6 +394,21 @@ export default function JobDetail({
               onAsk={() => openAsk(askPrompt(view))}
             />
 
+            {/* The operational story comes first: what happened to the
+                work, from the Work Graph. Visibility and Evidence follow it. */}
+            {isPage && (
+              <WorkGraphView
+                body={graph}
+                failed={Boolean(graphErr)}
+                onRetry={retryGraph}
+                evidence={evidence}
+                selectedId={selectedStep}
+                onSelect={setSelectedStep}
+                onOpenExecution={openExecutionAt}
+                onShowEvidence={setHighlightEvidence}
+              />
+            )}
+
             {isPage ? (
               <ActionList
                 actions={actions}
@@ -309,6 +419,7 @@ export default function JobDetail({
                 hidden={hidden}
                 detail={detail}
                 onOpenAgent={onOpenAgent}
+                folded
               />
             ) : (
             <section className="jobd-section" aria-label="Steps">
@@ -356,7 +467,10 @@ export default function JobDetail({
             </section>
             )}
 
-            {history.length > 0 && (
+            {/* The page tells this story in What happened, from the same
+                lifecycle records; the log stays for the panel, which has no
+                Work Graph. */}
+            {!isPage && history.length > 0 && (
               <section className="jobd-section" aria-label="Recent passes">
                 <h3 className="dash-caps">Recent passes</h3>
                 <ul className="jobd-history">
@@ -396,6 +510,7 @@ export default function JobDetail({
                 body={evidence}
                 failed={Boolean(evidenceErr)}
                 onRetry={retryEvidence}
+                highlightId={highlightEvidence}
               />
             )}
           </>
@@ -405,7 +520,7 @@ export default function JobDetail({
 
   if (isPage) {
     return (
-      <div className="view job-page" aria-label={view.title}>
+      <div className="view job-page" aria-label={view.title} ref={bodyRef}>
         {body}
       </div>
     )
@@ -432,24 +547,41 @@ export default function JobDetail({
  * When the record has no action-shaped rows we fall back to the old spine
  * rather than drawing an empty frame — the process is still true even when
  * the moves behind it were never exported.
+ *
+ * `folded` (the page, since the Work Graph took the story): the same list
+ * one disclosure away, closed by default. The moves are the agent's own
+ * reports of what it reached for — technical detail whose full form is the
+ * Execution view — so they sit under What happened rather than beside it.
  */
-function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, onOpenAgent }) {
-  if (loading) {
-    return (
+function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, onOpenAgent, folded = false }) {
+  const frame = (inner) =>
+    folded ? (
+      <details className="jobd-section jobd-moves" aria-label="How this job ran">
+        <summary className="dash-caps">
+          How this job ran
+          <span className="jobd-moves-hint">moves the agent reported</span>
+        </summary>
+        {inner}
+      </details>
+    ) : (
       <section className="jobd-section" aria-label="How this job ran">
         <h3 className="dash-caps">How this job ran</h3>
-        <div className="dash-skel">
-          <span style={{ width: '70%' }} />
-          <span style={{ width: '50%' }} />
-        </div>
+        {inner}
       </section>
+    )
+
+  if (loading) {
+    return frame(
+      <div className="dash-skel">
+        <span style={{ width: '70%' }} />
+        <span style={{ width: '50%' }} />
+      </div>,
     )
   }
 
   if (actions.length === 0) {
-    return (
-      <section className="jobd-section" aria-label="How this job ran">
-        <h3 className="dash-caps">How this job ran</h3>
+    return frame(
+      <>
         {failed && (
           <p className="dash-empty" role="alert">
             Couldn&apos;t load what this job did.{' '}
@@ -492,13 +624,11 @@ function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, 
             </ol>
           </>
         )}
-      </section>
+      </>,
     )
   }
 
-  return (
-    <section className="jobd-section" aria-label="How this job ran">
-      <h3 className="dash-caps">How this job ran</h3>
+  return frame(
       <ol className="jobd-acts">
         {actions.map((a, i) => (
           <li
@@ -534,8 +664,7 @@ function ActionList({ actions, loading, failed, onRetry, steps, hidden, detail, 
             {a.reason && <p className="jobd-run-why">{a.reason}</p>}
           </li>
         ))}
-      </ol>
-    </section>
+      </ol>,
   )
 }
 
@@ -607,7 +736,7 @@ function VisibilitySection({ body, failed, onRetry }) {
  * error with Retry — the page stays), and empty (an honest sentence, not
  * "nothing happened" and not "not connected").
  */
-function EvidenceSection({ body, failed, onRetry }) {
+function EvidenceSection({ body, failed, onRetry, highlightId = null }) {
   const loading = body === null && !failed
   const records = body?.evidence || []
   const srcs = sources(records)
@@ -653,7 +782,12 @@ function EvidenceSection({ body, failed, onRetry }) {
           {obs.length > 0 && (
             <ul className="jobd-ev-list" aria-label="Observations">
               {obs.map((o) => (
-                <li key={o.id} className={`jobd-ev-row kind-${o.kind}${o.errored ? ' is-errored' : ''}`}>
+                <li
+                  key={o.id}
+                  className={`jobd-ev-row kind-${o.kind}${o.errored ? ' is-errored' : ''}${highlightId === o.id ? ' is-highlighted' : ''}`}
+                  data-evidence-id={o.id}
+                  tabIndex={highlightId === o.id ? -1 : undefined}
+                >
                   <div className="jobd-ev-top">
                     <span className="jobd-ev-title">{o.title}</span>
                     {o.at && (

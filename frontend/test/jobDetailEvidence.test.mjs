@@ -65,6 +65,20 @@ function stub({ evidence = EVIDENCE, evidenceFail = false, runs = RUNS } = {}) {
   api.getWorkItemCoverage = async (id) => ({
     item_id: id, generated_at: new Date(NOW).toISOString(), evidence_bounded: false, dimensions: [],
   })
+  // And the Work Graph (jobDetailWorkGraph.test.mjs): the same story the
+  // old Recent passes told, now as What happened.
+  api.getWorkItemGraph = async (id) => ({
+    item_id: id, generated_at: new Date(NOW).toISOString(), chronology: ['work-step:event:10', 'work-step:event:12'],
+    steps: [
+      { id: 'work-step:event:10', type: 'handoff', at: ago(20), label: 'Handed to a person', actor: { type: 'agent', label: 'refunds-agent:main' }, system: null,
+        details: { direction: 'to_human', handoff_id: 'h-1', reason: null, target_label: 'Ada Lovelace', target_id: null },
+        provenance: { event_id: 10, evidence_id: 'event:10', evidence_kind: 'handoff', execution_node_id: 'event:10', span_id: null, trace_id: null, correlation: 'direct', source_type: 'agent', source_connector_id: 'grok-bot', external_object_id: null, external_event_id: null } },
+      { id: 'work-step:event:12', type: 'completed', at: ago(10), label: 'Work record closed', actor: { type: 'agent', label: 'refunds-agent:main' }, system: null,
+        details: { reason: 'completed_by_agent', detail: null, abandoned: false, outcome: 'record_closed' },
+        provenance: { event_id: 12, evidence_id: 'event:12', evidence_kind: 'completion', execution_node_id: 'event:12', span_id: '0000000000000009', trace_id: null, correlation: 'explicit_key', source_type: 'agent', source_connector_id: 'grok-bot', external_object_id: null, external_event_id: null } },
+    ],
+    possession: { segments: [], current_holder: null }, lifecycle: [], bounded: false, span_limit: 2000, spans_read: 3, events_read: 4, summary: {},
+  })
   return calls
 }
 
@@ -271,14 +285,15 @@ test('the page never speaks of coverage, verification or connecting a system', a
   m.unmount()
 })
 
-test('possession chain and navigation are unchanged: steps, passes, back link, decision block', async () => {
+test('the story and navigation are unchanged: What happened tells the passes, the back link and decision block stay', async () => {
   let closed = 0
   stub()
   const m = await mount(page({ onClose: () => { closed += 1 } }))
   await m.settle()
-  assert.match(m.text(), /Recent passes/)
-  assert.match(m.text(), /Waiting on Ada Lovelace/)
-  assert.match(m.text(), /Finished/)
+  assert.match(m.text(), /What happened/)
+  assert.match(m.text(), /Handed to a person\s*Ada Lovelace/)
+  assert.match(m.text(), /Work record closed/)
+  assert.doesNotMatch(m.text(), /Recent passes/, 'the page tells the story once')
   await m.click(m.$('.jobd-close'))
   assert.equal(closed, 1)
   m.unmount()
