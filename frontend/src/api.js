@@ -511,6 +511,16 @@ export const api = {
       timeoutMs: WORK_TIMEOUT_MS,
       signal,
     }),
+  // Work Graph: the operational projection of one item (work_graph.py) —
+  // its Work Steps, canonical possession and per-step provenance. Per
+  // item, opt-in: only the full Run page's "What happened" section reads
+  // it. Home, the Home desk panel, the Work table, Fleet and the job
+  // roll-up never do.
+  getWorkItemGraph: (id, { signal = undefined } = {}) =>
+    request(`/work/items/${encodeURIComponent(id)}/graph`, {
+      timeoutMs: WORK_TIMEOUT_MS,
+      signal,
+    }),
   getWorkSuggestions: () => request('/work/suggestions', { timeoutMs: WORK_TIMEOUT_MS }),
   // One named item plus the detail spine. `include: 'runs'` adds the
   // underlying agent runs — opt-in, because the job detail folds them away and

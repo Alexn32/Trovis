@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -455,11 +456,14 @@ with TestClient(main.app) as c:
     import work_execution
     src = inspect.getsource(work_execution)
     check("27. no LLM in the read model", not any(w in src for w in ("anthropic", "asker", "describer")))
-    # The architectural boundary after PR 216: the Execution UI exists and is
+    # The architectural boundary after PR 217: the Execution UI exists and is
     # the ONLY reader of the endpoint (the Run page, never Home or the Work
     # home). The Work Graph is a backend read model (work_graph.py) that
-    # projects Work Steps from LIFECYCLE EVENTS only; it has no frontend yet,
-    # and nothing anywhere derives business steps from execution spans.
+    # projects Work Steps from LIFECYCLE EVENTS only; its UI exists only on
+    # the full Run page (JobDetail.jsx + WorkGraphView.jsx + pure
+    # workGraph.js, through api.js) — never Home, the Work table, Fleet or
+    # the Agent page — and nothing anywhere, backend or frontend, derives
+    # business steps from execution spans, tool names or model output.
     fe_src = os.path.join(HERE, "frontend", "src")
     fe_files = {f: open(os.path.join(fe_src, f), encoding="utf-8").read()
                 for f in os.listdir(fe_src) if f.endswith((".jsx", ".js"))}
@@ -472,12 +476,24 @@ with TestClient(main.app) as c:
     py_files = [f for f in os.listdir(HERE) if f.endswith(".py") and not f.startswith("test_")]
     py_text = {f: open(os.path.join(HERE, f), encoding="utf-8").read() for f in py_files}
     graph_py = sorted(f for f, text in py_text.items() if any(w in text for w in graph_words))
-    check("26. no Work Graph UI yet, and no business-step generator anywhere: the backend read model is the only "
-          "Work Graph code, wired through models and the route, and it never reads the execution read model",
-          not any(f.startswith(("work_graph", "WorkGraph")) for f in fe_files)
-          and not any(w in text for text in fe_files.values() for w in graph_words)
+    graph_readers = sorted(f for f, text in fe_files.items() if "getWorkItemGraph" in text)
+    graph_fe = sorted(f for f, text in fe_files.items() if any(w in text for w in graph_words))
+    # Code, not comments: the modules SAY they never read lifecycle, which is
+    # the point — so the check reads what they do, not what they explain.
+    _strip_js = lambda s: re.sub(r"^\s*//.*$", "", re.sub(r"/\*[\s\S]*?\*/", "", s), flags=re.M)  # noqa: E731
+    fe_graph_ui = _strip_js(fe_files.get("workGraph.js", "") + fe_files.get("WorkGraphView.jsx", ""))
+    check("26. the Work Graph UI lives only on the full Run page (JobDetail / WorkGraphView / workGraph.js via api.js); "
+          "Home, the Work table, Fleet and the Agent page never read or render it; no business-step generator exists "
+          "anywhere; the frontend reconstructs nothing (no lifecycle read, no tool-name or provider phrase table)",
+          graph_readers == ["JobDetail.jsx", "api.js"]
+          and "WorkGraphView.jsx" in fe_files and "workGraph.js" in fe_files
+          and set(graph_fe) <= {"JobDetail.jsx", "WorkGraphView.jsx", "api.js", "workGraph.js"}
+          and not any(w in fe_files.get(f, "") for f in ("HomeView.jsx", "WorkTab.jsx", "Fleet.jsx", "AgentDetail.jsx", "App.jsx")
+                      for w in graph_words + ("getWorkItemGraph", "/graph"))
+          and not any("business_step" in text or "businessStep" in text for text in list(py_text.values()) + list(fe_files.values()))
+          and "lifecycle" not in fe_graph_ui
+          and not any(w in fe_graph_ui.lower() for w in ("charge.refunded", "refund issued", "payment_intent.succeeded"))
           and "work_graph.py" in py_text and set(graph_py) <= {"main.py", "models.py", "work_graph.py"}
-          and not any("business_step" in text or "businessStep" in text for text in py_text.values())
           and "import work_execution" not in py_text["work_graph.py"]
           and "from work_execution" not in py_text["work_graph.py"])
 

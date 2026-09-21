@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   TYPE_LABELS, boundedNote, buildTree, chronologyRows, defaultExpanded, diagnosticsNote,
   executionSummary, inspectorSections, nodeErrorLine, nodeMeta, nodeSubtitle, nodeTitle,
@@ -52,6 +52,32 @@ export default function ExecutionView({ body, failed, onRetry, selectedId, onSel
       return next
     })
 
+  // A selection that arrives from outside this view (a Work Step's "View in
+  // Execution", by the step's own execution_node_id) may sit behind a
+  // collapsed ancestor on a large tree. Open the recorded ancestors — the
+  // endpoint's parent ids, nothing else — and bring the row into view. A
+  // selectedId the body does not contain selects nothing and opens nothing.
+  const rootRef = useRef(null)
+  useEffect(() => {
+    if (!selectedId || !tree.byId.has(selectedId)) return undefined
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      let cur = tree.byId.get(selectedId)
+      const seen = new Set()
+      while (cur && cur.parent_id && tree.byId.has(cur.parent_id) && !seen.has(cur.id)) {
+        seen.add(cur.id)
+        next.add(cur.parent_id)
+        cur = tree.byId.get(cur.parent_id)
+      }
+      return next
+    })
+    const frame = requestAnimationFrame(() => {
+      const el = rootRef.current?.querySelector(`[data-node-id="${selectedId}"]`)
+      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [selectedId, tree])
+
   const facts = body
     ? [
         `${summary.nodes} ${summary.nodes === 1 ? 'node' : 'nodes'}`,
@@ -64,7 +90,7 @@ export default function ExecutionView({ body, failed, onRetry, selectedId, onSel
     : []
 
   return (
-    <section className="jobd-section exec" aria-label="Execution">
+    <section className="jobd-section exec" aria-label="Execution" ref={rootRef}>
       <header className="exec-head">
         <h3 className="dash-caps">Execution</h3>
         <p className="exec-lead">How this run executed, as its telemetry recorded it.</p>

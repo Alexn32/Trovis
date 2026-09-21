@@ -6424,6 +6424,118 @@ select.wf2-input { cursor: pointer; }
   color: var(--text-primary); background: var(--bg-elevated); border-color: var(--border-default);
 }
 
+/* --- What happened: the Work Graph as an operational timeline ------------ */
+/* One calm vertical flow, oldest first — a record of what changed, not a
+   node graph. Tokens only. Types are told apart by the marker's shape and
+   a small caps tag, never by a traffic light: an exception is an explicit
+   record, a closed record is not a success, a wait is not a problem. */
+.jobd-work { gap: 10px; }
+.jobd-work-steps { list-style: none; margin: 0; padding: 0; max-width: 760px; }
+.jobd-work-step { position: relative; padding: 0 0 0 28px; }
+.jobd-work-step:not(:last-child)::before {
+  content: ''; position: absolute; left: 6px; top: 24px; bottom: -2px;
+  width: 1px; background: var(--border-default);
+}
+.jobd-work-dot {
+  position: absolute; left: 0; top: 14px; width: 13px; height: 13px; box-sizing: border-box;
+  border-radius: 50%; background: var(--bg-surface); border: 2px solid var(--text-dim);
+}
+.jobd-work-step.type-handoff .jobd-work-dot { border-color: var(--wf-human, var(--brand-accent)); }
+.jobd-work-step.type-wait .jobd-work-dot { border-style: dashed; border-color: var(--text-muted); }
+.jobd-work-step.type-exception .jobd-work-dot { border-color: var(--error); border-width: 3px; }
+.jobd-work-step.type-completed .jobd-work-dot { border-radius: 3px; background: var(--text-dim); }
+.jobd-work-step.type-progress .jobd-work-dot { background: var(--text-muted); border-color: var(--text-muted); }
+.jobd-work-row {
+  display: flex; align-items: flex-start; gap: 14px; width: 100%;
+  padding: 8px 10px 8px 0; margin: 0; text-align: left; font: inherit; font-size: 12.5px;
+  color: var(--text-secondary); background: none; border: 1px solid transparent; border-radius: 8px;
+  cursor: pointer;
+}
+.jobd-work-row:hover { background: var(--bg-surface-hover); }
+.jobd-work-row:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 1px; }
+.jobd-work-step.is-selected > .jobd-work-row {
+  background: var(--bg-elevated); border-color: var(--border-hover); padding-left: 10px;
+}
+.jobd-work-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.jobd-work-who { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.jobd-work-kind {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.jobd-work-actor { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+.jobd-work-label { font-size: 14px; font-weight: 650; color: var(--text-primary); overflow-wrap: anywhere; }
+.jobd-work-context { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.jobd-work-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding-top: 2px; }
+.jobd-work-type {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-muted); white-space: nowrap;
+}
+.jobd-work-at { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* The details area under a selected step: recorded context, the record it
+   rests on, the two doors (Execution / Evidence), the ids folded away. */
+.jobd-work-details {
+  margin: 2px 0 10px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.jobd-work-dl { margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.jobd-work-dl-row { display: grid; grid-template-columns: minmax(84px, max-content) minmax(0, 1fr); gap: 0 10px; }
+.jobd-work-dl dt { color: var(--text-muted); font-size: 12px; }
+.jobd-work-dl dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.jobd-work-dl dd.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; }
+.jobd-work-support { margin: 0; font-size: 12px; color: var(--text-muted); }
+.jobd-work-actions { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.jobd-work-actions .dash-link { font-weight: 600; }
+.jobd-work-tech .jobd-work-dl { margin-top: 4px; }
+
+/* Zero steps: a truthful sparse record, said calmly. */
+.jobd-work-empty { display: flex; flex-direction: column; gap: 3px; }
+.jobd-work-empty .dash-empty { margin: 0; }
+.jobd-work-empty-sub { margin: 0; font-size: 12px; color: var(--text-muted); }
+
+/* Footer: who held the work (history, in order — not cause) and the read bound. */
+.jobd-work-foot { display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; color: var(--text-muted); }
+.jobd-work-history summary { cursor: pointer; list-style: none; width: fit-content; }
+.jobd-work-history summary::-webkit-details-marker { display: none; }
+.jobd-work-history summary:hover { color: var(--text-secondary); }
+.jobd-work-history-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.jobd-work-history-list li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.jobd-work-history-holder { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+.jobd-work-history-flag { color: var(--text-muted); font-size: 11px; }
+.jobd-work-note { margin: 0; }
+
+/* How this job ran, demoted: the agent's reported moves stay one fold away,
+   under the operational story rather than competing with it. */
+.jobd-moves > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 10px; width: fit-content;
+}
+.jobd-moves > summary::-webkit-details-marker { display: none; }
+.jobd-moves > summary::after { content: '▸'; font-size: 11px; color: var(--text-muted); }
+.jobd-moves[open] > summary::after { content: '▾'; }
+.jobd-moves-hint {
+  font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 11.5px; color: var(--text-muted);
+}
+
+/* An Evidence row a Work Step pointed at: marked for a moment with the same
+   warm inset the decision block uses, plus focus — never colour alone. */
+.jobd-ev-row.is-highlighted {
+  background: var(--warm-fill); box-shadow: inset 3px 0 0 var(--warning);
+  border-radius: 6px; padding-left: 10px; border-top-color: transparent;
+}
+.jobd-ev-row.is-highlighted:focus { outline: none; }
+
+/* Phones: the row stacks — who/what/context, then type and time on one
+   line — and the tap target grows where a thumb is pointing at it. */
+@media (max-width: 720px) {
+  .jobd-work-row { flex-direction: column; gap: 4px; }
+  .jobd-work-meta { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; }
+  .jobd-work-dl-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+@media (pointer: coarse) {
+  .jobd-work-row { padding-top: 11px; padding-bottom: 11px; }
+}
+
 /* --- Execution: a vertical technical record, quiet by default ------------- */
 /* Tokens only. Normal nodes carry no colour at all; an error is the one thing
    that stands out. Structure is drawn with one thin left rule per level —

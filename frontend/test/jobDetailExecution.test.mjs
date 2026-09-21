@@ -91,11 +91,17 @@ function flatBody() {
 }
 
 function stub({ execution = execBody(), executionFail = false, evidenceFail = false, coverageFail = false } = {}) {
-  const calls = { item: [], execution: [], evidence: [], coverage: [] }
+  const calls = { item: [], execution: [], evidence: [], coverage: [], graph: [] }
   api.getWorkItem = async (id, opts = {}) => {
     calls.item.push([id, opts.include || null])
     const d = DETAILS[id] || DETAILS[41]
     return opts.include === 'runs' ? { ...d, runs: RUNS } : d
+  }
+  // The page also reads the Work Graph (its own section, its own tests in
+  // jobDetailWorkGraph.test.mjs); keep it off the network here.
+  api.getWorkItemGraph = async (id) => {
+    calls.graph.push(id)
+    return { item_id: id, generated_at: T, steps: [], chronology: [], possession: { segments: [], current_holder: null }, lifecycle: [], bounded: false, span_limit: 2000, spans_read: 0, events_read: 0, summary: {} }
   }
   api.getWorkItemEvidence = async (id) => { calls.evidence.push(id); if (evidenceFail) throw new Error('down'); return EVIDENCE }
   api.getWorkItemCoverage = async (id) => { calls.coverage.push(id); if (coverageFail) throw new Error('down'); return COVERAGE }
@@ -535,5 +541,6 @@ test('the Home desk panel has no Execution switch and never fetches execution', 
   await m.settle()
   assert.ok(!m.$('.jobd-views'))
   assert.deepEqual(calls.execution, [])
+  assert.deepEqual(calls.graph, [], 'nor the Work Graph')
   m.unmount()
 })
