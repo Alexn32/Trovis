@@ -1272,6 +1272,9 @@ export default function WorkTab({
         item={{ id: route.run }}
         backLabel={openJob ? `← ${openJob.name}` : '← Work'}
         onOpenAgent={onOpenAgent}
+        // The run's own job, by the id the lean detail carries — the same
+        // job route a row click takes, so the header can name and open it.
+        onOpenJob={(jobId) => onRoute({ job: jobId, run: null })}
         onClose={() => onRoute({ job: route.job, run: null })}
         onResolved={() => {
           onRoute({ job: route.job, run: null })

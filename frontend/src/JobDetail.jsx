@@ -10,7 +10,7 @@ import {
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
 import { boundedNote, visibilityRows } from './coverage.js'
-import { holderLine } from './workGraph.js'
+import { ACTOR_KIND_LABELS, holderLine, possessionRows, situationFor } from './workGraph.js'
 import ExecutionView from './ExecutionView.jsx'
 import WorkGraphView from './WorkGraphView.jsx'
 
@@ -35,17 +35,32 @@ import WorkGraphView from './WorkGraphView.jsx'
 //      its own — independent of the detail, runs, evidence and coverage
 //      reads — and, like theirs, resets on every item change so Run A never
 //      shows inside Run B.
-//  10. (page only) What happened — the Run view's operational story, from
-//      GET /work/items/:id/graph (WorkGraphView.jsx + pure workGraph.js):
-//      the endpoint's Work Steps as a vertical timeline, who holds the work
-//      now (possession.current_holder, folded into the header's holder
-//      line), and a details area per step that opens the exact Execution
-//      node or Evidence record the step's own provenance names. The Run view
-//      IS the Work view — there is no third tab. On the page it replaces the
-//      old "Recent passes" log (the same lifecycle events, now the story)
-//      and demotes "How this job ran" (the agent's reported moves) to a fold
-//      under it. The panel keeps its steps, passes and runs fold, and never
-//      fetches the graph.
+//  10. (page only) The Run page proper — built so a person understands the
+//      work in a few seconds, in three levels under one quiet header (back
+//      link, title, the job it belongs to, the Activity | Execution switch):
+//
+//        CURRENT SITUATION  one statement of what is happening now
+//                           (workGraph.situationFor: the lean status plus
+//                           possession.current_holder, and nothing else),
+//                           with at most one supporting sentence built from
+//                           the last Work Step ONLY when that record itself
+//                           names the holder; the decision buttons when the
+//                           work is waiting on you.
+//        ACTIVITY           the Work Graph's steps as a vertical timeline
+//                           (WorkGraphView.jsx + pure workGraph.js) — exactly
+//                           `graph.steps`, one row each, in a person's words;
+//                           each row opens the exact Execution node or
+//                           Evidence record its provenance names.
+//        DETAILS            one closed disclosure holding the record Trovis
+//                           keeps: run information, Visibility (coverage),
+//                           who held the work (possession history, never a
+//                           "now"), Evidence, and the demoted "How this job
+//                           ran" moves.
+//
+//      Execution is the sibling view, one click away, unchanged. Nothing in
+//      the header repeats the situation (no status pill, no holder line).
+//      The panel keeps its own steps, passes, current-handoff block and runs
+//      fold, and never fetches the graph.
 //
 // Reads GET /work/items/:id (the lean detail), and /work/items/:id?include=runs
 // only when someone expands the runs section. Never the fat board, never a
@@ -68,7 +83,7 @@ import WorkGraphView from './WorkGraphView.jsx'
 // ---------------------------------------------------------------------------
 
 export default function JobDetail({
-  item, onClose, onResolved, onOpenAgent, variant = 'panel', backLabel = '← Back',
+  item, onClose, onResolved, onOpenAgent, onOpenJob, variant = 'panel', backLabel = '← Back',
 }) {
   const [detail, setDetail] = useState(null)
   const [err, setErr] = useState(null)
@@ -260,8 +275,11 @@ export default function JobDetail({
   }, [])
   // Who has the work now — the endpoint's possession.current_holder and
   // nothing else. Null until the graph is in, or when the record names no
-  // current holder; the header then keeps the lean detail's own sentence.
+  // current holder; the situation then says only what the status says.
   const held = isPage ? holderLine(graph?.possession) : null
+  // The one statement at the top of Activity, from the lean status and that
+  // canonical holder (workGraph.situationFor). Null until the detail is in.
+  const situation = isPage ? situationFor(view, graph) : null
 
   // Work → Execution: switch views and hand the step's node id to the
   // execution fetch above. Null (from the empty state's "View Execution")
@@ -275,9 +293,17 @@ export default function JobDetail({
   // evidence_id. Nothing is matched by time, actor or label; a row Evidence
   // does not draw is simply not offered (WorkGraphView decides that).
   const [highlightEvidence, setHighlightEvidence] = useState(null)
+  // Details is closed by default; a step's "View evidence" opens it so the
+  // row it points at can be seen.
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const showEvidence = useCallback((id) => {
+    setDetailsOpen(true)
+    setHighlightEvidence(id)
+  }, [])
   const bodyRef = useRef(null)
   useEffect(() => {
     setHighlightEvidence(null)
+    setDetailsOpen(false)
   }, [item.id])
   useEffect(() => {
     if (!highlightEvidence) return undefined
@@ -304,6 +330,9 @@ export default function JobDetail({
       setBusy(null)
     }
   }
+  const ask = () => openAsk(askPrompt(view))
+  const jobName = String(view.workflow_name || '').trim()
+  const canOpenJob = Boolean(onOpenJob && view.workflow_id)
 
   const body = (
     <>
@@ -312,34 +341,34 @@ export default function JobDetail({
             {isPage ? backLabel : '← Back'}
           </button>
           <h2 className="jobd-title">{view.title}</h2>
-          <div className="jobd-status">
-            <span className={`work-status-pill ${view.status || ''}`}>
-              {workItemStatusLabel(view.status)}
-            </span>
-            {/* The holder line reads from the Work Graph's canonical
-                possession once it is in ("Held by Stripe · waiting"); until
-                then, and whenever the record names no current holder, the
-                lean detail's own sentence stands. "With you" and
-                "Finished" are the session's and the status's to say. */}
-            <span className="jobd-holder">
-              {view.status === 'waiting_on_you' || view.status === 'done' || !held
-                ? holderSentence(view)
-                : held.text}
-            </span>
-            {view.updated_at && (
-              <span className="jobd-age">{workUpdatedLabel(view.updated_at)}</span>
-            )}
-            {/* Totals for the whole job, and only when the record has them.
-                Same rule as a run's own line: $0.00 is not a cost. */}
-            {isPage && jobTotals(runs).map((t) => (
-              <span key={t} className="jobd-total">{t}</span>
-            ))}
-            {/* Where the cost figure comes from — only beside a figure that
-                exists, and only when the evidence says how it was priced. */}
-            {costNote && jobTotals(runs).some((t) => t.startsWith('$')) && (
-              <span className="jobd-total-note">{costNote}</span>
-            )}
-          </div>
+          {/* The page header carries identity only: the title above, the
+              job it belongs to here. What is happening is the Current
+              situation's one statement, not a pill and a holder line
+              repeating it. The panel keeps its compact status line. */}
+          {isPage ? (
+            jobName && (
+              <p className="run-job">
+                Part of{' '}
+                {canOpenJob ? (
+                  <button type="button" className="run-job-link" onClick={() => onOpenJob(view.workflow_id)}>
+                    {jobName}
+                  </button>
+                ) : (
+                  <span className="run-job-name">{jobName}</span>
+                )}
+              </p>
+            )
+          ) : (
+            <div className="jobd-status">
+              <span className={`work-status-pill ${view.status || ''}`}>
+                {workItemStatusLabel(view.status)}
+              </span>
+              <span className="jobd-holder">{holderSentence(view)}</span>
+              {view.updated_at && (
+                <span className="jobd-age">{workUpdatedLabel(view.updated_at)}</span>
+              )}
+            </div>
+          )}
           {/* Two views of one run. The record above this line is shared;
               only what sits below it changes. */}
           {isPage && (
@@ -351,7 +380,7 @@ export default function JobDetail({
                 className={`jobd-view${pageView === 'run' ? ' is-active' : ''}`}
                 onClick={() => setPageView('run')}
               >
-                Run
+                Activity
               </button>
               <button
                 type="button"
@@ -382,6 +411,78 @@ export default function JobDetail({
               setReload((n) => n + 1)
             }}
           />
+        ) : isPage ? (
+          <>
+            {/* LEVEL 1 — what is happening now, said once. */}
+            <RunSituation
+              situation={situation}
+              view={view}
+              held={held}
+              decidable={decidable}
+              busy={busy}
+              actionErr={actionErr}
+              onApprove={() => resolve('approve')}
+              onSendBack={() => resolve('decline')}
+            />
+
+            {/* LEVEL 2 — what meaningful things happened, from the Work Graph. */}
+            <WorkGraphView
+              body={graph}
+              failed={Boolean(graphErr)}
+              onRetry={retryGraph}
+              evidence={evidence}
+              selectedId={selectedStep}
+              onSelect={setSelectedStep}
+              onOpenExecution={openExecutionAt}
+              onShowEvidence={showEvidence}
+            />
+
+            {/* LEVEL 3 — the record Trovis keeps, one disclosure away. */}
+            <details
+              className="jobd-section run-details"
+              aria-label="Details"
+              open={detailsOpen}
+              onToggle={(e) => setDetailsOpen(Boolean(e.currentTarget.open))}
+            >
+              <summary className="run-details-summary">
+                <span className="run-details-title">Details</span>
+                <span className="run-details-hint">run information · visibility · who held the work · evidence</span>
+              </summary>
+              <div className="run-details-body">
+                <RunInformation
+                  view={view}
+                  runs={runs}
+                  costNote={costNote}
+                  jobName={jobName}
+                  canOpenJob={canOpenJob}
+                  onOpenJob={onOpenJob}
+                />
+                <VisibilitySection
+                  body={coverage}
+                  failed={Boolean(coverageErr)}
+                  onRetry={retryCoverage}
+                />
+                <PossessionHistory possession={graph?.possession} />
+                <EvidenceSection
+                  body={evidence}
+                  failed={Boolean(evidenceErr)}
+                  onRetry={retryEvidence}
+                  highlightId={highlightEvidence}
+                />
+                <ActionList
+                  actions={actions}
+                  loading={runsLoading}
+                  failed={Boolean(runsErr)}
+                  onRetry={retryRuns}
+                  steps={steps}
+                  hidden={hidden}
+                  detail={detail}
+                  onOpenAgent={onOpenAgent}
+                  folded
+                />
+              </div>
+            </details>
+          </>
         ) : (
           <>
             <CurrentHandoff
@@ -391,37 +492,9 @@ export default function JobDetail({
               actionErr={actionErr}
               onApprove={() => resolve('approve')}
               onSendBack={() => resolve('decline')}
-              onAsk={() => openAsk(askPrompt(view))}
+              onAsk={ask}
             />
 
-            {/* The operational story comes first: what happened to the
-                work, from the Work Graph. Visibility and Evidence follow it. */}
-            {isPage && (
-              <WorkGraphView
-                body={graph}
-                failed={Boolean(graphErr)}
-                onRetry={retryGraph}
-                evidence={evidence}
-                selectedId={selectedStep}
-                onSelect={setSelectedStep}
-                onOpenExecution={openExecutionAt}
-                onShowEvidence={setHighlightEvidence}
-              />
-            )}
-
-            {isPage ? (
-              <ActionList
-                actions={actions}
-                loading={runsLoading}
-                failed={Boolean(runsErr)}
-                onRetry={retryRuns}
-                steps={steps}
-                hidden={hidden}
-                detail={detail}
-                onOpenAgent={onOpenAgent}
-                folded
-              />
-            ) : (
             <section className="jobd-section" aria-label="Steps">
               <h3 className="dash-caps">How this job runs</h3>
               {!detail ? (
@@ -465,9 +538,8 @@ export default function JobDetail({
                 </>
               )}
             </section>
-            )}
 
-            {/* The page tells this story in What happened, from the same
+            {/* The page tells this story in Activity, from the same
                 lifecycle records; the log stays for the panel, which has no
                 Work Graph. */}
             {!isPage && history.length > 0 && (
@@ -494,25 +566,6 @@ export default function JobDetail({
             {/* The page's action list already IS these runs, so folding the
                 same rows underneath it would be depth in name only. */}
             {!isPage && <AgentRuns itemId={item.id} onOpenAgent={onOpenAgent} />}
-
-            {/* Visibility sits between the record and its evidence: what
-                Trovis could see, then what it saw. */}
-            {isPage && (
-              <VisibilitySection
-                body={coverage}
-                failed={Boolean(coverageErr)}
-                onRetry={retryCoverage}
-              />
-            )}
-
-            {isPage && (
-              <EvidenceSection
-                body={evidence}
-                failed={Boolean(evidenceErr)}
-                onRetry={retryEvidence}
-                highlightId={highlightEvidence}
-              />
-            )}
           </>
         )}
     </>
@@ -827,6 +880,124 @@ function EvidenceDetail({ label, value }) {
   )
 }
 
+// --- the page: current situation, run information, who held the work -------
+
+/**
+ * LEVEL 1. One statement of what is happening now (workGraph.situationFor),
+ * one supporting sentence when the record itself supports one, and — only
+ * when the work is waiting on the reader AND the server gave us the handoff
+ * to resolve — the two genuine decisions on that handoff, as quiet
+ * secondary controls under the sentence. Nothing else: no pill, no holder
+ * line, no second phrasing of the same state, and no Ask here (the page
+ * already has the global Ask pill; Ask is not a disposition of the work).
+ */
+function RunSituation({ situation, view, held, decidable, busy, actionErr, onApprove, onSendBack }) {
+  const waitingOnYou = view.status === 'waiting_on_you'
+  if (!situation) {
+    return (
+      <section className="run-now" aria-label="Current situation">
+        <div className="dash-skel">
+          <span style={{ width: '38%' }} />
+        </div>
+      </section>
+    )
+  }
+  const ago = situation.support?.at ? workUpdatedLabel(situation.support.at) : ''
+  return (
+    <section
+      className={`run-now${waitingOnYou ? ' is-you' : ''}`}
+      aria-label="Current situation"
+      data-holder={held ? held.label : undefined}
+    >
+      <p className="run-now-state">{situation.headline}</p>
+      {situation.support && (
+        <p className="run-now-support">
+          {situation.support.text}
+          {ago ? ` ${ago} ago` : ''}.
+        </p>
+      )}
+      {waitingOnYou && decidable && (
+        <div className="run-now-actions">
+          <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onApprove}>
+            {busy === 'approve' ? 'Approving…' : 'Approve'}
+          </button>
+          <button type="button" className="btn btn-ghost" disabled={!!busy} onClick={onSendBack}>
+            {busy === 'decline' ? 'Sending back…' : 'Send back'}
+          </button>
+        </div>
+      )}
+      {waitingOnYou && actionErr && (
+        <p className="jobd-action-err" role="alert">
+          {actionErr}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/**
+ * Run information, inside Details: the identity and bookkeeping the header
+ * no longer carries. Every row exists only when the record has the value;
+ * nothing here is a priority, an owner, a source name or a verdict.
+ */
+function RunInformation({ view, runs, costNote, jobName, canOpenJob, onOpenJob }) {
+  const totals = jobTotals(runs)
+  const rows = []
+  if (jobName) {
+    rows.push(['Job', canOpenJob ? (
+      <button type="button" className="run-job-link" onClick={() => onOpenJob(view.workflow_id)}>{jobName}</button>
+    ) : jobName])
+  }
+  if (view.id) rows.push(['Run ID', String(view.id)])
+  if (view.status) rows.push(['Status', workItemStatusLabel(view.status)])
+  if (view.updated_at) rows.push(['Last updated', `${workUpdatedLabel(view.updated_at)} ago`])
+  // Totals for the whole job, and only when the record has them. Same rule
+  // as a run's own line: $0.00 is not a cost. The cost's provenance rides
+  // beside the figure, only when the evidence says how it was priced.
+  for (const t of totals) {
+    const isCost = t.startsWith('$')
+    rows.push([isCost ? 'Cost' : 'Duration', isCost && costNote ? `${t} · ${costNote}` : t])
+  }
+  if (rows.length === 0) return null
+  return (
+    <section className="jobd-section run-info" aria-label="Run information">
+      <h3 className="dash-caps">Run information</h3>
+      <dl className="run-info-dl">
+        {rows.map(([k, v]) => (
+          <div key={k} className="run-info-row">
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
+
+/**
+ * Who held the work, in order — possession.segments as history and nothing
+ * more: holder, kind, each segment's own waiting flag. No row is "now":
+ * current possession is the situation's, from possession.current_holder.
+ */
+function PossessionHistory({ possession }) {
+  const rows = possessionRows(possession)
+  if (rows.length === 0) return null
+  return (
+    <section className="jobd-section run-held" aria-label="Who held the work">
+      <h3 className="dash-caps">Who held the work</h3>
+      <ol className="jobd-work-history-list" aria-label="Who held the work, in order">
+        {rows.map((h) => (
+          <li key={h.key} className={`kind-${h.kind}`}>
+            <span className="jobd-work-kind">{ACTOR_KIND_LABELS[h.kind]}</span>
+            <span className="jobd-work-history-holder">{h.label}</span>
+            {h.waiting && <span className="jobd-work-history-flag">waiting</span>}
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
 /** "With you" / "With Sarah Chen" / "Waiting on Stripe" — never a bare enum. */
 function holderSentence(view) {
   const name = String(view?.holder?.name || '').trim()
@@ -853,43 +1024,61 @@ function CurrentHandoff({ view, decidable, busy, actionErr, onApprove, onSendBac
         {waitingOnYou ? 'This is waiting on you.' : view.whats_next || holderSentence(view)}
       </p>
       {waitingOnYou && (
-        <>
-          <div className="jobd-actions">
-            {/* Approve and Send back resolve the open handoff. They only
-                render when the server gave us its id — a decision button
-                with nothing to call is worse than no button. */}
-            {decidable && (
-              <>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={!!busy}
-                  onClick={onApprove}
-                >
-                  {busy === 'approve' ? 'Approving…' : 'Approve'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={!!busy}
-                  onClick={onSendBack}
-                >
-                  {busy === 'decline' ? 'Sending back…' : 'Send back'}
-                </button>
-              </>
-            )}
-            <button type="button" className="btn btn-ghost" onClick={onAsk}>
-              Ask
-            </button>
-          </div>
-          {actionErr && (
-            <p className="jobd-action-err" role="alert">
-              {actionErr}
-            </p>
-          )}
-        </>
+        <DecisionActions
+          decidable={decidable}
+          busy={busy}
+          actionErr={actionErr}
+          onApprove={onApprove}
+          onSendBack={onSendBack}
+          onAsk={onAsk}
+        />
       )}
     </section>
+  )
+}
+
+/**
+ * The panel's decision block: the two real calls on an open handoff, plus
+ * the panel's own Ask (the panel has no global pill). The page's Current
+ * situation renders the two decisions itself, quieter and without Ask.
+ */
+function DecisionActions({ decidable, busy, actionErr, onApprove, onSendBack, onAsk }) {
+  return (
+    <>
+      <div className="jobd-actions">
+        {/* Approve and Send back resolve the open handoff. They only
+            render when the server gave us its id — a decision button
+            with nothing to call is worse than no button. */}
+        {decidable && (
+          <>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!!busy}
+              onClick={onApprove}
+            >
+              {busy === 'approve' ? 'Approving…' : 'Approve'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={!!busy}
+              onClick={onSendBack}
+            >
+              {busy === 'decline' ? 'Sending back…' : 'Send back'}
+            </button>
+          </>
+        )}
+        <button type="button" className="btn btn-ghost" onClick={onAsk}>
+          Ask
+        </button>
+      </div>
+      {actionErr && (
+        <p className="jobd-action-err" role="alert">
+          {actionErr}
+        </p>
+      )}
+    </>
   )
 }
 

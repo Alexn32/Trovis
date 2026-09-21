@@ -6424,20 +6424,48 @@ select.wf2-input { cursor: pointer; }
   color: var(--text-primary); background: var(--bg-elevated); border-color: var(--border-default);
 }
 
-/* --- What happened: the Work Graph as an operational timeline ------------ */
-/* One calm vertical flow, oldest first — a record of what changed, not a
-   node graph. Tokens only. Types are told apart by the marker's shape and
-   a small caps tag, never by a traffic light: an exception is an explicit
-   record, a closed record is not a success, a wait is not a problem. */
+/* --- The Run page: current situation, Activity, Details ------------------ */
+/* Three levels, one reading flow. The work dominates: a title, one plain
+   statement of what is happening, a calm vertical story, and the record
+   Trovis keeps folded under "Details". Tokens only; types are told apart by
+   the marker's shape, never by a traffic light. */
+.run-job { margin: -2px 0 0; font-size: 13px; color: var(--text-muted); }
+.run-job-link {
+  font: inherit; font-weight: 600; color: var(--text-secondary); background: none; border: none;
+  padding: 0; cursor: pointer; text-decoration: underline; text-decoration-color: var(--border-hover);
+  text-underline-offset: 3px;
+}
+.run-job-link:hover { color: var(--text-primary); }
+.run-job-name { font-weight: 600; color: var(--text-secondary); }
+
+/* LEVEL 1 — the current situation: one statement, one supporting sentence,
+   the real decisions when the work is on you. */
+.run-now { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 2px; }
+.run-now.is-you {
+  padding: 14px 16px; border-radius: 10px; background: var(--warm-fill);
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+.run-now-state {
+  margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25;
+  color: var(--text-primary); overflow-wrap: anywhere;
+}
+.run-now-support { margin: 0; font-size: 14px; color: var(--text-secondary); line-height: 1.45; }
+/* The two decisions on an open handoff, when the work is on you: secondary,
+   under the sentence, never competing with the statement above them. */
+.run-now-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.run-now-actions .btn { font-size: 12.5px; padding: 5px 12px; }
+
+/* LEVEL 2 — Activity: a vertical story. Time at the left, who and what to
+   the right; one thin rule joins the rows. */
 .jobd-work { gap: 10px; }
 .jobd-work-steps { list-style: none; margin: 0; padding: 0; max-width: 760px; }
 .jobd-work-step { position: relative; padding: 0 0 0 28px; }
 .jobd-work-step:not(:last-child)::before {
-  content: ''; position: absolute; left: 6px; top: 24px; bottom: -2px;
+  content: ''; position: absolute; left: 6px; top: 26px; bottom: -2px;
   width: 1px; background: var(--border-default);
 }
 .jobd-work-dot {
-  position: absolute; left: 0; top: 14px; width: 13px; height: 13px; box-sizing: border-box;
+  position: absolute; left: 0; top: 15px; width: 13px; height: 13px; box-sizing: border-box;
   border-radius: 50%; background: var(--bg-surface); border: 2px solid var(--text-dim);
 }
 .jobd-work-step.type-handoff .jobd-work-dot { border-color: var(--wf-human, var(--brand-accent)); }
@@ -6446,8 +6474,8 @@ select.wf2-input { cursor: pointer; }
 .jobd-work-step.type-completed .jobd-work-dot { border-radius: 3px; background: var(--text-dim); }
 .jobd-work-step.type-progress .jobd-work-dot { background: var(--text-muted); border-color: var(--text-muted); }
 .jobd-work-row {
-  display: flex; align-items: flex-start; gap: 14px; width: 100%;
-  padding: 8px 10px 8px 0; margin: 0; text-align: left; font: inherit; font-size: 12.5px;
+  display: flex; align-items: flex-start; gap: 18px; width: 100%;
+  padding: 9px 10px 9px 0; margin: 0; text-align: left; font: inherit; font-size: 13px;
   color: var(--text-secondary); background: none; border: 1px solid transparent; border-radius: 8px;
   cursor: pointer;
 }
@@ -6456,21 +6484,13 @@ select.wf2-input { cursor: pointer; }
 .jobd-work-step.is-selected > .jobd-work-row {
   background: var(--bg-elevated); border-color: var(--border-hover); padding-left: 10px;
 }
+.jobd-work-at {
+  flex: none; min-width: 64px; padding-top: 2px; font-size: 12px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 .jobd-work-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.jobd-work-who { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
-.jobd-work-kind {
-  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--text-muted);
-}
-.jobd-work-actor { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
-.jobd-work-label { font-size: 14px; font-weight: 650; color: var(--text-primary); overflow-wrap: anywhere; }
-.jobd-work-context { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.jobd-work-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; padding-top: 2px; }
-.jobd-work-type {
-  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--text-muted); white-space: nowrap;
-}
-.jobd-work-at { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.jobd-work-headline { font-size: 14.5px; font-weight: 650; color: var(--text-primary); overflow-wrap: anywhere; }
+.jobd-work-line { font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; }
 
 /* The details area under a selected step: recorded context, the record it
    rests on, the two doors (Execution / Evidence), the ids folded away. */
@@ -6493,20 +6513,37 @@ select.wf2-input { cursor: pointer; }
 .jobd-work-empty { display: flex; flex-direction: column; gap: 3px; }
 .jobd-work-empty .dash-empty { margin: 0; }
 .jobd-work-empty-sub { margin: 0; font-size: 12px; color: var(--text-muted); }
+.jobd-work-note { margin: 0; font-size: 11.5px; color: var(--text-muted); }
 
-/* Footer: who held the work (history, in order — not cause) and the read bound. */
-.jobd-work-foot { display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; color: var(--text-muted); }
-.jobd-work-history summary { cursor: pointer; list-style: none; width: fit-content; }
-.jobd-work-history summary::-webkit-details-marker { display: none; }
-.jobd-work-history summary:hover { color: var(--text-secondary); }
-.jobd-work-history-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+/* LEVEL 3 — Details: one closed disclosure for the record Trovis keeps. */
+.run-details > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  width: fit-content; padding: 6px 0;
+}
+.run-details > summary::-webkit-details-marker { display: none; }
+.run-details > summary::before { content: '▸'; font-size: 11px; color: var(--text-muted); }
+.run-details[open] > summary::before { content: '▾'; }
+.run-details-title { font-size: 13px; font-weight: 650; color: var(--text-primary); }
+.run-details-hint { font-size: 11.5px; color: var(--text-muted); }
+.run-details-body {
+  display: flex; flex-direction: column; gap: 22px; margin-top: 10px; padding-top: 14px;
+  border-top: 1px solid var(--border-subtle, var(--border-default));
+}
+.run-info-dl { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.run-info-row { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); gap: 0 12px; }
+.run-info-row dt { color: var(--text-muted); }
+.run-info-row dd { margin: 0; color: var(--text-secondary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.jobd-work-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
 .jobd-work-history-list li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.jobd-work-history-holder { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+.jobd-work-kind {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.jobd-work-history-holder { color: var(--text-secondary); font-weight: 600; }
 .jobd-work-history-flag { color: var(--text-muted); font-size: 11px; }
-.jobd-work-note { margin: 0; }
 
-/* How this job ran, demoted: the agent's reported moves stay one fold away,
-   under the operational story rather than competing with it. */
+/* How this job ran, inside Details: the agent's reported moves stay one
+   more fold away — technical detail whose full form is Execution. */
 .jobd-moves > summary {
   cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 10px; width: fit-content;
 }
@@ -6525,15 +6562,17 @@ select.wf2-input { cursor: pointer; }
 }
 .jobd-ev-row.is-highlighted:focus { outline: none; }
 
-/* Phones: the row stacks — who/what/context, then type and time on one
-   line — and the tap target grows where a thumb is pointing at it. */
+/* Phones: the same three levels; a row stacks its time over who/what, and
+   the tap target grows where a thumb is pointing at it. */
 @media (max-width: 720px) {
-  .jobd-work-row { flex-direction: column; gap: 4px; }
-  .jobd-work-meta { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; }
-  .jobd-work-dl-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .run-now-state { font-size: 19px; }
+  .jobd-work-row { flex-direction: column; gap: 3px; }
+  .jobd-work-at { min-width: 0; padding-top: 0; }
+  .jobd-work-dl-row, .run-info-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
 @media (pointer: coarse) {
-  .jobd-work-row { padding-top: 11px; padding-bottom: 11px; }
+  .jobd-work-row { padding-top: 12px; padding-bottom: 12px; }
+  .run-details > summary { padding: 10px 0; }
 }
 
 /* --- Execution: a vertical technical record, quiet by default ------------- */

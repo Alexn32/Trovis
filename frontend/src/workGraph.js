@@ -283,6 +283,161 @@ export function possessionRows(possession) {
     }))
 }
 
+// --- the row, in a person's words ------------------------------------------------------------
+
+/**
+ * The first line of an Activity row: who, and — when the record names one —
+ * who or what they passed the work to. "Chief of Staff → Alex" for a
+ * handoff; "export-agent → warehouse" for a wait an agent declared on a
+ * system; just "Stripe" when the system itself is the actor of its own
+ * record; just the actor otherwise. The arrow is the record's target field,
+ * never a guess about who acted next.
+ */
+export function stepHeadline(step) {
+  const actor = actorDisplay(step?.actor)
+  const who = actor?.label || null
+  if (step?.type === 'handoff') {
+    const to = stepContext(step)
+    if (who && to) return `${who} → ${to}`
+    return who || to || step?.label || 'Step'
+  }
+  if (step?.type === 'wait' || step?.type === 'exception') {
+    const sys = str(step?.system?.label)
+    if (who && sys && sys !== who) return `${who} → ${sys}`
+    return who || sys || step?.label || 'Step'
+  }
+  return who || step?.label || 'Step'
+}
+
+/**
+ * The second line: the endpoint's own label, then the one recorded detail
+ * that adds something the headline does not already say — a handoff's
+ * recorded reason (its target is in the headline), a wait's `waiting_on`,
+ * an exception's reason. Nothing is reworded into an outcome.
+ */
+export function stepLine(step) {
+  const label = str(step?.label) || STEP_TYPE_LABELS[step?.type] || STEP_TYPE_LABELS.other
+  const d = step?.details || {}
+  const extra = step?.type === 'handoff' ? str(d.reason) : stepContext(step)
+  return extra ? `${label} · ${extra}` : label
+}
+
+// --- the current situation -----------------------------------------------------------------
+
+// The lean status, said plainly. `done` and `waiting_on_you` are handled
+// before this table is read; these are the fallbacks when the endpoint names
+// no current holder. None of them is a business verdict.
+const STATUS_HEADLINES = Object.freeze({
+  moving: 'In progress',
+  waiting_on_other: 'Waiting on someone',
+  stuck: 'Needs attention',
+})
+
+const CLOSED = 'Work record closed'
+
+/**
+ * ONE statement of the current situation, and at most one supporting
+ * sentence — both built only from canonical fields:
+ *
+ *   status (lean detail)   `done` → the closure step's own label, else
+ *                          "Work record closed" — the record ended, never
+ *                          "completed" or "succeeded";
+ *                          `waiting_on_you` → "Waiting for you" (the session
+ *                          knows this; possession does not know the viewer).
+ *   possession.current_holder   who has it: "Waiting for Alex" / "Waiting for
+ *                          Stripe" when the holder is waiting; "Chief of Staff
+ *                          is working on this" for an agent that is not;
+ *                          "With Alex" otherwise. `stuck` reads "Needs
+ *                          attention" over the holder.
+ *   no current holder      the status alone ("In progress", "Waiting on
+ *                          someone", "Needs attention") — never a holder
+ *                          inferred from a segment, a step or an actor.
+ *
+ * The supporting sentence exists only when the LAST Work Step the endpoint
+ * recorded is itself the record that explains the holder: a handoff whose
+ * `target_label` IS the current holder ("Chief of Staff handed this to Alex"),
+ * a wait whose `system` IS the current holder (its label and recorded
+ * `waiting_on`), or, for a stuck run, an exception whose system or actor IS
+ * the holder. Anything else — a holder the last step does not name — gets no
+ * sentence at all. Chronology is read here only to pick that last record;
+ * nothing says it caused anything.
+ *
+ * Returns { headline, support: { text, at } | null } or null before the
+ * status is known.
+ */
+export function situationFor(view, graph) {
+  const status = str(view?.status)
+  const g = normalizeGraph(graph)
+  const steps = g.steps
+  const lastRecorded = steps.length ? steps[steps.length - 1] : null
+  const held = holderLine(g.possession)
+  const ago = (s) => (s?.at ? s.at : null)
+
+  if (status === 'done') {
+    const closure = [...steps].reverse().find((s) => s.type === 'completed') || null
+    const closer = actorDisplay(closure?.actor)?.label || null
+    return {
+      headline: str(closure?.label) || CLOSED,
+      support: closure && closer ? { text: `${closer} closed the record`, at: ago(closure) } : null,
+    }
+  }
+
+  if (status === 'waiting_on_you') {
+    const fromHandoff = lastRecorded?.type === 'handoff' && lastRecorded.details?.direction === 'to_human'
+      ? actorDisplay(lastRecorded.actor)?.label || null
+      : null
+    return {
+      headline: 'Waiting for you',
+      support: fromHandoff ? { text: `${fromHandoff} handed this to you`, at: ago(lastRecorded) } : null,
+    }
+  }
+
+  if (held) {
+    const who = held.label
+    const explains = lastRecorded ? recordNamesHolder(lastRecorded, who) : null
+    if (status === 'stuck') {
+      return {
+        headline: 'Needs attention',
+        support: explains && lastRecorded.type === 'exception'
+          ? { text: stepLine(lastRecorded), at: ago(lastRecorded) }
+          : { text: `${who} has this${held.waiting ? ' and is waiting' : ''}`, at: null },
+      }
+    }
+    if (held.waiting) {
+      let support = null
+      if (explains && lastRecorded.type === 'handoff') {
+        support = { text: `${actorDisplay(lastRecorded.actor)?.label || 'Someone'} handed this to ${who}`, at: ago(lastRecorded) }
+      } else if (explains && lastRecorded.type === 'wait') {
+        // The system's own record ("Stripe: payment processing") or the
+        // agent's declared wait on it — the recorded waiting_on / reason.
+        const by = actorDisplay(lastRecorded.actor)?.label || null
+        const what = stepContext(lastRecorded)
+        if (by && by !== who) support = { text: `${by} is waiting on ${who}${what ? ` · ${what}` : ''}`, at: ago(lastRecorded) }
+        else if (what) support = { text: `${who}: ${what}`, at: ago(lastRecorded) }
+      }
+      return { headline: `Waiting for ${who}`, support }
+    }
+    return {
+      headline: held.kind === 'agent' ? `${who} is working on this` : `With ${who}`,
+      support: null,
+    }
+  }
+
+  if (!status) return null
+  return { headline: STATUS_HEADLINES[status] || 'In progress', support: null }
+}
+
+/** Whether this step's own record names `who` as where the work went. */
+function recordNamesHolder(step, who) {
+  if (!step || !who) return false
+  if (step.type === 'handoff') return stepContext(step) === who
+  if (step.type === 'wait') return str(step.system?.label) === who
+  if (step.type === 'exception') {
+    return str(step.system?.label) === who || actorDisplay(step.actor)?.label === who
+  }
+  return false
+}
+
 // --- notes ------------------------------------------------------------------------------
 
 /**

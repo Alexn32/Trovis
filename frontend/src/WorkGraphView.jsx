@@ -1,35 +1,32 @@
 import {
-  ACTOR_KIND_LABELS, STEP_TYPE_LABELS, actorDisplay, boundedNote, evidenceRecordFor,
-  evidenceRowShown, normalizeGraph, possessionRows, stepContext, stepDetailRows,
-  stepTechnicalRows, stepTimeLabels, supportLine,
+  boundedNote, evidenceRecordFor, evidenceRowShown, normalizeGraph, stepDetailRows,
+  stepHeadline, stepLine, stepTechnicalRows, stepTimeLabels, supportLine,
 } from './workGraph.js'
 
 // ---------------------------------------------------------------------------
-// What happened — the Work Graph as the Run's operational story.
+// Activity — the Work Graph as the Run's story, told simply.
 //
-// The Run view IS the Work view: under the shared header this section is
-// the first thing a person reads, before Visibility and Evidence. It draws
-// GET /work/items/:id/graph as a calm vertical timeline of the endpoint's
-// Work Steps — one row per step, oldest first, in the endpoint's order —
-// and nothing else:
+// Under the Current situation this is what a person reads: one row per Work
+// Step the endpoint returned, oldest first, in the endpoint's order —
 //
-//   WorkStep        who (actor) · what (the endpoint's label) · recorded
-//                   context · when. Selecting a row opens a small details
-//                   area under it: recorded context, the supporting Evidence
-//                   record in Evidence's own words, "View in Execution" when
-//                   the step has an execution_node_id, "View evidence" when
-//                   its evidence_id is a row Evidence draws, and the raw ids
-//                   behind a "Technical details" fold.
-//   empty state     zero steps is a truthful sparse record: Trovis has no
-//                   explicit work change to show — never "no activity".
-//   footer          who held the work, in order (the endpoint's possession
-//                   segments, quietly, as history — who has it NOW is the
-//                   header's line from possession.current_holder, never
-//                   read off a segment) and the bounded note.
+//   10:39 AM
+//   Chief of Staff → Alex
+//   Handed to a person · for review
 //
-// Not a node graph: no canvas, no edges, no arrows. Chronology is the only
-// relationship drawn. No step is ever generated here; `lifecycle` is not
-// read; nothing is inferred from Evidence or Execution.
+// — time, who (and who or what they passed the work to, when the record
+// names one), then the endpoint's own label with the one recorded detail
+// that adds something. No type tags, no actor-kind caps, no event names in
+// the row: those live in the details area a row opens (recorded context,
+// the supporting Evidence record in Evidence's words, "View in Execution"
+// when the step has an execution_node_id, "View evidence" when its
+// evidence_id is a row Evidence draws, and the raw ids behind a fold).
+//
+// Zero steps is a truthful sparse record: Trovis has no explicit work
+// change to show — never "no activity". One step is a one-row story and is
+// meant to look like one. Not a node graph: no canvas, no edges. No step is
+// ever generated here; `lifecycle` is not read; nothing is inferred from
+// Evidence or Execution; who holds the work now is the Current situation's
+// question, answered from possession.current_holder, never from a row.
 // ---------------------------------------------------------------------------
 
 export default function WorkGraphView({
@@ -38,21 +35,19 @@ export default function WorkGraphView({
   const loading = body === null && !failed
   const g = normalizeGraph(body)
   const times = stepTimeLabels(g.steps)
-  const history = possessionRows(g.possession)
   const note = boundedNote(body)
 
   return (
-    <section className="jobd-section jobd-work" aria-label="What happened">
-      <h3 className="dash-caps">What happened</h3>
+    <section className="jobd-section jobd-work" aria-label="Activity">
+      <h3 className="dash-caps">Activity</h3>
       {loading ? (
         <div className="dash-skel">
           <span style={{ width: '62%' }} />
           <span style={{ width: '48%' }} />
-          <span style={{ width: '55%' }} />
         </div>
       ) : failed ? (
         <p className="dash-empty" role="alert">
-          What happened couldn&apos;t be loaded.{' '}
+          Activity couldn&apos;t be loaded.{' '}
           <button type="button" className="dash-link" onClick={onRetry}>
             Retry
           </button>
@@ -75,7 +70,7 @@ export default function WorkGraphView({
           </p>
         </div>
       ) : (
-        <ol className="jobd-work-steps" aria-label="Work steps in time order">
+        <ol className="jobd-work-steps" aria-label="Activity in time order">
           {g.steps.map((step) => (
             <WorkStep
               key={step.id}
@@ -90,40 +85,19 @@ export default function WorkGraphView({
           ))}
         </ol>
       )}
-      {!loading && !failed && (history.length > 0 || note) && (
-        <div className="jobd-work-foot">
-          {history.length > 0 && (
-            <details className="jobd-work-history">
-              <summary>Who held the work</summary>
-              <ol className="jobd-work-history-list" aria-label="Who held the work, in order">
-                {history.map((h) => (
-                  <li key={h.key} className={`kind-${h.kind}`}>
-                    <span className="jobd-work-kind">{ACTOR_KIND_LABELS[h.kind]}</span>
-                    <span className="jobd-work-history-holder">{h.label}</span>
-                    {h.waiting && <span className="jobd-work-history-flag">waiting</span>}
-                  </li>
-                ))}
-              </ol>
-            </details>
-          )}
-          {note && <p className="jobd-work-note">{note}</p>}
-        </div>
-      )}
+      {!loading && !failed && note && <p className="jobd-work-note">{note}</p>}
     </section>
   )
 }
 
 /**
- * One Work Step. The row is a button (keyboard first: Enter/Space toggle
- * the details, aria-expanded says which way); the selected state is a class
- * AND aria-expanded, never colour alone. Everything shown comes from the
- * step's own fields.
+ * One Work Step. The row is a button (Enter/Space toggle the details,
+ * aria-expanded says which way); the selected state is a class AND
+ * aria-expanded, never colour alone. Everything shown comes from the step's
+ * own fields.
  */
 function WorkStep({ step, time, selected, onSelect, evidence, onOpenExecution, onShowEvidence }) {
-  const actor = actorDisplay(step.actor)
-  const context = stepContext(step)
   const detailsId = `work-step-details-${step.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
-  const typeLabel = STEP_TYPE_LABELS[step.type] || STEP_TYPE_LABELS.other
 
   return (
     <li className={`jobd-work-step type-${step.type}${selected ? ' is-selected' : ''}`} data-step-id={step.id}>
@@ -135,23 +109,14 @@ function WorkStep({ step, time, selected, onSelect, evidence, onOpenExecution, o
         aria-controls={detailsId}
         onClick={() => onSelect(selected ? null : step.id)}
       >
+        {time && (
+          <time className="jobd-work-at" dateTime={step.at || undefined} title={step.at || undefined}>
+            {time}
+          </time>
+        )}
         <span className="jobd-work-main">
-          {actor && (
-            <span className="jobd-work-who">
-              <span className="jobd-work-kind">{ACTOR_KIND_LABELS[actor.kind]}</span>
-              <span className="jobd-work-actor">{actor.label}</span>
-            </span>
-          )}
-          <span className="jobd-work-label">{step.label}</span>
-          {context && <span className="jobd-work-context">{context}</span>}
-        </span>
-        <span className="jobd-work-meta">
-          <span className="jobd-work-type">{typeLabel}</span>
-          {time && (
-            <time className="jobd-work-at" dateTime={step.at || undefined} title={step.at || undefined}>
-              {time}
-            </time>
-          )}
+          <span className="jobd-work-headline">{stepHeadline(step)}</span>
+          <span className="jobd-work-line">{stepLine(step)}</span>
         </span>
       </button>
       {selected && (

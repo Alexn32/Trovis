@@ -5,8 +5,8 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import {
   STEP_TYPES, STEP_TYPE_LABELS, actorDisplay, boundedNote, evidenceRecordFor, evidenceRowShown,
-  holderLine, isEmptyGraph, normalizeGraph, possessionRows, stepContext, stepDetailRows,
-  stepTechnicalRows, stepTimeLabels, supportLine,
+  holderLine, isEmptyGraph, normalizeGraph, possessionRows, situationFor, stepContext, stepDetailRows,
+  stepHeadline, stepLine, stepTechnicalRows, stepTimeLabels, supportLine,
 } from '../src/workGraph.js'
 
 const srcDir = new URL('../src/', import.meta.url)
@@ -137,6 +137,61 @@ test('an open-ended last segment does not make the client name a current holder:
   const closedSegs = { segments: [{ holder_type: 'agent', holder: 'returns-bot:main', start: 's1', end: 'e1', waiting: false }],
     current_holder: { holder_type: 'human', holder: 'Sarah Chen', waiting: true } }
   assert.equal(holderLine(closedSegs).text, 'Held by Sarah Chen · waiting')
+})
+
+// --- the row and the situation, in a person's words ----------------------------------------
+
+test('stepHeadline / stepLine: who → whom, then the endpoint’s label with the one detail the headline lacks', () => {
+  assert.equal(stepHeadline(step()), 'returns-bot → Sarah Chen')
+  assert.equal(stepLine(step()), 'Handed to a person · over limit')
+  assert.equal(stepLine(step({ details: { direction: 'to_human', target_label: 'Sarah Chen', reason: null } })), 'Handed to a person')
+  const saas = step({ type: 'wait', label: 'Waiting on Stripe', actor: { type: 'system', label: 'Stripe' }, system: { label: 'Stripe' }, details: { waiting_on: 'payment processing' } })
+  assert.equal(stepHeadline(saas), 'Stripe', 'a system acting on its own record is named once')
+  assert.equal(stepLine(saas), 'Waiting on Stripe · payment processing')
+  const declared = step({ type: 'wait', label: 'Waiting on warehouse', actor: { type: 'agent', label: 'export-agent:main' }, system: { label: 'warehouse' }, details: { reason: 'export queued' } })
+  assert.equal(stepHeadline(declared), 'export-agent → warehouse')
+  assert.equal(stepLine(declared), 'Waiting on warehouse · export queued')
+  const declined = step({ type: 'exception', label: 'Handoff declined', actor: { type: 'human', label: 'Sarah Chen' }, details: { reason: null } })
+  assert.equal(stepHeadline(declined), 'Sarah Chen')
+  assert.equal(stepLine(declined), 'Handoff declined')
+  const closed = step({ type: 'completed', label: 'Work record closed', details: { reason: 'completed_by_agent', outcome: 'record_closed' } })
+  assert.equal(stepHeadline(closed), 'returns-bot')
+  assert.equal(stepLine(closed), 'Work record closed', 'the closure reason is bookkeeping, not a second line')
+})
+
+test('situationFor: the status and possession.current_holder only — never a segment, the latest step, or an actor', () => {
+  const alex = { holder_type: 'human', holder: 'Alex', start: 'e1', end: null, waiting: true }
+  const handoff = step({ actor: { type: 'agent', label: 'Chief of Staff:main' }, at: '2026-09-18T10:39:00Z', details: { direction: 'to_human', target_label: 'Alex', reason: 'for review' } })
+  // A. the canonical holder is named; the last step names that holder, so it supports the sentence.
+  const a = situationFor({ status: 'waiting_on_other' }, { steps: [handoff], possession: { segments: [alex], current_holder: alex } })
+  assert.equal(a.headline, 'Waiting for Alex')
+  assert.deepEqual(a.support, { text: 'Chief of Staff handed this to Alex', at: '2026-09-18T10:39:00Z' })
+  // B. no current holder, an open-ended segment, a handoff to Alex as the last step: only the status speaks.
+  const b = situationFor({ status: 'waiting_on_other' }, { steps: [handoff], possession: { segments: [alex], current_holder: null } })
+  assert.deepEqual(b, { headline: 'Waiting on someone', support: null })
+  const stripeOpen = { holder_type: 'system', holder: 'Stripe', end: null, waiting: true }
+  const b2 = situationFor({ status: 'moving' }, { steps: [], possession: { segments: [stripeOpen], current_holder: null } })
+  assert.deepEqual(b2, { headline: 'In progress', support: null })
+  assert.doesNotMatch(JSON.stringify(b2), /Stripe/)
+  // The holder the endpoint names wins over the step's target; no sentence links them when they differ.
+  const c = situationFor({ status: 'waiting_on_other' }, { steps: [handoff], possession: { segments: [], current_holder: stripeOpen } })
+  assert.deepEqual(c, { headline: 'Waiting for Stripe', support: null })
+  // An agent holding without waiting is working on it; a stuck run needs attention over the holder.
+  const bot = { holder_type: 'agent', holder: 'returns-bot:main', waiting: false }
+  assert.deepEqual(situationFor({ status: 'moving' }, { steps: [], possession: { current_holder: bot } }), { headline: 'returns-bot is working on this', support: null })
+  const stuck = situationFor({ status: 'stuck' }, { steps: [handoff], possession: { current_holder: alex } })
+  assert.equal(stuck.headline, 'Needs attention')
+  assert.deepEqual(stuck.support, { text: 'Alex has this and is waiting', at: null })
+  // The viewer and the closed record are the status's words; possession never overrides them.
+  assert.equal(situationFor({ status: 'waiting_on_you' }, { steps: [handoff], possession: { current_holder: stripeOpen } }).headline, 'Waiting for you')
+  assert.deepEqual(situationFor({ status: 'waiting_on_you' }, { steps: [handoff], possession: { current_holder: alex } }).support, { text: 'Chief of Staff handed this to you', at: '2026-09-18T10:39:00Z' })
+  const closedStep = step({ type: 'completed', label: 'Work record closed', at: '2026-09-18T11:00:00Z', details: { reason: 'completed_by_agent' } })
+  const done = situationFor({ status: 'done' }, { steps: [handoff, closedStep], possession: { current_holder: alex } })
+  assert.equal(done.headline, 'Work record closed')
+  assert.deepEqual(done.support, { text: 'returns-bot closed the record', at: '2026-09-18T11:00:00Z' })
+  assert.equal(situationFor({ status: 'done' }, null).headline, 'Work record closed')
+  assert.doesNotMatch(JSON.stringify(done), /success|succeeded|completed successfully|finished/i)
+  assert.equal(situationFor({ status: null }, null), null, 'nothing is said before the status is known')
 })
 
 // --- notes and links -------------------------------------------------------------------
