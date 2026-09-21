@@ -14,7 +14,9 @@
 //
 //   POSSESSION IS THE ENDPOINT'S. Who holds the work is
 //   `possession.current_holder` and nothing else — never the latest step,
-//   never a step's actor, never a step's system.
+//   never a step's actor, never a step's system, never the shape of the
+//   last segment. `possession.segments` is recorded history and is shown
+//   as exactly that; the client derives neither field from the other.
 //
 //   REFERENCES ARE EXACT. A step links to Evidence or Execution only through
 //   its own `evidence_id` / `execution_node_id`, which are nullable. A null
@@ -259,8 +261,13 @@ export function holderLine(possession) {
 }
 
 /**
- * The possession history, one row per segment as the endpoint listed them.
- * Order is the endpoint's; nothing here says one segment caused the next.
+ * The possession history, one row per segment as the endpoint listed them,
+ * for presentation only: holder, holder type, the segment's own `waiting`
+ * flag, its recorded start and end. Order is the endpoint's; nothing here
+ * says one segment caused the next, and nothing here says which segment is
+ * current — an open-ended segment (`end: null`) is a recorded fact about
+ * that segment, not a client judgement about possession. Who holds the work
+ * now is `possession.current_holder` (holderLine) and nothing else.
  */
 export function possessionRows(possession) {
   const segs = isObj(possession) && Array.isArray(possession.segments) ? possession.segments : []
@@ -273,7 +280,6 @@ export function possessionRows(possession) {
       waiting: Boolean(s.waiting),
       start: s.start || null,
       end: s.end || null,
-      current: s.end === null || s.end === undefined,
     }))
 }
 

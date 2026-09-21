@@ -23,7 +23,9 @@ import {
 //   empty state     zero steps is a truthful sparse record: Trovis has no
 //                   explicit work change to show — never "no activity".
 //   footer          who held the work, in order (the endpoint's possession
-//                   segments, quietly, as history) and the bounded note.
+//                   segments, quietly, as history — who has it NOW is the
+//                   header's line from possession.current_holder, never
+//                   read off a segment) and the bounded note.
 //
 // Not a node graph: no canvas, no edges, no arrows. Chronology is the only
 // relationship drawn. No step is ever generated here; `lifecycle` is not
@@ -95,11 +97,10 @@ export default function WorkGraphView({
               <summary>Who held the work</summary>
               <ol className="jobd-work-history-list" aria-label="Who held the work, in order">
                 {history.map((h) => (
-                  <li key={h.key} className={`kind-${h.kind}${h.current ? ' is-current' : ''}`}>
+                  <li key={h.key} className={`kind-${h.kind}`}>
                     <span className="jobd-work-kind">{ACTOR_KIND_LABELS[h.kind]}</span>
                     <span className="jobd-work-history-holder">{h.label}</span>
                     {h.waiting && <span className="jobd-work-history-flag">waiting</span>}
-                    {h.current && <span className="jobd-work-history-flag">now</span>}
                   </li>
                 ))}
               </ol>

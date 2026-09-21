@@ -107,16 +107,36 @@ test('holderLine reads possession.current_holder only — null when the endpoint
   assert.equal(holderLine({ current_holder: { holder_type: 'agent', holder: '' } }), null)
 })
 
-test('possessionRows is the endpoint’s segments in its order, flags as given', () => {
+test('possessionRows is history for presentation: the endpoint’s order, holder labels and types, each segment’s own waiting flag and recorded bounds — and no client-side “current” judgement', () => {
   const rows = possessionRows({ segments: [
     { holder_type: 'agent', holder: 'returns-bot:main', start: 's1', end: 'e1', waiting: false },
     { holder_type: 'human', holder: 'Sarah Chen', start: 'e1', end: 'e2', waiting: true },
     { holder_type: 'system', holder: 'Stripe', start: 'e2', end: null, waiting: true },
-  ] })
-  assert.deepEqual(rows.map((r) => [r.label, r.kind, r.waiting, r.current]), [
-    ['returns-bot', 'agent', false, false], ['Sarah Chen', 'human', true, false], ['Stripe', 'system', true, true],
+  ], current_holder: null })
+  assert.deepEqual(rows.map((r) => [r.label, r.kind, r.waiting, r.start, r.end]), [
+    ['returns-bot', 'agent', false, 's1', 'e1'], ['Sarah Chen', 'human', true, 'e1', 'e2'], ['Stripe', 'system', true, 'e2', null],
   ])
+  for (const r of rows) {
+    assert.ok(!('current' in r) && !('now' in r), 'a segment row carries no current/now field: end: null is a recorded bound, not a possession verdict')
+  }
   assert.deepEqual(possessionRows(null), [])
+})
+
+test('an open-ended last segment does not make the client name a current holder: only possession.current_holder does', () => {
+  const open = { segments: [{ holder_type: 'system', holder: 'Stripe', start: 'e2', end: null, waiting: true }], current_holder: null }
+  assert.equal(holderLine(open), null)
+  const rows = possessionRows(open)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].label, 'Stripe')
+  assert.equal(rows[0].end, null)
+  assert.ok(!('current' in rows[0]))
+  // The same segments with the endpoint's own current holder: the header line comes from THAT field.
+  const named = { ...open, current_holder: { holder_type: 'system', holder: 'Stripe', start: 'e2', end: null, waiting: true } }
+  assert.equal(holderLine(named).text, 'Held by Stripe · waiting')
+  // And the endpoint's current holder wins even when no segment is open-ended.
+  const closedSegs = { segments: [{ holder_type: 'agent', holder: 'returns-bot:main', start: 's1', end: 'e1', waiting: false }],
+    current_holder: { holder_type: 'human', holder: 'Sarah Chen', waiting: true } }
+  assert.equal(holderLine(closedSegs).text, 'Held by Sarah Chen · waiting')
 })
 
 // --- notes and links -------------------------------------------------------------------
@@ -179,6 +199,7 @@ test('30. no reconstruction in the client: no lifecycle, no tool-name or provide
     assert.doesNotMatch(code, /refund issued|refund requested|charge\.refunded|payment_intent\.succeeded/i, `${f} maps provider events to business phrases`)
     assert.doesNotMatch(code, /getWorkItem|fetch\(/, `${f} fetches`)
     assert.doesNotMatch(code, /steps\[steps\.length - 1\]\.actor|\.actor\b[^\n]*holder|lastStep/, `${f} infers a holder from a step`)
+    assert.doesNotMatch(code, /end === null|end === undefined|\.end\b[^\n]*(current|now)|current:/, `${f} derives current possession from a segment's shape`)
   }
   const page = strip(src('JobDetail.jsx'))
   assert.match(page, /holderLine\(graph\?\.possession\)/, 'the header reads possession, not the steps')

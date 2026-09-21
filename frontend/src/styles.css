@@ -6503,7 +6503,6 @@ select.wf2-input { cursor: pointer; }
 .jobd-work-history-list li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .jobd-work-history-holder { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
 .jobd-work-history-flag { color: var(--text-muted); font-size: 11px; }
-.jobd-work-history-list li.is-current .jobd-work-history-holder { color: var(--text-primary); }
 .jobd-work-note { margin: 0; }
 
 /* How this job ran, demoted: the agent's reported moves stay one fold away,

@@ -502,7 +502,7 @@ test('14c. “With you” and “Finished” are the session’s and the status�
   m2.unmount()
 })
 
-test('15. the holder history is the endpoint’s segments, in order, flagged as given, folded under the story and named as history', async () => {
+test('15. the holder history is the endpoint’s segments, in order, with each segment’s own waiting flag — history only, never a “now”', async () => {
   stub({ graph: OPEN_GRAPH })
   const m = await mount(page())
   await m.settle()
@@ -511,9 +511,25 @@ test('15. the holder history is the endpoint’s segments, in order, flagged as 
   assert.match(hist.querySelector('summary').textContent, /Who held the work/)
   const rows = [...hist.querySelectorAll('li')].map((li) => [...li.children].map((c) => c.textContent).join(' '))
   assert.deepEqual(rows, [
-    'Agent returns-bot', 'Person Sarah Chen waiting', 'Agent returns-bot', 'System Stripe waiting now',
+    'Agent returns-bot', 'Person Sarah Chen waiting', 'Agent returns-bot', 'System Stripe waiting',
   ])
+  assert.doesNotMatch(hist.textContent, /\bnow\b|current/i, 'who has it now is the header’s line, from current_holder — the history does not repeat or re-derive it')
   assert.doesNotMatch(hist.textContent, /because|caused|led to|→/, 'history, not causality')
+  assert.equal(m.$('.jobd-holder').textContent, 'Held by Stripe · waiting', 'the header answers "now", from possession.current_holder')
+  m.unmount()
+})
+
+test('15b. an open-ended last segment with no current_holder: the history lists it, nothing says “now”, and the header does not name it', async () => {
+  const openSegs = SEGMENTS.slice(0, 4).map((s, i) => (i === 3 ? { ...s, end: null } : s))
+  stub({ graph: graphFor(41, { steps: [S_HANDOFF, S_WAIT], chronology: [S_HANDOFF.id, S_WAIT.id], possession: { segments: openSegs, current_holder: null } }) })
+  const m = await mount(page())
+  await m.settle()
+  const hist = work(m).querySelector('.jobd-work-history')
+  const rows = [...hist.querySelectorAll('li')].map((li) => [...li.children].map((c) => c.textContent).join(' '))
+  assert.equal(rows[3], 'System Stripe waiting')
+  assert.doesNotMatch(hist.textContent, /\bnow\b|current/i)
+  assert.equal(m.$('.jobd-holder').textContent, 'With returns-bot', 'no current holder from the endpoint → the lean detail’s sentence, not the open segment')
+  assert.doesNotMatch(m.$('.jobd-holder').textContent, /Stripe|Held by/)
   m.unmount()
 })
 
