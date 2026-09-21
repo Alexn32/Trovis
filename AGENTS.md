@@ -55,6 +55,7 @@ cost, workflows, and conversational Q&A. Multi-tenant SaaS.
 
 ## Architectural principles
 
+- **Every run belongs to a job.** Ingest matches each new run against the declared jobs' hint sets; when none claims it, `database._ensure_derived_workflow` files it under a job DERIVED from its agent's `service.name` (one per account + service, enforced by the partial unique index `idx_workflows_derived`; `workflows.derived_from` names the service, NULL means declared). A derived job is named after the agent, carries one hint (`service_name equals`) and NO expectation, so it is observed and never graded; `WorkflowSummary.derived` is what lets the UI say "not yet described". `loops.match_workflow` prefers a declaration over a derived job at equal specificity, so declaring a job takes its runs on the next pass (open runs re-match; closed runs stay frozen where they closed). Promotion is `POST /workflows/{id}/versions` with `name`: the person's description clears `derived_from` and names the job — the only path that ever changes a job's name, and 400 on a declared one. Archiving a derived job is respected: that agent's new runs stay unfiled rather than re-creating it. Telemetry is never refused for lacking a job.
 - **Build for the OTEL standard, not one framework.** Anything emitting OTEL spans
   should work; don't hardcode framework-specific schemas. An "agent" is *derived* from
   telemetry (`service.name` / `trovis.agent.id`), never pre-registered.

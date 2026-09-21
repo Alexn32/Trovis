@@ -97,13 +97,14 @@ with TestClient(main.app) as c:
     check("it is NOT the one targeted at Sarah",
           all("Confirm address" != y["title"] for y in s["yours"]))
 
-    print("\n--- Other work + the declare nudge ---")
-    o = s["other"]
-    check("other exists, is flagged is_other, named honestly",
-          o and o["is_other"] and o["name"] == "Other work" and o["workflow_id"] is None)
-    check("other: in_motion=3", o["in_motion"] == 3)
-    check("suggest_declare true — its pile exceeds every declared kind's",
-          o["suggest_declare"] is True)
+    print("\n--- undeclared agents get a derived kind each, never an Other pile ---")
+    # Every run belongs to a job: the three scrapers nobody declared are
+    # three derived kinds named after their agents, and there is no
+    # "Other work" catch-all left to nudge about.
+    check("no Other work card — nothing is undeclared", s["other"] is None)
+    check("each undeclared agent is its own derived kind, 1 in motion",
+          all(kinds.get(f"scraper-{i}", {}).get("in_motion") == 1 for i in range(3))
+          and all(kinds[f"scraper-{i}"]["workflow_id"] is not None for i in range(3)))
 
     print("\n--- sort: attention first, then activity ---")
     # cs (waiting) and orders (stuck) both have 1 attention item; tie broken by

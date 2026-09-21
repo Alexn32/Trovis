@@ -181,6 +181,7 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
       <div className="wfp-titlerow">
         <span className="wfpage-head">
           <h1 className="wfd-title">{wf.name}</h1>
+          {wf.derived && <span className="wfe-vchip is-derived">{WS.derivedTag}</span>}
           <button
             type="button"
             className="wfe-vchip is-btn"
@@ -192,7 +193,7 @@ export default function WorkflowPage({ workflowId, onBack, onEdit, onOpenAgent, 
         </span>
         {sessionUser && (
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => onEdit(wf)}>
-            {WS.editStations}
+            {wf.derived ? WS.describeJob : WS.editStations}
           </button>
         )}
       </div>

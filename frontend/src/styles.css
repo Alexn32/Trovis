@@ -7590,6 +7590,20 @@ button.work-td-task:hover {
 .wk-exc:hover .wk-exc-go { color: var(--text-secondary); }
 
 .wk-job-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.wk-job-foot-right { display: inline-flex; align-items: center; gap: 14px; }
+/* A job Trovis filed, not one a person declared. A quiet tag, never a
+   verdict: the job is observed, and the tag says where it came from. */
+.wk-derived-tag {
+  font-size: 10.5px; color: var(--text-dim); white-space: nowrap;
+  border: 1px solid var(--border-default); border-radius: 20px; padding: 1px 7px;
+}
+.jobp-derived {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+  padding: 12px 14px; border-radius: 10px; border: 1px dashed var(--border-default);
+}
+.jobp-derived p { margin: 0; font-size: 13px; color: var(--text-secondary); max-width: 68ch; line-height: 1.5; }
+.wfe-vchip.is-derived { color: var(--text-dim); }
+.wfe-derived-note { margin: -8px 0 14px; font-size: 13px; color: var(--text-muted); max-width: 68ch; line-height: 1.5; }
 .wk-fold {
   font: inherit; font-size: 12.5px; font-weight: 500; padding: 4px 0;
   background: none; border: none; cursor: pointer; color: var(--text-secondary);

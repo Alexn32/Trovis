@@ -721,6 +721,7 @@ function AppInner() {
           onOpenAgent={openDetail}
           onConnectAgent={openAddAgent}
           onNewWorkflow={() => setOverlay({ kind: 'workflow-new' })}
+          onEditWorkflow={(id) => id && setOverlay({ kind: 'workflow-edit', id })}
           // Whose work: the seat picks the options and the default; the
           // server still decides what each one may contain.
           seat={seat}

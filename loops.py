@@ -357,8 +357,9 @@ def match_workflow(loop_row: dict, workflow_versions: list[dict]):
     inference tiers). Hintless workflows never auto-match.
 
     Multiple matches: most hints wins (more specific declaration); tie ->
-    most recently created wins (higher id — SERIAL ids are creation-
-    ordered). Ties are logged; that log becomes a user-facing
+    a person's declaration beats a DERIVED job (`derived: True`, the
+    per-agent default Trovis creates itself); tie -> most recently created
+    wins (higher id — SERIAL ids are creation-ordered). Ties are logged; that log becomes a user-facing
     "overlapping workflows" warning later.
 
     Returns (workflow_id, version, confidence) or None.
@@ -369,18 +370,27 @@ def match_workflow(loop_row: dict, workflow_versions: list[dict]):
         if not hints:
             continue
         if all(_hint_passes(loop_row, h) for h in hints):
-            candidates.append((len(hints), wf["workflow_id"], wf["version"]))
+            # A job a PERSON declared outranks one Trovis derived from an
+            # agent's telemetry at the same specificity: the derived job is
+            # the default, and a declaration is exactly the person saying
+            # what that default should have been.
+            declared = 0 if wf.get("derived") else 1
+            candidates.append((len(hints), declared, wf["workflow_id"], wf["version"]))
     if not candidates:
         return None
-    candidates.sort(reverse=True)  # most hints, then most recent (highest id)
-    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+    candidates.sort(reverse=True)  # most hints, declared first, then most recent
+    if (
+        len(candidates) > 1
+        and candidates[0][0] == candidates[1][0]
+        and candidates[0][1] == candidates[1][1]
+    ):
         logger.info(
             "[loops] ambiguous workflow match for loop %s: workflows %s tie at %d hints",
             loop_row.get("id"),
-            [c[1] for c in candidates if c[0] == candidates[0][0]],
+            [c[2] for c in candidates if c[0] == candidates[0][0] and c[1] == candidates[0][1]],
             candidates[0][0],
         )
-    _, workflow_id, version = candidates[0]
+    _, _, workflow_id, version = candidates[0]
     return (workflow_id, version, 1.0)
 
 

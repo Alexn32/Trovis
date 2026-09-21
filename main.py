@@ -2650,6 +2650,8 @@ def add_workflow_version(
             # A version carries a FULL definition: an omitted expectation
             # clears it, exactly as omitted stations clear those.
             expectation=body.expectation.model_dump() if body.expectation else None,
+            # Promotion of a derived job may name it; 400 otherwise.
+            name=body.name,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

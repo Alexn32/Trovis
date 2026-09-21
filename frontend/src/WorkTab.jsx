@@ -437,7 +437,7 @@ function SettingsBand({ rows, onOpenAgent }) {
  */
 function JobPage({
   job, jobErr, name, runs: jobRuns, runsLoading, filter, onClearFilter,
-  onBack, onOpenItem, onOpenAgent,
+  onBack, onOpenItem, onOpenAgent, onEditJob,
 }) {
   const now = Date.now()
   // This job's own runs, id-filtered by the server. The aggregates come from
@@ -481,6 +481,22 @@ function JobPage({
       {/* The operator's own words. Absent until somebody writes them — this
           page will not summarise a job it has only counted. */}
       {job?.definition && <p className="jobp-definition">{job.definition}</p>}
+      {/* A derived job has no operator's words yet — this is where it says
+          so, and offers the one step that changes it. */}
+      {job?.derived && (
+        <div className="jobp-derived">
+          <span className="wk-derived-tag">not yet described</span>
+          <p>
+            Trovis created this job from {job.derived_from}&apos;s activity because nobody had described one yet.
+            It is observed, not graded: no expectation, no verdict.
+          </p>
+          {onEditJob && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => onEditJob(job.id)}>
+              Describe this job
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="jobp-stats">
         {stats.map((st) => (
@@ -613,12 +629,15 @@ function StateBar({ grouped }) {
  * its work on the right, and underneath only the runs that need a person.
  * Routine runs are a count; the fold opens them as a table without a fetch.
  */
-function JobRow({ grouped, now, onOpenJob, onOpenItem, expanded, onToggle }) {
+function JobRow({ grouped, now, onOpenJob, onOpenItem, onEditJob, expanded, onToggle }) {
   const idle = idleJobLine(grouped, { now })
   const sub = jobSubline(grouped)
   const badge = grouped.isUnmatched ? null : healthBadge(grouped, { now })
   const loud = badge && (badge.tone === 'error' || badge.tone === 'warning')
   const openable = !grouped.isUnmatched && grouped.job?.id != null
+  // Trovis filed this agent's runs here because nobody declared a job for
+  // them. Said plainly, and the row offers the one step that changes it.
+  const derived = Boolean(grouped.job?.derived)
   const exc = exceptionRows(grouped, { now })
   const openRows = [...grouped.columns.stuck, ...grouped.columns.waiting, ...grouped.columns.working]
   const name = openable ? (
@@ -635,6 +654,7 @@ function JobRow({ grouped, now, onOpenJob, onOpenItem, expanded, onToggle }) {
         <div className="wk-job-id">
           <div className="wk-job-title">
             {name}
+            {derived && <span className="wk-derived-tag">not yet described</span>}
             {/* One badge, and it always carries the number behind it. */}
             {loud && <span className={`jb-badge tone-${badge.tone}`}>{badge.label}</span>}
           </div>
@@ -677,11 +697,18 @@ function JobRow({ grouped, now, onOpenJob, onOpenItem, expanded, onToggle }) {
             {expanded ? 'Hide open runs' : `Show all ${openRows.length} open`}
             {exc.more > 0 && !expanded ? ` · ${exc.more} more need a person` : ''}
           </button>
-          {openable && (
-            <button type="button" className="wk-fold is-quiet" onClick={() => onOpenJob(grouped.job.id)}>
-              Job page <ChevronRightIcon size={13} />
-            </button>
-          )}
+          <span className="wk-job-foot-right">
+            {derived && onEditJob && (
+              <button type="button" className="wk-fold" onClick={() => onEditJob(grouped.job.id)}>
+                Describe this job
+              </button>
+            )}
+            {openable && (
+              <button type="button" className="wk-fold is-quiet" onClick={() => onOpenJob(grouped.job.id)}>
+                Job page <ChevronRightIcon size={13} />
+              </button>
+            )}
+          </span>
         </div>
       )}
 
@@ -808,6 +835,7 @@ function WorkHome({
   onView,
   onOpenItem,
   onOpenJob,
+  onEditJob,
   onNewJob,
   whose,
   onWhoseChange,
@@ -1043,6 +1071,7 @@ function WorkHome({
                   now={now}
                   onOpenJob={onOpenJob}
                   onOpenItem={onOpenItem}
+                  onEditJob={onEditJob}
                   expanded={expanded.has(g.key)}
                   onToggle={() => toggleJob(g.key)}
                 />
@@ -1068,6 +1097,9 @@ function WorkHome({
 export default function WorkTab({
   onConnectAgent,
   onNewWorkflow,
+  // Opens the job editor on one job. On a DERIVED job that is the promotion
+  // path — the person names and describes what Trovis only filed.
+  onEditWorkflow = null,
   onOpenAgent,
   active = true,
   // Which Work page the URL is pointing at, and how to change it. The URL is
@@ -1485,6 +1517,7 @@ export default function WorkTab({
         onBack={() => onRoute({ job: null, run: null })}
         onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
         onOpenAgent={onOpenAgent}
+        onEditJob={onEditWorkflow}
       />
     ) : (
     <WorkHome
@@ -1511,6 +1544,7 @@ export default function WorkTab({
       onView={setView}
       onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
       onOpenJob={(id) => onRoute({ job: Number(id), run: null })}
+      onEditJob={onEditWorkflow}
       onNewJob={onNewWorkflow}
       whose={whose}
       onWhoseChange={setWhose}
