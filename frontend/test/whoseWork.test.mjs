@@ -107,7 +107,10 @@ test('every page of a filtered list asks the same question', () => {
   // the selection would be a different query and would double-count or skip.
   const loadMore = workTab.slice(workTab.indexOf('cursor: nextCursor'))
   assert.match(loadMore.slice(0, 400), /whoseParams\(whoseRef\.current\)/)
-  assert.equal((workTab.match(/whoseParams\(whoseRef\.current\)/g) || []).length, 3)
+  const loadMoreDone = workTab.slice(workTab.indexOf('cursor: doneCursor'))
+  assert.match(loadMoreDone.slice(0, 400), /whoseParams\(whoseRef\.current\)/)
+  // overview, items, load more, the done page, its load more, the snapshot.
+  assert.equal((workTab.match(/whoseParams\(whoseRef\.current\)/g) || []).length, 6)
 })
 
 test('changing the selection refetches instead of filtering rows already held', () => {

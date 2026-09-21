@@ -137,39 +137,25 @@ test('roster grids use minmax(0, 1fr), never a bare 1fr', () => {
 // The Work board
 // ---------------------------------------------------------------------------
 
-test('stacked board cells carry their column label', () => {
-  // Stacked, the four state columns lose their heads. Each cell names itself
-  // from `data-col` — sourced from the same COLUMNS list the heads render
-  // from, so the labels cannot drift into a second copy of the strings.
-  assert.equal(workTab.match(/data-col=\{c\.label\}/g).length, 2)
-  assert.match(css, /\.jb-cell\[data-col\]::before \{[\s\S]*?content: attr\(data-col\)/)
+test('the job row stacks earlier than the shell', () => {
+  // The shell breaks where the header stops fitting (720). A job row's head
+  // is two columns — name and verdict beside the state bar — and stops
+  // reading well before that: at 768 the bar and its counts are squeezed into
+  // about 300px. If these two ever get merged onto one breakpoint, an iPad
+  // in portrait gets the squeezed row back.
+  assert.ok(inMediaQuery(css, '.wk-job-head { grid-template-columns: minmax(0, 1fr)', 860),
+    'the job head must stack at 860px')
+  assert.ok(inMediaQuery(css, '.wk-tiles { grid-template-columns: repeat(2, minmax(0, 1fr))', 860),
+    'four tiles become two-by-two at 860px')
+  assert.ok(inMediaQuery(css, '.wk-done-grid { grid-template-columns: minmax(0, 1fr)', 860))
 })
 
-test('the board stacks earlier than the shell', () => {
-  // The shell breaks where the header stops fitting (720). Four state columns
-  // stop being readable well before that — at 768 each is about 120px and a
-  // run title wraps to one word per line. If these two ever get merged onto
-  // one breakpoint, an iPad in portrait gets the squeezed board back.
-  assert.ok(inMediaQuery(css, '.jb-rowgrid,', 860), 'the board must stack at 860px')
-  assert.ok(inMediaQuery(css, '.jb-colheads { display: none; }', 860))
-})
-
-test('hiding the column heads and re-laying the rows happen together', () => {
-  // The bug this replaces: an older rule hid `.jb-colheads` at 860 and re-laid
-  // only `.jb-flat .jb-grid`. The by-job view uses `.jb-rowgrid`, so it kept
-  // five columns and lost its labels — worse than either alone. There must be
-  // no rule that hides the heads without also collapsing BOTH grids.
-  const hides = css.match(/\.jb-colheads \{ display: none; \}/g) || []
-  assert.equal(hides.length, 1, 'the heads should be hidden in exactly one place')
-})
-
-test('an empty stacked cell is dropped', () => {
-  // Deliberately the reverse of the desktop rule. Wide, an empty cell keeps
-  // its height because the SHAPE of the row is the signal. Stacked in one
-  // column there is no shape, so an empty cell is a heading with nothing
-  // under it.
-  assert.match(css, /\.jb-cell:empty \{ display: none; \}/)
-  assert.match(css, /\.jb-cell \{ display: flex;[\s\S]*?min-height: 46px/)
+test('the state bar carries its counts in words', () => {
+  // A proportional bar cannot say whether it is a bar of 3 runs or 300, and
+  // stacked on a phone it is the only thing beside the name. The counts are
+  // printed under it in every layout, and the bar itself names them for AT.
+  assert.match(workTab, /<p className="wk-counts">\{calmLine\(grouped\)\}<\/p>/)
+  assert.match(workTab, /role="img" aria-label=\{countsLine\(grouped\)\}/)
 })
 
 // ---------------------------------------------------------------------------
@@ -239,7 +225,7 @@ test('every phone rule is inside a max-width query', () => {
   // The whole ship has to be invisible above 860px. A rule that leaked out of
   // its media query would change the product for everyone on a laptop, which
   // is who uses it today.
-  for (const sel of ['.jb-cell:empty', '.btn-compact-label', '.ad-chip']) {
+  for (const sel of ['.wk-head-controls { width: 100%', '.btn-compact-label', '.ad-chip']) {
     const at = css.indexOf(sel)
     assert.notEqual(at, -1, `${sel} not found`)
     const before = css.slice(0, at)

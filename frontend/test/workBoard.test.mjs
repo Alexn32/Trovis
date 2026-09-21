@@ -453,40 +453,52 @@ test('Work home is the board, and it still stays on the lean reads', () => {
   // The board is the landing again (the Monday table lock is reversed), but
   // the endpoint ban is not: /work/board and /work/summary loop-scan and
   // starve the single replica. The board is built from /workflows +
-  // /work/items and nothing else.
+  // /work/items and nothing else; Completed adds the lean done page and the
+  // LLM-free /home/snapshot Home already draws from, fetched only when the
+  // view is open.
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
   assert.doesNotMatch(work, /getWorkBoard|getWorkSummary/)
   assert.match(work, /api\.getWorkItems\(/)
   assert.match(work, /getWorkflows/)
   assert.match(work, /function WorkHome/)
-  // Four column headers, rendered ONCE above every row.
-  assert.match(work, /jb-colheads/)
-  assert.equal((work.match(/className="jb-colheads"/g) || []).length, 2,
-               'once for the grouped board, once for Flat — never per job row')
+  assert.match(work, /function SituationStrip/)
   assert.match(work, /function JobRow/)
-  assert.match(work, /function FlatBoard/)
+  assert.match(work, /function CompletedView/)
+  // Completed is lazy: nothing about done work or the snapshot is fetched
+  // until that view is on screen.
+  assert.match(work, /const completedWanted = view === 'done' && !route\.job && !route\.run/)
+  assert.match(work, /if \(!completedWanted\) return undefined/)
+  assert.match(work, /status: 'done'/)
+  assert.match(work, /getHomeSnapshot\(\{ days: 7, tz: timeZone/)
 })
 
-test('every board view is a view of the same rows, and Mine is server-resolved', () => {
+test('every view is a view of the same rows, and Needs you is server-resolved', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   const home = work.slice(work.indexOf('function WorkHome'), work.indexOf('// `active` is false'))
-  for (const label of ['By job', 'Flat', 'Mine', 'Today']) {
-    assert.ok(work.includes(`label: '${label}'`), `${label} view is offered`)
+  for (const label of ['By job', 'All open', 'Completed']) {
+    assert.ok(work.includes(`label: '${label}'`) || readFileSync(
+      new URL('../src/workPage.js', import.meta.url), 'utf8').includes(`label: '${label}'`),
+    `${label} view is offered`)
   }
-  // `Mine` reads the status the SERVER resolved. The client never decides
-  // who "you" is — that was the whole point of _attach_awaiting_human.
-  assert.match(home, /r\.status === 'waiting_on_you'/)
-  assert.doesNotMatch(home, /viewer|currentUser|myEmail/)
+  // The status chips are Home's vocabulary, so a tile there and a chip here
+  // land on the same rows; and the filter is applied through the one table,
+  // never by a second predicate written in the component.
+  assert.match(home, /matchesWorkFilter\(r, filter\)/)
+  assert.doesNotMatch(home, /\bviewer\b|currentUser|myEmail/)
+  // The board and the table are cut from the same `rows`.
+  assert.match(home, /groupByJob\(jobs \|\| \[\], rows, \{ now \}\)/)
+  assert.match(home, /const openRows = rows\.filter\(\(r\) => r\.status !== 'done'\)/)
 })
 
-test('the Today pill actually scopes, and the empty state needs a real count', () => {
+test('the Touched today toggle actually scopes, and the empty state needs a real count', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   const home = work.slice(work.indexOf('function WorkHome'), work.indexOf('// `active` is false'))
-  // A pill that changes the scope LABEL and not the rows is a control that
-  // lies. Browser-caught: Today read "Touched today" over the full list.
-  assert.match(home, /view === 'today' \? all\.filter\(\(r\) => touchedToday\(r, now\)\)/)
+  // A toggle that changes the scope LABEL and not the rows is a control that
+  // lies. Browser-caught once: Today read "Touched today" over the full list.
+  assert.match(home, /todayOnly \? all\.filter\(\(r\) => touchedToday\(r, now\)\)/)
+  assert.match(home, /todayOnly \? 'Touched today' : 'All open work'/)
   // Rule 6 on the board's own empty state: "No named work yet" is an
   // assertion about the account, and an unreadable count must not produce it.
   assert.match(home, /const openCount = numOrNull\(overview\?\.open\)/)
@@ -497,7 +509,7 @@ test('the Today pill actually scopes, and the empty state needs a real count', (
 test('a job row opens the job; a card opens the run', () => {
   const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  const rowFn = work.slice(work.indexOf('function JobRow'), work.indexOf('const BOARD_VIEWS'))
+  const rowFn = work.slice(work.indexOf('function JobRow'), work.indexOf('const STATUS_CHIPS'))
   assert.match(rowFn, /onClick=\{\(\) => onOpenJob\(grouped\.job\.id\)\}/)
   assert.match(rowFn, /onOpen=\{onOpenItem\}/)
   // An Unmatched row is not a job and must not pretend to open one.
@@ -660,22 +672,22 @@ test('RULE 6 — an agent with no spans has no error rate', () => {
   assert.equal(errorRatePercent({ span_count: 10, error_count: 2 }), 20)
 })
 
-test('RULE 5 — the board header states the basis of every number it shows', () => {
-  // The header replaced the overview pills, and inherits their problem: its
-  // five numbers come from three different places. Jobs and runs-started are
-  // server totals; waiting and stuck are counted from the rows the grid
-  // draws; cost is the job window, which is not today. Left unlabelled the
-  // screen reads as contradicting itself.
+test('RULE 5 — the situation strip states the basis of every number it shows', () => {
+  // The four tiles are server totals over the whole scope; the rows under
+  // them are one page. Each tile carries the words for what it counts, the
+  // scope line says how many rows the page holds (a floor when truncated),
+  // and a count the server did not return is the words, never a zero.
   const src = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
-  // The two page-derived counts can be floors, and say so.
-  assert.match(src, /\{p\.floor \? '\+' : ''\}/)
-  // The scope of "these rows" is on the page, not assumed.
+  assert.match(src, /Do not recompute or clamp them here/)
+  assert.match(src, /\{t\.value === null \? 'No data' : t\.value\}/)
   assert.match(src, /className="jb-scope"/)
   assert.match(src, /Touched today|All open work/)
-  // Cost carries its own window rather than sitting silently beside counts
-  // that mean today.
-  const wb = readFileSync(new URL('../src/workBoard.js', import.meta.url), 'utf8')
-  assert.match(wb, /label: days \? `last \$\{days\} days` : 'recorded'/)
+  const wp = readFileSync(new URL('../src/workPage.js', import.meta.url), 'utf8')
+  assert.match(wp, /sub: 'waiting on your decision'/)
+  assert.match(wp, /sub: 'stuck, or waiting too long'/)
+  assert.match(wp, /sub: 'all unfinished work in scope'/)
+  assert.match(wp, /recorded completions, last 7 days/)
+  assert.match(wp, /\$\{truncated \? '\+' : ''\}/)
 })
 
 test('filtered to nothing is not the same as having no work', () => {
