@@ -21,7 +21,7 @@ export default [
     // rule on; with it off they'd otherwise all report as unused.
     linterOptions: { reportUnusedDisableDirectives: 'off' },
     languageOptions: {
-      ecmaVersion: 2023,
+      ecmaVersion: 'latest', // import attributes (`with { type: 'json' }`) are ES2025
       sourceType: 'module',
       parserOptions: { ecmaFeatures: { jsx: true } },
       globals: { ...globals.browser, ...globals.node },

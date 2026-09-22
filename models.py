@@ -2718,6 +2718,16 @@ class ConnectionHealth(BaseModel):
                          connector; None otherwise.
       source_count       distinct telemetry sources (service names) rolled
                          into this connector; None for OAuth connectors.
+      events_received    OAuth connectors only: verified, mapped webhook
+                         events that reached this account. None otherwise.
+      events_linked      of those, how many reached an open run through a
+                         trovis_loop_external_id / trovis_run_id on the
+                         provider object. `connected` with 0 here means the
+                         provider talks to Trovis but nothing links its
+                         events to work yet.
+      events_without_link_key   events whose object carried no link key.
+      events_without_open_run   events whose key matched no open run.
+      last_linked_at     the newest event that reached a run; None if none.
     None of this says how much of the work Trovis can see. That is coverage,
     a different question.
     """
@@ -2730,11 +2740,45 @@ class ConnectionHealth(BaseModel):
     connection_method: str | None = None
     label: str | None = None
     source_count: int | None = None
+    events_received: int | None = None
+    events_linked: int | None = None
+    events_without_link_key: int | None = None
+    events_without_open_run: int | None = None
+    last_linked_at: str | None = None
 
 
 class ConnectionHealthResponse(BaseModel):
     generated_at: str
     connectors: list[ConnectionHealth] = Field(default_factory=list)
+
+
+class ConnectorSpec(BaseModel):
+    """One entry of the canonical connector registry (connectors.py):
+    identity, setup shape and capabilities. Capabilities (`observes`) say
+    what a connection of this kind CAN contribute to Work Coverage, never
+    what a given run has observed."""
+
+    id: str
+    name: str
+    category: str
+    availability: str
+    methods: list[str] = Field(default_factory=list)
+    setup_type: str
+    observes: list[str] = Field(default_factory=list)
+    discovers_agents: bool
+    supports_multiple_instances: bool
+    management: str
+    explicit_method: str | None = None
+    stamps: list[str] = Field(default_factory=list)
+    tile_label: str | None = None
+    tile_subtitle: str | None = None
+    guide_label: str | None = None
+    variants: list[dict[str, str]] = Field(default_factory=list)
+    setup_notes: str | None = None
+
+
+class ConnectorsResponse(BaseModel):
+    connectors: list[ConnectorSpec] = Field(default_factory=list)
 
 
 class SaaSConnection(BaseModel):

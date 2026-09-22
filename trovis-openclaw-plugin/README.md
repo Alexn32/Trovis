@@ -116,7 +116,7 @@ Per-span attributes. The defaults are **metadata only** — no message bodies, n
 
 **`model_call`** (combined from `model_call_started` + `model_call_ended`, enriched from the transcript) — `trovis.event.type`, `gen_ai.system`, `gen_ai.request.model`, `trovis.model.call_id`, `trovis.model.duration_ms`, `trovis.model.outcome`, `trovis.run.id`, and the token counts `gen_ai.usage.input_tokens` / `output_tokens` / `total_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` (token **counts** only — read from the session transcript, never prompt/response content). `trovis.model.usage_source=transcript` marks spans whose tokens came from the transcript.
 
-**`agent_run_complete`** (from `agent_end`) — `trovis.event.type`, `trovis.run.id`, `trovis.run.success`, `trovis.run.message_provider`, `trovis.run.channel_id`, `trovis.run.job_id`.
+**`agent_run_complete`** (from `agent_end`) — `trovis.event.type`, `trovis.run.id`, `trovis.run.success`, `trovis.run.message_provider`, `trovis.run.channel_id`, `trovis.run.job_id` (the OpenClaw gateway's own job id for the run, passed through verbatim — not a Trovis job; Trovis jobs are declared in Work, see below).
 
 ### Output capture
 
@@ -129,6 +129,10 @@ Per-span attributes. The defaults are **metadata only** — no message bodies, n
 The inbound message (collapsed, first 80 characters) is also stamped as
 `trovis.loop.title` on the creating span. That is what makes the run
 **named Work** in Trovis (`title_source=provided` on `GET /work/items`).
+The title names the **run** — one occurrence of work. The **job** (the
+recurring kind of work, e.g. "Process customer returns") is declared in
+Trovis and recognises its runs by service, agent or title pattern; the
+plugin never names it.
 Connect setup (`/trovis capture on`) turns this on. Privacy default is
 still off — titles derived from user messages follow the same opt-in.
 
@@ -204,6 +208,13 @@ two small hooks for the parts only your agent knows.
   content-derived title is sent — follow Connect (`/trovis capture on`)
   or call `trovisSetLoopTitle("Refund order 42")` to name a run without
   sending the prompt. We never invent placeholder titles.
+- **Linking a work system to the run.** When an agent's tool creates or
+  updates a Stripe, HubSpot or Shopify object, it should put the run's
+  grouping id — the session key this plugin stamps as
+  `trovis.loop.external_id` — on that object as `trovis_loop_external_id`
+  (Stripe `metadata`, a Shopify order note attribute, a HubSpot property).
+  The provider's own webhooks then attach to the run as evidence; without
+  the key Trovis records that the event arrived and links it to nothing.
 - **When a conversational turn ends (`agent_end`), the loop hands off to
   the human** — `to_human`, `reason: "turn_end"`, targeted at the sender
   we last heard from. The loop sits `awaiting_human` until the person

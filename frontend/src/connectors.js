@@ -11,14 +11,26 @@
 //                 Agent-to-agent edges, NOT connecting an external system.
 //
 // Pure data + lookups. No React, no setup snippets — those stay with the
-// Connect pages (AddAgent.jsx, connectSnippets.js). Later PRs read this
-// for the Connections page, the AI setup flow, capability reporting and
-// Work coverage; they should extend the entries, not fork the list.
+// Connect pages (AddAgent.jsx, connectSnippets.js). The Connections page,
+// the manual wizard's tiles, the AI guide's opening chips and (later)
+// capability reporting all read this; they extend the entries, never fork
+// the list.
+//
+// Source of truth: the BACKEND registry (connectors.py). Identity, setup
+// shape and capabilities come from its committed snapshot,
+// connectors.registry.json (`python3 connectors.py > frontend/src/connectors.registry.json`);
+// this module adds only the presentation fields the backend has no business
+// owning (brand mark, one-line description). test_connectors_registry.py
+// fails when the snapshot is stale; connectors.test.mjs fails when the two
+// sides disagree. Registry-sourced fields keep the API's snake_case so a row
+// here and a row from GET /connect/connectors read the same.
 //
 // Truth rule: `available` means the CURRENT codebase has a real, viable
 // connection path (a live Connect door, a shipped SDK/plugin, an OAuth +
 // webhook adapter, or the OTLP receiver). Anything planned is
 // `coming_soon`, whatever its logo says on a landing page.
+
+import REGISTRY from './connectors.registry.json' with { type: 'json' }
 
 /** What kind of system a connector observes. */
 export const CONNECTOR_CATEGORIES = Object.freeze([
@@ -57,149 +69,98 @@ export const AVAILABILITY_LABELS = Object.freeze({
   coming_soon: 'Coming soon',
 })
 
-// Entry shape (keep it this small — no evidence/coverage/recommendation
-// fields until a PR actually reads them):
-//   id           stable kebab-case id; matches the AddAgent platform id where
-//                one exists so the two never need a mapping table
-//   name         product-facing name
-//   category     one of CONNECTOR_CATEGORIES
-//   availability one of AVAILABILITY
-//   methods      non-empty subset of CONNECTION_METHODS
+// Entry shape:
+//   id, name, category, availability, methods    identity (registry)
+//   setup_type                                   how a connection is set up:
+//                                                sdk | plugin | actions | mcp |
+//                                                recipe | guide | oauth | none
+//   observes                                     Work Coverage dimensions a
+//                                                connection CAN contribute —
+//                                                capabilities, never a promise
+//   discovers_agents, supports_multiple_instances, management
+//   explicit_method, stamps                      how connect_health recognises it
+//   tile_label, tile_subtitle, guide_label, variants, setup_notes
+//                                                Connect-surface labels
 //   brandId      brandMarks.js id for the mark (recognition, not identity)
 //   description  one honest sentence about what the connection observes
 //
 // One connector per product-facing concept. Implementation variants
 // (Claude Agent SDK vs Managed Agents, Python vs Node recipes) live under
 // one id — the setup pages split them, the taxonomy does not.
-export const CONNECTORS = Object.freeze([
-  {
-    id: 'openclaw',
-    name: 'OpenClaw',
-    category: 'agent_platform',
-    availability: 'available',
-    methods: ['plugin'],
+
+/** Registry setup types that are picker tiles in the manual wizard. */
+export const TILE_SETUP_TYPES = Object.freeze(['sdk', 'plugin', 'actions', 'mcp', 'recipe'])
+
+// Presentation-only fields, keyed by registry id. Every registry id must
+// have an entry (connectors.test.mjs), so a connector added to the backend
+// shows up here as a failing test rather than a blank row.
+const PRESENTATION = Object.freeze({
+  openclaw: {
     brandId: 'openclaw',
     description: 'OpenClaw agents connect themselves through the Trovis plugin.',
   },
-  {
-    id: 'openai-agents',
-    name: 'OpenAI Agents SDK',
-    category: 'agent_platform',
-    availability: 'available',
-    methods: ['sdk'],
+  'openai-agents': {
     brandId: 'chatgpt',
     description: 'Agents built on the OpenAI Agents SDK, instrumented with the trovis-agents package.',
   },
-  {
-    id: 'claude',
-    name: 'Claude Agents',
-    category: 'agent_platform',
-    availability: 'available',
-    methods: ['sdk'],
+  claude: {
     brandId: 'claude',
     description: 'Claude Agent SDK (the Claude Code engine) and Claude Managed Agents, via the trovis-agents package.',
   },
-  {
-    id: 'chatgpt',
-    name: 'ChatGPT custom GPT',
-    category: 'ai_worker',
-    availability: 'available',
-    methods: ['actions', 'oauth'],
+  chatgpt: {
     brandId: 'chatgpt',
     description: 'A custom GPT reports its own activity to Trovis through GPT Actions — no code.',
   },
-  {
-    id: 'grok',
-    name: 'Grok (xAI SDK)',
-    category: 'agent_platform',
-    availability: 'available',
-    methods: ['sdk', 'otel'],
+  grok: {
     brandId: 'grok',
     description: 'Agents built on the xAI SDK, which already emits OpenTelemetry; trovis.init() points it at Trovis.',
   },
-  {
-    id: 'grok-bot',
-    name: 'Grok Bot',
-    category: 'ai_worker',
-    availability: 'available',
-    methods: ['mcp'],
+  'grok-bot': {
     brandId: 'cursor',
     description: 'A Grok Bot desktop assistant reports in over the Trovis MCP server.',
   },
-  {
-    id: 'cursor',
-    name: 'Cursor',
-    category: 'ai_worker',
-    availability: 'available',
-    methods: ['otel'],
+  cursor: {
     brandId: 'cursor',
     description: 'Cursor sends traces to Trovis over OpenTelemetry — a recipe, not a plugin.',
   },
-  {
-    id: 'custom-otel',
-    name: 'Custom (OpenTelemetry)',
-    category: 'custom',
-    availability: 'available',
-    methods: ['otel'],
+  'custom-otel': {
     brandId: null,
     description: 'Anything that emits OpenTelemetry spans can send them to the Trovis OTLP/HTTP receiver.',
   },
-  {
-    id: 'stripe',
-    name: 'Stripe',
-    category: 'work_system',
-    availability: 'available',
-    methods: ['oauth', 'webhook'],
+  stripe: {
     brandId: 'stripe',
-    description: 'See when a job is waiting on a payment, and when that payment clears or fails.',
+    description: 'See when a run is waiting on a payment, and when that payment clears or fails.',
   },
-  {
-    id: 'hubspot',
-    name: 'HubSpot',
-    category: 'work_system',
-    availability: 'available',
-    methods: ['oauth', 'webhook'],
+  hubspot: {
     brandId: 'hubspot',
-    description: 'See when a job is waiting on a deal or a support ticket, and when it moves.',
+    description: 'See when a run is waiting on a deal or a support ticket, and when it moves.',
   },
-  {
-    id: 'shopify',
-    name: 'Shopify',
-    category: 'work_system',
-    availability: 'available',
-    methods: ['oauth', 'webhook'],
+  shopify: {
     brandId: 'shopify',
-    description: 'See when a job is waiting on an order, payment, or fulfillment, and when it completes.',
+    description: 'See when a run is waiting on an order, payment, or fulfillment, and when it completes.',
   },
   // Recognised in Work today (brandMarks.js `coming`), no direct door yet.
-  {
-    id: 'slack',
-    name: 'Slack',
-    category: 'communication',
-    availability: 'coming_soon',
-    methods: ['oauth'],
+  slack: {
     brandId: 'slack',
     description: 'Recognised when it shows up in work; a direct connect is coming.',
   },
-  {
-    id: 'github',
-    name: 'GitHub',
-    category: 'work_system',
-    availability: 'coming_soon',
-    methods: ['oauth'],
+  github: {
     brandId: 'github',
     description: 'Recognised when it shows up in work; a direct connect is coming.',
   },
-  {
-    id: 'intercom',
-    name: 'Intercom',
-    category: 'communication',
-    availability: 'coming_soon',
-    methods: ['oauth'],
+  intercom: {
     brandId: 'intercom',
     description: 'Recognised when it shows up in work; a direct connect is coming.',
   },
-])
+})
+
+export const CONNECTORS = Object.freeze(
+  REGISTRY.map((entry) => {
+    const pres = PRESENTATION[entry.id]
+    if (!pres) throw new Error(`connectors.js: no presentation for registry connector ${entry.id}`)
+    return Object.freeze({ ...entry, ...pres })
+  }),
+)
 
 const BY_ID = new Map(CONNECTORS.map((c) => [c.id, c]))
 
@@ -227,4 +188,11 @@ export function brandIdForConnector(id) {
 
 export function connectorHasMethod(id, method) {
   return (getConnector(id)?.methods || []).includes(method)
+}
+
+/** Available connectors whose setup is a manual-wizard tile, registry order. */
+export function tileConnectors() {
+  return CONNECTORS.filter(
+    (c) => c.availability === 'available' && TILE_SETUP_TYPES.includes(c.setup_type),
+  )
 }

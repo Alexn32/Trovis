@@ -2,7 +2,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { CONNECTORS, getConnector } from '../src/connectors.js'
+import { CONNECTORS, TILE_SETUP_TYPES, getConnector } from '../src/connectors.js'
+import { allTiles } from '../src/connectSetup.js'
 import {
   AI_CATEGORIES,
   SETUP_TILE_IDS,
@@ -89,16 +90,23 @@ test('Connect on an AI connector reuses the existing Add Agent flow', () => {
 })
 
 test('the setup tile list is the Add Agent picker, exactly', () => {
-  const addAgent = src('AddAgent.jsx')
-  const tiles = []
-  for (const block of ['PLATFORMS', 'RECIPE_PLATFORMS']) {
-    const m = addAgent.match(new RegExp(`const ${block} = \\[([\\s\\S]*?)\\n\\]`))
-    assert.ok(m, `${block} exists`)
-    for (const id of m[1].matchAll(/id:\s*'([a-z-]+)'/g)) tiles.push(id[1])
-  }
+  // Both derive from the registry's setup_type, so they cannot drift — but
+  // pin it, because setupEntryFor routes on one and the wizard renders the
+  // other.
+  const tiles = allTiles().map((t) => t.id)
   assert.deepEqual([...tiles].sort(), [...SETUP_TILE_IDS].sort())
-  // And every tile is a registry connector.
-  for (const id of SETUP_TILE_IDS) assert.ok(getConnector(id), id)
+  assert.ok(tiles.length >= 7)
+  // And every tile is an available registry connector with a tile setup type.
+  for (const id of SETUP_TILE_IDS) {
+    const c = getConnector(id)
+    assert.ok(c, id)
+    assert.equal(c.availability, 'available', id)
+    assert.ok(TILE_SETUP_TYPES.includes(c.setup_type), `${id}: ${c.setup_type}`)
+  }
+  // The AddAgent picker reads the same derivation.
+  const addAgent = src('AddAgent.jsx')
+  assert.match(addAgent, /const PLATFORMS = pickerTiles\(\)/)
+  assert.match(addAgent, /const RECIPE_PLATFORMS = recipeTiles\(\)/)
 })
 
 test('saasStatus reads only what /saas/connections records', () => {
@@ -135,7 +143,7 @@ test('no Work API and no backend permission atom changed', () => {
 
 // --- normalized health helpers ---------------------------------------------
 
-import { HEALTH_STATES, aiRowState, healthFor, workRowState } from '../src/connectionsPage.js'
+import { HEALTH_STATES, aiRowState, healthFor, linkedDetail, workRowState } from '../src/connectionsPage.js'
 
 const rel = (iso) => `REL(${iso})`
 
@@ -163,6 +171,19 @@ test('a work-system row separates authorization from activity', () => {
   const connected = { state: 'connected', configured: true, observed: true, last_observed_at: 'T', label: 'acct_1234567890' }
   assert.deepEqual(workRowState(connected, null, rel, 'Stripe'),
     { status: 'Connected · …567890', detail: 'Last observed REL(T)', connected: true })
+  // Connected means events ARRIVE. Whether any reached a run is a recorded
+  // fact the row carries; the page says which, never a bare "Connected".
+  assert.deepEqual(workRowState({ ...connected, events_received: 3, events_linked: 0 }, null, rel, 'Stripe'),
+    { status: 'Connected · …567890',
+      detail: 'Last observed REL(T) · 3 events received, none linked to a run yet',
+      connected: true })
+  assert.deepEqual(workRowState({ ...connected, events_received: 3, events_linked: 2 }, null, rel, 'Stripe'),
+    { status: 'Connected · …567890', detail: 'Last observed REL(T) · 2 of 3 events linked to runs', connected: true })
+  assert.equal(linkedDetail({ events_received: 1, events_linked: 0 }), '1 event received, none linked to a run yet')
+  // The page states the fact; the link key itself is taught in Add Agent.
+  assert.doesNotMatch(linkedDetail({ events_received: 1, events_linked: 0 }), /trovis_loop_external_id|metadata/)
+  assert.equal(linkedDetail({ events_received: 0, events_linked: 0 }), null)
+  assert.equal(linkedDetail({}), null, 'an older server without the counts says nothing')
   const waiting = { state: 'waiting_for_data', configured: true, observed: false, label: 'shop.myshopify.com' }
   assert.deepEqual(workRowState(waiting, null, rel, 'Shopify'),
     { status: 'Waiting for data', detail: 'Authorized as shop.myshopify.com · no Shopify activity observed yet', connected: false })

@@ -211,6 +211,57 @@ with TestClient(main.app) as c:
     s = h["stripe"]
     check("stripe connected", s["state"] == "connected" and s["observed"] is True)
     check("stripe last_observed_at is the webhook time", isinstance(s["last_observed_at"], str) and s["last_observed_at"])
+
+    print("\n3b. connected means events ARRIVE; whether they reach a run is a recorded, separate fact")
+    check("a claimed event with no recorded outcome counts as received, not linked",
+          s["events_received"] == 1 and s["events_linked"] == 0
+          and s["events_without_link_key"] == 0 and s["events_without_open_run"] == 0
+          and s["last_linked_at"] is None)
+    check("telemetry rows carry no event counts",
+          all(h[cid]["events_received"] is None and h[cid]["events_linked"] is None
+              for cid in connect_health.TELEMETRY_CONNECTOR_IDS))
+    import saas as saas_spine
+    r_nometa = saas_spine.apply_work_effect(
+        aid_a, provider="stripe", effect="wait", object_id="pi_1",
+        event_id="evt_health_nometa", event_type="payment_intent.created", metadata={},
+    )
+    r_noloop = saas_spine.apply_work_effect(
+        aid_a, provider="stripe", effect="wait", object_id="pi_2",
+        event_id="evt_health_noloop", event_type="payment_intent.created",
+        metadata={"trovis_loop_external_id": "no-such-run"},
+    )
+    check("the spine still answers the caller as before",
+          r_nometa["status"] == "ignored_no_metadata" and r_noloop["status"] == "ignored_no_loop")
+    s = health(HA)["stripe"]
+    check("events that never reached a run are counted by reason",
+          s["events_received"] == 3 and s["events_linked"] == 0
+          and s["events_without_link_key"] == 1 and s["events_without_open_run"] == 1)
+    check("and the connector still reads connected — events do arrive",
+          s["state"] == "connected")
+    # An open run with the key: the event links.
+    post_traces(KA, "billing-agent", spans=[dict(span("collect"), attributes=kv({
+        "trovis.loop.title": "Collect invoice for Acme",
+        "trovis.loop.external_id": "inv-acme-health",
+    }))])
+    r_linked = saas_spine.apply_work_effect(
+        aid_a, provider="stripe", effect="wait", object_id="pi_3",
+        event_id="evt_health_linked", event_type="payment_intent.created",
+        metadata={"trovis_loop_external_id": "inv-acme-health"},
+    )
+    check("an event whose key matches an open run is applied", r_linked["status"] == "applied")
+    s = health(HA)["stripe"]
+    check("and counts as linked, with a last_linked_at",
+          s["events_received"] == 4 and s["events_linked"] == 1
+          and isinstance(s["last_linked_at"], str) and s["last_linked_at"])
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            f"SELECT outcome, loop_id, link_key FROM saas_events WHERE event_id = {database.PH}",
+            ("evt_health_linked",),
+        )
+        stamped = cur.fetchone()
+    check("the outcome is stamped on the saas_events row itself",
+          stamped is not None and stamped["outcome"] == "applied"
+          and stamped["link_key"] == "inv-acme-health" and stamped["loop_id"] is not None)
     check("a replayed event is not a new observation",
           database.claim_saas_event(aid_a, "stripe", "evt_health_1", "payment_intent.succeeded") is False)
 

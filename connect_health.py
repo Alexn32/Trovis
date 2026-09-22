@@ -1,7 +1,8 @@
 """Connection health — a normalized read model over facts Trovis already records.
 
 Connections are the systems Trovis connects to in order to observe work
-(frontend/src/connectors.js is the canonical connector registry). This module
+(connectors.py is the canonical connector registry; frontend/src/connectors.js
+mirrors it through a committed snapshot). This module
 answers ONE question per connector: "what does Trovis actually know about
 this connection right now?" It does not answer how much of the work Trovis
 can see — that is Work Coverage, a later, separate model.
@@ -43,6 +44,11 @@ Truth rules this module enforces:
     door writes on the wire (below). A bare `service.name` proves nothing
     about the vendor, so unstamped telemetry is the custom OpenTelemetry
     connector — by definition of that connector, not by guess.
+  * For a work system, `connected` means verified events ARRIVE. Whether
+    any of them reached a run is a separate, recorded fact
+    (`events_linked` from saas_events.outcome) — an event with no
+    trovis_loop_external_id / trovis_run_id on the provider object is
+    counted, not inferred into a link.
   * Fields Trovis cannot establish are None, not a default.
 
 Identity on the wire, in precedence order (`identify_connector`):
@@ -72,25 +78,19 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import connectors
 import database
 
 CONNECTOR_ID_ATTR = "trovis.connector.id"
 
-# Telemetry connectors this model can attribute. Mirrors the AI / platform /
-# custom ids in frontend/src/connectors.js — keep the two in step.
-TELEMETRY_CONNECTOR_IDS: tuple[str, ...] = (
-    "openclaw",
-    "openai-agents",
-    "claude",
-    "chatgpt",
-    "grok",
-    "grok-bot",
-    "cursor",
-    "custom-otel",
-)
+# Telemetry connectors this model can attribute — every available connector
+# whose data path is telemetry rather than OAuth. Derived from the canonical
+# registry (connectors.py), which the frontend mirrors through a committed
+# snapshot; nothing here is a second list.
+TELEMETRY_CONNECTOR_IDS: tuple[str, ...] = connectors.telemetry_ids()
 
 # Work systems with a durable OAuth row in saas_connections.
-SAAS_CONNECTOR_IDS: tuple[str, ...] = ("stripe", "hubspot", "shopify")
+SAAS_CONNECTOR_IDS: tuple[str, ...] = connectors.saas_ids()
 
 STATE_NOT_CONNECTED = "not_connected"
 STATE_WAITING_FOR_DATA = "waiting_for_data"
@@ -115,17 +115,9 @@ _SDK_STAMPS: dict[str, str] = {
     "agent": "custom-otel",
 }
 
-# Method for an explicit connector id when it is deterministic for that id.
-_EXPLICIT_METHODS: dict[str, str | None] = {
-    "openclaw": "plugin",
-    "openai-agents": "sdk",
-    "claude": "sdk",
-    "chatgpt": None,
-    "grok": "sdk",
-    "grok-bot": "mcp",
-    "cursor": "otel",
-    "custom-otel": "otel",
-}
+# Method for an explicit connector id when it is deterministic for that id
+# (registry `explicit_method`; None where the id alone does not settle it).
+_EXPLICIT_METHODS: dict[str, str | None] = connectors.explicit_methods()
 
 
 def _load_attrs(resource_attrs: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -258,6 +250,15 @@ def _saas_rows(account_id: int) -> dict[str, dict[str, Any]]:
             "connection_method": "oauth" if authorized else None,
             "label": (conn or {}).get("provider_account_id") if authorized else None,
             "source_count": None,
+            # What the verified events DID. `connected` above means events
+            # arrive; it does not mean any of them reached a run — that
+            # needs a trovis_loop_external_id / trovis_run_id on the
+            # provider object. These counts let the page say which.
+            "events_received": int(act.get("event_count") or 0) if act else 0,
+            "events_linked": int(act.get("linked_count") or 0) if act else 0,
+            "events_without_link_key": int(act.get("no_link_key_count") or 0) if act else 0,
+            "events_without_open_run": int(act.get("no_open_run_count") or 0) if act else 0,
+            "last_linked_at": act.get("last_linked_at") if act else None,
         }
     return rows
 

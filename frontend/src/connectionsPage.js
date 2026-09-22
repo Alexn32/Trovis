@@ -6,7 +6,7 @@
 // registry is GROUPED and where a click goes. Nothing here is a second
 // connector list — if a connector is missing from the page, fix the registry.
 
-import { CONNECTORS, comingSoonConnectors, connectorsByCategory, getConnector } from './connectors.js'
+import { CONNECTORS, comingSoonConnectors, connectorsByCategory, getConnector, tileConnectors } from './connectors.js'
 
 // Section 1 — AI workers & platforms. The manager-facing grouping folds the
 // registry's three "things that do work" categories together; the technical
@@ -36,13 +36,11 @@ export function isConnectable(connector) {
   return connector?.availability === 'available'
 }
 
-// The Add Agent manual wizard's picker tiles, by connector id. Kept here so
-// AddAgent's tile→brand map and the Connections page's "where does Connect
-// go" answer read the same list; a tile added to AddAgent without an entry
-// here is caught by connectionsPage.test.mjs.
-export const SETUP_TILE_IDS = Object.freeze([
-  'openclaw', 'openai-agents', 'claude', 'chatgpt', 'grok', 'grok-bot', 'cursor',
-])
+// The Add Agent manual wizard's picker tiles, by connector id — derived from
+// the registry's `setup_type` (connectSetup.js builds the tiles themselves
+// from the same rows), so AddAgent's picker and the Connections page's
+// "where does Connect go" answer can never disagree.
+export const SETUP_TILE_IDS = Object.freeze(tileConnectors().map((c) => c.id))
 
 /**
  * Where "Connect" on an AI connector lands inside the EXISTING Add Agent
@@ -111,7 +109,7 @@ export function workRowState(row, saasRow, rel, providerName) {
       const when = row.last_observed_at ? rel(row.last_observed_at) : null
       return {
         status: acct ? `Connected · ${acct}` : 'Connected',
-        detail: when ? `Last observed ${when}` : null,
+        detail: [when ? `Last observed ${when}` : null, linkedDetail(row)].filter(Boolean).join(' · ') || null,
         connected: true,
       }
     }
@@ -131,6 +129,22 @@ export function workRowState(row, saasRow, rel, providerName) {
     detail: 'Couldn’t check recent activity',
     connected: false,
   }
+}
+
+/**
+ * What the provider's events DID, from the recorded outcomes. `connected`
+ * means events arrive; only `events_linked` says any reached a run. Absent
+ * counts (an older server) say nothing. Never "N events" alone — the number
+ * that matters is how many linked.
+ */
+export function linkedDetail(row) {
+  const received = Number.isInteger(row?.events_received) ? row.events_received : null
+  const linked = Number.isInteger(row?.events_linked) ? row.events_linked : null
+  if (received === null || linked === null || received === 0) return null
+  // No how-to here: the Connections page states facts, and the link key is
+  // taught where the agent is set up (Add Agent, the SDK and plugin docs).
+  if (linked === 0) return `${received} event${received === 1 ? '' : 's'} received, none linked to a run yet`
+  return `${linked} of ${received} event${received === 1 ? '' : 's'} linked to runs`
 }
 
 function shortAccount(acct) {

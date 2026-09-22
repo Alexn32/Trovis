@@ -18,8 +18,27 @@ import {
   getConnector,
 } from '../src/connectors.js'
 import { BRANDS } from '../src/brandMarks.js'
+import { readFileSync } from 'node:fs'
+import {
+  allTiles,
+  connectorForGuideOption,
+  guideOpeningOptions,
+  pickerTiles,
+  recipeTiles,
+  variantsFor,
+} from '../src/connectSetup.js'
 
-const FIELDS = ['id', 'name', 'category', 'availability', 'methods', 'brandId', 'description']
+// Registry-sourced fields (connectors.registry.json, snake_case like the API)
+// plus the two presentation fields this module owns.
+const REGISTRY_FIELDS = [
+  'id', 'name', 'category', 'availability', 'methods', 'setup_type', 'observes',
+  'discovers_agents', 'supports_multiple_instances', 'management', 'explicit_method',
+  'stamps', 'tile_label', 'tile_subtitle', 'guide_label', 'variants', 'setup_notes',
+]
+const FIELDS = [...REGISTRY_FIELDS, 'brandId', 'description']
+const SNAPSHOT = JSON.parse(
+  readFileSync(new URL('../src/connectors.registry.json', import.meta.url), 'utf8'),
+)
 
 test('every connector has exactly the registry shape', () => {
   for (const c of CONNECTORS) {
@@ -152,4 +171,92 @@ test('lookups are quiet on unknown ids', () => {
   assert.equal(brandIdForConnector('zendesk'), null)
   assert.equal(connectorHasMethod('zendesk', 'otel'), false)
   assert.deepEqual(connectorsByCategory('nope'), [])
+})
+
+// --- the backend registry is canonical; this module mirrors it -------------
+
+test('the committed snapshot and this module agree on every registry field', () => {
+  // connectors.py → connectors.registry.json → here. test_connectors_registry.py
+  // fails when the snapshot is stale against the backend; this fails when the
+  // frontend stops mirroring the snapshot.
+  assert.deepEqual(CONNECTORS.map((c) => c.id), SNAPSHOT.map((c) => c.id), 'same ids, same order')
+  for (const entry of SNAPSHOT) {
+    const c = getConnector(entry.id)
+    for (const f of REGISTRY_FIELDS) {
+      assert.deepEqual(c[f], entry[f], `${entry.id}.${f}`)
+    }
+  }
+})
+
+test('every registry connector has a presentation entry, and nothing else does', () => {
+  // The module throws at import when a registry id lacks presentation, so the
+  // fact that this test file loaded proves half of it; the other half is
+  // that a presentation row cannot outlive its registry entry.
+  assert.equal(CONNECTORS.length, SNAPSHOT.length)
+})
+
+test('setup_type is the one field the Connect surfaces route on', () => {
+  const tileTypes = ['sdk', 'plugin', 'actions', 'mcp', 'recipe']
+  for (const c of CONNECTORS) {
+    if (c.availability === 'coming_soon') assert.equal(c.setup_type, 'none', c.id)
+    else assert.notEqual(c.setup_type, 'none', c.id)
+    if (c.category === 'work_system' && c.availability === 'available') {
+      assert.equal(c.setup_type, 'oauth', c.id)
+    }
+    if (tileTypes.includes(c.setup_type)) {
+      assert.ok(c.tile_label && c.tile_subtitle, `${c.id} tile has labels`)
+    }
+  }
+  assert.equal(getConnector('custom-otel').setup_type, 'guide')
+})
+
+test('observes lists coverage dimensions only — capabilities, not observations', () => {
+  const DIMENSIONS = ['execution', 'actions', 'external_outcomes', 'handoffs', 'cost']
+  for (const c of CONNECTORS) {
+    for (const d of c.observes) assert.ok(DIMENSIONS.includes(d), `${c.id}: ${d}`)
+    // A work system enriches Work; it never invents workers.
+    if (c.category === 'work_system') assert.equal(c.discovers_agents, false, c.id)
+  }
+  assert.deepEqual(getConnector('stripe').observes, ['external_outcomes'])
+})
+
+// --- connectSetup.js: the surfaces derive from the registry ------------------
+
+test('the wizard tiles are the available tile-type connectors, in registry order', () => {
+  const ids = allTiles().map((t) => t.id)
+  assert.deepEqual(ids, ['openclaw', 'openai-agents', 'claude', 'chatgpt', 'grok', 'grok-bot', 'cursor'])
+  assert.deepEqual(recipeTiles().map((t) => t.id), ['cursor'])
+  assert.ok(!pickerTiles().some((t) => t.id === 'cursor'))
+  for (const t of allTiles()) {
+    assert.deepEqual(Object.keys(t).sort(), ['id', 'label', 'needsProvider', 'subtitle'])
+    assert.equal(t.needsProvider, false)
+    assert.ok(t.label && t.subtitle, t.id)
+  }
+})
+
+test('the Claude tile splits into the registry variants', () => {
+  assert.deepEqual(variantsFor('claude').map((v) => v.id), ['claude-agent-sdk', 'claude-agents'])
+  assert.deepEqual(variantsFor('openclaw'), [])
+  assert.deepEqual(variantsFor('nope'), [])
+})
+
+test("the guide opening chips are the available AI connectors' guide labels, catch-all last", () => {
+  const chips = guideOpeningOptions()
+  assert.deepEqual(chips, [
+    'OpenClaw',
+    'OpenAI Agents SDK',
+    'Claude Agent SDK / Claude Code',
+    'ChatGPT (custom GPT)',
+    'Grok (xAI SDK)',
+    'Grok Bot',
+    'Cursor (OpenTelemetry)',
+    'Custom Python / other',
+  ])
+  for (const chip of chips) {
+    assert.ok(chip.length < 40, `${chip} fits a chip`)
+    assert.ok(connectorForGuideOption(chip), chip)
+  }
+  assert.equal(connectorForGuideOption('custom python / OTHER').id, 'custom-otel')
+  assert.equal(connectorForGuideOption('Stripe'), null)
+  assert.equal(connectorForGuideOption(''), null)
 })

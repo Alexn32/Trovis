@@ -3,6 +3,7 @@ import { api, getApiKey } from './api.js'
 import { CodeBlock, computeGrokMcpUrl, computeOverseeEndpoint } from './AddAgent.jsx'
 import { TrovisMark, SendIcon, CheckCircleIcon } from './Icons.jsx'
 import { QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
+import { guideOpeningOptions } from './connectSetup.js'
 // Placeholder → real key/endpoint substitution, and the wire-history
 // flattening that keeps the placeholders. Extracted so both are covered by
 // frontend/test/connectSnippets.test.mjs.
@@ -19,22 +20,15 @@ import {
 // POST /connect/ask → asker.ask_connect (Opus). Stateless on the server —
 // we post the full thread each turn.
 
-// Hardcoded first turn so the guide opens instantly (no network round-trip).
+// Local first turn so the guide opens instantly (no network round-trip).
 // Included in the history we post, so the model continues from the answer.
+// The chips are the registry's `guide_label`s (connectSetup.js), so a door
+// added on the backend shows up here without a second list to maintain.
 const OPENING_TURN = {
   role: 'assistant',
   content:
     "Hey — I'm Trovis. I'll get your agent connected in a couple of minutes.\nWhat's your agent built with?",
-  options: [
-    'OpenAI Agents SDK',
-    'Claude Agent SDK / Claude Code',
-    'OpenClaw',
-    'ChatGPT (custom GPT)',
-    'Grok (xAI SDK)',
-    'Grok Bot',
-    'Cursor (OpenTelemetry)',
-    'Custom Python / other',
-  ],
+  options: guideOpeningOptions(),
   code: [],
 }
 

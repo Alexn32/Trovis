@@ -5,6 +5,7 @@ import { BrandMark, WorksWithStrip } from './BrandMarks.jsx'
 import ConnectGuide from './ConnectGuide.jsx'
 import { brandIdForConnector } from './connectors.js'
 import { SETUP_TILE_IDS } from './connectionsPage.js'
+import { pickerTiles, recipeTiles, variantsFor } from './connectSetup.js'
 
 // Tile → V1 brand id, read from the canonical connector registry
 // (connectors.js) — tile ids are connector ids. ChatGPT and the OpenAI Agents
@@ -15,20 +16,9 @@ const TILE_BRAND = Object.fromEntries(
   SETUP_TILE_IDS.map((id) => [id, brandIdForConnector(id)]),
 )
 
-// The two Claude variants shown on the sub-step after picking "Claude Agents".
-// Each maps to the existing instructions platform id.
-const CLAUDE_VARIANTS = [
-  {
-    id: 'claude-agent-sdk',
-    label: 'Claude Agent SDK',
-    subtitle: 'query() + ClaudeSDKClient — the Claude Code engine',
-  },
-  {
-    id: 'claude-agents',
-    label: 'Claude Managed Agents',
-    subtitle: 'client.beta.agents + beta.sessions API',
-  },
-]
+// The Claude variants shown on the sub-step after picking "Claude Agents",
+// from the registry entry. Each maps to an existing instructions platform id.
+const CLAUDE_VARIANTS = variantsFor('claude')
 
 // ============================================================================
 // AddAgent — the three-step onboarding wizard.
@@ -46,37 +36,17 @@ const CLAUDE_VARIANTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Live Connect doors — only the ones that already work today. Generic
-// Python / Node / framework pages still exist below; they are not
-// reachable from this picker. Slack / GitHub / Intercom
-// are recognition-only (see WorksWithStrip) and must not appear
-// here as clickable doors. Stripe, HubSpot, and Shopify are live
-// *SaaS* doors (Settings → Integrations), not an agent ingest picker.
-const PLATFORMS = [
-  { id: 'openclaw',       label: 'OpenClaw',                  subtitle: 'AI agent platform — agents connect themselves',  needsProvider: false },
-  { id: 'openai-agents',  label: 'OpenAI Agents SDK',         subtitle: 'OpenAI native agent framework',                  needsProvider: false },
-  // One Claude tile; a sub-step then splits SDK vs Managed Agents.
-  { id: 'claude',         label: 'Claude Agents',             subtitle: 'Claude Agent SDK or Managed Agents',             needsProvider: false },
-  // A custom GPT built in ChatGPT: via GPT Actions (OAuth) it both reports its
-  // own activity to Trovis AND can ask about the fleet (askFleet). No code.
-  { id: 'chatgpt',        label: 'ChatGPT (custom GPT)',      subtitle: 'Monitor + query a GPT via Actions — no code',    needsProvider: false },
-  // Agents built on the xAI SDK. The SDK traces itself through the global
-  // OTEL provider, so trovis.init() is the whole integration.
-  { id: 'grok',           label: 'Grok (xAI SDK)',            subtitle: 'Already OpenTelemetry-instrumented — two lines', needsProvider: false },
-  // A Grok Bot exports nothing and we cannot pull from it, so the door is the
-  // Bot reporting in over MCP. Not the xAI SDK tile above.
-  { id: 'grok-bot',       label: 'Grok Bot',                  subtitle: 'Desktop assistant — it reports in over MCP',     needsProvider: false },
-]
+// Live Connect doors — only the ones that already work today, read from the
+// canonical registry (connectors.py → connectors.registry.json →
+// connectSetup.js): every available connector whose `setup_type` is a tile.
+// Generic Python / Node / framework pages still exist below; they are not
+// reachable from this picker. Slack / GitHub / Intercom are recognition-only
+// (see WorksWithStrip) and have no tile type. Stripe, HubSpot, and Shopify
+// are live *SaaS* doors (Connections page), not an agent ingest picker.
+const PLATFORMS = pickerTiles()
 
 // Recipe path — real OTEL ingest, not a first-party Cursor integration.
-const RECIPE_PLATFORMS = [
-  {
-    id: 'cursor',
-    label: 'Cursor',
-    subtitle: 'Send traces over OpenTelemetry — no plugin',
-    needsProvider: false,
-  },
-]
+const RECIPE_PLATFORMS = recipeTiles()
 
 const PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic (Claude)' },
@@ -288,7 +258,7 @@ function SuccessCallout() {
   return (
     <Callout variant="success">
       Once connected, your agent shows up in Trovis within seconds. Runs that
-      carry a title arrive as named jobs you can open and follow — the rest is
+      carry a title arrive as named runs you can open and follow — the rest is
       recorded, just unnamed.
     </Callout>
   )
@@ -296,7 +266,13 @@ function SuccessCallout() {
 
 /**
  * The one rule every builder has to follow for their work to be legible:
- * give the job a human title.
+ * give each run a human title.
+ *
+ * Vocabulary (the Work model): a RUN is one occurrence of work — "Approve
+ * refund for order #4821". A JOB is the recurring kind of work those runs
+ * belong to — "Process customer returns" — and it is declared in Work, which
+ * recognises its runs by service, agent or title pattern. Instrumentation
+ * names the run; it never names the job.
  *
  * Shared across the recipe pages so the guidance cannot drift between doors,
  * and so the platform helpers (which set the attribute for you) are always
@@ -306,33 +282,48 @@ function NamedWorkGuidance() {
   return (
     <>
       <p>
-        Trovis groups spans into <strong>jobs</strong> — one job is one piece of
-        work, however many runs, people and tools it passes through. A job needs
-        a title a person would recognise:
+        Trovis groups spans into <strong>runs</strong> — one run is one
+        occurrence of work, however many steps, people and tools it passes
+        through. A run needs a title a person would recognise:
       </p>
       <CodeBlock code={'span.set_attribute("trovis.loop.title", "Approve refund for order #4821")'} />
       <p className="helper-text">
         <strong>Write it the way you would say it.</strong>{' '}
         <code>Approve refund for order #4821</code> — not <code>run_4821</code>,{' '}
         <code>handle_refund</code>, or a UUID. Generated and id-shaped titles are
-        filtered out of Work on purpose, so a job titled like that simply will
+        filtered out of Work on purpose, so a run titled like that simply will
         not appear there.
       </p>
       <p className="helper-text">
-        Set it once, on any span of the job. Pair it with{' '}
+        Set it once, on any span of the run. Pair it with{' '}
         <code>trovis.loop.external_id</code> — the same id on every span of the
-        same job — so the steps group into one job instead of a row each.
+        same run — so the steps group into one run instead of a row each.
+      </p>
+      <p className="helper-text">
+        <strong>Touching Stripe, HubSpot or Shopify?</strong> Put the same
+        id on the object your agent creates or updates —{' '}
+        <code>trovis_loop_external_id</code> in Stripe metadata, a Shopify
+        order note attribute, or a HubSpot deal/ticket property. That is the
+        only way the provider&apos;s own events (payment cleared, order
+        fulfilled, deal moved) link back to this run; without it Trovis
+        records that the event arrived and nothing more.
+      </p>
+      <p className="helper-text">
+        <strong>The job is declared in Work, not in code.</strong> A job is the
+        recurring kind of work — <em>Process customer returns</em> — and Work
+        recognises its runs by service, agent or title pattern. Don&apos;t put
+        the job&apos;s name in the title; title the one thing this run is doing.
       </p>
       <p className="helper-text">
         <strong>On a supported platform you don&apos;t write this by hand.</strong>{' '}
         The <code>trovis</code> SDK exposes{' '}
         <code>trovis.set_loop_title(&quot;…&quot;)</code>, and OpenClaw names each
-        job from the inbound message once{' '}
+        run from the inbound message once{' '}
         <code>/trovis capture on</code> is set. Reach for the raw attribute only
         when you are emitting OTEL yourself.
       </p>
       <p className="helper-text">
-        Titled jobs are what make hybrid work readable: a job hands off between
+        Titled runs are what make hybrid work readable: a run hands off between
         a person, an agent and a SaaS tool, and Work shows that route instead of
         a pile of traces.
       </p>
@@ -698,14 +689,17 @@ trace.set_tracer_provider(provider)
 
 # Create spans for your agent's operations.
 #
-# trovis.loop.title is what turns a trace into a named job on Work. Write it
+# trovis.loop.title is what turns a trace into a named run on Work. Write it
 # the way a colleague would say it out loud — no ids, no snake_case. Without
-# it the run is still recorded, but it stays an unnamed trace.
+# it the run is still recorded, but it stays an unnamed trace. (The job —
+# the recurring kind of work — is declared in Work, not here.)
 tracer = trace.get_tracer("AGENT_NAME")
 with tracer.start_as_current_span("handle_refund") as span:
     span.set_attribute("trovis.loop.title", "Approve refund for order #4821")
-    # Same id on every span of the same job, so the steps group into one job
-    # instead of a row each.
+    # Same id on every span of the same run, so the steps group into one run
+    # instead of a row each. Put the SAME value in Stripe metadata / a Shopify
+    # note attribute / a HubSpot property as trovis_loop_external_id, and the
+    # provider's own events link back to this run.
     span.set_attribute("trovis.loop.external_id", "order-4821")
     # your agent logic here`,
     agentName, endpoint,
@@ -751,7 +745,7 @@ function CursorOtelInstructions({ agentName, endpoint }) {
       <NumberedStep n={2} title="Point traces at Trovis">
         <CodeBlock code={otelSetupBlock(agentName, resolvedEndpoint, apiKey)} />
       </NumberedStep>
-      <NumberedStep n={3} title="Name the job (required for named Work)">
+      <NumberedStep n={3} title="Name the run (required for named Work)">
         <NamedWorkGuidance />
       </NumberedStep>
       <Callout variant="info">
@@ -1246,7 +1240,7 @@ init(
 from xai_sdk import Client
 from xai_sdk.chat import user
 
-# Name the job the way a colleague would say it — this is what turns the
+# Name the run the way a colleague would say it — this is what turns the
 # run into named Work instead of an untitled trace.
 set_loop_title("Triage refund for order #4821")
 
@@ -1275,14 +1269,14 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
         <CodeBlock code={setupCode} />
       </NumberedStep>
 
-      <NumberedStep n={3} title="Name the job (required for named Work)">
+      <NumberedStep n={3} title="Name the run (required for named Work)">
         <NamedWorkGuidance />
       </NumberedStep>
 
       <NumberedStep n={4} title="Run your agent as you normally would">
         <p>
           Every Grok call becomes a span — the model, the token usage, and
-          the cost — grouped into one job per run.
+          the cost — grouped into one run.
         </p>
       </NumberedStep>
 
@@ -1290,8 +1284,8 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
         <strong>Don't call <code>Telemetry()</code> yourself.</strong>{' '}
         <code>xai_sdk.telemetry.Telemetry()</code> installs its own tracer
         provider: it names every agent <code>xai-sdk</code>, so a whole
-        fleet collapses into one row here and none of it carries your job
-        titles. <code>init()</code> does that job, and OpenTelemetry won&apos;t
+        fleet collapses into one row here and none of it carries your run
+        titles. <code>init()</code> does that work, and OpenTelemetry won&apos;t
         let a second provider take over — if one got there first,{' '}
         <code>init()</code> says so in the logs.
       </Callout>
@@ -1338,7 +1332,7 @@ MCP server
 Put the key in the header itself — not a placeholder — and confirm a tool call actually works before telling me you're done.
 
 Trovis reporting (always do this)
-- At the start of any task, call report_job_started with a short plain-English title describing the task. That title becomes the job name in Trovis. Keep the job_id it returns.
+- At the start of any task, call report_job_started with a short plain-English title describing the task. That title becomes the run's name in Trovis. Keep the job_id it returns.
 - On your first report, also pass bot_role: one line on what you are for in general (e.g. "Chief of staff: drafts updates, chases follow-ups, keeps the week organised"), so Trovis describes you by your actual job.
 - On report_job_started, also pass request: one line on what I actually asked you for. On report_job_finished, also pass result: one or two lines on what you told me back, and details: a short paragraph or a few bullets on what you looked at, what you found, and anything you couldn't do. [Delete this bullet if you don't want Trovis to see what we talked about.]
 - If you stop to ask me a question or wait on input, call report_job_waiting with that job_id and one line on what you need.
@@ -1360,7 +1354,7 @@ Report in the background — don't mention Trovis unless I ask.`
       <h2 className="instructions-title">Connect a Grok Bot</h2>
       <p className="instructions-subtitle">
         For a Grok Bot desktop assistant. Paste one block into a chat with the
-        Bot: it adds the Trovis MCP server itself, then reports each job it
+        Bot: it adds the Trovis MCP server itself, then reports each run it
         starts, waits on, and finishes.
       </p>
 
@@ -1397,17 +1391,17 @@ Report in the background — don't mention Trovis unless I ask.`
           each of what you asked and what the Bot answered — that is what
           the Work Feed shows and what its summaries are written from.{' '}
           <code>details</code> is the Bot&apos;s longer account, kept behind
-          a “Get more details” click on the job rather than shown by
-          default. (A failure reason is recorded too, so a stopped job says
+          a “Get more details” click on the run rather than shown by
+          default. (A failure reason is recorded too, so a stopped run says
           why.)
-          Delete that bullet and the Bot still reports its jobs, titles and
+          Delete that bullet and the Bot still reports its runs, titles and
           all; Trovis just won&apos;t hold anything you said to it.
         </p>
       </NumberedStep>
 
       <NumberedStep n={2} title="Make it prove the connection works">
         <p>
-          Ask the Bot to run one small job start-to-finish and tell you the{' '}
+          Ask the Bot to run one small task start-to-finish and tell you the{' '}
           <code>job_id</code>. The known failure here is an MCP server that
           installs with a <em>placeholder</em> in the auth header: the four
           tools appear, and every call fails auth. If that happens, have the
@@ -1415,26 +1409,29 @@ Report in the background — don't mention Trovis unless I ask.`
         </p>
       </NumberedStep>
 
-      <NumberedStep n={3} title="Name the job (required for named Work)">
+      <NumberedStep n={3} title="Name the run (required for named Work)">
         <p>
           The <code>title</code> on <code>report_job_started</code>{' '}
-          <em>is</em> the job's name on Work — Trovis stamps it as the job
+          <em>is</em> the run's name on Work — Trovis stamps it as the run
           title, the same way <code>trovis.loop.title</code> does on the
           SDK doors. Write it the way you'd say it out loud:{' '}
           <code>Draft the Q3 board update</code>, not{' '}
           <code>job_4821</code> or a UUID. Id-shaped titles are filtered out
-          of Work on purpose, so a job named like that won't appear there.
+          of Work on purpose, so a run named like that won't appear there.
+          (The tool is called <code>report_job_started</code> for
+          compatibility; each call starts one run. The recurring job it
+          belongs to is declared in Work.)
         </p>
         <p className="helper-text">
           Everything after the start — waiting, finished, failed — lands on
-          the same job as long as the Bot passes back the{' '}
+          the same run as long as the Bot passes back the{' '}
           <code>job_id</code> it was given.
         </p>
       </NumberedStep>
 
-      <NumberedStep n={4} title="Run one real job">
+      <NumberedStep n={4} title="Run one real task">
         <p>
-          Ask the Bot to do something it would normally do. The job appears
+          Ask the Bot to do something it would normally do. The run appears
           on Work with its title, moves to “waiting on a person” when the
           Bot asks you a question, and closes when it reports finished. On
           the agent&apos;s Work Feed you get the ask, the outcome, and a
@@ -1486,7 +1483,7 @@ Token exchange:     Default (POST request)`
   const gptInstructions =
 `You are connected to Trovis, the user's agent monitoring system.
 - At the START of each conversation, call connectAgent with your name, your role, and a one-line description of what you do.
-- When the user asks you for something, call logActivity with job_title set to what you're doing in plain English ("Draft the Q3 board update") — that becomes the job's name in Trovis. Keep the same job until the task changes.
+- When the user asks you for something, call logActivity with job_title set to what you're doing in plain English ("Draft the Q3 board update") — that becomes the run's name in Trovis. Keep the same title until the task changes.
 - As you finish each meaningful step, call logActivity with a short step name and description.
 - When the task is done, call reportComplete with a one-line summary of what you accomplished.
 - Whenever the user asks ANYTHING about their agents or fleet (e.g. "what was the last agent that ran?", "what did my agents do today?", "which ones are drifting?", "what did I spend?"), call askFleet with their question and answer from the result. For a plain list of agents use listAgents; for a timeline of recent runs use recentActivity.
@@ -1565,9 +1562,10 @@ Do the connect/log/complete calls silently in the background — don't mention T
       </Callout>
 
       <Callout variant="info">
-        <strong>Named jobs, if the GPT names them.</strong>{' '}
-        <code>logActivity</code> takes a <code>job_title</code>: send one and
-        the GPT&apos;s steps group into a named job on Work, closed by{' '}
+        <strong>Named runs, if the GPT names them.</strong>{' '}
+        <code>logActivity</code> takes a <code>job_title</code> (the run&apos;s
+        title — the field name is kept for compatibility): send one and
+        the GPT&apos;s steps group into a named run on Work, closed by{' '}
         <code>reportComplete</code>. Send none and its steps still land, as
         activity without a name — same as before. The Instructions block below
         already asks for it.

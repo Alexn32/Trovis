@@ -2188,6 +2188,15 @@ def init_db() -> None:
         # Shopify OAuth start stores the shop domain so the callback can
         # reject a shop-swap. NULL on Stripe / HubSpot rows.
         _try_add_column(cur, "saas_oauth_states", "payload", "TEXT")
+        # What became of each verified SaaS event AFTER the idempotency claim:
+        # `outcome` is saas.apply_work_effect's status (applied /
+        # noop_already / ignored_no_metadata / ignored_no_loop), `loop_id`
+        # the run it reached, `link_key` the metadata key it carried. Before
+        # this, health could only say "an event arrived" — not whether any
+        # event ever reached a run (connect_health._saas_rows).
+        _try_add_column(cur, "saas_events", "outcome", "TEXT")
+        _try_add_column(cur, "saas_events", "loop_id", "INTEGER")
+        _try_add_column(cur, "saas_events", "link_key", "TEXT")
         # Org builder — the chart-editing ladder, deliberately NOT the same
         # axis as view breadth. A wide-view Exec sees the whole company and
         # still cannot re-draw the chart; a middle manager with a narrow seat
@@ -8748,8 +8757,8 @@ def _record_title(
     """What this record was, in the agent's own words, when there is no
     transcript to summarize.
 
-    Order: the job title the agent reported (`trovis.loop.title` — the same
-    attribute Work names jobs from), then a step description, then a step
+    Order: the run title the agent reported (`trovis.loop.title` — the same
+    attribute Work names runs from), then a step description, then a step
     name, then the first non-system operation. None when the record says
     nothing about itself.
     """
@@ -13151,10 +13160,22 @@ def get_saas_activity(account_id: int) -> dict[str, dict[str, Any]]:
     BEFORE the link-key and loop lookups, so it records "provider X sent
     this account a mapped event at T" whether or not the event later moved
     any work. Unmapped event types and events without an id never reach it.
+
+    Since the outcome columns exist, it also says what those events DID:
+    `linked_count` reached an open run (applied / noop_already),
+    `no_link_key_count` carried no trovis_loop_external_id / trovis_run_id,
+    `no_open_run_count` carried a key that matched no open run, and
+    `last_linked_at` is the newest event that reached a run. Events claimed
+    before the columns existed have a NULL outcome and count in none of the
+    three — `event_count` is still the total.
     """
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT provider, COUNT(*) AS event_count, MAX(created_at) AS last_event_at "
+            "SELECT provider, COUNT(*) AS event_count, MAX(created_at) AS last_event_at, "
+            "       SUM(CASE WHEN outcome IN ('applied', 'noop_already') THEN 1 ELSE 0 END) AS linked_count, "
+            "       SUM(CASE WHEN outcome = 'ignored_no_metadata' THEN 1 ELSE 0 END) AS no_link_key_count, "
+            "       SUM(CASE WHEN outcome = 'ignored_no_loop' THEN 1 ELSE 0 END) AS no_open_run_count, "
+            "       MAX(CASE WHEN outcome IN ('applied', 'noop_already') THEN created_at END) AS last_linked_at "
             f"FROM saas_events WHERE account_id = {PH} GROUP BY provider",
             (account_id,),
         )
@@ -13162,6 +13183,10 @@ def get_saas_activity(account_id: int) -> dict[str, dict[str, Any]]:
             r["provider"]: {
                 "event_count": int(r["event_count"] or 0),
                 "last_event_at": _ts_to_str(r["last_event_at"]),
+                "linked_count": int(r["linked_count"] or 0),
+                "no_link_key_count": int(r["no_link_key_count"] or 0),
+                "no_open_run_count": int(r["no_open_run_count"] or 0),
+                "last_linked_at": _ts_to_str(r["last_linked_at"]) if r["last_linked_at"] else None,
             }
             for r in cur.fetchall()
         }
@@ -13384,6 +13409,33 @@ def claim_saas_event(
         if "unique" in msg or "duplicate" in msg:
             return False
         raise
+
+
+def record_saas_event_outcome(
+    provider: str,
+    event_id: str | None,
+    outcome: str,
+    *,
+    loop_id: int | None = None,
+    link_key: str | None = None,
+) -> None:
+    """Stamp what apply_work_effect did with a claimed event, on its
+    saas_events row. Keyed on the same UNIQUE (provider, event_id) the claim
+    used; an event without an id was never claimed, so there is nothing to
+    stamp. Best-effort: a failure here must never undo the Work effect."""
+    event_id = (event_id or "").strip()
+    if not event_id:
+        return
+    provider = (provider or "").strip().lower()
+    try:
+        with _connect() as conn, _cursor(conn) as cur:
+            cur.execute(
+                f"UPDATE saas_events SET outcome = {PH}, loop_id = {PH}, link_key = {PH} "
+                f"WHERE provider = {PH} AND event_id = {PH}",
+                (outcome, loop_id, (link_key or None), provider, event_id),
+            )
+    except Exception:  # noqa: BLE001 — the effect already happened
+        logger.exception("[saas] could not record outcome for %s/%s", provider, event_id)
 
 
 def find_open_loop_by_external_id(

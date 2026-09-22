@@ -400,8 +400,10 @@ check("and the auth header it actually needs",
 for tool in ("report_job_started", "report_job_waiting",
              "report_job_finished", "report_job_failed"):
     check(f"the guide can name {tool}", tool in PROMPT)
-check("the guide is told the title IS the job name",
-      "title IS the job name" in PROMPT)
+check("the guide is told the title IS the run's name",
+      "title IS the run's name" in PROMPT)
+check("the guide teaches Run vs Job: the title names a run, the job is declared in Work",
+      "name the RUN" in PROMPT and "jobs are declared in Work" in PROMPT)
 check("the guide tells the truth: nothing lands unless the Bot calls in",
       "nothing is recorded unless the Bot calls these tools" in PROMPT)
 # The path that worked on the first real connection: hand the whole setup to
@@ -425,11 +427,25 @@ check("the xai-sdk door is still there, unconfused with the Bot one",
       "trovis-agents[xai]" in PROMPT and 'platform="xai"' in PROMPT)
 
 # Every door the picker offers should be reachable through the guide too.
+# Both now derive from the canonical registry (connectors.py → the committed
+# frontend snapshot → connectSetup.js), so the check is that the guide reads
+# the registry's chips and that the registry carries every live door's label.
+import connectors as _connectors
 _wizard = pathlib.Path("frontend/src/AddAgent.jsx").read_text()
 _chips = pathlib.Path("frontend/src/ConnectGuide.jsx").read_text()
-for label in ("Grok Bot", "Grok (xAI SDK)", "ChatGPT", "OpenClaw"):
-    check(f"the guide's opening chips offer {label}", label in _chips)
-    check(f"and the manual picker offers {label}", label in _wizard)
+check("the guide's opening chips come from the registry, not a second list",
+      "options: guideOpeningOptions()" in _chips)
+check("and the wizard's tiles do too",
+      "const PLATFORMS = pickerTiles()" in _wizard
+      and "const RECIPE_PLATFORMS = recipeTiles()" in _wizard)
+_labels = [c.guide_label for c in _connectors.available() if c.guide_label]
+for label in ("Grok Bot", "Grok (xAI SDK)", "ChatGPT (custom GPT)", "OpenClaw"):
+    check(f"the guide's opening chips offer {label}", label in _labels)
+check("every wizard tile has a guide chip",
+      all(_connectors.get(cid).guide_label for cid in _connectors.tile_ids()))
+_tile_labels = [_connectors.get(cid).tile_label for cid in _connectors.tile_ids()]
+for label in ("Grok Bot", "Grok (xAI SDK)", "ChatGPT (custom GPT)", "OpenClaw"):
+    check(f"and the manual picker offers {label}", label in _tile_labels)
 
 print()
 if failures:

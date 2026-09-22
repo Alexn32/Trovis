@@ -1,7 +1,9 @@
-// Job detail — turning a work item's event timeline into the two things a
-// person actually wants to see. Pure, so both are testable without a renderer.
+// Run detail — turning one work item's (one RUN's) event timeline into the
+// two things a person actually wants to see. Pure, so both are testable
+// without a renderer. (File name predates the Job/Run split: a "job" here is
+// the recurring kind of work a run belongs to, not this timeline.)
 //
-//   steps    the ROUTE the job takes: Agent → You → Stripe. Consecutive events
+//   steps    the ROUTE the run takes: Agent → You → Stripe. Consecutive events
 //            with the same actor collapse into one step, because "the agent did
 //            four things in a row" is one leg of the journey, not four.
 //   history  the LOG: the last few timestamped events, newest last.

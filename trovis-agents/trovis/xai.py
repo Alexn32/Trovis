@@ -128,9 +128,9 @@ def setup_xai() -> bool:
             "[Trovis] Another OpenTelemetry TracerProvider is already global "
             "(commonly xai_sdk.telemetry.Telemetry(), which names every agent "
             "'xai-sdk'). OTEL will not let Trovis replace it, so Grok spans "
-            "may not reach Trovis, and none will carry your job titles. Call "
+            "may not reach Trovis, and none will carry your run titles. Call "
             "trovis.init() BEFORE creating a Telemetry() — and don't create "
-            "one at all; init() does that job."
+            "one at all; init() does that work."
         )
         ok = False
     elif not _INSTALLED:
