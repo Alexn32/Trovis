@@ -98,6 +98,19 @@ export function visibilityRows(body) {
   return DIMENSION_ORDER.filter((id) => byId.has(id)).map((id) => dimensionRow(byId.get(id)))
 }
 
+/**
+ * The one phrase a run's cost figure carries when the figure is incomplete:
+ * "some model usage unpriced". Only for `partial` — the one state where the
+ * record KNOWS the denominator and knows part of it is missing. Observed
+ * cost needs no caveat; not_observed and unknown have no figure to caveat.
+ */
+export function costCoverageNote(body) {
+  const dims = Array.isArray(body?.dimensions) ? body.dimensions : []
+  const cost = dims.find((d) => d?.id === 'cost')
+  if (!cost || cost.state !== 'partial') return null
+  return 'some model usage unpriced'
+}
+
 /** The bounded-read note, or null. A cap on the read, never a verdict. */
 export function boundedNote(body) {
   if (!body?.evidence_bounded) return null

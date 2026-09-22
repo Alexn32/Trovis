@@ -1781,6 +1781,12 @@ CREATE TABLE IF NOT EXISTS saas_events (
 _ACCOUNT_ID_TABLES = ("spans", "descriptions", "agent_registrations")
 
 _INDEXES = [
+    # One derived job per agent per account. Partial so declared jobs
+    # (derived_from NULL) are unconstrained; the same syntax works on both
+    # backends, and the ingest fallback relies on it to survive two batches
+    # meeting an agent for the first time at once.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_derived "
+    "ON workflows(account_id, derived_from) WHERE derived_from IS NOT NULL",
     # The spending report reads by period, then groups by account, model and
     # stage. `created_at` leads because every query is bounded by it first.
     "CREATE INDEX IF NOT EXISTS idx_home_llm_created ON home_llm_requests(created_at)",
@@ -2081,6 +2087,12 @@ def init_db() -> None:
         _try_add_column(cur, "workflows", "created_by", "TEXT DEFAULT ''")
         _try_add_column(cur, "workflows", "archived_at", "TIMESTAMP")
         _try_add_column(cur, "workflows", "current_version", "INTEGER DEFAULT 1")
+        # Every run belongs to a job. When no declared job claims a run,
+        # ingest files it under a job DERIVED from its agent's service.name
+        # — this column names that service, and NULL means a person
+        # declared the job. Promotion (a person describing the derived job)
+        # clears it. One derived job per (account, service): see _INDEXES.
+        _try_add_column(cur, "workflows", "derived_from", "TEXT")
         # Loop → workflow match cache. Same philosophy as cached_state:
         # derived and recomputable while the loop is OPEN, frozen once the
         # loop reaches a terminal state (done/abandoned) — a closed loop
@@ -3803,20 +3815,21 @@ def ingest_spans_with_loops(
         # records the match it had when it closed. Frozen (grace-attached)
         # loops are skipped — their match froze at close. Zero cost when no
         # workflows are declared.
-        hint_sets = _current_workflow_hints(cur, account_id)
-        if hint_sets:
-            for loop_id in affected:
-                if loop_id in frozen:
-                    continue
-                cur.execute(
-                    "SELECT id, service_name, agent_id, title, "
-                    "workflow_id, workflow_version FROM loops "
-                    f"WHERE id = {PH}",
-                    (loop_id,),
-                )
-                row = cur.fetchone()
-                if row is not None:
-                    _apply_workflow_match(cur, dict(row), hint_sets)
+        # No longer gated on "any workflows declared": with none declared,
+        # the pass is what files each new run under its agent's derived job.
+        hint_sets = _current_workflow_hints(cur, account_id) if affected else []
+        for loop_id in affected:
+            if loop_id in frozen:
+                continue
+            cur.execute(
+                "SELECT id, service_name, agent_id, title, "
+                "workflow_id, workflow_version FROM loops "
+                f"WHERE id = {PH}",
+                (loop_id,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                _apply_workflow_match(cur, dict(row), hint_sets, account_id)
 
         now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
         for loop_id, (actor, value, ts, span_ref) in closes.items():
@@ -5796,6 +5809,17 @@ def get_work_overview(
                 )
                 needs_you_ids = {int(i) for i in assigned}
 
+            # How current the picture is. Account-wide and exact (the same
+            # MAX the Home snapshot reports), so Work can say "newest data
+            # 4m ago" instead of implying live. A quiet job and a stopped
+            # feed look identical without it.
+            span_acct = f" WHERE account_id = {PH}" if account_id is not None else ""
+            cur.execute(
+                f"SELECT MAX(start_time_unix) AS m FROM spans{span_acct}",
+                tuple([account_id] if account_id is not None else []),
+            )
+            newest = (dict(cur.fetchone() or {})).get("m")
+
             return {
                 "needs_you": len(needs_you_ids),
                 "needs_attention": len(attention_ids - needs_you_ids),
@@ -5803,6 +5827,7 @@ def get_work_overview(
                 "completed_week": completed_week,
                 "completed_prev_week": completed_prev_week,
                 "has_prev_week": has_prev_week,
+                "latest_telemetry_at": _ns_to_iso(int(newest)) if newest else None,
             }
     except Exception as exc:
         if _is_query_canceled(exc):
@@ -7555,17 +7580,25 @@ def create_workflow_version(
     note: str | None = None,
     created_by: str = "",
     expectation: dict[str, Any] | None = None,
+    name: str | None = None,
 ) -> dict[str, Any] | None:
     """Append a new FULL definition (not a diff) and bump current_version —
     one of the two allowed writes on the workflows row. Prior versions are
     never touched. Open loops re-match on the next ingest/sweep pass;
-    closed loops keep the version they matched forever."""
+    closed loops keep the version they matched forever.
+
+    PROMOTION: a new version on a DERIVED job is a person describing it for
+    the first time, so it also clears `derived_from` and may set the name —
+    the one write on a job's name, allowed only here, because a derived
+    job's name was never chosen by anyone. A declared job cannot be renamed
+    through this path (ValueError)."""
     lp = _loops_mod()
     stations = lp.validate_stations(stations or [])
     match_hints = lp.validate_match_hints(match_hints or [])
+    new_name = str(name).strip() if name is not None and str(name).strip() else None
     with _connect() as conn, _cursor(conn) as cur:
         sql = (
-            "SELECT w.id, w.current_version, w.archived_at FROM workflows w "
+            "SELECT w.id, w.current_version, w.archived_at, w.derived_from FROM workflows w "
             "JOIN workflow_versions v ON v.workflow_id = w.id "
             "AND v.version = w.current_version "
             f"WHERE w.id = {PH}"
@@ -7580,6 +7613,8 @@ def create_workflow_version(
             return None
         if row["archived_at"] is not None:
             raise ValueError("workflow is archived — unarchive is not a thing; declare a new one")
+        if new_name is not None and row["derived_from"] is None:
+            raise ValueError("a declared job keeps its name; only a derived job is named on promotion")
         next_version = int(row["current_version"] or 1) + 1
         cur.execute(
             "INSERT INTO workflow_versions "
@@ -7590,11 +7625,24 @@ def create_workflow_version(
              json.dumps(match_hints), note, created_by or "",
              *_expectation_values(expectation)),
         )
-        # ALLOWED WRITE 1 of 2 on workflows: the current_version bump.
+        # ALLOWED WRITE 1 of 3 on workflows: the current_version bump.
         cur.execute(
             f"UPDATE workflows SET current_version = {PH} WHERE id = {PH}",
             (next_version, workflow_id),
         )
+        # PROMOTION: the person's description turns a derived default into a
+        # declared job. Clearing derived_from is what lets the matcher rank
+        # it as a declaration, and the name a person gives it replaces the
+        # service name Trovis filed it under.
+        # ALLOWED WRITE 3 of 3 on workflows, and the only one that can touch
+        # the name — a derived job's name was Trovis's placeholder, not a
+        # person's choice. COALESCE keeps the placeholder when no name came.
+        if row["derived_from"] is not None:
+            cur.execute(
+                f"UPDATE workflows SET derived_from = NULL, name = COALESCE({PH}, name) "
+                f"WHERE id = {PH}",
+                (new_name, workflow_id),
+            )
     return get_workflow(workflow_id, account_id)
 
 
@@ -7889,6 +7937,11 @@ def _workflow_summary_row(
         "created_by": r["created_by"] or "",
         "created_at": _ts_to_str(r["created_at"]),
         "archived_at": _ts_to_str(r["archived_at"]),
+        # Who authored this job: a person (declared) or Trovis, from the
+        # agent's telemetry (derived). A derived job carries no expectation
+        # and so no verdict; the flag is what lets the UI say so.
+        "derived": r["derived_from"] is not None,
+        "derived_from": r["derived_from"],
         "loop_counts": by_state.get(r["id"], {}),
         "loops_today": today.get(r["id"], 0),
         "stations": _parse_json_list(r["stations"]),
@@ -7912,7 +7965,7 @@ def get_workflows(
 ) -> list[dict[str, Any]]:
     sql = (
         "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
-        f"w.current_version, v.stations, {_EXPECTATION_SELECT} FROM workflows w "
+        f"w.current_version, w.derived_from, v.stations, {_EXPECTATION_SELECT} FROM workflows w "
         "JOIN workflow_versions v ON v.workflow_id = w.id "
         "AND v.version = w.current_version WHERE 1=1"
     )
@@ -7939,7 +7992,7 @@ def get_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any] | N
     for legacy graph rows (no version row → excluded by the join)."""
     sql = (
         "SELECT w.id, w.name, w.created_by, w.created_at, w.archived_at, "
-        f"w.current_version, v.stations, v.match_hints, v.note, "
+        f"w.current_version, w.derived_from, v.stations, v.match_hints, v.note, "
         f"{_EXPECTATION_SELECT} FROM workflows w "
         "JOIN workflow_versions v ON v.workflow_id = w.id "
         "AND v.version = w.current_version "
@@ -8014,7 +8067,7 @@ def _current_workflow_hints(cur, account_id: int | None) -> list[dict[str, Any]]
     acct_sql, acct_args = _loop_account_clause(account_id)
     cur.execute(
         "SELECT w.id AS workflow_id, w.current_version AS version, "
-        "v.match_hints FROM workflows w "
+        "v.match_hints, w.derived_from FROM workflows w "
         "JOIN workflow_versions v ON v.workflow_id = w.id "
         "AND v.version = w.current_version "
         f"WHERE w.archived_at IS NULL {acct_sql.replace('account_id', 'w.account_id')}",
@@ -8025,9 +8078,74 @@ def _current_workflow_hints(cur, account_id: int | None) -> list[dict[str, Any]]
             "workflow_id": r["workflow_id"],
             "version": int(r["version"] or 1),
             "match_hints": _parse_json_list(r["match_hints"]),
+            "derived": r["derived_from"] is not None,
         }
         for r in cur.fetchall()
     ]
+
+
+def _derived_hint_set(workflow_id: int, version: int, service_name: str) -> dict[str, Any]:
+    """The one recognition rule a derived job has: this agent's runs."""
+    return {
+        "workflow_id": workflow_id,
+        "version": int(version or 1),
+        "match_hints": [{"field": "service_name", "op": "equals", "value": service_name}],
+        "derived": True,
+    }
+
+
+def _ensure_derived_workflow(cur, account_id: int, service_name: str):
+    """The job a run gets when nobody declared one: this agent's work.
+
+    Find-or-create, one per (account, service_name). Returns
+    (workflow_id, version), or None when the derived job for this agent was
+    ARCHIVED — a person hid it on purpose, and re-creating it would undo
+    that every time the agent ran.
+
+    Creation goes through ON CONFLICT DO NOTHING against the partial unique
+    index so two ingest batches that meet an agent at the same moment
+    converge on one row instead of one of them failing the whole batch. The
+    version row carries a real hint set (service_name equals), so the
+    ordinary matcher recognises the job on every later pass and a person
+    promoting it inherits a rule they can read and edit.
+    """
+    svc = str(service_name or "").strip()
+    if not svc:
+        return None
+    sel = (
+        "SELECT id, current_version, archived_at FROM workflows "
+        f"WHERE account_id = {PH} AND derived_from = {PH}"
+    )
+    cur.execute(sel, (account_id, svc))
+    row = cur.fetchone()
+    if row is None:
+        cur.execute(
+            "INSERT INTO workflows (account_id, name, created_by, current_version, derived_from) "
+            f"VALUES ({PH}, {PH}, 'trovis', 1, {PH}) "
+            "ON CONFLICT (account_id, derived_from) WHERE derived_from IS NOT NULL DO NOTHING",
+            (account_id, svc, svc),
+        )
+        cur.execute(sel, (account_id, svc))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cur.execute(
+            f"SELECT 1 FROM workflow_versions WHERE workflow_id = {PH} AND version = 1",
+            (row["id"],),
+        )
+        if cur.fetchone() is None:
+            hints = _derived_hint_set(row["id"], 1, svc)["match_hints"]
+            stations = [{"holder_type": "agent", "holder": svc}]
+            cur.execute(
+                "INSERT INTO workflow_versions "
+                "(workflow_id, version, stations, match_hints, note, created_by) "
+                f"VALUES ({PH}, 1, {PH}, {PH}, {PH}, 'trovis')",
+                (row["id"], json.dumps(stations), json.dumps(hints),
+                 f"Derived from {svc}'s telemetry. Describe this job to make it yours."),
+            )
+    if row["archived_at"] is not None:
+        return None
+    return (row["id"], int(row["current_version"] or 1))
 
 
 def get_workflow_map(
@@ -8106,7 +8224,9 @@ def get_current_workflow_hints(account_id: int | None) -> list[dict[str, Any]]:
         return _current_workflow_hints(cur, account_id)
 
 
-def _apply_workflow_match(cur, loop_row: dict[str, Any], hint_sets: list) -> bool:
+def _apply_workflow_match(
+    cur, loop_row: dict[str, Any], hint_sets: list, account_id: int | None = None,
+) -> bool:
     """Recompute the loop's workflow match and write the cache columns when
     changed. Cache semantics mirror cached_state: mutation allowed while
     the loop is open, FROZEN at terminal — every caller guarantees the
@@ -8119,9 +8239,23 @@ def _apply_workflow_match(cur, loop_row: dict[str, Any], hint_sets: list) -> boo
     archived the workflow, and silently detaching that run makes it vanish
     from the job board it belongs on. Kept links are reported by
     stale_workflow_links() so a wrong one is findable rather than permanent.
+
+    EVERY RUN BELONGS TO A JOB: when no declared job claims a run that has
+    none yet, it is filed under the job derived from its agent (see
+    _ensure_derived_workflow), and that job's hint set joins `hint_sets` in
+    place so the rest of the batch matches it without another lookup. The
+    record is never refused and never left unfiled; a person refines the
+    default by declaring a job, which the matcher prefers on the next pass.
     """
     lp = _loops_mod()
     m = lp.match_workflow(loop_row, hint_sets)
+    if m is None and loop_row.get("workflow_id") is None and account_id is not None:
+        derived = _ensure_derived_workflow(cur, account_id, loop_row.get("service_name"))
+        if derived is not None:
+            wf_id, version = derived
+            if not any(h.get("workflow_id") == wf_id for h in hint_sets):
+                hint_sets.append(_derived_hint_set(wf_id, version, loop_row.get("service_name")))
+            m = (wf_id, version, 1.0)
     if m is None and loop_row.get("workflow_id") is not None:
         # The moment the link goes stale, said once, where it happens.
         #
@@ -8241,7 +8375,7 @@ def rematch_open_loop(
             return False
         if row["closed_at"] is not None or row["cached_state"] in ("done", "abandoned"):
             return False  # FROZEN
-        return _apply_workflow_match(cur, dict(row), hint_sets)
+        return _apply_workflow_match(cur, dict(row), hint_sets, account_id)
 
 
 def save_description(

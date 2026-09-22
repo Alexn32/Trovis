@@ -212,7 +212,9 @@ with TestClient(main.app) as c:
           and s["completions_series"]["reconciles"] is True)
     check("the job breakdown totals the completion only",
           s["by_job"]["aggregate_total"] == 1
-          and s["by_job"]["unclassified_completed"] == 1
+          # Filed under the agent's derived job, so it is a row, not unclassified.
+          and s["by_job"]["unclassified_completed"] == 0
+          and sum(r["completed"] for r in s["by_job"]["rows"]) == 1
           and s["by_job"]["reconciles"] is True)
     check("completion freshness is the completion's close, not an abandonment's",
           s["freshness"]["latest_recorded_completion_at"] is not None

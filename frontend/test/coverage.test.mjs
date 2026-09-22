@@ -10,6 +10,7 @@ import {
   STATE_LABELS,
   boundedNote,
   dimensionRow,
+  costCoverageNote,
   visibilityRows,
 } from '../src/coverage.js'
 
@@ -216,4 +217,20 @@ test('24. the Visibility section renders exactly the rows the helper gives it an
   assert.match(page, /\[coverage, setCoverage\]/)
   assert.match(page, /\[coverageErr, setCoverageErr\]/)
   assert.match(page, /\[isPage, item\.id, coverageReload\]/)
+})
+
+test('a run cost carries "some model calls unpriced" only when coverage says partial', () => {
+  // partial is the one state where the record KNOWS the denominator and
+  // knows part is missing; observed needs no caveat, not_observed and
+  // unknown have no figure to caveat. Cost is never gated on Work — this
+  // note is what the figure is owed, not a reason to hide it.
+  const body = (state) => ({ dimensions: [{ id: 'cost', state, reason: 'x' }] })
+  assert.equal(costCoverageNote(body('partial')), 'some model usage unpriced')
+  assert.equal(costCoverageNote(body('observed')), null)
+  assert.equal(costCoverageNote(body('not_observed')), null)
+  assert.equal(costCoverageNote(body('unknown')), null)
+  assert.equal(costCoverageNote({ dimensions: [{ id: 'actions', state: 'partial' }] }), null)
+  assert.equal(costCoverageNote(null), null)
+  const page = readFileSync(new URL('../src/JobDetail.jsx', import.meta.url), 'utf8')
+  assert.match(page, /costNote=\{\[costNote, costCoverageNote\(coverage\)\]\.filter\(Boolean\)\.join\(' · '\) \|\| null\}/)
 })

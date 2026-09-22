@@ -9,7 +9,7 @@ import {
   jobTotals, runCost, runDuration, runErrorLine, shortHistory,
 } from './jobDetail.js'
 import { costProvenance, observations, sources, truncationNote } from './evidence.js'
-import { boundedNote, visibilityRows } from './coverage.js'
+import { boundedNote, costCoverageNote, visibilityRows } from './coverage.js'
 import {
   ACTOR_KIND_LABELS, elapsedLabel, holderLine, holderStrip, possessionRows, runTiming, situationEyebrow,
   situationFor, stepClock, stepDay,
@@ -177,6 +177,10 @@ export default function JobDetail({
     setEvidenceErr(null)
     setEvidenceReload((n) => n + 1)
   }, [])
+  // The cost's provenance, plus how complete it is. Coverage knows when only
+  // some of the observed model usage carried a price; a total that omits
+  // part of the usage has to say so beside the figure, not two sections
+  // down. Cost is never gated on Work — the note is what the number is owed.
   const costNote = isPage ? costProvenance(evidence?.evidence) : null
 
   // Visibility (coverage) is its own request with its own loading, error
@@ -511,7 +515,7 @@ export default function JobDetail({
                 view={view}
                 runs={runs}
                 evidence={evidence}
-                costNote={costNote}
+                costNote={[costNote, costCoverageNote(coverage)].filter(Boolean).join(' · ') || null}
                 jobName={jobName}
                 canOpenJob={canOpenJob}
                 onOpenJob={onOpenJob}

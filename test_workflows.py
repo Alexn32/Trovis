@@ -225,14 +225,22 @@ with TestClient(main.app) as c:
         "match_hints": [{"field": "service_name", "op": "equals", "value": "late-bot"}],
     }, headers=HB)
     late_id = r.json()["id"]
-    check("pre-declaration loops start unmatched",
-          all(x["workflow_id"] is None for x in loops_for("late-bot")))
+    # EVERY RUN BELONGS TO A JOB. Before anyone declared one, ingest filed
+    # late-bot's runs under a job DERIVED from its service.name — named after
+    # the agent, flagged derived, carrying one recognition rule.
+    derived = [w for w in c.get("/workflows", headers=HB).json()
+               if w.get("derived") and w["derived_from"] == "late-bot"]
+    check("pre-declaration loops land on a derived job, never on nothing",
+          len(derived) == 1 and derived[0]["name"] == "late-bot"
+          and all(x["workflow_id"] == derived[0]["id"] for x in loops_for("late-bot")))
+    check("a derived job declares nothing, so it can be graded on nothing",
+          derived[0]["has_expectation"] is False and derived[0]["definition"] is None)
     summary = loops_mod.run_sweep_for_account(account_id)
     lb = {x["cached_state"]: x for x in loops_for("late-bot")}
-    check("sweep matches the in-flight loop to the late workflow",
+    check("sweep moves the in-flight loop to the late DECLARED workflow (a declaration beats the derived default)",
           lb["working"]["workflow_id"] == late_id and summary["rematched"] >= 1)
-    check("closed loop stays unmatched (frozen before the workflow existed)",
-          lb["done"]["workflow_id"] is None)
+    check("closed loop stays on the derived job (frozen before the declaration existed)",
+          lb["done"]["workflow_id"] == derived[0]["id"])
 
     # --- 6. Archive
     assert c.post(f"/workflows/{late_id}/archive", headers=HK).status_code == 403
@@ -240,7 +248,8 @@ with TestClient(main.app) as c:
     check("archive sets archived_at", r.status_code == 200 and r.json()["archived_at"])
     assert post_spans(c, key, "late-bot", [span("c", NOW - 2 * MIN, {"trovis.run.id": "lb3"})]).status_code == 200
     lb3 = [x for x in loops_for("late-bot") if x["external_id"] == "lb3"][0]
-    check("archived workflow no longer matches new loops", lb3["workflow_id"] is None)
+    check("archived workflow no longer matches new loops — they fall back to the derived job",
+          lb3["workflow_id"] == derived[0]["id"])
     hist = c.get(f"/workflows/{late_id}/loops", headers=HB).json()
     check("matched history still readable via /workflows/{id}/loops",
           len(hist) == 1 and hist[0]["workflow_id"] == late_id)

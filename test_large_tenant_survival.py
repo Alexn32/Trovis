@@ -227,6 +227,11 @@ with TestClient(main.app) as c:
               # Both come off the SAME scan as completed_week — no extra
               # query, which is what this file exists to guard.
               "completed_prev_week", "has_prev_week",
+              # Work's "Newest data" line. One MAX over the tail of
+              # idx_spans_account_started (account_id, start_time_unix) —
+              # an index lookup, not a scan; the timing check below is
+              # what holds that.
+              "latest_telemetry_at",
           })
     check("GET /work/overview HTTP is fast", ovh_dt < 1.0)
     print(f"    http /agents={http_dt:.3f}s /work/overview={ovh_dt:.3f}s")

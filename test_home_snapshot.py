@@ -430,8 +430,12 @@ with TestClient(main.app) as c:
           by_id.get(job_a["id"], {}).get("completed") == 2
           and by_id[job_a["id"]]["name"] == "Refund requests"
           and by_id.get(job_b["id"], {}).get("completed") == 1)
-    check("unmatched work is reported as unclassified, not dropped",
-          bj["unclassified_completed"] == 63)
+    # Every run belongs to a job: work no declared job claimed sits on jobs
+    # derived from its agents, so nothing is unclassified — and it is all
+    # still counted, in the rows or the tail.
+    check("work no declared job claimed is filed under derived jobs, not left unclassified",
+          bj["unclassified_completed"] == 0
+          and sum(r["completed"] for r in bj["rows"]) + bj["other_completed"] == 66)
     check("rows + other + unclassified equal the period total",
           sum(r["completed"] for r in bj["rows"]) + bj["other_completed"]
           + bj["unclassified_completed"] == big["period"]["completed"])

@@ -562,6 +562,10 @@ class WorkflowVersionCreate(BaseModel):
     match_hints: list[dict[str, Any]] = Field(default_factory=list)
     note: str | None = None
     expectation: WorkflowExpectation | None = None
+    # Only meaningful on a DERIVED job: the name a person gives it when they
+    # describe it for the first time (promotion). 400 on a declared job — a
+    # declared job's name is not a version field.
+    name: str | None = None
 
 
 class WorkflowVersionInfo(BaseModel):
@@ -581,6 +585,14 @@ class WorkflowSummary(WorkflowExpectation, WorkflowObserved):
     created_by: str = ""
     created_at: str | None = None
     archived_at: str | None = None
+    # Who authored the job. `derived` is Trovis filing an agent's runs under
+    # a default job named after its service.name because nobody had declared
+    # one; `derived_from` is that service. A derived job carries no
+    # expectation, so it can never earn a verdict — it is observed, not
+    # graded. A person promotes it by posting a version (see
+    # WorkflowVersionCreate.name), after which both read declared.
+    derived: bool = False
+    derived_from: str | None = None
     loop_counts: dict[str, int] = Field(default_factory=dict)  # state -> count
     loops_today: int = 0
     # The Work list renders each workflow's shape ("3 steps · triage-agent +
@@ -1569,6 +1581,10 @@ class WorkOverview(BaseModel):
     # be the pulse's first lie.
     completed_prev_week: int = 0
     has_prev_week: bool = False
+    # When the newest span in the account was recorded — the same
+    # account-wide, membership-independent MAX Home's freshness panel shows.
+    # None means no telemetry at all, never "just now".
+    latest_telemetry_at: str | None = None
 
 
 # ---------------------------------------------------------------------------

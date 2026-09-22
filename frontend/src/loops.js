@@ -192,6 +192,9 @@ export function chainGlyph(loop) {
 export const WORKFLOW_STRINGS = {
   newWorkflow: 'New workflow',
   editStations: 'Edit steps',
+  describeJob: 'Describe this job',
+  derivedTag: 'not yet described',
+  derivedNote: (svc) => `Trovis created this job from ${svc}'s activity because nobody had described one yet. Give it a name and describe it, and it becomes yours.`,
   nameLabel: 'Name',
   stationsLabel: 'Steps',
   stationsEmptyNudge: 'No steps yet — describe the process and the map fills in.',

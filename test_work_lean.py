@@ -75,6 +75,8 @@ with TestClient(main.app) as c:
               # Home's fleet pulse compares finished work week over week;
               # has_prev_week says whether that comparison is meaningful.
               "completed_prev_week", "has_prev_week",
+              # Work says how current its picture is rather than implying live.
+              "latest_telemetry_at",
           })
     check("empty: all zeros",
           ov["needs_you"] == 0 and ov["needs_attention"] == 0
@@ -385,9 +387,14 @@ with TestClient(main.app) as c:
     check("the kind's rows carry its name, so the page needs no second call",
           {i["workflow_name"] for i in items(limit=100, workflow_id=wf["id"])["items"]}
           == {"Refunds"})
-    check("workflow_id=none is the undeclared work, and excludes the declared",
-          "Refund order #1" not in titles(limit=100, workflow_id="none")
-          and len(titles(limit=100, workflow_id="none")) > 0)
+    # Every run belongs to a job: what no declared job claims is filed under
+    # a job derived from its agent, so the undeclared slice is empty and the
+    # rest carry a job name (the agent's service.name).
+    check("workflow_id=none is empty — every run has a job",
+          len(titles(limit=100, workflow_id="none")) == 0)
+    check("the rows no declared job claimed carry their derived job",
+          all(i["workflow_id"] is not None and i["workflow_name"]
+              for i in items(limit=100)["items"] if i["title"] not in {"Refund order #1", "Refund order #2"}))
     check("status=done is the finished work only",
           "Refund order #2" in titles(limit=100, status="done")
           and "Refund order #1" not in titles(limit=100, status="done"))

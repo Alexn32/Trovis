@@ -25,6 +25,10 @@ function emptyHint() {
 
 export default function WorkflowEditor({ workflow, onBack, onSaved }) {
   const editing = Boolean(workflow)
+  // A DERIVED job was named by Trovis after the agent, not by a person. The
+  // first description promotes it, and that is the one time its name is
+  // editable — a declared job keeps its name.
+  const derived = Boolean(workflow?.derived)
   const [name, setName] = useState(workflow?.name || '')
   const [stations, setStations] = useState(
     (workflow?.stations || []).map((s) => ({
@@ -125,7 +129,12 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
     setError(null)
     try {
       if (editing) {
-        await api.createWorkflowVersion(workflow.id, payload)
+        // Only a promotion carries a name; a declared job's version never does.
+        const { name: newName, ...rest } = payload
+        await api.createWorkflowVersion(
+          workflow.id,
+          derived && newName !== workflow.name ? { ...rest, name: newName } : rest,
+        )
         onSaved(workflow.id)
       } else {
         const created = await api.createWorkflow(payload)
@@ -147,7 +156,9 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
           {editing ? `${workflow.name}` : WS.newWorkflow}
         </h1>
         {editing && <span className="wfe-vchip">v{workflow.current_version}</span>}
+        {derived && <span className="wfe-vchip is-derived">{WS.derivedTag}</span>}
       </div>
+      {derived && <p className="wfe-derived-note">{WS.derivedNote(workflow.derived_from)}</p>}
 
       <div className="dash-card wfe-card">
         {!editing && (
@@ -187,7 +198,7 @@ export default function WorkflowEditor({ workflow, onBack, onSaved }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Signup triage"
-          disabled={editing}
+          disabled={editing && !derived}
         />
 
         <div className="wfe-label" style={{ marginTop: 18 }}>
