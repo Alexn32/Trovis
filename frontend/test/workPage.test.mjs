@@ -170,3 +170,14 @@ test('no jargon in anything a person reads from workPage.js', () => {
     assert.ok(!FORBIDDEN.test(m[1]), `workPage.js ships jargon: ${m[1]}`)
   }
 })
+
+test('Work says how current its picture is, and never implies live', () => {
+  // The overview carries the account-wide newest-span time (the same MAX
+  // Home's freshness panel reads). Work prints it under the tiles; with no
+  // telemetry at all it says so rather than showing a stale relative time.
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  assert.match(work, /function FreshnessLine\(\{ overview \}\)/)
+  assert.match(work, /const at = overview\.latest_telemetry_at/)
+  assert.match(work, /\{at \? relTime\(at\) : 'No data yet'\}/)
+  assert.match(work, /<FreshnessLine overview=\{overview\} \/>/)
+})

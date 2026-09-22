@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  computedFrom, costLabel, healthRows, jobPath, jobStats, recentRuns, settingsRows,
+  computedFrom, costBasis, costLabel, healthRows, jobPath, jobStats, recentRuns, settingsRows,
 } from '../src/jobPage.js'
 import { kindPath } from '../src/board.js'
 import { groupByJob, healthBadge, unmeasuredExpectations } from '../src/workBoard.js'
@@ -176,6 +176,23 @@ test('stats read the way a person says them', () => {
   }), { now: NOW })
   assert.deepEqual(stats.map((s) => s.value),
                    ['4h 02m ago', '10/day', '4m 18s', '$0.0042'])
+})
+
+test('cost per run states what it is an average of, and only when that is not the whole window', () => {
+  // The average is cost_usd / cost_runs, and cost_runs is a subset of the
+  // runs that started in the same window. The reader is owed that
+  // denominator. Whole window → nothing to add. No average → the value is
+  // already "No data"; no basis under it.
+  assert.equal(costBasis(job({ cost_runs: 52, started_runs: 59, cost_per_run: 0.06 })), 'over 52 of 59 runs')
+  assert.equal(costBasis(job({ cost_runs: 59, started_runs: 59, cost_per_run: 0.06 })), null)
+  assert.equal(costBasis(job({ cost_runs: 0, started_runs: 59 })), null)
+  assert.equal(costBasis(job({ cost_runs: null, started_runs: 59 })), null)
+  assert.equal(costBasis(job({})), null)
+  const st = jobStats(job({ cost_runs: 3, started_runs: 10, cost_per_run: 0.5 }), { now: NOW })
+  assert.equal(st.find((s) => s.key === 'cost').sub, 'over 3 of 10 runs')
+  // Rendered under the value, and never under "No data".
+  const work = src('WorkTab.jsx')
+  assert.match(work, /\{st\.sub && st\.value != null && <span className="jobp-stat-sub">\{st\.sub\}<\/span>\}/)
 })
 
 test('cadence counts runs STARTED, not runs finished', () => {

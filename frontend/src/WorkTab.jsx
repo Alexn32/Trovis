@@ -32,7 +32,7 @@ import {
   computedFrom, healthRows, jobPath, jobStats, recentRuns, settingsRows,
 } from './jobPage.js'
 import { CompletionChart, JobBreakdown } from './HomeSections.jsx'
-import { readComparison, readJobs, readSeries } from './homeView.js'
+import { readComparison, readJobs, readSeries, relTime } from './homeView.js'
 import { QuietBrand } from './BrandMarks.jsx'
 
 // IA: Work home is three views of the same open work — By job (the
@@ -506,6 +506,8 @@ function JobPage({
                 dash here beside "No data" two inches below was the same fact
                 rendered two ways on one screen \u2014 browser-caught. */}
             <span className="jobp-stat-value">{st.value ?? 'No data'}</span>
+            {/* The denominator, when it is not the whole job. */}
+            {st.sub && st.value != null && <span className="jobp-stat-sub">{st.sub}</span>}
           </div>
         ))}
       </div>
@@ -548,6 +550,24 @@ function JobPage({
  * each one a door to the rows behind it. Counts are the server contract.
  * Do not recompute or clamp them here.
  */
+/**
+ * How current the picture is. A quiet job and a stopped feed look the same
+ * on a board of runs; this is the one line that tells them apart. Reads the
+ * overview's account-wide newest-span time — the same MAX Home's freshness
+ * panel shows — and says "No data yet" rather than implying live when the
+ * account has no telemetry at all.
+ */
+function FreshnessLine({ overview }) {
+  if (!overview) return null
+  const at = overview.latest_telemetry_at
+  return (
+    <p className="wk-fresh">
+      <span className="wk-fresh-label">Newest data</span>
+      <span className="wk-fresh-value">{at ? relTime(at) : 'No data yet'}</span>
+    </p>
+  )
+}
+
 function SituationStrip({ overview, overviewErr, onRetry, onTile, filter, view }) {
   const tiles = situationTiles(overview)
   if (!tiles) {
@@ -929,6 +949,7 @@ function WorkHome({
         filter={filter}
         view={view}
       />
+      <FreshnessLine overview={overview} />
 
       <SuggestionsStrip
         suggestions={suggestions}

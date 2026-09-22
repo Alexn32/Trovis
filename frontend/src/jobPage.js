@@ -95,8 +95,29 @@ export function jobStats(job, { now = Date.now() } = {}) {
     { key: 'last', label: 'Last run', value: last ? `${last} ago` : null },
     { key: 'cadence', label: 'Cadence', value: perDay === null ? null : `${perDay}/day` },
     { key: 'close', label: 'Median close', value: durationLabel(job?.median_close_s) },
-    { key: 'cost', label: 'Cost per run', value: costLabel(job?.cost_per_run) },
+    { key: 'cost', label: 'Cost per run', value: costLabel(job?.cost_per_run), sub: costBasis(job) },
   ]
+}
+
+/**
+ * What the cost per run is an average OF: "over 52 of 59 runs".
+ *
+ * `cost_per_run` is `cost_usd / cost_runs`, and `cost_runs` is the runs in
+ * the window that carried any recorded activity at all — not every run that
+ * started. An average over part of the population is not an average over
+ * the job, and the difference is invisible without the denominator, so the
+ * server's own two counts (same window, same population) are printed. Null
+ * when there is no average (the value already reads No data) and when the
+ * basis is the whole window — a line that says "all" adds nothing.
+ * Cost is never gated on Work: a person who can see the job can see what
+ * its runs cost; the basis is the only thing the number is owed.
+ */
+export function costBasis(job) {
+  const over = numOrNull(job?.cost_runs)
+  const started = numOrNull(job?.started_runs)
+  if (over === null || over <= 0 || started === null || started <= 0) return null
+  if (over >= started) return null
+  return `over ${over} of ${started} runs`
 }
 
 // The four things a job can declare, and the observed number each is read

@@ -1581,6 +1581,10 @@ class WorkOverview(BaseModel):
     # be the pulse's first lie.
     completed_prev_week: int = 0
     has_prev_week: bool = False
+    # When the newest span in the account was recorded — the same
+    # account-wide, membership-independent MAX Home's freshness panel shows.
+    # None means no telemetry at all, never "just now".
+    latest_telemetry_at: str | None = None
 
 
 # ---------------------------------------------------------------------------

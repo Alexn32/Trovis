@@ -75,6 +75,8 @@ with TestClient(main.app) as c:
               # Home's fleet pulse compares finished work week over week;
               # has_prev_week says whether that comparison is meaningful.
               "completed_prev_week", "has_prev_week",
+              # Work says how current its picture is rather than implying live.
+              "latest_telemetry_at",
           })
     check("empty: all zeros",
           ov["needs_you"] == 0 and ov["needs_attention"] == 0

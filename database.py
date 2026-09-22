@@ -5800,6 +5800,17 @@ def get_work_overview(
                 )
                 needs_you_ids = {int(i) for i in assigned}
 
+            # How current the picture is. Account-wide and exact (the same
+            # MAX the Home snapshot reports), so Work can say "newest data
+            # 4m ago" instead of implying live. A quiet job and a stopped
+            # feed look identical without it.
+            span_acct = f" WHERE account_id = {PH}" if account_id is not None else ""
+            cur.execute(
+                f"SELECT MAX(start_time_unix) AS m FROM spans{span_acct}",
+                tuple([account_id] if account_id is not None else []),
+            )
+            newest = (dict(cur.fetchone() or {})).get("m")
+
             return {
                 "needs_you": len(needs_you_ids),
                 "needs_attention": len(attention_ids - needs_you_ids),
@@ -5807,6 +5818,7 @@ def get_work_overview(
                 "completed_week": completed_week,
                 "completed_prev_week": completed_prev_week,
                 "has_prev_week": has_prev_week,
+                "latest_telemetry_at": _ns_to_iso(int(newest)) if newest else None,
             }
     except Exception as exc:
         if _is_query_canceled(exc):
