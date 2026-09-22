@@ -4,8 +4,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  WORK_VIEWS, calmLine, completedDelta, countsLine, exceptionLine, exceptionRows,
-  resolveView, scopeLine, situationTiles, stateSegments, tileTarget,
+  DENSITIES, WORK_VIEWS, calmLine, compactJobLine, completedDelta, countsLine, exceptionLine,
+  exceptionRows, resolveDensity, resolveView, scopeLine, situationTiles, stateSegments, tileTarget,
 } from '../src/workPage.js'
 import { groupByJob } from '../src/workBoard.js'
 
@@ -180,4 +180,48 @@ test('Work says how current its picture is, and never implies live', () => {
   assert.match(work, /const at = overview\.latest_telemetry_at/)
   assert.match(work, /\{at \? relTime\(at\) : 'No data yet'\}/)
   assert.match(work, /<FreshnessLine overview=\{overview\} \/>/)
+})
+
+// --- the compact job list ---------------------------------------------------
+
+test('the compact line carries the same verdict as the row, and empty cells stay empty', () => {
+  const g = groupByJob([job({
+    id: 1, name: 'Refunds', last_run_at: ago(120), started_runs: 28, window_days: 14,
+    cost_per_run: 0.06, has_expectation: true, expected_per_day_min: 1,
+  })], [run({ id: 1, status: 'stuck', updated_at: ago(60) }), run({ id: 2, status: 'moving' })], { now: NOW })[0]
+  const line = compactJobLine(g, { now: NOW })
+  assert.equal(line.name, 'Refunds')
+  assert.equal(line.openable, true)
+  assert.equal(line.open, 2)
+  assert.equal(line.badge.label, 'Failing 1 of 2', 'the one badge the row shows')
+  assert.equal(line.loud, true)
+  assert.equal(line.lastRun, '2m ago')
+  assert.equal(line.cadence, '2/day')
+  assert.equal(line.costPerRun, '$0.06')
+
+  const bare = compactJobLine(groupByJob([job({ id: 2, name: 'New' })], [], { now: NOW })[0], { now: NOW })
+  assert.equal(bare.open, 0)
+  assert.equal(bare.lastRun, null, 'never ran is not "0m ago"')
+  assert.equal(bare.cadence, null)
+  assert.equal(bare.costPerRun, null, 'unpriced is not $0.00')
+  assert.equal(bare.loud, false, 'no expectation → observed, no verdict, nothing loud')
+})
+
+test('an Unmatched line is not a job: no door, no verdict', () => {
+  const g = groupByJob([], [run({ id: 9, workflow_id: 77, status: 'stuck' })], { now: NOW })[0]
+  const line = compactJobLine(g, { now: NOW })
+  assert.equal(line.openable, false)
+  assert.equal(line.badge, null)
+})
+
+test('density is a remembered convenience, and an unknown value means rows', () => {
+  assert.deepEqual(DENSITIES, ['rows', 'list'])
+  assert.equal(resolveDensity('list'), 'list')
+  assert.equal(resolveDensity('grid'), 'rows')
+  assert.equal(resolveDensity(null), 'rows')
+  const work = readFileSync(new URL('../src/WorkTab.jsx', import.meta.url), 'utf8')
+  // Storage reads and writes are wrapped: a blocked store is the default, never a crash.
+  assert.match(work, /try \{ return resolveDensity\(localStorage\.getItem\(DENSITY_KEY\)\) \} catch \{ return 'rows' \}/)
+  assert.match(work, /density === 'list' && \(\s*<JobList grouped=\{grouped\} now=\{now\} onOpenJob=\{onOpenJob\} \/>/)
+  assert.match(work, /density === 'rows' && \(/)
 })

@@ -596,7 +596,11 @@ function AppInner() {
       <WorkflowEditorLoader
         workflowId={overlay.kind === 'workflow-edit' ? overlay.id : null}
         onBack={closeOverlay}
-        onSaved={(id) => setOverlay({ kind: 'workflow', id })}
+        onSaved={(id) => {
+          setWorkRoute({ job: Number(id), run: null })
+          setTab('work')
+          setOverlay(null)
+        }}
       />
     )
   }
@@ -671,7 +675,15 @@ function AppInner() {
             setTab('work')
             setOverlay(null)
           }}
-          onOpenJob={(id) => id && setOverlay({ kind: 'workflow', id })}
+          // The one job page: Work's, at /work/jobs/:id. Home and the
+          // editor both land there, so a job read from either side is the
+          // same page. (The older workflow overlay is no longer linked.)
+          onOpenJob={(id) => {
+            if (id == null) return
+            setWorkRoute({ job: Number(id), run: null })
+            setTab('work')
+            setOverlay(null)
+          }}
           // A finding's run target opens that exact item through Work's own
           // run route; JobDetail fetches it by id, so an item outside the
           // first loaded page opens just the same.
@@ -726,7 +738,6 @@ function AppInner() {
           // server still decides what each one may contain.
           seat={seat}
           people={orgPeople}
-          onOpenWorkflow={(id) => id && setOverlay({ kind: 'workflow', id })}
         />
       </TabPane>
     </>

@@ -243,6 +243,23 @@ export function settingsRows(job) {
 }
 
 /**
+ * The steps the operator DECLARED, in order — who holds the work at each.
+ * Read off the job's current version; empty until somebody declares them.
+ * Kept here so the job page never spells the internal field name.
+ */
+export function declaredSteps(job) {
+  const raw = Array.isArray(job?.stations) ? job.stations : []
+  return raw
+    .filter((s) => s && typeof s === 'object')
+    .map((s) => ({
+      kind: s.holder_type === 'human' ? 'human' : s.holder_type === 'system' ? 'tool' : 'agent',
+      label: String(s.label || s.holder || s.holder_type || '').trim(),
+      holder: s.label && s.holder ? String(s.holder).trim() : '',
+    }))
+    .filter((s) => s.label)
+}
+
+/**
  * Recent runs, newest first — every state, not just the closed ones.
  *
  * The job page's list is a sample of what this job has been doing lately, so

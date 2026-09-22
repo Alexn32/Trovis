@@ -26,8 +26,12 @@ test('App wires every destination Home expects', () => {
   assert.match(app, /onOpenCost=\{\(days\) => setOverlay\(\{ kind: 'cost', days: days \?\? null \}\)\}/)
   assert.match(app, /initialRange=\{overlay\.days \?\? undefined\}/)
   assert.match(app, /onConnectAgent=\{openAddAgent\}/)
-  // The by-job bars open the job pane App already owns.
-  assert.match(app, /onOpenJob=\{\(id\) => id && setOverlay\(\{ kind: 'workflow', id \}\)\}/)
+  // The by-job bars open THE job page — Work's, at /work/jobs/:id — so a
+  // job read from Home is the same page as a job read from Work.
+  const openJob = app.slice(app.indexOf('onOpenJob={(id) => {'), app.indexOf('onOpenRun'))
+  assert.match(openJob, /setWorkRoute\(\{ job: Number\(id\), run: null \}\)/)
+  assert.match(openJob, /setTab\('work'\)/)
+  assert.doesNotMatch(app, /onOpenJob=\{\(id\) => id && setOverlay\(\{ kind: 'workflow', id \}\)\}/)
   // Home never invents a URL route; every destination is App state.
   assert.doesNotMatch(readFileSync(new URL('../src/HomeView.jsx', import.meta.url), 'utf8'), /window\.location|history\.push/)
 })
