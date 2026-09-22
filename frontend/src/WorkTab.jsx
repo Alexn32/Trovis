@@ -29,7 +29,7 @@ import {
   resolveDensity, resolveView, scopeLine, situationTiles, stateSegments, tileTarget,
 } from './workPage.js'
 import {
-  computedFrom, declaredSteps, healthRows, jobPath, jobStats, recentRuns, settingsRows,
+  computedFrom, flowHeatLabel, healthRows, jobFlow, jobPath, jobStats, recentRuns, settingsRows,
 } from './jobPage.js'
 import { CompletionChart, JobBreakdown } from './HomeSections.jsx'
 import { readComparison, readJobs, readSeries, relTime } from './homeView.js'
@@ -342,12 +342,15 @@ function fmtDay(iso) {
   return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-/** The typical route, and the one branch worth naming. */
+/**
+ * The typical route the RECORD saw, and the one branch worth naming. Drawn
+ * only when nobody has declared enough steps to draw instead; it is a
+ * measurement, so its provenance line never leaves its side.
+ */
 function JobPathBand({ path, provenance }) {
   if (!path) return null
   return (
-    <div className="jp-sub" aria-label="How this job usually runs">
-      <JpLabel>How this job usually runs</JpLabel>
+    <div className="jp-flow-observed" aria-label="How this job usually runs">
       <ol className="kind-path">
         {path.map((n, i) => (
           // The connector is a sibling of the node, not a pseudo-element on
@@ -374,70 +377,185 @@ function JobPathBand({ path, provenance }) {
   )
 }
 
-/**
- * What the operator DECLARED the job's steps to be — who holds the work at
- * each step. Distinct from "How this job usually runs" above it, which is
- * what the record observed; the two sit apart so a declaration is never
- * mistaken for a measurement. Absent until somebody declares steps.
- */
-function DeclaredStepsBand({ steps }) {
-  if (!steps.length) return null
+// who holds a step → the dot on its box. Same colours as the run rows:
+// an agent is the product's teal, a person is warm, a system is muted.
+const STEP_DOT = { agent: 'teal', human: 'warn', tool: 'muted' }
+const STEP_WORD = { agent: 'agent', human: 'person', tool: 'system' }
+
+/** One declared step as a box: who, what they do, tools, and the work there now. */
+function FlowStep({ step }) {
+  const heat = flowHeatLabel(step.heat)
   return (
-    <div className="jp-sub" aria-label="Declared steps">
-      <JpLabel>Declared steps</JpLabel>
-      <ol className="kind-path">
-        {steps.map((s, i) => (
-          <li key={`${s.kind}-${s.label}-${i}`} className="kind-step">
-            {i > 0 && <span className="kind-arrow" aria-hidden="true">→</span>}
-            <span className={`kind-node kind-${s.kind}`}>
-              <span className="kind-node-label">{s.label}</span>
-              {s.holder && <span className="kind-node-pct">{s.holder}</span>}
-            </span>
-          </li>
-        ))}
-      </ol>
+    <div className={`jp-flow-step${heat ? ' is-busy' : ''}`}>
+      <div className="jp-flow-who">
+        <span className={`jp-dot is-${STEP_DOT[step.kind] || 'muted'}`} aria-hidden="true" />
+        <span className="jp-flow-name">{step.who}</span>
+        <span className="jp-flow-kind">{STEP_WORD[step.kind]}</span>
+      </div>
+      {step.label && <div className="jp-flow-what">{step.label}</div>}
+      {step.tools.length > 0 && (
+        <div className="jp-flow-tools">
+          {step.tools.map((t) => <span key={t} className="jp-tag">{t}</span>)}
+        </div>
+      )}
+      {/* Where the open work is, right now. Absent when nothing is here —
+          a box that says "0 here" is a row of zeros across the drawing. */}
+      {heat && <div className="jp-flow-heat">{heat}</div>}
+    </div>
+  )
+}
+
+/** The arrow between two steps, carrying what is handed across if declared. */
+function FlowArrow({ carrier }) {
+  return (
+    <div className="jp-flow-arrow" aria-hidden="true">
+      {carrier && <span className="jp-flow-carrier">{carrier}</span>}
+      <span className="jp-flow-line" />
     </div>
   )
 }
 
 /**
- * Health & expectations — the identity card's shape: a label, the one
- * verdict pill, a sentence, then the four metrics each naming the number it
- * is read against, or nothing. Under them, the observed path and the
- * declared steps: what the record saw, then what a person said.
+ * How this job runs — the drawing the reader asked for.
+ *
+ * Three states, in order of how much the record can say:
+ *   declared  the steps a person described, left to right, with today's
+ *             open runs placed on them and Done at the end. This is the
+ *             DECLARATION with the live work laid over it, and it says so.
+ *   observed  nobody has declared two or more steps, so the page draws the
+ *             route the record saw across recent runs — the hands the work
+ *             passed through — with its provenance line, because that is a
+ *             measurement and a measurement states its basis.
+ *   none      nothing to draw: not enough runs, no steps. One sentence and
+ *             the door to declaring them.
+ *
+ * One step alone is never drawn as "the steps". Every derived job carries
+ * exactly one — the owning agent, named once — and a diagram of one box
+ * repeats the header.
  */
-function HealthCard({ rows, declared, badge, path, provenance, steps }) {
-  const tone = VERDICT_DOT[badge?.tone] || 'muted'
+function FlowCard({ flow, path, provenance, job, runCount, onEditJob }) {
+  const edit = onEditJob && job ? (
+    <button type="button" className="jp-link" onClick={() => onEditJob(job.id)}>
+      {job.derived ? 'Describe this job' : 'Edit job'}
+    </button>
+  ) : null
+  const declared = flow.mode === 'declared'
   return (
-    <section className="jp-card" aria-label="Health">
+    <section className="jp-card" aria-label="How this job runs">
       <div className="jp-card-head">
-        <JpLabel>Health &amp; expectations</JpLabel>
-        {badge && <JpPill tone={tone}>{badge.label}</JpPill>}
+        <JpLabel>How this job runs</JpLabel>
+        {declared && flow.live && (
+          <span className="jp-count">
+            {flow.doneToday !== null && `${flow.doneToday} finished today`}
+          </span>
+        )}
       </div>
-      <p className="jp-lede">
-        {declared
-          ? 'Observed over the window, read against what this job declared. A number turns red only where a declared ceiling or floor exists and was crossed.'
-          : 'No expectation set. These are the observed numbers; nothing is being graded against them.'}
-      </p>
-      <dl className="jp-metrics">
-        {rows.map((r) => (
-          <div
-            key={r.key}
-            className={`jp-metric${r.over ? ' is-over' : ''}${r.noData ? ' is-nodata' : ''}`}
-          >
-            <dt>{r.label}</dt>
-            {/* Rule 6: the words, not a dash. A dash beside three rows of
-                numbers reads as a small value rather than as no value. */}
-            <dd className="jp-metric-value">{r.observed}</dd>
-            {/* Empty, not a dash pretending to be a verdict. */}
-            <dd className="jp-metric-expected">
-              {r.noData && r.expected ? `${r.expected} · not checked` : r.expected || ''}
-            </dd>
+      {declared ? (
+        <>
+          <p className="jp-lede">
+            The steps this job was described with, and where its open runs are right now.
+          </p>
+          <div className="jp-flow" role="list">
+            {flow.steps.map((s, i) => (
+              <div key={`${s.who}-${i}`} className="jp-flow-cell" role="listitem">
+                {i > 0 && <FlowArrow carrier={flow.steps[i - 1].carrier} />}
+                <FlowStep step={s} />
+              </div>
+            ))}
+            <div className="jp-flow-cell" role="listitem">
+              <FlowArrow carrier={flow.steps[flow.steps.length - 1].carrier} />
+              <div className="jp-flow-step is-done">
+                <div className="jp-flow-who">
+                  <span className="jp-dot is-ok" aria-hidden="true" />
+                  <span className="jp-flow-name">Done</span>
+                </div>
+                {flow.live && flow.doneToday !== null && (
+                  <div className="jp-flow-what">{flow.doneToday} today</div>
+                )}
+              </div>
+            </div>
           </div>
-        ))}
-      </dl>
-      <JobPathBand path={path} provenance={provenance} />
-      <DeclaredStepsBand steps={steps} />
+          {/* Real work the drawing could not place. Hiding it would claim
+              the steps are complete when the record says otherwise. */}
+          {flow.offPath > 0 && (
+            <p className="jp-quiet jp-flow-note">
+              {flow.offPath} open {flow.offPath === 1 ? 'run is' : 'runs are'} not following these steps.
+            </p>
+          )}
+        </>
+      ) : path ? (
+        <>
+          <p className="jp-lede">
+            Nobody has described this job&apos;s steps yet, so this is the route its recent runs
+            actually took — who held the work, in order.{' '}
+            {edit && <>Describe the steps to see the work placed on them. {edit}</>}
+          </p>
+          <JobPathBand path={path} provenance={provenance} />
+        </>
+      ) : runCount > 0 ? (
+        // Runs exist but every one stayed in one pair of hands, so there is
+        // no route to draw. Say that — "not enough runs" would be false.
+        <p className="jp-lede">
+          Every run on record so far was handled {flow.solo ? `by ${flow.solo}` : 'by one agent'} from
+          start to finish, without passing to a person or another system.{' '}
+          {edit && <>If the job has more steps than that, describe them and they will be drawn here. {edit}</>}
+        </p>
+      ) : (
+        <p className="jp-lede">
+          No runs on the record yet, so there is nothing to draw.{' '}
+          {edit && <>Describe its steps and they will be drawn here. {edit}</>}
+        </p>
+      )}
+    </section>
+  )
+}
+
+/**
+ * Expectations — what this job was told to hit, and how it is doing against
+ * each. Only DECLARED targets get a row: a grid of four "No data" cells under
+ * a sentence saying nothing is being graded was the page describing its own
+ * emptiness. With nothing declared, one sentence and the door to declaring.
+ * The verdict itself lives in the header, once.
+ */
+function ExpectationsCard({ rows, declared, job, onEditJob }) {
+  const shown = declared ? rows.filter((r) => r.declared) : []
+  const edit = onEditJob && job ? (
+    <button type="button" className="jp-link" onClick={() => onEditJob(job.id)}>Set expectations</button>
+  ) : null
+  return (
+    <section className="jp-card" aria-label="Expectations">
+      <JpLabel>Expectations</JpLabel>
+      {shown.length > 0 ? (
+        <>
+          <p className="jp-lede">
+            What this job is expected to do, and what it has actually done over the window.
+            A number turns red only where a target was set and missed.
+          </p>
+          <dl className="jp-metrics">
+            {shown.map((r) => (
+              <div
+                key={r.key}
+                className={`jp-metric${r.over ? ' is-over' : ''}${r.noData ? ' is-nodata' : ''}`}
+              >
+                <dt>{r.label}</dt>
+                {/* Rule 6: the words, not a dash. A dash beside rows of
+                    numbers reads as a small value rather than as no value. */}
+                <dd className="jp-metric-value">{r.observed}</dd>
+                <dd className="jp-metric-expected">
+                  {r.noData ? `${r.expected} · not checked yet` : r.expected}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      ) : (
+        <p className="jp-lede">
+          No expectations set. Tell Trovis how often this job should run, how long a run should
+          take, or how often it may need a person or fail, and each run will be graded against
+          that.{' '}
+          {edit}
+        </p>
+      )}
     </section>
   )
 }
@@ -574,11 +692,12 @@ function ArchiveZone({ onArchive }) {
  *   1. What is this & is it OK?   (header: name, verdict, definition)
  *   2. How is it doing?           (the window strip)
  *   3. What has it been doing?    (runs, filtered and paged)
- *   4. Is it what it declared?    (health & expectations, path, steps)
- *   5. How is it recognised?      (settings, history)
+ *   4. How does it run?           (the steps, with today's work on them)
+ *   5. Is it what it declared?    (expectations, only the declared ones)
+ *   6. How is it recognised?      (settings, history)
  */
 function JobPage({
-  job, jobErr, name, runs: jobRuns, runsLoading, runsCursor, onLoadMoreRuns,
+  job, jobErr, name, map, runs: jobRuns, runsLoading, runsCursor, onLoadMoreRuns,
   filter, onFilter, onClearFilter, onBack, onOpenItem, onOpenAgent, onEditJob, onArchive,
 }) {
   const now = Date.now()
@@ -599,7 +718,10 @@ function JobPage({
   const [expanded, setExpanded] = useState(false)
   const RECENT = 8
   const visible = expanded ? runs : runs.slice(0, RECENT)
-  const steps = declaredSteps(job)
+  // The drawing: declared steps with the live map laid over them, else the
+  // observed route. The map is fail-soft — without it the steps still draw,
+  // just with nobody placed on them.
+  const flow = jobFlow(job, map, { now })
   const versions = Array.isArray(job?.versions) ? job.versions : []
   // The one verdict, from the same rule the board uses, over the same runs.
   const grouped = job ? groupByJob([job], mine, { now })[0] : null
@@ -667,8 +789,9 @@ function JobPage({
             {stats.map((st) => (
               <div key={st.key} className={`jp-stat${st.value === null ? ' is-nodata' : ''}`}>
                 <div className="jp-stat-label">{st.label}</div>
-                {/* Rule 6, said the same way the health section says it. */}
-                <div className="jp-stat-value">{st.value ?? 'No data'}</div>
+                {/* Rule 6, said the same way the expectations card says it —
+                    and with the cause where it is known. */}
+                <div className="jp-stat-value">{st.value ?? st.empty ?? 'No data'}</div>
                 {/* The denominator, when it is not the whole job. */}
                 {st.sub && st.value != null && <div className="jp-stat-sub">{st.sub}</div>}
               </div>
@@ -753,17 +876,25 @@ function JobPage({
           )}
         </section>
 
-        {/* 4. Is it what it declared. */}
-        <HealthCard
-          rows={health}
-          declared={Boolean(job?.has_expectation)}
-          badge={badge}
-          path={path}
-          provenance={provenance}
-          steps={steps}
-        />
+        {/* 4. How it runs — the steps, drawn, with today's work on them. */}
+        {job && (
+          <FlowCard
+            flow={flow} path={path} provenance={provenance} job={job}
+            runCount={mine.length} onEditJob={onEditJob}
+          />
+        )}
 
-        {/* 5. How it is recognised, and how its definition changed. */}
+        {/* 5. Is it what it declared — only the declared targets. */}
+        {job && (
+          <ExpectationsCard
+            rows={health}
+            declared={Boolean(job?.has_expectation)}
+            job={job}
+            onEditJob={onEditJob}
+          />
+        )}
+
+        {/* 6. How it is recognised, and how its definition changed. */}
         {(settings.length > 0 || versions.length > 0) && (
           <section className="jp-card" aria-label="Settings">
             <JpLabel>Settings</JpLabel>
@@ -996,7 +1127,7 @@ function JobList({ grouped, now, onOpenJob }) {
         <span role="columnheader">Verdict</span>
         <span role="columnheader" className="is-num">Open</span>
         <span role="columnheader">Last run</span>
-        <span role="columnheader">Cadence</span>
+        <span role="columnheader">Runs / day</span>
         <span role="columnheader" className="is-num">Cost / run</span>
       </div>
       {lines.map((l) => {
@@ -1556,6 +1687,22 @@ export default function WorkTab({
         .catch((e) => isAlive() && setJobDetailErr(e))
     })
   }, [route.job, active])
+  // Where this job's open runs are on its declared steps, and how many
+  // finished today — the drawing's live layer. Job page only, fail-soft: a
+  // failed read leaves the steps drawn with nobody placed on them.
+  const [jobMap, setJobMap] = useState(null)
+  useEffect(() => {
+    if (!route.job || !active) {
+      if (!route.job) setJobMap(null)
+      return undefined
+    }
+    return startAbortable(({ signal, isAlive }) => {
+      api
+        .getWorkflowMap(route.job, { signal })
+        .then((m) => isAlive() && setJobMap(m))
+        .catch(() => isAlive() && setJobMap(null))
+    })
+  }, [route.job, active])
   // THIS job's runs, in every state — one lean column-filtered read.
   //
   // Not sliced out of the board's 50-row page: that page is ordered by
@@ -1891,6 +2038,7 @@ export default function WorkTab({
         job={jobDetail}
         jobErr={jobDetailErr}
         name={kindName}
+        map={jobMap}
         runs={finished}
         runsLoading={finishedLoading}
         runsCursor={finishedCursor}

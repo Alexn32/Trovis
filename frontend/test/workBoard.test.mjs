@@ -313,7 +313,7 @@ test('an off-expectation metric names both numbers', () => {
     intervention_pct: 18, expected_intervention_pct: 10, last_run_at: ago(60),
   })], [run({ id: 1, status: 'moving' })], { now: NOW })
   assert.deepEqual(healthBadge(rows[0], { now: NOW }),
-                   { tone: 'warning', label: 'Intervention 18%, expected under 10%' })
+                   { tone: 'warning', label: 'Needed a person 18%, expected under 10%' })
 })
 
 test('a ceiling that is met is not a finding', () => {
@@ -326,7 +326,7 @@ test('a ceiling that is met is not a finding', () => {
 test('close time over its ceiling reads in time, not seconds', () => {
   assert.equal(
     firstOverCeiling(job({ median_close_s: 3960, expected_close_s: 360 })),
-    'Close time 1h 06m, expected under 6m 00s')
+    'Time to finish 1h 06m, expected under 6m 00s')
 })
 
 // --- the quiet line ---------------------------------------------------------

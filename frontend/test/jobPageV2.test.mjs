@@ -8,7 +8,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  computedFrom, costBasis, costLabel, healthRows, jobPath, jobStats, recentRuns, settingsRows,
+  NO_FINISHED, computedFrom, costBasis, costLabel, flowHeatLabel, healthRows, jobFlow, jobPath,
+  jobStats, recentRuns, settingsRows,
 } from '../src/jobPage.js'
 import { kindPath } from '../src/board.js'
 import { groupByJob, healthBadge, unmeasuredExpectations } from '../src/workBoard.js'
@@ -162,9 +163,9 @@ test('one kind of holder is still not a path', () => {
 
 test('a stat the record cannot supply is absent, never zero', () => {
   const stats = jobStats(job(), { now: NOW })
-  assert.deepEqual(stats.map((s) => s.key), ['last', 'cadence', 'close', 'cost'])
-  assert.equal(stats.find((s) => s.key === 'close').value, null,
-               'a job that never closed a run has no median close time')
+  assert.deepEqual(stats.map((s) => s.key), ['last', 'perDay', 'finish', 'cost'])
+  assert.equal(stats.find((s) => s.key === 'finish').value, null,
+               'a job that never finished a run has no typical time to finish')
   assert.equal(stats.find((s) => s.key === 'cost').value, null)
   assert.equal(stats.find((s) => s.key === 'last').value, null)
 })
@@ -176,6 +177,50 @@ test('stats read the way a person says them', () => {
   }), { now: NOW })
   assert.deepEqual(stats.map((s) => s.value),
                    ['4h 02m ago', '10/day', '4m 18s', '$0.0042'])
+})
+
+test('the stat labels are a manager\'s words, not a statistician\'s', () => {
+  // Browser-caught, by the person who owns the product: "wtf is Cadence or
+  // Median close". The number was right and nobody could read it.
+  const labels = jobStats(job(), { now: NOW }).map((s) => s.label)
+  assert.deepEqual(labels, ['Last run', 'Runs per day', 'Typical time to finish', 'Cost per run'])
+  for (const l of [...labels, ...healthRows(job()).map((r) => r.label)]) {
+    assert.doesNotMatch(l, /cadence|median|close|intervention|volume|rate/i, l)
+  }
+  assert.deepEqual(healthRows(job()).map((r) => r.label),
+                   ['Runs per day', 'Time to finish', 'Needed a person', 'Failed'])
+})
+
+test('runs per day says how many runs over how many days', () => {
+  // A rate with no denominator is an assertion. "0.1/day" alone read as a
+  // broken number; "2 runs in the last 14 days" is what it means.
+  const st = jobStats(job({ started_runs: 2, window_days: 14 }), { now: NOW })
+  assert.equal(st.find((s) => s.key === 'perDay').sub, '2 runs in the last 14 days')
+  assert.equal(jobStats(job({ started_runs: 1, window_days: 14 }), { now: NOW })
+    .find((s) => s.key === 'perDay').sub, '1 run in the last 14 days')
+  assert.equal(jobStats(job({ started_runs: null }), { now: NOW }).find((s) => s.key === 'perDay').sub, null)
+})
+
+test('a finish-side number with nothing finished says WHY it is missing', () => {
+  // "No data" reads as a fault in the pipeline. When the record knows the
+  // cause — nothing has finished yet — it says that instead, on the stat and
+  // on every finish-side expectation row alike. Runs per day is measured
+  // over runs STARTED, so it keeps the bare wording: the cause there is not
+  // known.
+  const j = job({ started_runs: 4, closed_runs: 0, window_days: 14 })
+  const st = jobStats(j, { now: NOW })
+  assert.equal(st.find((s) => s.key === 'finish').value, null)
+  assert.equal(st.find((s) => s.key === 'finish').empty, NO_FINISHED)
+  assert.equal(NO_FINISHED, 'No finished runs yet')
+  const by = Object.fromEntries(healthRows(j).map((r) => [r.key, r]))
+  for (const k of ['close', 'intervention', 'failure']) assert.equal(by[k].observed, NO_FINISHED, k)
+  // ...and the typical time carries its basis when it exists.
+  const fin = jobStats(job({ closed_runs: 28, median_close_s: 258 }), { now: NOW }).find((s) => s.key === 'finish')
+  assert.equal(fin.sub, 'over 28 finished runs')
+  assert.equal(fin.empty, null)
+  // Rendered: the cause, then the generic words, never zero.
+  const work = src('WorkTab.jsx')
+  assert.match(work, /\{st\.value \?\? st\.empty \?\? 'No data'\}/)
 })
 
 test('cost per run states what it is an average of, and only when that is not the whole window', () => {
@@ -195,14 +240,14 @@ test('cost per run states what it is an average of, and only when that is not th
   assert.match(work, /\{st\.sub && st\.value != null && <div className="jp-stat-sub">\{st\.sub\}<\/div>\}/)
 })
 
-test('cadence counts runs STARTED, not runs finished', () => {
+test('runs per day counts runs STARTED, not runs finished', () => {
   // Caught in the browser: a job that ran seven times and closed two read as
   // "0.1/day, expected 8–12" and was flagged red. That is not a slow job, it
   // is the wrong question — a declared per-day expectation asks how often the
   // job runs. The two counts must be able to disagree without the page
   // reading the wrong one.
   const j = job({ started_runs: 140, closed_runs: 28, window_days: 14 })
-  assert.equal(jobStats(j, { now: NOW }).find((s) => s.key === 'cadence').value, '10/day')
+  assert.equal(jobStats(j, { now: NOW }).find((s) => s.key === 'perDay').value, '10/day')
   assert.equal(healthRows(j).find((r) => r.key === 'volume').observed, '10/day')
   // A job mid-flight — nothing closed yet — still has a cadence.
   const open = job({ started_runs: 28, closed_runs: 0, window_days: 14 })
@@ -220,11 +265,27 @@ test('all four metrics report, each naming its own number', () => {
     expected_failure_pct: 2,
   }))
   assert.deepEqual(rows.map((r) => [r.label, r.observed, r.expected, r.over]), [
-    ['Volume', '10/day', 'expected 8–12', false],
-    ['Close time', '4m 18s', 'expected under 6m 00s', false],
-    ['Intervention', '18%', 'expected under 10%', true],
-    ['Failure rate', '3.2%', 'expected under 2%', true],
+    ['Runs per day', '10/day', 'expected 8–12', false],
+    ['Time to finish', '4m 18s', 'expected under 6m 00s', false],
+    ['Needed a person', '18%', 'expected under 10%', true],
+    ['Failed', '3.2%', 'expected under 2%', true],
   ])
+  assert.ok(rows.every((r) => r.declared), 'every row here has a target')
+})
+
+test('the expectations card shows ONLY the declared targets', () => {
+  // Browser-caught: a card headed "No expectation set… nothing is being
+  // graded" over four rows, three reading No data. The card was describing
+  // its own emptiness. A row is a comparison; with no target there is none.
+  const rows = healthRows(job({ started_runs: 140, window_days: 14, expected_close_s: 360 }))
+  assert.deepEqual(rows.filter((r) => r.declared).map((r) => r.key), ['close'])
+  const work = src('WorkTab.jsx')
+  const card = work.slice(work.indexOf('function ExpectationsCard'), work.indexOf('function RunRow'))
+  assert.match(card, /declared \? rows\.filter\(\(r\) => r\.declared\) : \[\]/)
+  assert.match(card, /No expectations set\./)
+  assert.match(card, /Set expectations/)
+  // One verdict on the page: the header's. The card carries no second pill.
+  assert.doesNotMatch(card, /JpPill|badge/)
 })
 
 test('an undeclared metric shows the observation with an EMPTY comparison', () => {
@@ -242,7 +303,7 @@ test('an undeclared metric shows the observation with an EMPTY comparison', () =
 })
 
 test('a metric with no observation and no ceiling claims nothing at all', () => {
-  const rows = healthRows(job({ started_runs: 0, closed_runs: 0 }))
+  const rows = healthRows(job({ started_runs: 0, closed_runs: null }))
   const iv = rows.find((r) => r.key === 'intervention')
   // Rule 6: the words, not a dash, and never a verdict either way.
   assert.equal(iv.observed, 'No data')
@@ -251,19 +312,23 @@ test('a metric with no observation and no ceiling claims nothing at all', () => 
   assert.equal(iv.over, false)
 })
 
-test('RULE 6 — a missing observation reads as No data, on every metric', () => {
+test('RULE 6 — a missing observation reads as words, on every metric', () => {
   // Nothing has closed, so three of the four metrics have no number. Each
-  // says so in words. An em dash next to three rows of real numbers reads as
-  // a small value, which is the opposite of what it means.
+  // says so in words — and names the cause, since here it is known. An em
+  // dash next to three rows of real numbers reads as a small value, which is
+  // the opposite of what it means.
   const rows = healthRows(job({ started_runs: 4, closed_runs: 0, window_days: 14 }))
   const by = Object.fromEntries(rows.map((r) => [r.key, r]))
   assert.equal(by.volume.observed, '0.3/day', 'runs STARTED is measurable without a close')
   assert.equal(by.volume.noData, false)
   for (const k of ['close', 'intervention', 'failure']) {
-    assert.equal(by[k].observed, 'No data', k)
+    assert.equal(by[k].observed, 'No finished runs yet', k)
     assert.equal(by[k].noData, true, k)
     assert.equal(by[k].over, false, `${k} cannot breach a ceiling it never measured`)
   }
+  // With the closed count itself unknown, the cause is unknown too.
+  const unknown = healthRows(job({ started_runs: 4, closed_runs: null, window_days: 14 }))
+  assert.equal(unknown.find((r) => r.key === 'close').observed, 'No data')
 })
 
 test('RULE 6 — a declared check with no observation is NOT a pass', () => {
@@ -279,7 +344,7 @@ test('RULE 6 — a declared check with no observation is NOT a pass', () => {
   const badge = healthBadge(row, { now: NOW })
   assert.notEqual(badge.label, 'Healthy', 'a check that did not run did not pass')
   assert.equal(badge.tone, 'none', 'and it is not a warning either — it is unknown')
-  assert.equal(badge.label, 'No data for close time', 'and it names WHICH check')
+  assert.equal(badge.label, 'No data for time to finish', 'and it names WHICH check')
 })
 
 test('RULE 6 — the badge names how many checks it could not run', () => {
@@ -319,10 +384,10 @@ test('RULE 6 — a measured ZERO is a measurement, not a gap', () => {
   // ...and null on either side is.
   assert.deepEqual(unmeasuredExpectations(job({
     expected_per_day_min: 8, started_runs: null,
-  })), ['cadence'])
+  })), ['runs per day'])
   assert.deepEqual(unmeasuredExpectations(job({
     expected_close_s: 360, median_close_s: null,
-  })), ['close time'])
+  })), ['time to finish'])
   // An undeclared metric is not a gap — there was no check to run.
   assert.deepEqual(unmeasuredExpectations(job({ median_close_s: null })), [])
   assert.deepEqual(unmeasuredExpectations(null), [])
@@ -339,7 +404,7 @@ test('RULE 6 — a breach outranks a gap, and both outrank green', () => {
   }))
   const badge = healthBadge(row, { now: NOW })
   assert.equal(badge.tone, 'warning')
-  assert.match(badge.label, /^Failure rate 40%/)
+  assert.match(badge.label, /^Failed 40%/)
 })
 
 test('RULE 6 — with neither an expectation nor an observation, say both', () => {
@@ -547,20 +612,113 @@ test('no jargon on the job page', () => {
   for (const m of pageSrc.matchAll(/>([^<>{}]{3,})</g)) {
     assert.ok(!FORBIDDEN.test(m[1]), `job page ships jargon: ${JSON.stringify(m[1])}`)
   }
-  for (const s of ['How this job usually runs', 'Recent runs', 'Health', 'Settings']) {
+  for (const s of ['How this job runs', 'Recent runs', 'Expectations', 'Settings']) {
     assert.ok(!FORBIDDEN.test(s), s)
   }
+  // The cards above JobPage carry copy too — same rule, same check.
+  const cards = work.slice(work.indexOf('function FlowStep'), work.indexOf('function JobPage'))
+  for (const m of cards.matchAll(/>([^<>{}]{3,})</g)) {
+    assert.ok(!FORBIDDEN.test(m[1]), `job page card ships jargon: ${JSON.stringify(m[1])}`)
+  }
+})
+
+// --- how this job runs: the drawing -------------------------------------------
+
+const stations = [
+  { holder_type: 'agent', holder: 'triage-agent', label: 'Reads the ticket', tools: 'zendesk, slack', carrier: 'a draft' },
+  { holder_type: 'human', holder: 'Sarah', label: 'Approves the refund', tools: '', carrier: 'approval' },
+  { holder_type: 'system', holder: 'Stripe', label: 'Issues it', tools: '' },
+]
+const nsAgo = (s) => (NOW - s * 1000) * 1e6
+const map = {
+  loops: [
+    { id: 1, position: { status: 'on_path', station_index: 1 }, last_event_unix: nsAgo(3 * 3600) },
+    { id: 2, position: { status: 'on_path', station_index: 1 }, last_event_unix: nsAgo(600) },
+    { id: 3, position: { status: 'on_path', station_index: 0 }, last_event_unix: nsAgo(30) },
+    { id: 4, position: { status: 'off_path', station_index: null }, last_event_unix: nsAgo(60) },
+  ],
+  done_today: 7,
+}
+
+test('declared steps draw as boxes, in order, with who holds each and the work there now', () => {
+  const flow = jobFlow(job({ stations }), map, { now: NOW })
+  assert.equal(flow.mode, 'declared')
+  assert.deepEqual(flow.steps.map((s) => [s.kind, s.who, s.label]), [
+    ['agent', 'triage-agent', 'Reads the ticket'],
+    ['human', 'Sarah', 'Approves the refund'],
+    ['tool', 'Stripe', 'Issues it'],
+  ])
+  assert.deepEqual(flow.steps[0].tools, ['zendesk', 'slack'])
+  assert.equal(flow.steps[0].carrier, 'a draft')
+  // The live layer: two runs sit with Sarah, the older one three hours.
+  assert.equal(flow.steps[1].heat.count, 2)
+  assert.equal(flow.steps[1].heat.oldestS, 3 * 3600)
+  assert.equal(flowHeatLabel(flow.steps[1].heat), '2 here · 3h')
+  assert.equal(flowHeatLabel(flow.steps[0].heat), '1 here · under a minute')
+  assert.equal(flowHeatLabel(flow.steps[2].heat), null, 'nothing here says nothing, never "0 here"')
+  assert.equal(flow.doneToday, 7)
+  assert.equal(flow.offPath, 1, 'a run the steps cannot place is still counted')
+  assert.equal(flow.live, true)
+})
+
+test('the steps still draw when the live map has not arrived — with nobody placed on them', () => {
+  const flow = jobFlow(job({ stations }), null, { now: NOW })
+  assert.equal(flow.mode, 'declared')
+  assert.equal(flow.steps.length, 3)
+  assert.ok(flow.steps.every((s) => s.heat === null))
+  assert.equal(flow.live, false)
+  assert.equal(flow.doneToday, null, 'not zero: the count was not read')
+  assert.equal(flow.offPath, 0)
+})
+
+test('ONE declared step is not a drawing — the page falls back to the observed route', () => {
+  // Browser-caught: "Declared steps: 1. Chief of Staff?" Every derived job
+  // carries exactly one station — the owning agent, named once — and a
+  // diagram of one box repeats the header.
+  assert.equal(jobFlow(job({ stations: [stations[0]] }), map).mode, 'observed')
+  assert.equal(jobFlow(job({ stations: [] }), map).mode, 'observed')
+  assert.equal(jobFlow(job(), null).mode, 'observed')
+  assert.equal(jobFlow(null, null).mode, 'observed')
+  // ...and it carries the one name it has, so the page can say "every run
+  // stayed with X" — "not enough runs" over six runs was a false statement.
+  assert.equal(jobFlow(job({ stations: [stations[0]] }), null).solo, 'triage-agent')
+  assert.equal(jobFlow(job({ stations: [], derived_from: 'ops-bot' }), null).solo, 'ops-bot')
+  assert.equal(jobFlow(job(), null).solo, null)
+  const card = src('WorkTab.jsx')
+  assert.match(card, /runCount > 0 \?/)
+  assert.match(card, /Every run on record so far was handled/)
+  assert.doesNotMatch(card, /Not enough runs on the record/)
+})
+
+test('a step with no name is still a step — named by what holds it', () => {
+  const flow = jobFlow(job({ stations: [{ holder_type: 'human' }, { holder_type: 'system' }, {}] }), null)
+  assert.deepEqual(flow.steps.map((s) => s.who), ['A person', 'A system', 'An agent'])
+})
+
+test('the drawing is wired: the page reads the live map, fail-soft, on the job page only', () => {
+  const tab = src('WorkTab.jsx')
+  assert.match(tab, /api\s*\.getWorkflowMap\(route\.job, \{ signal \}\)/)
+  assert.match(tab, /\.catch\(\(\) => isAlive\(\) && setJobMap\(null\)\)/, 'a failed map read leaves the steps drawn')
+  assert.match(tab, /map=\{jobMap\}/)
+  const card = tab.slice(tab.indexOf('function FlowCard'), tab.indexOf('function ExpectationsCard'))
+  assert.match(card, /How this job runs/)
+  assert.match(card, /flow\.offPath > 0 &&/, 'work the steps cannot place is said, not hidden')
+  assert.match(card, /finished today/)
+  // The observed route keeps its provenance line — it is a measurement.
+  assert.match(card, /<JobPathBand path=\{path\} provenance=\{provenance\} \/>/)
+  // No "Declared steps" list of pills any more: the drawing replaced it.
+  assert.doesNotMatch(tab, /DeclaredStepsBand|Declared steps/)
 })
 
 // --- one job page ---------------------------------------------------------------
 
-test('the job page is THE job page: edit door, declared steps, history, paged runs', () => {
+test('the job page is THE job page: edit door, the drawing, history, paged runs', () => {
   const page = work.slice(work.indexOf('function JobPage'), work.indexOf('function WorkHome'))
   // One edit door, worded for what it does on each kind of job.
   assert.match(page, /\{job\.derived \? 'Describe this job' : 'Edit job'\}/)
-  // Declared steps sit apart from the observed path, so a declaration is
-  // never read as a measurement.
-  assert.match(work, /<JobPathBand path=\{path\} provenance=\{provenance\} \/>\s*<DeclaredStepsBand steps=\{steps\} \/>/)
+  // The drawing and the expectations, each its own card, fed by the page.
+  assert.match(page, /<FlowCard\s+flow=\{flow\} path=\{path\} provenance=\{provenance\} job=\{job\}\s+runCount=\{mine\.length\}/)
+  assert.match(page, /<ExpectationsCard\s+rows=\{health\}/)
   assert.match(page, /<HistoryBand versions=\{versions\} \/>/)
   // Runs: the board's status vocabulary, and a Load more that continues the
   // same server question (this job's id) — never a second predicate.
