@@ -2283,6 +2283,10 @@ def init_db() -> None:
         # After loop_id exists: classify leftover titles from before
         # title_source. No-op on a fresh DB (no titled loops yet).
         _backfill_loop_title_source(cur)
+        # After title_source is classified and loops.workflow_id exists: retire
+        # derived jobs that hold no NAMED run (created before the fallback
+        # was gated on named work). Idempotent.
+        _archive_unnamed_derived_jobs(cur)
         for idx in _INDEXES:
             cur.execute(idx)
         # Bootstrap the pricing table with a handful of common models so
@@ -3822,7 +3826,7 @@ def ingest_spans_with_loops(
             if loop_id in frozen:
                 continue
             cur.execute(
-                "SELECT id, service_name, agent_id, title, "
+                "SELECT id, service_name, agent_id, title, title_source, "
                 "workflow_id, workflow_version FROM loops "
                 f"WHERE id = {PH}",
                 (loop_id,),
@@ -7663,14 +7667,44 @@ def archive_workflow(workflow_id: int, account_id: int | None) -> dict[str, Any]
         cur.execute(sql, tuple(args))
         if cur.fetchone() is None:
             return None
-        now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
-        # ALLOWED WRITE 2 of 2 on workflows: setting archived_at (once).
-        cur.execute(
-            f"UPDATE workflows SET archived_at = {now_sql} "
-            f"WHERE id = {PH} AND archived_at IS NULL",
-            (workflow_id,),
-        )
+        _archive_workflow_row(cur, workflow_id)
     return get_workflow(workflow_id, account_id)
+
+
+def _archive_workflow_row(cur, workflow_id: int) -> None:
+    """ALLOWED WRITE 2 of 3 on workflows: setting archived_at (once). The one
+    statement, shared by the archive endpoint and the boot sweep below."""
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    cur.execute(
+        f"UPDATE workflows SET archived_at = {now_sql} "
+        f"WHERE id = {PH} AND archived_at IS NULL",
+        (workflow_id,),
+    )
+
+
+def _archive_unnamed_derived_jobs(cur) -> int:
+    """Retire derived jobs that hold no NAMED run.
+
+    Before the fallback was gated on named work it derived a job for every
+    agent that sent a span, so the job list read as a copy of the Agents
+    page. A derived job whose runs are all untitled OTel flood is exactly
+    that: not work anyone named, so not a job. Archive, never delete —
+    the runs keep their link and their history stays readable. Idempotent;
+    a job a person promoted (derived_from NULL) is never touched, and a
+    derived job with even one named run stays.
+    """
+    cur.execute(
+        "SELECT w.id FROM workflows w "
+        "WHERE w.derived_from IS NOT NULL AND w.archived_at IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM loops l WHERE l.workflow_id = w.id "
+        "AND l.title_source = 'provided')"
+    )
+    ids = [int(r["id"]) for r in cur.fetchall()]
+    for wid in ids:
+        _archive_workflow_row(cur, wid)
+    if ids:
+        logger.info("archived %d derived job(s) holding no named run", len(ids))
+    return len(ids)
 
 
 def _workflow_loop_aggregates(
@@ -8240,16 +8274,25 @@ def _apply_workflow_match(
     from the job board it belongs on. Kept links are reported by
     stale_workflow_links() so a wrong one is findable rather than permanent.
 
-    EVERY RUN BELONGS TO A JOB: when no declared job claims a run that has
-    none yet, it is filed under the job derived from its agent (see
-    _ensure_derived_workflow), and that job's hint set joins `hint_sets` in
-    place so the rest of the batch matches it without another lookup. The
-    record is never refused and never left unfiled; a person refines the
-    default by declaring a job, which the matcher prefers on the next pass.
+    EVERY NAMED RUN BELONGS TO A JOB: when no declared job claims a run that
+    has none yet AND the run is named work (`title_source = 'provided'` —
+    a person or their plugin gave it a human title), it is filed under the
+    job derived from its agent (see _ensure_derived_workflow), and that
+    job's hint set joins `hint_sets` in place so the rest of the batch
+    matches it without another lookup. The untitled OTel flood is NOT named
+    work: Work never shows it, so it earns no job — an agent that only
+    emits untitled traces is an agent on the Agents page, not a job. That
+    is the same line /work/overview and /work/items already draw. A person
+    refines the default by declaring a job, which the matcher prefers.
     """
     lp = _loops_mod()
     m = lp.match_workflow(loop_row, hint_sets)
-    if m is None and loop_row.get("workflow_id") is None and account_id is not None:
+    if (
+        m is None
+        and loop_row.get("workflow_id") is None
+        and account_id is not None
+        and loop_row.get("title_source") == "provided"
+    ):
         derived = _ensure_derived_workflow(cur, account_id, loop_row.get("service_name"))
         if derived is not None:
             wf_id, version = derived
@@ -8365,7 +8408,7 @@ def rematch_open_loop(
     acct_sql, acct_args = _loop_account_clause(account_id)
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
-            "SELECT id, service_name, agent_id, title, closed_at, "
+            "SELECT id, service_name, agent_id, title, title_source, closed_at, "
             "cached_state, workflow_id, workflow_version FROM loops "
             f"WHERE id = {PH} {acct_sql}",
             tuple([loop_id, *acct_args]),
