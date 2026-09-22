@@ -236,6 +236,17 @@ New runs land as **named Work** on Trovis (`GET /work/items`,
 `trovis.loop.title`. Ingest stamps the title only at loop INSERT — set it
 on the first span of the run.
 
+**Linking a work system to the run.** If the run creates or updates a
+Stripe, HubSpot or Shopify object, put the run's grouping id on that object
+as `trovis_loop_external_id` (or `trovis_run_id`): Stripe `metadata`, a
+Shopify order `note_attributes` entry, a HubSpot deal/ticket property. The
+provider's own webhooks (payment succeeded, order fulfilled, deal moved)
+then attach to this run as independent evidence. Trovis never infers the
+link from surrounding fields — without the key the event is recorded as
+received and links to nothing. Use the same value you pass as the run's
+`trovis.loop.external_id` (raw OTLP) or the id your adapter stamps as
+`trovis.run.id`.
+
 The SDK sets the title automatically when a sensible one is available:
 
 | Source | When |

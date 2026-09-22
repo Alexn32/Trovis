@@ -122,6 +122,12 @@ test('the guidance teaches Run, not Job: the title names one occurrence of work'
   assert.match(body, /Process customer returns/)
   assert.doesNotMatch(body, /groups spans into <strong>jobs/)
   assert.doesNotMatch(body, /one job is one piece of/)
+  // The SaaS link key is taught next to the grouping key: the enrichment
+  // path only fires when the provider object carries it.
+  assert.match(body, /trovis_loop_external_id/)
+  assert.match(body, /Stripe metadata/)
+  const otel = addAgent.slice(addAgent.indexOf('function otelSetupBlock'))
+  assert.match(otel.slice(0, otel.indexOf('\n}')), /trovis_loop_external_id/)
   // No recipe page anywhere calls the titled unit a job.
   assert.doesNotMatch(addAgent, /named job on Work/)
   assert.doesNotMatch(addAgent, /becomes the job'?s name in Trovis/)

@@ -286,7 +286,7 @@
     "tile_subtitle": null,
     "guide_label": null,
     "variants": [],
-    "setup_notes": "Independent evidence of deal and ticket state, linked to a run only through an explicit link key on the HubSpot object."
+    "setup_notes": "Independent evidence of deal and ticket state, linked to a run only through an explicit trovis_loop_external_id / trovis_run_id property on the HubSpot deal or ticket."
   },
   {
     "id": "shopify",
@@ -310,7 +310,7 @@
     "tile_subtitle": null,
     "guide_label": null,
     "variants": [],
-    "setup_notes": "Independent evidence of order, payment and fulfillment state, linked to a run only through an explicit link key on the order."
+    "setup_notes": "Independent evidence of order, payment and fulfillment state, linked to a run only through an explicit trovis_loop_external_id / trovis_run_id note attribute on the Shopify order."
   },
   {
     "id": "slack",

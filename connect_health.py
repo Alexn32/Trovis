@@ -44,6 +44,11 @@ Truth rules this module enforces:
     door writes on the wire (below). A bare `service.name` proves nothing
     about the vendor, so unstamped telemetry is the custom OpenTelemetry
     connector — by definition of that connector, not by guess.
+  * For a work system, `connected` means verified events ARRIVE. Whether
+    any of them reached a run is a separate, recorded fact
+    (`events_linked` from saas_events.outcome) — an event with no
+    trovis_loop_external_id / trovis_run_id on the provider object is
+    counted, not inferred into a link.
   * Fields Trovis cannot establish are None, not a default.
 
 Identity on the wire, in precedence order (`identify_connector`):
@@ -245,6 +250,15 @@ def _saas_rows(account_id: int) -> dict[str, dict[str, Any]]:
             "connection_method": "oauth" if authorized else None,
             "label": (conn or {}).get("provider_account_id") if authorized else None,
             "source_count": None,
+            # What the verified events DID. `connected` above means events
+            # arrive; it does not mean any of them reached a run — that
+            # needs a trovis_loop_external_id / trovis_run_id on the
+            # provider object. These counts let the page say which.
+            "events_received": int(act.get("event_count") or 0) if act else 0,
+            "events_linked": int(act.get("linked_count") or 0) if act else 0,
+            "events_without_link_key": int(act.get("no_link_key_count") or 0) if act else 0,
+            "events_without_open_run": int(act.get("no_open_run_count") or 0) if act else 0,
+            "last_linked_at": act.get("last_linked_at") if act else None,
         }
     return rows
 

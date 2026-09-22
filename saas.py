@@ -102,6 +102,10 @@ def apply_work_effect(
 
       ignored_no_metadata / ignored_no_loop / ignored_unknown_effect
       ignored_duplicate / applied / noop_already
+
+    Every status after the idempotency claim is also stamped on the
+    saas_events row (database.record_saas_event_outcome), so connection
+    health can say whether this provider's events ever reach a run.
     """
     provider = (provider or "").strip().lower()
     effect = (effect or "").strip().lower()
@@ -127,6 +131,9 @@ def apply_work_effect(
             "[saas] no metadata link key provider=%s event=%s type=%s — no-op",
             provider, event_id, event_type,
         )
+        # Recorded, not just logged: connection health reads these outcomes
+        # to tell "events arrive" apart from "events reach a run".
+        database.record_saas_event_outcome(provider, event_id, "ignored_no_metadata")
         return {"status": "ignored_no_metadata", "event_id": event_id}
 
     loop = database.find_open_loop_by_external_id(account_id, key)
@@ -135,6 +142,7 @@ def apply_work_effect(
             "[saas] no open loop for key=%r account=%s provider=%s event=%s — ignore",
             key, account_id, provider, event_id,
         )
+        database.record_saas_event_outcome(provider, event_id, "ignored_no_loop", link_key=key)
         return {
             "status": "ignored_no_loop",
             "event_id": event_id,
@@ -167,4 +175,8 @@ def apply_work_effect(
     result["loop_id"] = loop_id
     result["link_key"] = key
     result["effect"] = effect
+    database.record_saas_event_outcome(
+        provider, event_id, str(result.get("status") or "applied"),
+        loop_id=loop_id, link_key=key,
+    )
     return result

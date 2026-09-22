@@ -300,6 +300,15 @@ function NamedWorkGuidance() {
         same run — so the steps group into one run instead of a row each.
       </p>
       <p className="helper-text">
+        <strong>Touching Stripe, HubSpot or Shopify?</strong> Put the same
+        id on the object your agent creates or updates —{' '}
+        <code>trovis_loop_external_id</code> in Stripe metadata, a Shopify
+        order note attribute, or a HubSpot deal/ticket property. That is the
+        only way the provider&apos;s own events (payment cleared, order
+        fulfilled, deal moved) link back to this run; without it Trovis
+        records that the event arrived and nothing more.
+      </p>
+      <p className="helper-text">
         <strong>The job is declared in Work, not in code.</strong> A job is the
         recurring kind of work — <em>Process customer returns</em> — and Work
         recognises its runs by service, agent or title pattern. Don&apos;t put
@@ -688,7 +697,9 @@ tracer = trace.get_tracer("AGENT_NAME")
 with tracer.start_as_current_span("handle_refund") as span:
     span.set_attribute("trovis.loop.title", "Approve refund for order #4821")
     # Same id on every span of the same run, so the steps group into one run
-    # instead of a row each.
+    # instead of a row each. Put the SAME value in Stripe metadata / a Shopify
+    # note attribute / a HubSpot property as trovis_loop_external_id, and the
+    # provider's own events link back to this run.
     span.set_attribute("trovis.loop.external_id", "order-4821")
     # your agent logic here`,
     agentName, endpoint,

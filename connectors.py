@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any
 
 # --- vocabularies -----------------------------------------------------------
@@ -378,7 +378,8 @@ CONNECTORS: tuple[Connector, ...] = (
         management="oauth_disconnect",
         setup_notes=(
             "Independent evidence of deal and ticket state, linked to a run "
-            "only through an explicit link key on the HubSpot object."
+            "only through an explicit trovis_loop_external_id / trovis_run_id "
+            "property on the HubSpot deal or ticket."
         ),
     ),
     Connector(
@@ -394,7 +395,8 @@ CONNECTORS: tuple[Connector, ...] = (
         management="oauth_disconnect",
         setup_notes=(
             "Independent evidence of order, payment and fulfillment state, "
-            "linked to a run only through an explicit link key on the order."
+            "linked to a run only through an explicit trovis_loop_external_id / "
+            "trovis_run_id note attribute on the Shopify order."
         ),
     ),
     # Recognised in Work today (brand marks), no direct door yet.

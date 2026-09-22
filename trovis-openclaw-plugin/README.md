@@ -208,6 +208,13 @@ two small hooks for the parts only your agent knows.
   content-derived title is sent — follow Connect (`/trovis capture on`)
   or call `trovisSetLoopTitle("Refund order 42")` to name a run without
   sending the prompt. We never invent placeholder titles.
+- **Linking a work system to the run.** When an agent's tool creates or
+  updates a Stripe, HubSpot or Shopify object, it should put the run's
+  grouping id — the session key this plugin stamps as
+  `trovis.loop.external_id` — on that object as `trovis_loop_external_id`
+  (Stripe `metadata`, a Shopify order note attribute, a HubSpot property).
+  The provider's own webhooks then attach to the run as evidence; without
+  the key Trovis records that the event arrived and links it to nothing.
 - **When a conversational turn ends (`agent_end`), the loop hands off to
   the human** — `to_human`, `reason: "turn_end"`, targeted at the sender
   we last heard from. The loop sits `awaiting_human` until the person

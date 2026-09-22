@@ -143,7 +143,7 @@ test('no Work API and no backend permission atom changed', () => {
 
 // --- normalized health helpers ---------------------------------------------
 
-import { HEALTH_STATES, aiRowState, healthFor, workRowState } from '../src/connectionsPage.js'
+import { HEALTH_STATES, aiRowState, healthFor, linkedDetail, workRowState } from '../src/connectionsPage.js'
 
 const rel = (iso) => `REL(${iso})`
 
@@ -171,6 +171,19 @@ test('a work-system row separates authorization from activity', () => {
   const connected = { state: 'connected', configured: true, observed: true, last_observed_at: 'T', label: 'acct_1234567890' }
   assert.deepEqual(workRowState(connected, null, rel, 'Stripe'),
     { status: 'Connected · …567890', detail: 'Last observed REL(T)', connected: true })
+  // Connected means events ARRIVE. Whether any reached a run is a recorded
+  // fact the row carries; the page says which, never a bare "Connected".
+  assert.deepEqual(workRowState({ ...connected, events_received: 3, events_linked: 0 }, null, rel, 'Stripe'),
+    { status: 'Connected · …567890',
+      detail: 'Last observed REL(T) · 3 events received, none linked to a run yet',
+      connected: true })
+  assert.deepEqual(workRowState({ ...connected, events_received: 3, events_linked: 2 }, null, rel, 'Stripe'),
+    { status: 'Connected · …567890', detail: 'Last observed REL(T) · 2 of 3 events linked to runs', connected: true })
+  assert.equal(linkedDetail({ events_received: 1, events_linked: 0 }), '1 event received, none linked to a run yet')
+  // The page states the fact; the link key itself is taught in Add Agent.
+  assert.doesNotMatch(linkedDetail({ events_received: 1, events_linked: 0 }), /trovis_loop_external_id|metadata/)
+  assert.equal(linkedDetail({ events_received: 0, events_linked: 0 }), null)
+  assert.equal(linkedDetail({}), null, 'an older server without the counts says nothing')
   const waiting = { state: 'waiting_for_data', configured: true, observed: false, label: 'shop.myshopify.com' }
   assert.deepEqual(workRowState(waiting, null, rel, 'Shopify'),
     { status: 'Waiting for data', detail: 'Authorized as shop.myshopify.com · no Shopify activity observed yet', connected: false })
