@@ -5,7 +5,7 @@ import { BrandMark, WorksWithStrip } from './BrandMarks.jsx'
 import ConnectGuide from './ConnectGuide.jsx'
 import { brandIdForConnector } from './connectors.js'
 import { SETUP_TILE_IDS } from './connectionsPage.js'
-import { pickerTiles, recipeTiles, variantsFor } from './connectSetup.js'
+import { intentChips, pickerTiles, recipeTiles, variantsFor } from './connectSetup.js'
 
 // Tile → V1 brand id, read from the canonical connector registry
 // (connectors.js) — tile ids are connector ids. ChatGPT and the OpenAI Agents
@@ -775,7 +775,7 @@ const TROVIS_API_HOST = 'https://api.trovisai.com'
 // time) and fall back to the canonical host, never the page origin, which
 // would be wrong for the hosted dashboard.
 export function computeOverseeEndpoint() {
-  const base = import.meta.env.VITE_API_URL || TROVIS_API_HOST
+  const base = import.meta.env?.VITE_API_URL || TROVIS_API_HOST
   return base.replace(/\/+$/, '') + '/v1/traces'
 }
 
@@ -783,7 +783,7 @@ export function computeOverseeEndpoint() {
 // as ingest (VITE_API_URL at build time, the canonical host otherwise) — never
 // the dashboard origin, which serves no MCP.
 export function computeGrokMcpUrl() {
-  const base = import.meta.env.VITE_API_URL || TROVIS_API_HOST
+  const base = import.meta.env?.VITE_API_URL || TROVIS_API_HOST
   return base.replace(/\/+$/, '') + '/mcp/grok'
 }
 
@@ -1938,15 +1938,22 @@ function InstructionsView({ platform, agentName, endpoint }) {
 // `initialView` / `initialPlatform` let the Connections page open this flow
 // already pointed at one connector (the manual wizard on that tile, or the
 // AI guide for the custom OpenTelemetry path) instead of at the landing.
-// Both default to the landing, so every existing caller is unchanged.
+// `initialConnector` / `initialMessage` open the guide already knowing what
+// the person wants (a deep link's connector, a sentence from elsewhere).
+// All default to the landing, so every existing caller is unchanged.
 export default function AddAgent({
   onClose,
   embedded = false,
   onUpgrade,
   initialView = null,
   initialPlatform = null,
+  initialConnector = null,
+  initialMessage = null,
 }) {
   const startView = initialView === 'manual' || initialView === 'guide' ? initialView : 'landing'
+  // What the landing learned before handing over to the guide: a sentence the
+  // person typed, and/or a connector they picked. Set once per hand-over.
+  const [guideSeed, setGuideSeed] = useState({ message: initialMessage, connector: initialConnector, local: null })
   const [view, setView] = useState(startView) // 'landing' | 'guide' | 'manual'
   // Once visited, the guide stays MOUNTED (hidden) across guide↔manual
   // switches so the chat history and connect-poll baseline survive a detour.
@@ -1983,8 +1990,9 @@ export default function AddAgent({
         </div>
       )}
       {view === 'landing' && (
-        <AddAgentLanding
-          onStartGuide={() => {
+        <ConnectLanding
+          onStartGuide={({ message = null, connector = null, local = null } = {}) => {
+            if (!guideVisited) setGuideSeed({ message, connector, local })
             setGuideVisited(true)
             setView('guide')
           }}
@@ -2001,6 +2009,9 @@ export default function AddAgent({
             onClose={embedded ? null : onClose}
             onSkipToManual={() => setView('manual')}
             onUpgrade={onUpgrade}
+            initialMessage={guideSeed.message}
+            initialConnector={guideSeed.connector}
+            initialLocalTurn={guideSeed.local}
           />
         </div>
       )}
@@ -2016,9 +2027,19 @@ export default function AddAgent({
   )
 }
 
-// The hero shown when the Add Agent overlay opens: one primary path (the AI
-// guide) and one secondary (the classic platform-picker wizard).
-function AddAgentLanding({ onStartGuide, onManual, onClose, hideWorksWith = false }) {
+// The Connect landing — the one front door. It asks what the person wants
+// Trovis to see and hands the answer to the guided setup: a typed sentence
+// becomes the guide's first user turn, an intent chip sends a stock opener,
+// and "Set up with AI" opens the guide on its own question. The manual
+// wizard stays one click away for someone who already knows their platform.
+function ConnectLanding({ onStartGuide, onManual, onClose, hideWorksWith = false }) {
+  const [text, setText] = useState('')
+  const intents = intentChips()
+  function submit(e) {
+    e.preventDefault()
+    const message = text.trim()
+    onStartGuide(message ? { message } : {})
+  }
   return (
     <div className="aa-landing">
       {onClose && (
@@ -2034,16 +2055,41 @@ function AddAgentLanding({ onStartGuide, onManual, onClose, hideWorksWith = fals
       <div className="aa-landing-mark">
         <TrovisMark size={26} />
       </div>
-      <h1 className="aa-landing-title">Connect an agent</h1>
+      <h1 className="aa-landing-title">Connect to Trovis</h1>
       <p className="aa-landing-sub">
-        Trovis walks you through it — answer a couple of questions and get
-        copy-paste setup for your exact stack.
+        What do you want Trovis to see? An AI worker, a work system like Stripe or
+        Shopify, or something custom — Trovis walks you through it and hands you the
+        exact setup.
       </p>
-      <button type="button" className="btn btn-primary aa-landing-cta" onClick={onStartGuide}>
-        <SparkleIcon size={15} /> Set up with AI
-      </button>
+      <form className="aa-landing-ask" onSubmit={submit}>
+        <input
+          className="text-input aa-landing-input"
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="e.g. Our Grok Bot processes Shopify returns"
+          aria-label="What do you want to connect?"
+          autoComplete="off"
+        />
+        <button type="submit" className="btn btn-primary aa-landing-cta">
+          <SparkleIcon size={15} /> Set up with AI
+        </button>
+      </form>
+      <div className="aa-intents" role="group" aria-label="What do you want to connect?">
+        {intents.map((it) => (
+          <button
+            key={it.id}
+            type="button"
+            className="aa-intent"
+            onClick={() => onStartGuide({ message: it.message, local: it.local || null })}
+          >
+            <span className="aa-intent-label">{it.label}</span>
+            <span className="aa-intent-hint">{it.hint}</span>
+          </button>
+        ))}
+      </div>
       <button type="button" className="aa-landing-manual" onClick={onManual}>
-        Add manually instead
+        I know my platform — set up an agent manually
       </button>
       {!hideWorksWith && <WorksWithStrip className="aa-landing-logos" />}
     </div>

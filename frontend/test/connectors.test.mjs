@@ -23,9 +23,11 @@ import {
   allTiles,
   connectorForGuideOption,
   guideOpeningOptions,
+  intentChips,
   pickerTiles,
   recipeTiles,
   variantsFor,
+  workSystemOptions,
 } from '../src/connectSetup.js'
 
 // Registry-sourced fields (connectors.registry.json, snake_case like the API)
@@ -242,6 +244,12 @@ test('the Claude tile splits into the registry variants', () => {
 
 test("the guide opening chips are the available AI connectors' guide labels, catch-all last", () => {
   const chips = guideOpeningOptions()
+  // Work systems join as their names (connectorForGuideOption resolves both).
+  assert.deepEqual(workSystemOptions(), ['Stripe', 'HubSpot', 'Shopify'])
+  assert.equal(connectorForGuideOption('shopify').id, 'shopify')
+  assert.equal(connectorForGuideOption('Shopify').setup_type, 'oauth')
+  assert.deepEqual(intentChips().map((i) => i.id), ['ai', 'work_system', 'custom', 'unsure'])
+  for (const it of intentChips()) assert.ok(it.label && it.hint && it.message, it.id)
   assert.deepEqual(chips, [
     'OpenClaw',
     'OpenAI Agents SDK',
@@ -257,6 +265,7 @@ test("the guide opening chips are the available AI connectors' guide labels, cat
     assert.ok(connectorForGuideOption(chip), chip)
   }
   assert.equal(connectorForGuideOption('custom python / OTHER').id, 'custom-otel')
-  assert.equal(connectorForGuideOption('Stripe'), null)
+  assert.equal(connectorForGuideOption('Stripe').id, 'stripe', 'work systems are chips too')
+  assert.equal(connectorForGuideOption('Slack'), null, 'coming soon is not a chip')
   assert.equal(connectorForGuideOption(''), null)
 })

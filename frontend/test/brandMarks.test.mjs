@@ -11,7 +11,7 @@ import {
   brandTooltip,
   resolveBrand,
 } from '../src/brandMarks.js'
-import { allTiles, guideOpeningOptions, pickerTiles, recipeTiles } from '../src/connectSetup.js'
+import { allTiles, guideOpeningOptions, pickerTiles, recipeTiles, workSystemOptions } from '../src/connectSetup.js'
 
 const V1 = [
   'openclaw',
@@ -88,16 +88,23 @@ test('Connections exposes Stripe, HubSpot, and Shopify Connect; Add Agent stays 
   // correlation works belongs in setup docs, never on this page.
   assert.doesNotMatch(connections, /trovis_loop_external_id/)
   assert.doesNotMatch(connections, /Trovis loop key/)
-  assert.match(connections, /work it can reliably link/)
-  assert.match(connections, /not Trovis billing/)
-  assert.match(connections, /not CRM or contact sync/)
-  assert.match(connections, /not catalog, product, or/)
-  assert.match(connections, /startStripeConnect/)
-  assert.match(connections, /startHubSpotConnect/)
-  assert.match(connections, /startShopifyConnect/)
-  assert.match(connections, /disconnectStripe/)
-  assert.match(connections, /disconnectHubSpot/)
-  assert.match(connections, /disconnectShopify/)
+  // The doors and their honesty copy live in one shared module (saasDoors.js)
+  // so the Connections page and the guided Connect flow offer the same OAuth
+  // door with the same words.
+  assert.match(connections, /from '\.\/saasDoors\.js'/)
+  const doors = readFileSync(new URL('../src/saasDoors.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(doors, /trovis_loop_external_id/)
+  assert.doesNotMatch(doors, /Trovis loop key/)
+  assert.match(doors, /work it can reliably link/)
+  assert.match(doors, /not Trovis billing/)
+  assert.match(doors, /not CRM or contact sync/)
+  assert.match(doors, /not catalog, product, or/)
+  assert.match(doors, /startStripeConnect/)
+  assert.match(doors, /startHubSpotConnect/)
+  assert.match(doors, /startShopifyConnect/)
+  assert.match(doors, /disconnectStripe/)
+  assert.match(doors, /disconnectHubSpot/)
+  assert.match(doors, /disconnectShopify/)
   // Settings keeps a doorway, not a second manager.
   const settings = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
   assert.match(settings, /Manage connections/)
@@ -148,18 +155,21 @@ test('Work table brand marks are muted; Connect tiles stay loud', () => {
   assert.doesNotMatch(css, /\.platform-card-logo[^{]*\{[^}]*opacity:\s*0\.[0-6]/)
 })
 
-test('Connect opening chips are live/recipe only — no SaaS doors', () => {
-  // The chips come from the registry's guide_label (connectSetup.js); the
-  // guide reads them, it does not keep its own list.
+test('Connect opening chips are live doors only — AI, and the work systems; never coming-soon', () => {
+  // The chips come from the registry (connectSetup.js): AI guide_labels plus
+  // the work systems with an OAuth door. The guide reads them, it does not
+  // keep its own list. A recognised-only logo (Slack, GitHub, Intercom) is
+  // never offered as something to connect.
   const src = readFileSync(new URL('../src/ConnectGuide.jsx', import.meta.url), 'utf8')
-  assert.match(src, /options: guideOpeningOptions\(\)/)
-  const block = guideOpeningOptions().join('\n')
+  assert.match(src, /options: \[\.\.\.guideOpeningOptions\(\), \.\.\.workSystemOptions\(\)\]/)
+  const block = [...guideOpeningOptions(), ...workSystemOptions()].join('\n')
   assert.match(block, /OpenClaw/)
   assert.match(block, /OpenAI/)
   assert.match(block, /Claude/)
   assert.match(block, /ChatGPT/)
   assert.match(block, /Cursor/)
-  for (const name of ['Slack', 'GitHub', 'HubSpot', 'Stripe', 'Intercom', 'Shopify', 'Zendesk']) {
+  for (const name of ['Stripe', 'HubSpot', 'Shopify']) assert.match(block, new RegExp(name))
+  for (const name of ['Slack', 'GitHub', 'Intercom', 'Zendesk']) {
     assert.doesNotMatch(block, new RegExp(name))
   }
 })

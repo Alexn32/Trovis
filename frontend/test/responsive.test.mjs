@@ -200,11 +200,11 @@ test('tap size follows the input device, not the width', () => {
 })
 
 test('the labels that drop are spans with an aria-label behind them', () => {
-  // "Add Agent" and the account name are dropped to icons on a phone. A
+  // "Connect" and the account name are dropped to icons on a phone. A
   // control that is only an icon still has to be named, or the header becomes
   // four unlabelled squares to a screen reader.
   assert.match(app, /className="btn-compact-label"/)
-  assert.match(app, /aria-label="Add Agent"/)
+  assert.match(app, /aria-label="Connect to Trovis"/)
   assert.ok(inMediaQuery(css, '.btn-compact-label', 720))
   assert.ok(inMediaQuery(css, '.account-badge-label', 720))
 })

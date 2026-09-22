@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
+import { SAAS_DOORS } from './saasDoors.js'
 import { BrandMark } from './BrandMarks.jsx'
 import { CATEGORY_LABELS } from './connectors.js'
 import { relativeTime } from './utils.js'
@@ -37,47 +38,6 @@ import {
 //
 // The connect / disconnect mechanics moved here from Settings → Integrations
 // unchanged; Settings keeps a doorway to this page, not a second manager.
-
-// One row per work system: which API calls its door uses. Thunks, not bound
-// references, so a test can stub `api.*` after this module loads.
-const SAAS_DOORS = {
-  stripe: {
-    start: () => api.startStripeConnect(),
-    disconnect: () => api.disconnectStripe(),
-    configured: (d) => !!d?.stripe_oauth_configured,
-    notConfigured: 'Stripe Connect isn’t configured on this deploy yet.',
-    startError: 'Could not start Stripe Connect.',
-    disconnectError: 'Could not disconnect Stripe.',
-    fineprint:
-      'Stripe helps Trovis understand payment and refund outcomes related to work. Trovis only '
-      + 'associates Stripe activity with work it can reliably link. This is not Trovis billing.',
-  },
-  hubspot: {
-    start: () => api.startHubSpotConnect(),
-    disconnect: () => api.disconnectHubSpot(),
-    configured: (d) => !!d?.hubspot_oauth_configured,
-    notConfigured: 'HubSpot Connect isn’t configured on this deploy yet.',
-    startError: 'Could not start HubSpot Connect.',
-    disconnectError: 'Could not disconnect HubSpot.',
-    fineprint:
-      'HubSpot helps Trovis understand deal and ticket changes related to work. Trovis only '
-      + 'associates HubSpot activity with work it can reliably link. This is not CRM or contact sync.',
-  },
-  shopify: {
-    start: (shop) => api.startShopifyConnect(shop),
-    disconnect: () => api.disconnectShopify(),
-    configured: (d) => !!d?.shopify_oauth_configured,
-    notConfigured: 'Shopify Connect isn’t configured on this deploy yet.',
-    startError: 'Could not start Shopify Connect.',
-    disconnectError: 'Could not disconnect Shopify.',
-    needsShop: true,
-    shopPlaceholder: 'your-store.myshopify.com',
-    fineprint:
-      'Shopify helps Trovis understand order, payment, refund, and fulfillment outcomes related '
-      + 'to work. Trovis only associates Shopify activity with work it can reliably link. This is '
-      + 'not catalog, product, or customer sync.',
-  },
-}
 
 export default function Connections({ active = true, onConnect }) {
   // SaaS connection rows. null = not asked yet; {error} = the check failed,

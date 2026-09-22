@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { api, getApiKey } from './api.js'
 import { CodeBlock, computeGrokMcpUrl, computeOverseeEndpoint } from './AddAgent.jsx'
 import { TrovisMark, SendIcon, CheckCircleIcon } from './Icons.jsx'
-import { QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
-import { guideOpeningOptions } from './connectSetup.js'
+import { BrandMark, QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
+import { connectorForGuideOption, guideOpeningOptions, workSystemOptions } from './connectSetup.js'
+import { getConnector } from './connectors.js'
+import { doorFor } from './saasDoors.js'
 // Placeholder → real key/endpoint substitution, and the wire-history
 // flattening that keeps the placeholders. Extracted so both are covered by
 // frontend/test/connectSnippets.test.mjs.
@@ -22,21 +24,41 @@ import {
 
 // Local first turn so the guide opens instantly (no network round-trip).
 // Included in the history we post, so the model continues from the answer.
-// The chips are the registry's `guide_label`s (connectSetup.js), so a door
-// added on the backend shows up here without a second list to maintain.
+// The chips are the registry's AI `guide_label`s plus the work systems
+// (connectSetup.js), so a door added on the backend shows up here without a
+// second list to maintain. This is the one Connect door: an AI worker, a
+// work system or a custom source all start here.
 const OPENING_TURN = {
   role: 'assistant',
   content:
-    "Hey — I'm Trovis. I'll get your agent connected in a couple of minutes.\nWhat's your agent built with?",
-  options: guideOpeningOptions(),
+    "Hey — I'm Trovis. What do you want Trovis to see?\nAn AI worker or agent platform, a work system like Stripe or Shopify, or something custom that emits OpenTelemetry.",
+  options: [...guideOpeningOptions(), ...workSystemOptions()],
   code: [],
+}
+
+/** A registry work system (OAuth door) for a chip label or id, else null. */
+function workSystemFor(labelOrId) {
+  const c = connectorForGuideOption(labelOrId) || getConnector(labelOrId)
+  return c && c.setup_type === 'oauth' ? c : null
 }
 
 // Turns posted to the backend (the model only needs role + content).
 const MAX_HISTORY = 24
 
-export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, onUpgrade }) {
+// `initialMessage` is the sentence the landing collected ("Our Grok Bot
+// processes Shopify returns") — sent as the first user turn the moment the
+// guide mounts. `initialConnector` is a registry id the landing or a deep
+// link already chose; a work system renders its Connect card at once, with
+// no model round-trip, because there is nothing to ask.
+// `initialLocalTurn` ({content, options}) answers `initialMessage` locally —
+// the landing's "which one?" intents — so the guide opens on a chip list the
+// registry already holds instead of waiting on the model for it.
+export default function ConnectGuide({
+  active, onBack, onClose, onSkipToManual, onUpgrade,
+  initialMessage = null, initialConnector = null, initialLocalTurn = null,
+}) {
   const [messages, setMessages] = useState([OPENING_TURN])
+  const seeded = useRef(false)
   const [input, setInput] = useState('')
   const [pending, setPending] = useState(false)
   // undefined = still loading; null = none in this session; string = the key.
@@ -122,10 +144,43 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
     if (active && inputRef.current) inputRef.current.focus()
   }, [active])
 
+  // Seed the thread from what the landing already learned (once).
+  useEffect(() => {
+    if (seeded.current) return
+    seeded.current = true
+    const ws = initialConnector ? workSystemFor(initialConnector) : null
+    if (ws) {
+      setMessages((prev) => [...prev, { kind: 'work_system', connectorId: ws.id }])
+      return
+    }
+    if (initialMessage && initialLocalTurn && Array.isArray(initialLocalTurn.options)) {
+      setMessages((prev) => [
+        ...prev,
+        { role: 'user', content: String(initialMessage) },
+        { role: 'assistant', content: initialLocalTurn.content || '', options: initialLocalTurn.options, code: [] },
+      ])
+      return
+    }
+    if (initialMessage && String(initialMessage).trim()) send(String(initialMessage))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function send(text) {
     const q = (text ?? input).trim()
     if (!q || pending) return
     setInput('')
+    // A work-system chip needs no model turn: the door is a button, and the
+    // card says what the connection adds. The pick still lands in the thread
+    // as the user's words, so the conversation reads straight.
+    const ws = workSystemFor(q)
+    if (ws) {
+      setMessages((prev) => [
+        ...prev,
+        { role: 'user', content: q },
+        { kind: 'work_system', connectorId: ws.id },
+      ])
+      return
+    }
     setPending(true)
     // Build the wire history from real chat turns (skip local banners),
     // flattening assistant turns, then append the user's new message.
@@ -141,6 +196,13 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
     setMessages((prev) => [...prev, { role: 'user', content: q }])
     try {
       const r = await api.askConnect(wire.slice(-MAX_HISTORY))
+      // A work system the model named this turn gets its Connect card right
+      // under the reply — the model says what it adds, the card does the
+      // connecting. AI connectors in `connectors` need nothing extra here.
+      const cards = (r.connectors || [])
+        .map((id) => workSystemFor(id))
+        .filter(Boolean)
+        .map((c) => ({ kind: 'work_system', connectorId: c.id }))
       setMessages((prev) => [
         ...prev,
         {
@@ -149,6 +211,7 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
           options: r.options || [],
           code: r.code || [],
         },
+        ...cards,
       ])
     } catch (e) {
       const is503 = e?.status === 503 || String(e?.message || '').includes('503')
@@ -213,6 +276,8 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
         {messages.map((m, i) =>
           m.kind === 'connected' ? (
             <ConnectedBanner key={i} name={m.name} overLimit={m.overLimit} onUpgrade={onUpgrade} />
+          ) : m.kind === 'work_system' ? (
+            <WorkSystemConnectCard key={i} connectorId={m.connectorId} />
           ) : (
             <GuideBubble
               key={i}
@@ -261,7 +326,7 @@ export default function ConnectGuide({ active, onBack, onClose, onSkipToManual, 
       </form>
 
       <button type="button" className="connect-skip" onClick={onSkipToManual}>
-        Skip — add manually
+        Skip — set up an agent manually
       </button>
     </div>
   )
@@ -315,6 +380,114 @@ function GuideBubble({ m, orgKey, endpoint, mcpUrl, chipsEnabled, onPick }) {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// The work-system turn: the same OAuth door the Connections page uses
+// (saasDoors.js), offered inside the conversation. It reads /saas/connections
+// once so an already-connected system says so instead of offering a second
+// authorization, asks for the shop domain where the door needs one, and
+// hands off to the provider with a hard navigation — the OAuth return lands
+// on Connections, where the row now reads Authorized / Waiting for data.
+function WorkSystemConnectCard({ connectorId }) {
+  const connector = getConnector(connectorId)
+  const door = doorFor(connectorId)
+  const [saas, setSaas] = useState(null)
+  const [shop, setShop] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    api
+      .getSaasConnections()
+      .then((d) => alive && setSaas(d || { connections: [] }))
+      .catch(() => alive && setSaas({ error: true, connections: [] }))
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  if (!connector || !door) return null
+  const row = (saas?.connections || []).find((c) => c.provider === connector.id)
+  const connected = !!row && row.status === 'connected'
+  const canOauth = saas !== null && !saas.error && door.configured(saas)
+  const needsShop = !!door.needsShop
+  const shopReady = !needsShop || !!shop.trim()
+
+  async function connect() {
+    setError(null)
+    if (needsShop && !shop.trim()) {
+      setError('Enter your Shopify store domain to connect.')
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await door.start(needsShop ? shop.trim() : undefined)
+      if (res?.authorize_url) {
+        window.location.href = res.authorize_url
+        return
+      }
+      setError(door.startError)
+    } catch (e) {
+      if (e?.status === 503) setError(door.notConfigured)
+      else if (e?.status === 400 && needsShop) setError('Enter a valid Shopify store (your-store.myshopify.com).')
+      else setError(`${door.startError} Please try again.`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="connect-card" data-connector={connector.id}>
+      <div className="connect-card-head">
+        {connector.brandId && <BrandMark id={connector.brandId} size={18} />}
+        <strong>{connector.name}</strong>
+        {connected && <span className="cx-status is-on">Connected</span>}
+      </div>
+      <p className="connect-card-desc">{connector.description}</p>
+      {connected ? (
+        <p className="connect-card-note">
+          Already authorized{row.provider_account_id ? ` as ${row.provider_account_id}` : ''}.
+          Trovis attaches {connector.name}&apos;s events to a run when the agent puts the
+          run&apos;s id on the object it touches.
+        </p>
+      ) : (
+        <>
+          <p className="connect-card-note">
+            Trovis asks you to authorize in {connector.name}; no code to paste. The
+            connection adds {connector.name}&apos;s own view of outcomes to the runs it
+            can link to.
+          </p>
+          {needsShop && (
+            <input
+              className="text-input cx-shop"
+              type="text"
+              value={shop}
+              onChange={(e) => setShop(e.target.value)}
+              placeholder={door.shopPlaceholder}
+              aria-label="Shopify store domain"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          )}
+          <button
+            type="button"
+            className="btn btn-primary btn-sm connect-card-cta"
+            onClick={connect}
+            disabled={busy || saas === null || !canOauth || !shopReady}
+            title={saas !== null && !canOauth ? door.notConfigured : undefined}
+            aria-label={`Connect ${connector.name}`}
+          >
+            {busy ? 'Working…' : saas === null ? 'Checking…' : `Connect ${connector.name}`}
+          </button>
+          {saas !== null && !saas.error && !canOauth && (
+            <span className="connect-card-note">{door.notConfigured}</span>
+          )}
+        </>
+      )}
+      {error && <span className="cx-error" role="alert">{error}</span>}
     </div>
   )
 }

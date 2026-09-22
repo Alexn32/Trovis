@@ -963,12 +963,15 @@ class ConnectCodeBlock(BaseModel):
 
 
 class ConnectAskResponse(BaseModel):
-    """A guided add-agent chat turn: short answer, optional quick-reply
-    chips, optional code snippets."""
+    """A guided connect chat turn: short answer, optional quick-reply chips,
+    optional code snippets, and the registry connector ids this turn is
+    about (`connectors`) — a work-system id there is what makes the client
+    render its inline Connect (OAuth) card."""
 
     answer: str
     options: list[str] = Field(default_factory=list)
     code: list[ConnectCodeBlock] = Field(default_factory=list)
+    connectors: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

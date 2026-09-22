@@ -59,7 +59,7 @@ check("fenced JSON stripped + parsed", r["answer"] == "Fenced.")
 r = P("Just plain prose, no JSON at all.")
 check("plain prose → fallback, empty options/code",
       r == {"answer": "Just plain prose, no JSON at all.",
-            "options": [], "code": []})
+            "options": [], "code": [], "connectors": []})
 
 r = P(json.dumps({
     "answer": "Mixed bag.",
@@ -89,7 +89,7 @@ check("salvage handles escaped quotes", r["answer"] == 'He said "run it" and the
 
 r = P("")
 check("empty reply → empty answer, no crash",
-      r == {"answer": "", "options": [], "code": []})
+      r == {"answer": "", "options": [], "code": [], "connectors": []})
 
 
 print("\n-- code-promise detector --")
@@ -199,8 +199,8 @@ finally:
     asker.anthropic = real_anthropic
 
 schema = asker.CONNECT_RESPONSE_SCHEMA
-check("schema requires answer/options/code",
-      sorted(schema["required"]) == ["answer", "code", "options"]
+check("schema requires answer/options/code/connectors",
+      sorted(schema["required"]) == ["answer", "code", "connectors", "options"]
       and schema["additionalProperties"] is False)
 code_item = schema["properties"]["code"]["items"]
 check("schema requires all three snippet keys",
@@ -404,6 +404,26 @@ check("the guide is told the title IS the run's name",
       "title IS the run's name" in PROMPT)
 check("the guide teaches Run vs Job: the title names a run, the job is declared in Work",
       "name the RUN" in PROMPT and "jobs are declared in Work" in PROMPT)
+
+# --- one door for connections, not only agents --------------------------------
+check("the guide connects AI workers, work systems and custom sources",
+      "work system (Stripe, HubSpot, Shopify)" in PROMPT and "custom" in PROMPT)
+check("and knows the order when the user names both: worker first, then the system",
+      "connect the AI worker first, then the work system" in PROMPT)
+check("a work system is a button, never code",
+      "Work systems are connected with a button, never with code" in PROMPT
+      and "`code` stays [] for a work system" in PROMPT)
+check("the reply schema carries the connectors the turn is about",
+      "connectors" in asker.CONNECT_RESPONSE_SCHEMA["properties"]
+      and "connectors" in asker.CONNECT_RESPONSE_SCHEMA["required"])
+_parsed = asker._parse_connect_response(
+    '{"answer":"Connect Shopify below.","options":[],"code":[],'
+    '"connectors":["shopify","zendesk","slack","Shopify","grok-bot","stripe","hubspot"]}')
+check("the parser keeps only known, available registry ids, de-duplicated, at most 3",
+      _parsed["connectors"] == ["shopify", "grok-bot", "stripe"])
+check("a reply without connectors parses to []",
+      asker._parse_connect_response('{"answer":"hi","options":[],"code":[]}')["connectors"] == []
+      and asker._parse_connect_response("plain prose")["connectors"] == [])
 check("the guide tells the truth: nothing lands unless the Bot calls in",
       "nothing is recorded unless the Bot calls these tools" in PROMPT)
 # The path that worked on the first real connection: hand the whole setup to
@@ -434,7 +454,7 @@ import connectors as _connectors
 _wizard = pathlib.Path("frontend/src/AddAgent.jsx").read_text()
 _chips = pathlib.Path("frontend/src/ConnectGuide.jsx").read_text()
 check("the guide's opening chips come from the registry, not a second list",
-      "options: guideOpeningOptions()" in _chips)
+      "options: [...guideOpeningOptions(), ...workSystemOptions()]" in _chips)
 check("and the wizard's tiles do too",
       "const PLATFORMS = pickerTiles()" in _wizard
       and "const RECIPE_PLATFORMS = recipeTiles()" in _wizard)
