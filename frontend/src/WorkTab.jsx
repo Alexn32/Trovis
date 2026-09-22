@@ -25,11 +25,11 @@ import {
   groupByJob, healthBadge, idleJobLine, jobSubline, numOrNull, tableJobMeta, touchedToday,
 } from './workBoard.js'
 import {
-  WORK_VIEWS, calmLine, countsLine, exceptionLine, exceptionRows, resolveView, scopeLine,
-  situationTiles, stateSegments, tileTarget,
+  DENSITY_KEY, WORK_VIEWS, calmLine, compactJobLine, countsLine, exceptionLine, exceptionRows,
+  resolveDensity, resolveView, scopeLine, situationTiles, stateSegments, tileTarget,
 } from './workPage.js'
 import {
-  computedFrom, healthRows, jobPath, jobStats, recentRuns, settingsRows,
+  computedFrom, declaredSteps, healthRows, jobPath, jobStats, recentRuns, settingsRows,
 } from './jobPage.js'
 import { CompletionChart, JobBreakdown } from './HomeSections.jsx'
 import { readComparison, readJobs, readSeries, relTime } from './homeView.js'
@@ -367,19 +367,19 @@ function HealthBand({ rows, declared }) {
   )
 }
 
-/** Recent runs — every state, so a repeated failure reads as a cluster. */
-function RecentRunsBand({ rows, onOpenItem }) {
+/** Recent runs — every state, so a repeated failure reads as a cluster.
+ *  `bare` renders the list alone; the job page owns the section around it. */
+function RecentRunsBand({ rows, onOpenItem, bare = false }) {
   if (rows.length === 0) {
-    return (
+    const quiet = <p className="kind-quiet">No runs on the record yet.</p>
+    return bare ? quiet : (
       <section className="kind-band" aria-label="Recent runs">
         <h2 className="dash-caps">Recent runs</h2>
-        <p className="kind-quiet">No runs on the record yet.</p>
+        {quiet}
       </section>
     )
   }
-  return (
-    <section className="kind-band" aria-label="Recent runs">
-      <h2 className="dash-caps">Recent runs</h2>
+  const list = (
       <ul className="jobp-runs">
         {rows.map((r) => (
           <li key={r.id}>
@@ -393,6 +393,11 @@ function RecentRunsBand({ rows, onOpenItem }) {
           </li>
         ))}
       </ul>
+  )
+  return bare ? list : (
+    <section className="kind-band" aria-label="Recent runs">
+      <h2 className="dash-caps">Recent runs</h2>
+      {list}
     </section>
   )
 }
@@ -436,8 +441,8 @@ function SettingsBand({ rows, onOpenAgent }) {
  * the run page.
  */
 function JobPage({
-  job, jobErr, name, runs: jobRuns, runsLoading, filter, onClearFilter,
-  onBack, onOpenItem, onOpenAgent, onEditJob,
+  job, jobErr, name, runs: jobRuns, runsLoading, runsCursor, onLoadMoreRuns,
+  filter, onFilter, onClearFilter, onBack, onOpenItem, onOpenAgent, onEditJob,
 }) {
   const now = Date.now()
   // This job's own runs, id-filtered by the server. The aggregates come from
@@ -452,6 +457,8 @@ function JobPage({
   const provenance = computedFrom(job, mine)
   const runs = recentRuns(shown)
   const filteredOut = runs.length === 0 && mine.length > 0
+  const steps = declaredSteps(job)
+  const versions = Array.isArray(job?.versions) ? job.versions : []
 
   return (
     <div className="view work-kind-page">
@@ -460,15 +467,17 @@ function JobPage({
           ← All work
         </button>
         <h1>{job?.name || name}</h1>
-        {filter && (
+        {job?.derived && <span className="wk-derived-tag">not yet described</span>}
+        {/* The one edit door. On a derived job it reads as what it is —
+            the promotion; on a declared job, a new version of its
+            definition. Both land in the same editor. */}
+        {onEditJob && job && (
           <button
             type="button"
-            className="work-filter-chip"
-            onClick={onClearFilter}
-            aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
+            className="btn btn-secondary btn-sm jobp-edit"
+            onClick={() => onEditJob(job.id)}
           >
-            {WORK_FILTER_LABELS[filter] || filter}
-            <span aria-hidden="true">×</span>
+            {job.derived ? 'Describe this job' : 'Edit job'}
           </button>
         )}
       </header>
@@ -513,27 +522,118 @@ function JobPage({
       </div>
 
       <JobPathBand path={path} provenance={provenance} />
+      <DeclaredStepsBand steps={steps} />
       <HealthBand rows={health} declared={Boolean(job?.has_expectation)} />
 
-      {runsLoading && mine.length === 0 ? (
-        <section className="kind-band" aria-label="Recent runs">
+      <section className="kind-band" aria-label="Recent runs">
+        <div className="jobp-runs-head">
           <h2 className="dash-caps">Recent runs</h2>
+          {/* The same status vocabulary as the board, applied to the runs
+              this page has loaded. The server pages by recency; the chips
+              narrow what is on screen, and Load more fetches the next page
+              of the job's history whichever chip is on. */}
+          {onFilter && (
+            <div className="jb-filters jobp-runs-filters">
+              {[...STATUS_CHIPS, 'done'].map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  className={`jb-pill${filter === f ? ' is-on' : ''}`}
+                  aria-pressed={filter === f}
+                  onClick={() => onFilter(filter === f ? null : f)}
+                >
+                  {WORK_FILTER_LABELS[f]}
+                </button>
+              ))}
+              {filter && (
+                <button
+                  type="button"
+                  className="work-filter-chip"
+                  onClick={onClearFilter}
+                  aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
+                >
+                  {WORK_FILTER_LABELS[filter] || filter}
+                  <span aria-hidden="true">×</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {runsLoading && mine.length === 0 ? (
           <div className="dash-skel"><span style={{ width: '60%' }} /></div>
-        </section>
-      ) : filteredOut ? (
-        <section className="kind-band" aria-label="Recent runs">
-          <h2 className="dash-caps">Recent runs</h2>
+        ) : filteredOut ? (
           <div className="board-empty">
             <p className="board-empty-lead">Nothing matches these filters.</p>
-            <p className="board-empty-sub">Clear the filter above to see the rest of this job.</p>
+            <p className="board-empty-sub">
+              Clear the filter, or load more of this job&apos;s history below.
+            </p>
           </div>
-        </section>
-      ) : (
-        <RecentRunsBand rows={runs} onOpenItem={onOpenItem} />
-      )}
+        ) : (
+          <RecentRunsBand rows={runs} onOpenItem={onOpenItem} bare />
+        )}
+        {/* How much of the history is on screen, and the way to more of it. */}
+        <p className="jobp-runs-scope">
+          {mine.length} {mine.length === 1 ? 'run' : 'runs'} loaded{runsCursor ? ', more on record' : ''}
+          {filter ? ` · ${runs.length} shown` : ''}
+        </p>
+        {runsCursor && onLoadMoreRuns && (
+          <button type="button" className="btn btn-secondary btn-sm work-more" onClick={onLoadMoreRuns}>
+            Load more
+          </button>
+        )}
+      </section>
 
       <SettingsBand rows={settings} onOpenAgent={onOpenAgent} />
+      <HistoryBand versions={versions} />
     </div>
+  )
+}
+
+/**
+ * What the operator DECLARED the job's steps to be — who holds the work at
+ * each step. Distinct from "How this job usually runs" above it, which is
+ * what the record observed; the two sit apart so a declaration is never
+ * mistaken for a measurement. Absent until somebody declares steps.
+ */
+function DeclaredStepsBand({ steps }) {
+  if (!steps.length) return null
+  return (
+    <section className="kind-band" aria-label="Declared steps">
+      <h2 className="dash-caps">Declared steps</h2>
+      <ol className="kind-path">
+        {steps.map((s, i) => (
+          <li key={`${s.kind}-${s.label}-${i}`} className="kind-step">
+            {i > 0 && <span className="kind-arrow" aria-hidden="true">→</span>}
+            <span className={`kind-node kind-${s.kind}`}>
+              <span className="kind-node-label">{s.label}</span>
+              {s.holder && <span className="kind-node-pct">{s.holder}</span>}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+/** Every version of the definition, newest first. Append-only, so a
+ *  history is exactly the record and nothing is ever missing from it. */
+function HistoryBand({ versions }) {
+  if (!versions.length) return null
+  return (
+    <section className="kind-band jobp-history" aria-label="History">
+      <h2 className="dash-caps">History</h2>
+      <ol className="jobp-history-list">
+        {versions.map((v) => (
+          <li key={v.version} className="jobp-history-row">
+            <span className="wfe-vchip">v{v.version}</span>
+            <span className="jobp-history-date">
+              {v.created_at ? new Date(String(v.created_at).replace(' ', 'T')).toLocaleDateString() : ''}
+            </span>
+            {v.note && <span className="jobp-history-note">{v.note}</span>}
+          </li>
+        ))}
+      </ol>
+    </section>
   )
 }
 
@@ -741,9 +841,64 @@ function JobRow({ grouped, now, onOpenJob, onOpenItem, onEditJob, expanded, onTo
   )
 }
 
+/**
+ * The compact list: one line per job, for scanning many. The same jobs in
+ * the same order as the rows, with the same single verdict — a different
+ * density, not a different page. Empty cells stay empty (rule 6).
+ */
+function JobList({ grouped, now, onOpenJob }) {
+  const lines = grouped.map((g) => compactJobLine(g, { now }))
+  return (
+    <div className="wk-list" role="table" aria-label="Jobs">
+      <div className="wk-list-head" role="row">
+        <span role="columnheader">Job</span>
+        <span role="columnheader">Verdict</span>
+        <span role="columnheader" className="is-num">Open</span>
+        <span role="columnheader">Last run</span>
+        <span role="columnheader">Cadence</span>
+        <span role="columnheader" className="is-num">Cost / run</span>
+      </div>
+      {lines.map((l) => {
+        const Row = l.openable ? 'button' : 'div'
+        return (
+          <Row
+            key={l.key}
+            role="row"
+            className={`wk-list-row${l.openable ? ' is-link' : ''}${l.loud ? ` is-${l.badge.tone}` : ''}`}
+            {...(l.openable ? { type: 'button', onClick: () => onOpenJob(l.key) } : {})}
+          >
+            <span className="wk-list-name">
+              <span className={l.openable ? 'jb-name' : 'jb-name is-unmatched'}>{l.name}</span>
+              {l.derived && <span className="wk-derived-tag">not yet described</span>}
+            </span>
+            <span className="wk-list-verdict">
+              {l.badge && (
+                <span className={`jb-badge tone-${l.badge.tone}`}>{l.badge.label}</span>
+              )}
+            </span>
+            <span className="is-num">{l.open || ''}</span>
+            <span>{l.lastRun || ''}</span>
+            <span>{l.cadence || ''}</span>
+            <span className="is-num">{l.costPerRun || ''}</span>
+          </Row>
+        )
+      })}
+    </div>
+  )
+}
+
 // The status chips. `mine` and `attention` share Home's vocabulary, so a tile
 // here and a card there land on the same rows.
 const STATUS_CHIPS = ['mine', 'attention', 'moving', 'waiting', 'stuck']
+
+/** The By job density, remembered per browser. A convenience, never state
+ *  the server needs — so a blocked storage just means the default. */
+function readDensity() {
+  try { return resolveDensity(localStorage.getItem(DENSITY_KEY)) } catch { return 'rows' }
+}
+function writeDensity(v) {
+  try { localStorage.setItem(DENSITY_KEY, v) } catch { /* per-viewer convenience only */ }
+}
 
 /**
  * What got done: the period's completions as a chart, by job, and then the
@@ -865,6 +1020,11 @@ function WorkHome({
   const now = Date.now()
   const [todayOnly, setTodayOnly] = useState(false)
   const [expanded, setExpanded] = useState(() => new Set())
+  const [density, setDensity] = useState(readDensity)
+  function changeDensity(v) {
+    setDensity(v)
+    writeDensity(v)
+  }
   const all = sortWorkItems(items || [])
   // The board shows OPEN work; Done has its own view with its own fetch, so
   // a done row that happens to sit on the mixed page is not drawn twice.
@@ -975,6 +1135,26 @@ function WorkHome({
             </button>
           ))}
         </div>
+        {view === 'jobs' && (
+          <div className="wk-density" role="group" aria-label="Density">
+            <button
+              type="button"
+              className={`wk-density-btn${density === 'rows' ? ' is-on' : ''}`}
+              aria-pressed={density === 'rows'}
+              onClick={() => changeDensity('rows')}
+            >
+              Rows
+            </button>
+            <button
+              type="button"
+              className={`wk-density-btn${density === 'list' ? ' is-on' : ''}`}
+              aria-pressed={density === 'list'}
+              onClick={() => changeDensity('list')}
+            >
+              List
+            </button>
+          </div>
+        )}
         {view !== 'done' && (
           <div className="jb-filters">
             {STATUS_CHIPS.map((f) => (
@@ -1083,7 +1263,11 @@ function WorkHome({
             )
           )}
 
-          {items && !empty && !filteredOut && view === 'jobs' && (
+          {items && !empty && !filteredOut && view === 'jobs' && density === 'list' && (
+            <JobList grouped={grouped} now={now} onOpenJob={onOpenJob} />
+          )}
+
+          {items && !empty && !filteredOut && view === 'jobs' && density === 'rows' && (
             <div className="wk-jobs">
               {grouped.map((g) => (
                 <JobRow
@@ -1190,6 +1374,7 @@ export default function WorkTab({
   // never the board.
   const [finished, setFinished] = useState(null)
   const [finishedLoading, setFinishedLoading] = useState(false)
+  const [finishedCursor, setFinishedCursor] = useState(null)
 
   // Declared jobs, for table-row enrichment (name + numbered verdict).
   // Not a second count source — overview pills stay authoritative.
@@ -1214,9 +1399,12 @@ export default function WorkTab({
   // aggregates come precomputed so the client does no arithmetic on them.
   const [jobDetail, setJobDetail] = useState(null)
   const [jobDetailErr, setJobDetailErr] = useState(null)
+  // Re-read when the pane comes back on screen too: the editor is an
+  // overlay over this pane, so a saved version (or a promotion) returns to
+  // a job page that must show it — the same page, one lean read newer.
   useEffect(() => {
-    if (!route.job) {
-      setJobDetail(null)
+    if (!route.job || !active) {
+      if (!route.job) setJobDetail(null)
       return undefined
     }
     setJobDetailErr(null)
@@ -1226,7 +1414,7 @@ export default function WorkTab({
         .then((d) => isAlive() && setJobDetail(d))
         .catch((e) => isAlive() && setJobDetailErr(e))
     })
-  }, [route.job])
+  }, [route.job, active])
   // THIS job's runs, in every state — one lean column-filtered read.
   //
   // Not sliced out of the board's 50-row page: that page is ordered by
@@ -1250,11 +1438,28 @@ export default function WorkTab({
         .then((p) => {
           if (!isAlive()) return
           setFinished(Array.isArray(p?.items) ? p.items : [])
+          setFinishedCursor(p?.next_cursor || null)
           setFinishedLoading(false)
         })
         .catch(() => isAlive() && setFinishedLoading(false))
     })
   }, [kindOpen, kindWorkflowId])
+
+  // The next page of THIS job's history — the same question, continued.
+  async function loadMoreFinished() {
+    if (!finishedCursor || !kindOpen) return
+    try {
+      const page = await api.getWorkItems({
+        cursor: finishedCursor,
+        limit: 50,
+        workflowId: kindWorkflowId === null ? 'none' : kindWorkflowId,
+      })
+      setFinished((prev) => [...(prev || []), ...(page?.items || [])])
+      setFinishedCursor(page?.next_cursor || null)
+    } catch {
+      /* keep last-good rows */
+    }
+  }
 
   const overviewFailSoftRef = useRef(false)
   const itemsFailSoftRef = useRef(false)
@@ -1396,15 +1601,19 @@ export default function WorkTab({
   }
 
   // Declarations only — not polled. A job name and its expectation do not
-  // change between ticks the way live runs do.
+  // change between ticks the way live runs do; they change when a person
+  // saves the editor, which is an overlay over this pane — so the list is
+  // re-read when the pane comes back on screen, and otherwise left alone.
   useEffect(
-    () =>
-      startAbortable(({ signal, isAlive }) => {
+    () => {
+      if (!active) return undefined
+      return startAbortable(({ signal, isAlive }) => {
         api.getWorkflows({ signal })
           .then((r) => isAlive() && setJobs(Array.isArray(r) ? r : []))
           .catch(() => isAlive() && setJobs([]))
-      }),
-    [refreshKeyForJobs],
+      })
+    },
+    [refreshKeyForJobs, active],
   )
 
   useEffect(() => {
@@ -1533,7 +1742,10 @@ export default function WorkTab({
         name={kindName}
         runs={finished}
         runsLoading={finishedLoading}
+        runsCursor={finishedCursor}
+        onLoadMoreRuns={loadMoreFinished}
         filter={filter}
+        onFilter={setFilter}
         onClearFilter={() => setFilter(null)}
         onBack={() => onRoute({ job: null, run: null })}
         onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}

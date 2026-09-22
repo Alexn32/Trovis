@@ -10,7 +10,7 @@
 // Language rule (enforced by test): nothing a person reads here says loop,
 // possession, segment, station or handoff.
 
-import { ageLabel, needsCard, numOrNull } from './workBoard.js'
+import { ageLabel, healthBadge, needsCard, numOrNull, observedPerDay } from './workBoard.js'
 
 /** The three ways to look at the same work. */
 export const WORK_VIEWS = [
@@ -213,4 +213,42 @@ export function scopeLine({ whoseLabel, shown, truncated }) {
     parts.push(`${shown}${truncated ? '+' : ''} ${shown === 1 ? 'row' : 'rows'} loaded`)
   }
   return parts
+}
+
+// --- the compact job list -------------------------------------------------
+
+/** How dense the By job view is: full rows, or one line per job. */
+export const DENSITIES = ['rows', 'list']
+export const DENSITY_KEY = 'trovis_work_density'
+
+export function resolveDensity(v) {
+  return DENSITIES.includes(v) ? v : 'rows'
+}
+
+/**
+ * One job as one line, for scanning thirty of them: name, its verdict (the
+ * same single badge the row shows, loud or quiet), how much is open, when it
+ * last ran, how often it runs, what a run costs. Every cell is a fact the
+ * row already had; nothing here is a second computation. Cells the record
+ * cannot supply are null and render as nothing — never as a zero or a dash
+ * that reads like a small value.
+ */
+export function compactJobLine(grouped, { now = Date.now() } = {}) {
+  const job = grouped?.job || null
+  const badge = grouped?.isUnmatched ? null : healthBadge(grouped, { now })
+  const perDay = observedPerDay(job)
+  const last = ageLabel(job?.last_run_at, now)
+  const per = numOrNull(job?.cost_per_run)
+  return {
+    key: grouped?.key,
+    name: grouped?.name || '',
+    openable: !grouped?.isUnmatched && job?.id != null,
+    derived: Boolean(job?.derived),
+    badge,
+    loud: Boolean(badge && (badge.tone === 'error' || badge.tone === 'warning')),
+    open: grouped?.open ?? 0,
+    lastRun: last ? `${last} ago` : null,
+    cadence: perDay === null ? null : `${perDay}/day`,
+    costPerRun: per !== null && per > 0 ? (per < 0.01 ? `$${per.toFixed(4)}` : `$${per.toFixed(2)}`) : null,
+  }
 }

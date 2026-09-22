@@ -7322,6 +7322,19 @@ button.work-td-task:hover {
   .jobp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* The job page's edit door sits in the header, after the name. */
+.jobp-edit { margin-left: auto; }
+.work-kind-page .work-home-head .wk-derived-tag { margin-left: 4px; }
+/* Recent runs: the heading and its chips on one line, scope under the list. */
+.jobp-runs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.jobp-runs-filters { gap: 5px; }
+.jobp-runs-scope { margin: 6px 0 0; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+/* History: every version, newest first. */
+.jobp-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.jobp-history-row { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; }
+.jobp-history-date { color: var(--text-muted); }
+.jobp-history-note { color: var(--text-muted); font-style: italic; }
+
 /* Never optional, never far from the diagram. */
 .jobp-computed {
   margin: 2px 0 0; font-size: 11.5px; color: var(--text-muted);
@@ -7518,6 +7531,52 @@ button.work-td-task:hover {
   font-size: 12px; color: var(--text-muted);
 }
 .jb-scope .dash-dot-sep { margin: 0 3px; }
+
+/* Density: full rows or one line per job. A control, not a view. */
+.wk-density {
+  display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+}
+.wk-density-btn {
+  font: inherit; font-size: 12px; font-weight: 600; padding: 5px 11px;
+  border: none; border-radius: 8px; background: none; cursor: pointer;
+  color: var(--text-muted);
+}
+.wk-density-btn:hover { color: var(--text-primary); }
+.wk-density-btn.is-on { background: var(--bg-surface-hover); color: var(--text-primary); }
+.wk-density-btn:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 1px; }
+
+/* --- The compact job list ---------------------------------------------------- */
+.wk-list { overflow-x: auto; }
+.wk-list-head, .wk-list-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.6fr) minmax(140px, 1.2fr) 64px 100px 90px 90px;
+  gap: 12px; align-items: center;
+}
+.wk-list-head {
+  padding: 0 14px 8px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.wk-list-row {
+  width: 100%; text-align: left; font: inherit; font-size: 13px; color: var(--text-secondary);
+  padding: 10px 14px; margin: 0 0 4px; border: 1px solid var(--border-default);
+  border-radius: 10px; background: var(--bg-surface); font-variant-numeric: tabular-nums;
+}
+.wk-list-row.is-link { cursor: pointer; }
+.wk-list-row.is-link:hover { border-color: var(--border-hover); background: var(--bg-surface-hover); }
+.wk-list-row:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+/* State is an edge, the same as everywhere else on this page. */
+.wk-list-row.is-error { box-shadow: inset 3px 0 0 var(--error); }
+.wk-list-row.is-warning { box-shadow: inset 3px 0 0 var(--warning); }
+.wk-list-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wk-list-name .jb-name { font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk-list-verdict { min-width: 0; }
+.wk-list .is-num { text-align: right; }
+@media (max-width: 860px) {
+  .wk-list-head { display: none; }
+  .wk-list-row { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
+  .wk-list-row > span:nth-child(n + 3) { display: none; }
+}
 
 /* --- By job ---------------------------------------------------------------- */
 .wk-jobs { display: flex; flex-direction: column; gap: 10px; }

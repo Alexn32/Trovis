@@ -551,3 +551,27 @@ test('no jargon on the job page', () => {
     assert.ok(!FORBIDDEN.test(s), s)
   }
 })
+
+// --- one job page ---------------------------------------------------------------
+
+test('the job page is THE job page: edit door, declared steps, history, paged runs', () => {
+  const page = work.slice(work.indexOf('function JobPage'), work.indexOf('function DeclaredStepsBand'))
+  // One edit door, worded for what it does on each kind of job.
+  assert.match(page, /\{job\.derived \? 'Describe this job' : 'Edit job'\}/)
+  // Declared steps sit apart from the observed path, so a declaration is
+  // never read as a measurement.
+  assert.match(page, /<JobPathBand path=\{path\} provenance=\{provenance\} \/>\s*<DeclaredStepsBand steps=\{steps\} \/>/)
+  assert.match(page, /<HistoryBand versions=\{versions\} \/>/)
+  // Runs: the board's status vocabulary, and a Load more that continues the
+  // same server question (this job's id) — never a second predicate.
+  assert.match(page, /\[\.\.\.STATUS_CHIPS, 'done'\]\.map/)
+  assert.match(page, /runsCursor && onLoadMoreRuns && \(/)
+  assert.match(page, /loaded\{runsCursor \? ', more on record' : ''\}/)
+  const tab = work.slice(work.indexOf('async function loadMoreFinished'), work.indexOf('const overviewFailSoftRef'))
+  assert.match(tab, /cursor: finishedCursor/)
+  assert.match(tab, /workflowId: kindWorkflowId === null \? 'none' : kindWorkflowId/)
+  // The editor's save lands on this page too — not on the older overlay.
+  const app = src('App.jsx')
+  assert.match(app, /onSaved=\{\(id\) => \{\s*setWorkRoute\(\{ job: Number\(id\), run: null \}\)/)
+  assert.doesNotMatch(app, /onSaved=\{\(id\) => setOverlay\(\{ kind: 'workflow', id \}\)\}/)
+})
