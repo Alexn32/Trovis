@@ -71,8 +71,14 @@ for path in SOURCES:
 #      job clears derived_from and may name it — the only write that ever
 #      touches a job's name, because a derived job's name was Trovis's
 #      placeholder (the agent's service.name), never a person's choice.
+# The archive statement is written once (_archive_workflow_row) and called
+# from the endpoint and from the boot sweep that retires derived jobs
+# holding no named run — one statement, two callers.
 check("database.py: UPDATE workflows pinned at 3 (version bump + archive + promotion)",
       count("database.py", "UPDATE workflows") == 3)
+check("database.py: the archive statement has one home",
+      count("database.py", "SET archived_at = {now_sql}") == 1
+      and count("database.py", "_archive_workflow_row(cur") == 3)  # the def + two callers
 check("database.py: the name write is the promotion and nothing else",
       count("database.py", "SET derived_from = NULL, name = COALESCE") == 1
       and "UPDATE workflows SET name" not in text["database.py"])

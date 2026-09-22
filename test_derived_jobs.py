@@ -136,6 +136,44 @@ with TestClient(main.app) as c:
     check("after a person archives the derived job, that agent's new runs stay unfiled rather than re-creating it",
           o2["workflow_id"] is None and len([j for j in jobs(include_archived=1) if j["derived_from"] == "ops-bot"]) == 1)
 
+    print("\n--- only NAMED work earns a job ---")
+    # An agent that emits untitled traces is an agent, not a job: the same
+    # line Work draws everywhere (title_source = provided). No derived job,
+    # the run stays unmatched, and the agent is absent from the job list.
+    post("quiet-scraper", [sp("http.request", 50, {"trovis.run.id": "q1"})])
+    post("quiet-scraper", [sp("http.request", 40, {"trovis.run.id": "q2"})])
+    check("untitled runs derive no job",
+          not any(j["derived_from"] == "quiet-scraper" for j in jobs(include_archived=1)))
+    # A single named run from that same agent is named work, and gets one.
+    post("quiet-scraper", [sp("message_received", 30, t("Scrape the vendor catalog", "q3"))])
+    q = [j for j in jobs() if j["derived_from"] == "quiet-scraper"]
+    q3 = [i for i in items() if i["title"] == "Scrape the vendor catalog"]
+    check("one named run from the same agent derives its job, and the run lands on it",
+          len(q) == 1 and len(q3) == 1 and q3[0]["workflow_id"] == q[0]["id"])
+
+    print("\n--- the boot sweep retires derived jobs holding no named run ---")
+    # Simulate the pre-gate world: a derived job with only untitled runs.
+    with database._connect() as conn, database._cursor(conn) as cur:
+        cur.execute(
+            f"INSERT INTO workflows (account_id, name, created_by, current_version, derived_from) "
+            f"VALUES ({database.PH}, 'flood-bot', 'trovis', 1, 'flood-bot')",
+            (c.get("/auth/me", headers=H).json()["org"]["id"],),
+        )
+        cur.execute("SELECT id FROM workflows WHERE derived_from = 'flood-bot'")
+        flood_id = int(cur.fetchone()["id"])
+        cur.execute(
+            f"INSERT INTO workflow_versions (workflow_id, version, stations, match_hints, created_by) "
+            f"VALUES ({database.PH}, 1, '[]', '[]', 'trovis')", (flood_id,))
+        n = database._archive_unnamed_derived_jobs(cur)
+    swept = [j for j in jobs(include_archived=1) if j["derived_from"] == "flood-bot"]
+    kept = [j for j in jobs() if j["derived_from"] == "quiet-scraper"]
+    check("a derived job with no named run is archived by the sweep; one with a named run is kept",
+          n >= 1 and len(swept) == 1 and swept[0]["archived_at"]
+          and len(kept) == 1 and kept[0]["archived_at"] is None)
+    with database._connect() as conn, database._cursor(conn) as cur:
+        again = database._archive_unnamed_derived_jobs(cur)
+    check("the sweep is idempotent — a second pass archives nothing", again == 0)
+
     print("\n--- closed runs are frozen ---")
     post("billing-agent", [sp("message_received", 70, t("Invoice 1", "b1")),
         sp("agent_run_complete", 60, {"trovis.loop.external_id": "b1", "trovis.loop.close": "done"})])
