@@ -302,13 +302,52 @@ function WorkTable({ rows, onOpen, onOpenJob, onOpenRun, jobMeta, nextCursor, on
 // Every number here is an aggregate. The provenance line under the diagram
 // and the empty comparison column in health are what keep this page from
 // reading like the run page one click away, which states facts.
+//
+// It is laid out like the agent detail page (AgentDetail.jsx) — the same
+// shell, cards, mono labels, dot-pills and feed rows — so a job and an agent
+// read as two pages of one product. Its palette is the same page-scoped set
+// (`.jp` in styles.css), by the same design decision that page carries.
+
+// status → dot colour on a run row. Rule 6: an unknown status is muted, never
+// green — defaulting an unknown to a pass is the bug this rule exists for.
+const RUN_DOT = {
+  stuck: 'err', waiting_on_you: 'warn', waiting_on_other: 'warn', moving: 'ok', done: 'muted',
+}
+// verdict tone → dot colour on the header pill.
+const VERDICT_DOT = { error: 'err', warning: 'warn', ok: 'ok', none: 'muted' }
+
+function JpLabel({ children }) {
+  return <div className="jp-label">{children}</div>
+}
+function JpPill({ tone = 'muted', children }) {
+  return (
+    <span className="jp-pill">
+      <span className={`jp-dot is-${tone}`} aria-hidden="true" />
+      {children}
+    </span>
+  )
+}
+function JpTag({ children, onClick }) {
+  return onClick ? (
+    <button type="button" className="jp-tag is-link" onClick={onClick}>{children}</button>
+  ) : (
+    <span className="jp-tag">{children}</span>
+  )
+}
+
+function fmtDay(iso) {
+  if (!iso) return ''
+  const t = Date.parse(String(iso).includes('T') ? iso : `${iso}Z`.replace(' ', 'T'))
+  if (Number.isNaN(t)) return ''
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
 
 /** The typical route, and the one branch worth naming. */
 function JobPathBand({ path, provenance }) {
   if (!path) return null
   return (
-    <section className="kind-band" aria-label="How this job usually runs">
-      <h2 className="dash-caps">How this job usually runs</h2>
+    <div className="jp-sub" aria-label="How this job usually runs">
+      <JpLabel>How this job usually runs</JpLabel>
       <ol className="kind-path">
         {path.map((n, i) => (
           // The connector is a sibling of the node, not a pseudo-element on
@@ -331,260 +370,6 @@ function JobPathBand({ path, provenance }) {
       {/* Never optional. An average with no stated basis is an assertion,
           and this page sits one click from a page of recorded facts. */}
       {provenance && <p className="jobp-computed">{provenance}</p>}
-    </section>
-  )
-}
-
-/** Four metrics, each naming the number it is read against — or nothing. */
-function HealthBand({ rows, declared }) {
-  return (
-    <section className="kind-band" aria-label="Health">
-      <h2 className="dash-caps">Health</h2>
-      {!declared && (
-        <p className="jobp-nodecl">
-          No expectation set. These are the observed numbers; nothing is being
-          graded against them.
-        </p>
-      )}
-      <dl className="jobp-health">
-        {rows.map((r) => (
-          <div
-            key={r.key}
-            className={`jobp-metric${r.over ? ' is-over' : ''}${r.noData ? ' is-nodata' : ''}`}
-          >
-            <dt>{r.label}</dt>
-            {/* Rule 6: the words, not a dash. A dash beside three rows of
-                numbers reads as a small value rather than as no value. */}
-            <dd className="jobp-observed">{r.observed}</dd>
-            {/* Empty, not a dash pretending to be a verdict. */}
-            <dd className="jobp-expected">
-              {r.noData && r.expected ? `${r.expected} \u00b7 not checked` : r.expected || ''}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </section>
-  )
-}
-
-/** Recent runs — every state, so a repeated failure reads as a cluster.
- *  `bare` renders the list alone; the job page owns the section around it. */
-function RecentRunsBand({ rows, onOpenItem, bare = false }) {
-  if (rows.length === 0) {
-    const quiet = <p className="kind-quiet">No runs on the record yet.</p>
-    return bare ? quiet : (
-      <section className="kind-band" aria-label="Recent runs">
-        <h2 className="dash-caps">Recent runs</h2>
-        {quiet}
-      </section>
-    )
-  }
-  const list = (
-      <ul className="jobp-runs">
-        {rows.map((r) => (
-          <li key={r.id}>
-            <button type="button" className={`jobp-run is-${r.status}`} onClick={() => onOpenItem(r)}>
-              <span className="jobp-run-what">{r.title}</span>
-              <span className={`work-status-pill ${r.status || ''}`}>
-                {workItemStatusLabel(r.status)}
-              </span>
-              <span className="jobp-run-age">{workUpdatedLabel(r.updated_at)}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-  )
-  return bare ? list : (
-    <section className="kind-band" aria-label="Recent runs">
-      <h2 className="dash-caps">Recent runs</h2>
-      {list}
-    </section>
-  )
-}
-
-/** The technical block, below the fold, and only what is declared. */
-function SettingsBand({ rows, onOpenAgent }) {
-  if (rows.length === 0) return null
-  return (
-    <section className="kind-band jobp-settings" aria-label="Settings">
-      <h2 className="dash-caps">Settings</h2>
-      <dl>
-        {rows.map((r) => (
-          <div key={`${r.label}-${r.value}`}>
-            <dt>{r.label}</dt>
-            <dd>
-              {r.route && onOpenAgent ? (
-                <button
-                  type="button"
-                  className="jobd-run-agent"
-                  onClick={() => onOpenAgent(r.route[0], r.route[1])}
-                >
-                  {r.value}
-                </button>
-              ) : (
-                r.value
-              )}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </section>
-  )
-}
-
-/**
- * The job page: /work/jobs/:id.
- *
- * One subject, and it is a PATTERN — how this job usually runs, what it
- * declared about itself, how the record compares. Individual runs appear
- * only as a recent sample that links out; the instance-level story lives on
- * the run page.
- */
-function JobPage({
-  job, jobErr, name, runs: jobRuns, runsLoading, runsCursor, onLoadMoreRuns,
-  filter, onFilter, onClearFilter, onBack, onOpenItem, onOpenAgent, onEditJob,
-}) {
-  const now = Date.now()
-  // This job's own runs, id-filtered by the server. The aggregates come from
-  // the job itself, precomputed — the client does no arithmetic on them, so
-  // it cannot disagree with the board.
-  const mine = jobRuns || []
-  const shown = filter ? mine.filter((r) => matchesWorkFilter(r, filter)) : mine
-  const path = jobPath(job, mine)
-  const stats = jobStats(job, { now })
-  const health = healthRows(job)
-  const settings = settingsRows(job)
-  const provenance = computedFrom(job, mine)
-  const runs = recentRuns(shown)
-  const filteredOut = runs.length === 0 && mine.length > 0
-  const steps = declaredSteps(job)
-  const versions = Array.isArray(job?.versions) ? job.versions : []
-
-  return (
-    <div className="view work-kind-page">
-      <header className="work-home-head">
-        <button type="button" className="wf2-back" onClick={onBack}>
-          ← All work
-        </button>
-        <h1>{job?.name || name}</h1>
-        {job?.derived && <span className="wk-derived-tag">not yet described</span>}
-        {/* The one edit door. On a derived job it reads as what it is —
-            the promotion; on a declared job, a new version of its
-            definition. Both land in the same editor. */}
-        {onEditJob && job && (
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm jobp-edit"
-            onClick={() => onEditJob(job.id)}
-          >
-            {job.derived ? 'Describe this job' : 'Edit job'}
-          </button>
-        )}
-      </header>
-
-      {jobErr && !job && (
-        <p className="kind-quiet" role="alert">
-          Couldn&apos;t load this job&apos;s definition. The runs below are still real.
-        </p>
-      )}
-      {/* The operator's own words. Absent until somebody writes them — this
-          page will not summarise a job it has only counted. */}
-      {job?.definition && <p className="jobp-definition">{job.definition}</p>}
-      {/* A derived job has no operator's words yet — this is where it says
-          so, and offers the one step that changes it. */}
-      {job?.derived && (
-        <div className="jobp-derived">
-          <span className="wk-derived-tag">not yet described</span>
-          <p>
-            Trovis created this job from {job.derived_from}&apos;s activity because nobody had described one yet.
-            It is observed, not graded: no expectation, no verdict.
-          </p>
-          {onEditJob && (
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => onEditJob(job.id)}>
-              Describe this job
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="jobp-stats">
-        {stats.map((st) => (
-          <div key={st.key} className={`jobp-stat${st.value === null ? ' is-nodata' : ''}`}>
-            <span className="jobp-stat-label">{st.label}</span>
-            {/* Rule 6, said the same way the health section says it. An em
-                dash here beside "No data" two inches below was the same fact
-                rendered two ways on one screen \u2014 browser-caught. */}
-            <span className="jobp-stat-value">{st.value ?? 'No data'}</span>
-            {/* The denominator, when it is not the whole job. */}
-            {st.sub && st.value != null && <span className="jobp-stat-sub">{st.sub}</span>}
-          </div>
-        ))}
-      </div>
-
-      <JobPathBand path={path} provenance={provenance} />
-      <DeclaredStepsBand steps={steps} />
-      <HealthBand rows={health} declared={Boolean(job?.has_expectation)} />
-
-      <section className="kind-band" aria-label="Recent runs">
-        <div className="jobp-runs-head">
-          <h2 className="dash-caps">Recent runs</h2>
-          {/* The same status vocabulary as the board, applied to the runs
-              this page has loaded. The server pages by recency; the chips
-              narrow what is on screen, and Load more fetches the next page
-              of the job's history whichever chip is on. */}
-          {onFilter && (
-            <div className="jb-filters jobp-runs-filters">
-              {[...STATUS_CHIPS, 'done'].map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  className={`jb-pill${filter === f ? ' is-on' : ''}`}
-                  aria-pressed={filter === f}
-                  onClick={() => onFilter(filter === f ? null : f)}
-                >
-                  {WORK_FILTER_LABELS[f]}
-                </button>
-              ))}
-              {filter && (
-                <button
-                  type="button"
-                  className="work-filter-chip"
-                  onClick={onClearFilter}
-                  aria-label={`Clear the ${WORK_FILTER_LABELS[filter] || filter} filter`}
-                >
-                  {WORK_FILTER_LABELS[filter] || filter}
-                  <span aria-hidden="true">×</span>
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-        {runsLoading && mine.length === 0 ? (
-          <div className="dash-skel"><span style={{ width: '60%' }} /></div>
-        ) : filteredOut ? (
-          <div className="board-empty">
-            <p className="board-empty-lead">Nothing matches these filters.</p>
-            <p className="board-empty-sub">
-              Clear the filter, or load more of this job&apos;s history below.
-            </p>
-          </div>
-        ) : (
-          <RecentRunsBand rows={runs} onOpenItem={onOpenItem} bare />
-        )}
-        {/* How much of the history is on screen, and the way to more of it. */}
-        <p className="jobp-runs-scope">
-          {mine.length} {mine.length === 1 ? 'run' : 'runs'} loaded{runsCursor ? ', more on record' : ''}
-          {filter ? ` · ${runs.length} shown` : ''}
-        </p>
-        {runsCursor && onLoadMoreRuns && (
-          <button type="button" className="btn btn-secondary btn-sm work-more" onClick={onLoadMoreRuns}>
-            Load more
-          </button>
-        )}
-      </section>
-
-      <SettingsBand rows={settings} onOpenAgent={onOpenAgent} />
-      <HistoryBand versions={versions} />
     </div>
   )
 }
@@ -598,8 +383,8 @@ function JobPage({
 function DeclaredStepsBand({ steps }) {
   if (!steps.length) return null
   return (
-    <section className="kind-band" aria-label="Declared steps">
-      <h2 className="dash-caps">Declared steps</h2>
+    <div className="jp-sub" aria-label="Declared steps">
+      <JpLabel>Declared steps</JpLabel>
       <ol className="kind-path">
         {steps.map((s, i) => (
           <li key={`${s.kind}-${s.label}-${i}`} className="kind-step">
@@ -611,7 +396,103 @@ function DeclaredStepsBand({ steps }) {
           </li>
         ))}
       </ol>
+    </div>
+  )
+}
+
+/**
+ * Health & expectations — the identity card's shape: a label, the one
+ * verdict pill, a sentence, then the four metrics each naming the number it
+ * is read against, or nothing. Under them, the observed path and the
+ * declared steps: what the record saw, then what a person said.
+ */
+function HealthCard({ rows, declared, badge, path, provenance, steps }) {
+  const tone = VERDICT_DOT[badge?.tone] || 'muted'
+  return (
+    <section className="jp-card" aria-label="Health">
+      <div className="jp-card-head">
+        <JpLabel>Health &amp; expectations</JpLabel>
+        {badge && <JpPill tone={tone}>{badge.label}</JpPill>}
+      </div>
+      <p className="jp-lede">
+        {declared
+          ? 'Observed over the window, read against what this job declared. A number turns red only where a declared ceiling or floor exists and was crossed.'
+          : 'No expectation set. These are the observed numbers; nothing is being graded against them.'}
+      </p>
+      <dl className="jp-metrics">
+        {rows.map((r) => (
+          <div
+            key={r.key}
+            className={`jp-metric${r.over ? ' is-over' : ''}${r.noData ? ' is-nodata' : ''}`}
+          >
+            <dt>{r.label}</dt>
+            {/* Rule 6: the words, not a dash. A dash beside three rows of
+                numbers reads as a small value rather than as no value. */}
+            <dd className="jp-metric-value">{r.observed}</dd>
+            {/* Empty, not a dash pretending to be a verdict. */}
+            <dd className="jp-metric-expected">
+              {r.noData && r.expected ? `${r.expected} · not checked` : r.expected || ''}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <JobPathBand path={path} provenance={provenance} />
+      <DeclaredStepsBand steps={steps} />
     </section>
+  )
+}
+
+/** One run as a feed row: dot, title, status tag, holder, age, chevron. */
+function RunRow({ r, onOpen }) {
+  const tone = RUN_DOT[r.status] || 'muted'
+  return (
+    <button type="button" className="jp-row" onClick={() => onOpen(r)}>
+      <span className={`jp-dot is-${tone}`} aria-hidden="true" />
+      <span className="jp-row-title">{r.title}</span>
+      <span className={`jp-row-tag is-${tone}`}>{workItemStatusLabel(r.status)}</span>
+      <span className="jp-row-meta">{holderLabel(r.holder, r.status)}</span>
+      <span className="jp-row-meta">{workUpdatedLabel(r.updated_at)}</span>
+      <span className="jp-row-go" aria-hidden="true">›</span>
+    </button>
+  )
+}
+
+/** Recent runs — every state, so a repeated failure reads as a cluster. */
+function RecentRunsBand({ rows, onOpenItem }) {
+  if (rows.length === 0) {
+    return <p className="jp-quiet">No runs on the record yet.</p>
+  }
+  return (
+    <div className="jp-rows">
+      {rows.map((r) => <RunRow key={r.id} r={r} onOpen={onOpenItem} />)}
+    </div>
+  )
+}
+
+/** The technical block, and only what is declared. */
+function SettingsBand({ rows, onOpenAgent }) {
+  if (rows.length === 0) return null
+  return (
+    <dl className="jp-settings">
+      {rows.map((r) => (
+        <div key={`${r.label}-${r.value}`}>
+          <dt>{r.label}</dt>
+          <dd>
+            {r.route && onOpenAgent ? (
+              <button
+                type="button"
+                className="jp-link"
+                onClick={() => onOpenAgent(r.route[0], r.route[1])}
+              >
+                {r.value}
+              </button>
+            ) : (
+              r.value
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
   )
 }
 
@@ -620,20 +501,280 @@ function DeclaredStepsBand({ steps }) {
 function HistoryBand({ versions }) {
   if (!versions.length) return null
   return (
-    <section className="kind-band jobp-history" aria-label="History">
-      <h2 className="dash-caps">History</h2>
-      <ol className="jobp-history-list">
+    <div className="jp-sub" aria-label="History">
+      <JpLabel>History</JpLabel>
+      <ol className="jp-history">
         {versions.map((v) => (
-          <li key={v.version} className="jobp-history-row">
-            <span className="wfe-vchip">v{v.version}</span>
-            <span className="jobp-history-date">
-              {v.created_at ? new Date(String(v.created_at).replace(' ', 'T')).toLocaleDateString() : ''}
-            </span>
-            {v.note && <span className="jobp-history-note">{v.note}</span>}
+          <li key={v.version} className="jp-history-row">
+            <span className="jp-tag">v{v.version}</span>
+            <span className="jp-history-date">{fmtDay(v.created_at)}</span>
+            {v.note && <span className="jp-history-note">{v.note}</span>}
           </li>
         ))}
       </ol>
-    </section>
+    </div>
+  )
+}
+
+/**
+ * Archive, never delete — the same posture as the agent page's danger zone,
+ * for the write this record actually allows. Archiving stops future matching
+ * and hides the job from the board; every run and every version stays
+ * readable, and Home's history keeps its rows. Two clicks, like the agent
+ * page.
+ */
+function ArchiveZone({ onArchive }) {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  async function go() {
+    setBusy(true)
+    try {
+      await onArchive()
+    } catch {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+  return (
+    <div className="jp-danger">
+      <div>
+        <div className="jp-danger-title">Archive this job</div>
+        <div className="jp-danger-sub">
+          Stops new runs from being filed here and takes it off the board. Its runs and
+          every version stay on the record. Archiving cannot be undone; declare a new job instead.
+        </div>
+      </div>
+      <div className="jp-danger-actions">
+        {confirming && (
+          <button type="button" className="jp-btn-ghost" disabled={busy} onClick={() => setConfirming(false)}>
+            Cancel
+          </button>
+        )}
+        <button
+          type="button"
+          className="jp-btn-danger"
+          disabled={busy}
+          onClick={() => (confirming ? go() : setConfirming(true))}
+        >
+          {busy ? 'Archiving…' : confirming ? 'Confirm archive' : 'Archive job'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The job page: /work/jobs/:id.
+ *
+ * One subject, and it is a PATTERN — how this job usually runs, what it
+ * declared about itself, how the record compares. Individual runs appear
+ * only as a recent sample that links out; the instance-level story lives on
+ * the run page. Organising rule, borrowed from the agent page: plain
+ * English first, the record behind a click.
+ *   1. What is this & is it OK?   (header: name, verdict, definition)
+ *   2. How is it doing?           (the window strip)
+ *   3. What has it been doing?    (runs, filtered and paged)
+ *   4. Is it what it declared?    (health & expectations, path, steps)
+ *   5. How is it recognised?      (settings, history)
+ */
+function JobPage({
+  job, jobErr, name, runs: jobRuns, runsLoading, runsCursor, onLoadMoreRuns,
+  filter, onFilter, onClearFilter, onBack, onOpenItem, onOpenAgent, onEditJob, onArchive,
+}) {
+  const now = Date.now()
+  // This job's own runs, id-filtered by the server. The aggregates come from
+  // the job itself, precomputed — the client does no arithmetic on them, so
+  // it cannot disagree with the board.
+  const mine = jobRuns || []
+  const shown = filter ? mine.filter((r) => matchesWorkFilter(r, filter)) : mine
+  const path = jobPath(job, mine)
+  const stats = jobStats(job, { now })
+  const health = healthRows(job)
+  const settings = settingsRows(job)
+  const provenance = computedFrom(job, mine)
+  const runs = recentRuns(shown, { limit: 200 })
+  const filteredOut = runs.length === 0 && mine.length > 0
+  // The feed's three depths, as on the agent page: the recent few, then
+  // everything loaded, then the next page from the server.
+  const [expanded, setExpanded] = useState(false)
+  const RECENT = 8
+  const visible = expanded ? runs : runs.slice(0, RECENT)
+  const steps = declaredSteps(job)
+  const versions = Array.isArray(job?.versions) ? job.versions : []
+  // The one verdict, from the same rule the board uses, over the same runs.
+  const grouped = job ? groupByJob([job], mine, { now })[0] : null
+  const badge = grouped ? healthBadge(grouped, { now }) : null
+  const shape = grouped ? stateSegments(grouped) : { total: 0, segments: [] }
+  const windowDays = numOrNull(job?.window_days)
+  const declaredOn = fmtDay(job?.created_at)
+  const owner = String(job?.owning_service_name || '').trim()
+
+  return (
+    <div className="jp">
+      <div className="jp-inner">
+        <button type="button" className="jp-back" onClick={onBack}>← All work</button>
+
+        <header className="jp-head">
+          <div className="jp-head-row">
+            <h1 className="jp-title">{job?.name || name}</h1>
+            {badge && <JpPill tone={VERDICT_DOT[badge.tone] || 'muted'}>{badge.label}</JpPill>}
+            {/* The one edit door. On a derived job it reads as what it is —
+                the promotion; on a declared job, a new version of its
+                definition. Both land in the same editor. */}
+            {onEditJob && job && (
+              <button type="button" className="jp-btn jp-edit" onClick={() => onEditJob(job.id)}>
+                {job.derived ? 'Describe this job' : 'Edit job'}
+              </button>
+            )}
+          </div>
+          <div className="jp-meta">
+            {job?.derived && <JpTag>not yet described</JpTag>}
+            {owner && (
+              <JpTag onClick={onOpenAgent ? () => onOpenAgent(owner, String(job?.owning_agent_id || '').trim() || 'main') : undefined}>
+                {owner}
+              </JpTag>
+            )}
+            {job?.current_version != null && <JpTag>v{job.current_version}</JpTag>}
+            {declaredOn && <span>{job?.derived ? 'Created' : 'Declared'} {declaredOn}</span>}
+          </div>
+          {jobErr && !job && (
+            <p className="jp-quiet" role="alert">
+              Couldn&apos;t load this job&apos;s definition. The runs below are still real.
+            </p>
+          )}
+          {/* The operator's own words. Absent until somebody writes them —
+              this page will not summarise a job it has only counted. */}
+          {job?.definition && <p className="jp-definition">{job.definition}</p>}
+          {/* A derived job has no operator's words yet — this is where it
+              says so, and offers the one step that changes it. */}
+          {job?.derived && (
+            <p className="jp-definition is-derived">
+              Trovis created this job from {job.derived_from}&apos;s activity because nobody had described one yet.
+              It is observed, not graded: no expectation, no verdict.
+              {onEditJob && (
+                <button type="button" className="jp-link" onClick={() => onEditJob(job.id)}>
+                  Describe this job
+                </button>
+              )}
+            </p>
+          )}
+        </header>
+
+        {/* 2. How is it doing — the window strip, the agent page's "This week". */}
+        <section className="jp-card" aria-label="Recent activity">
+          <JpLabel>{windowDays ? `Last ${windowDays} days` : 'Recent activity'}</JpLabel>
+          <div className="jp-stats">
+            {stats.map((st) => (
+              <div key={st.key} className={`jp-stat${st.value === null ? ' is-nodata' : ''}`}>
+                <div className="jp-stat-label">{st.label}</div>
+                {/* Rule 6, said the same way the health section says it. */}
+                <div className="jp-stat-value">{st.value ?? 'No data'}</div>
+                {/* The denominator, when it is not the whole job. */}
+                {st.sub && st.value != null && <div className="jp-stat-sub">{st.sub}</div>}
+              </div>
+            ))}
+            {/* The shape of the runs on this page, where the agent page draws
+                its cost sparkline: proportional bar, counts in words, and the
+                basis — these are the loaded rows, not the window. */}
+            {shape.total > 0 && (
+              <div className="jp-shape">
+                <span className="wk-bar" role="img" aria-label={countsLine(grouped)}>
+                  {shape.segments.map((s) => (
+                    <span key={s.key} className={`wk-bar-seg tone-${s.tone}`} style={{ width: `${s.pct}%` }} />
+                  ))}
+                </span>
+                <span className="jp-shape-line">{countsLine(grouped)} · of {mine.length} loaded</span>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* 3. What has it been doing — the runs, the agent page's work feed. */}
+        <section className="jp-card jp-feed" aria-label="Recent runs">
+          <div className="jp-card-head jp-feed-head">
+            <h2 className="dash-caps">Recent runs</h2>
+            <span className="jp-count">
+              {mine.length} {mine.length === 1 ? 'run' : 'runs'} loaded{runsCursor ? ', more on record' : ''}
+              {filter ? ` · ${runs.length} shown` : ''}
+            </span>
+          </div>
+          {/* The same status vocabulary as the board, applied to the runs
+              this page has loaded. The server pages by recency; the chips
+              narrow what is on screen, and Load more fetches the next page
+              of the job's history whichever chip is on. */}
+          {onFilter && mine.length > 0 && (
+            <div className="jp-filters">
+              <button
+                type="button"
+                className={`jp-filter${!filter ? ' is-on' : ''}`}
+                aria-pressed={!filter}
+                onClick={onClearFilter}
+              >
+                All
+              </button>
+              {[...STATUS_CHIPS, 'done'].map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  className={`jp-filter${filter === f ? ' is-on' : ''}`}
+                  aria-pressed={filter === f}
+                  onClick={() => onFilter(filter === f ? null : f)}
+                >
+                  {WORK_FILTER_LABELS[f]}
+                </button>
+              ))}
+            </div>
+          )}
+          {runsLoading && mine.length === 0 ? (
+            <p className="jp-quiet is-pad">Loading…</p>
+          ) : filteredOut ? (
+            <p className="jp-quiet is-pad">
+              Nothing matches these filters{runsCursor ? ' in the loaded runs — load more below to keep looking.' : '.'}
+            </p>
+          ) : (
+            <RecentRunsBand rows={visible} onOpenItem={onOpenItem} />
+          )}
+          {(runs.length > RECENT || (runsCursor && onLoadMoreRuns)) && (
+            <button
+              type="button"
+              className="jp-feed-more"
+              onClick={() => {
+                if (!expanded && runs.length > RECENT) setExpanded(true)
+                else if (runsCursor && onLoadMoreRuns) onLoadMoreRuns()
+                else setExpanded(false)
+              }}
+            >
+              {!expanded && runs.length > RECENT
+                ? `Show all ${runs.length} loaded`
+                : runsCursor && onLoadMoreRuns
+                  ? 'Load 50 more'
+                  : `Show recent ${RECENT}`}
+            </button>
+          )}
+        </section>
+
+        {/* 4. Is it what it declared. */}
+        <HealthCard
+          rows={health}
+          declared={Boolean(job?.has_expectation)}
+          badge={badge}
+          path={path}
+          provenance={provenance}
+          steps={steps}
+        />
+
+        {/* 5. How it is recognised, and how its definition changed. */}
+        {(settings.length > 0 || versions.length > 0) && (
+          <section className="jp-card" aria-label="Settings">
+            <JpLabel>Settings</JpLabel>
+            <SettingsBand rows={settings} onOpenAgent={onOpenAgent} />
+            <HistoryBand versions={versions} />
+          </section>
+        )}
+
+        {onArchive && job && !job.archived_at && <ArchiveZone onArchive={onArchive} />}
+      </div>
+    </div>
   )
 }
 
@@ -1706,6 +1847,16 @@ export default function WorkTab({
     }
   }
 
+  // Archive, never delete: stops future matching, keeps every run and
+  // version readable. The board re-reads its declarations and the page
+  // returns to the board, where the job is no longer listed.
+  async function archiveJob() {
+    if (!route.job) return
+    await api.archiveWorkflow(route.job)
+    setRefreshKeyForJobs((n) => n + 1)
+    onRoute({ job: null, run: null })
+  }
+
   // WHICH PAGE is the URL's job now, not local state. Back, Forward and a
   // pasted link all go through the same path, so they cannot diverge.
   const openJob = route.job ? (jobs || []).find((j) => j.id === route.job) || null : null
@@ -1751,6 +1902,7 @@ export default function WorkTab({
         onOpenItem={(it) => onRoute({ job: it.workflow_id ?? route.job, run: it.id })}
         onOpenAgent={onOpenAgent}
         onEditJob={onEditWorkflow}
+        onArchive={onEditWorkflow ? archiveJob : null}
       />
     ) : (
     <WorkHome
