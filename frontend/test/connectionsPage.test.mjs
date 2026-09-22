@@ -198,6 +198,25 @@ test('a work-system row separates authorization from activity', () => {
     { status: 'Not connected', detail: null, connected: false })
 })
 
+test('a recorded setup shows on the AI row before any data arrives', () => {
+  // Instances (connection_instances) give telemetry connectors the fact they
+  // never had: setup began or finished. The row says so instead of a bare
+  // Connect, and offers Connect another.
+  const started = { state: 'not_connected', observed: false, instances: [{ setup_status: 'started', state: 'setup_started' }] }
+  assert.deepEqual(aiRowState(started, rel),
+    { status: 'Waiting for data', detail: 'Setup started · waiting for data', action: 'Connect another' })
+  const complete = { state: 'waiting_for_data', observed: false, instances: [{ setup_status: 'completed', state: 'waiting_for_data' }] }
+  assert.deepEqual(aiRowState(complete, rel),
+    { status: 'Waiting for data', detail: 'Setup complete · waiting for data', action: 'Connect another' })
+  const two = { state: 'not_connected', observed: false, instances: [
+    { setup_status: 'started', state: 'setup_started' }, { setup_status: 'completed', state: 'waiting_for_data' }] }
+  assert.equal(aiRowState(two, rel).detail, '2 set up · waiting for data')
+  // Disconnected rows do not count, and a row without instances is unchanged.
+  const gone = { state: 'not_connected', observed: false, instances: [{ setup_status: 'disconnected', state: 'disconnected' }] }
+  assert.deepEqual(aiRowState(gone, rel), { status: null, detail: null, action: 'Connect' })
+  assert.deepEqual(aiRowState({ state: 'not_connected', observed: false }, rel), { status: null, detail: null, action: 'Connect' })
+})
+
 test('the health API is one Connections-oriented read; Work and Agent Flow APIs are untouched', () => {
   const api = src('api.js')
   assert.match(api, /getConnectHealth: \(\) => request\('\/connect\/health'\)/)

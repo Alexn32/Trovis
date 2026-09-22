@@ -86,6 +86,19 @@ export function healthFor(health, connectorId) {
  */
 export function aiRowState(row, rel) {
   if (!row || !row.observed || row.state !== 'connected') {
+    // A setup recorded through Trovis but not observed yet: say so, from the
+    // instance rows — a first for telemetry connectors, which used to have no
+    // fact between "nothing" and "a span arrived".
+    const live = (row?.instances || []).filter((i) => i.setup_status !== 'disconnected')
+    if (live.length) {
+      const n = live.length
+      const complete = live.some((i) => i.state === 'waiting_for_data')
+      return {
+        status: 'Waiting for data',
+        detail: `${n === 1 ? (complete ? 'Setup complete' : 'Setup started') : `${n} set up`} · waiting for data`,
+        action: 'Connect another',
+      }
+    }
     return { status: null, detail: null, action: 'Connect' }
   }
   const when = row.last_observed_at ? rel(row.last_observed_at) : null

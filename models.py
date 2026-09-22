@@ -2764,6 +2764,40 @@ class ConnectionInstanceResponse(ConnectionInstance):
     stamp: dict[str, str] = Field(default_factory=dict)
 
 
+class ConnectionStatusService(BaseModel):
+    service_name: str | None = None
+    agent_id: str | None = None
+    last_observed_at: str | None = None
+    span_count: int = 0
+
+
+class ConnectionStatus(BaseModel):
+    """The guided setup's verification read (connect_health.
+    build_connection_status): what arrived for one connector — and, when an
+    instance is named, for that instance — since setup began.
+
+      state        instance: setup_started | waiting_for_data | connected |
+                   disconnected; connector-level: not_connected | connected
+      attribution  "instance" (a span carried the instance key), "connector"
+                   (traffic for the connector arrived without it), or null
+      sees         execution / actions / model_usage / named_work from the
+                   spans counted — facts, not coverage; handoffs and external
+                   outcomes are not derivable here
+      bounded      the read hit its group cap; counts are a lower bound
+    """
+
+    connection_id: int | None = None
+    connector_id: str
+    state: str | None = None
+    attribution: str | None = None
+    since: str | None = None
+    last_observed_at: str | None = None
+    services: list[ConnectionStatusService] = Field(default_factory=list)
+    sees: dict[str, bool] = Field(default_factory=dict)
+    span_count: int = 0
+    bounded: bool = False
+
+
 class ConnectionInstanceList(BaseModel):
     connections: list[ConnectionInstance] = Field(default_factory=list)
 
