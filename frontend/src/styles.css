@@ -7479,7 +7479,49 @@ button.work-td-task:hover {
 }
 .jp-feed-more:hover { filter: brightness(0.98); }
 
-/* health & expectations — the agent page's identity card */
+/* how this job runs — the declared steps drawn left to right, today's open
+   work placed on them, Done at the end. Boxes, not pills: a step is a place
+   work sits, and it has to be able to hold a name, a task, tools and a count.
+   Scrolls sideways before it wraps, so the order stays an order. */
+.jp-flow {
+  display: flex; align-items: stretch; gap: 0; overflow-x: auto; padding: 4px 2px 8px;
+  scrollbar-width: thin;
+}
+.jp-flow-cell { display: flex; align-items: stretch; flex-shrink: 0; }
+.jp-flow-step {
+  display: flex; flex-direction: column; gap: 6px; min-width: 150px; max-width: 220px;
+  padding: 14px 16px; border-radius: 12px; background: var(--jp-linen);
+  border: 1px solid var(--jp-border);
+}
+.jp-flow-step.is-busy { background: #FBEBDD; border-color: var(--jp-warn); }
+.jp-flow-step.is-done { background: transparent; border-style: dashed; justify-content: center; }
+.jp-flow-who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.jp-flow-name {
+  font-family: var(--jp-disp); font-weight: 700; font-size: 14.5px; color: var(--jp-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.jp-flow-kind {
+  font-family: var(--jp-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--jp-faint); margin-left: auto; padding-left: 6px;
+}
+.jp-flow-what { font-size: 12.5px; line-height: 1.45; color: var(--jp-body); }
+.jp-flow-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.jp-flow-heat { font-family: var(--jp-mono); font-size: 12px; font-weight: 500; color: var(--jp-warn); margin-top: 2px; }
+.jp-flow-arrow {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; padding: 0 6px; min-width: 44px; flex-shrink: 0;
+}
+.jp-flow-carrier { font-family: var(--jp-mono); font-size: 10.5px; color: var(--jp-muted); white-space: nowrap; }
+.jp-flow-line { position: relative; width: 100%; min-width: 32px; height: 1px; background: var(--jp-faint); }
+.jp-flow-line::after {
+  content: ''; position: absolute; right: -1px; top: -3.5px; width: 0; height: 0;
+  border-left: 6px solid var(--jp-faint); border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+}
+.jp-flow-note { margin-top: 10px; }
+.jp-flow-observed { margin-top: 4px; }
+.jp .jp-dot.is-teal { background: var(--jp-teal); }
+
+/* expectations — the agent page's identity card, only the declared rows */
 .jp-metrics { margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .jp-metric { display: flex; flex-direction: column; gap: 3px; padding: 10px 0 10px 12px; border-left: 2px solid var(--jp-subtle); }
 .jp-metric.is-over { border-left-color: var(--jp-err); }
@@ -7529,6 +7571,7 @@ button.work-td-task:hover {
   .jp-stat { padding-right: 0; margin-right: 0; border-right: none; }
   .jp-shape { grid-column: 1 / -1; min-width: 0; }
   .jp-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jp-flow-step { min-width: 132px; padding: 12px 13px; }
   .jp-row { grid-template-columns: 8px minmax(0, 1fr) auto 10px; }
   .jp-row .jp-row-meta { display: none; }
   .jp-settings { grid-template-columns: 1fr; gap: 0; }

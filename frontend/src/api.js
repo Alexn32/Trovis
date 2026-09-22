@@ -285,7 +285,7 @@ export const api = {
   getWorkflows: (opts = {}) => request('/workflows', opts),
   getWorkflow: (id, opts = {}) => request(`/workflows/${id}`, opts),
   // Live station map: where every non-terminal matched loop currently sits.
-  getWorkflowMap: (id) => request(`/workflows/${id}/map`),
+  getWorkflowMap: (id, opts = {}) => request(`/workflows/${id}/map`, opts),
   getWorkflowLoops: (id, state = null) =>
     request(`/workflows/${id}/loops${state ? `?state=${encodeURIComponent(state)}` : ''}`),
   createWorkflow: (data) =>

@@ -212,11 +212,13 @@ export function unmeasuredExpectations(job) {
   const declaredCadence =
     numOrNull(job?.expected_per_day_min) !== null
     || numOrNull(job?.expected_per_day_max) !== null
-  if (declaredCadence && observedPerDay(job) === null) add('cadence')
+  if (declaredCadence && observedPerDay(job) === null) add('runs per day')
+  // Plain words, because these land in a badge a manager reads: "No data for
+  // time to finish", not "No data for close time".
   const pairs = [
-    ['expected_close_s', 'median_close_s', 'close time'],
-    ['expected_intervention_pct', 'intervention_pct', 'intervention'],
-    ['expected_failure_pct', 'failure_pct', 'failure rate'],
+    ['expected_close_s', 'median_close_s', 'time to finish'],
+    ['expected_intervention_pct', 'intervention_pct', 'how often a person was needed'],
+    ['expected_failure_pct', 'failure_pct', 'how often it failed'],
   ]
   for (const [exp, obs, label] of pairs) {
     if (numOrNull(job?.[exp]) === null) continue
@@ -236,8 +238,8 @@ export function unmeasuredExpectations(job) {
  *   3. never ran, against a floor      Never run, expected 8/day
  *   4. quiet past the expected cadence Quiet 3 days
  *   5. under the declared floor        0.5/day, expected 8–12
- *   6. a metric past its ceiling       Intervention 18%, expected under 10%
- *   7. a declared check with no data   No data for close time
+ *   6. a metric past its ceiling       Needed a person 18%, expected under 10%
+ *   7. a declared check with no data   No data for time to finish
  *   8. no expectation, but observed    9/day, no expectation set
  *   9. no expectation and no data      No data, no expectation set
  *  10. every declared check measured
@@ -361,8 +363,8 @@ export function quietFor(job, now = Date.now()) {
  */
 export function firstOverCeiling(job) {
   const checks = [
-    ['intervention_pct', 'expected_intervention_pct', 'Intervention', '%'],
-    ['failure_pct', 'expected_failure_pct', 'Failure rate', '%'],
+    ['intervention_pct', 'expected_intervention_pct', 'Needed a person', '%'],
+    ['failure_pct', 'expected_failure_pct', 'Failed', '%'],
   ]
   // Every side of every comparison goes through numOrNull first. `!= null`
   // lets '' and a stray string through to `>`, which compares them by
@@ -378,7 +380,7 @@ export function firstOverCeiling(job) {
   const close = numOrNull(job?.median_close_s)
   const closeMax = numOrNull(job?.expected_close_s)
   if (close !== null && closeMax !== null && close > closeMax) {
-    return `Close time ${durationLabel(close)}, expected under ${durationLabel(closeMax)}`
+    return `Time to finish ${durationLabel(close)}, expected under ${durationLabel(closeMax)}`
   }
   return null
 }

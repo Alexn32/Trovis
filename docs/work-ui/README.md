@@ -19,9 +19,9 @@ server, Chromium at 1280×900 (390×900 for the narrow shot).
 | `3-work-all-open.png` | All open: one urgency-sorted table of the same rows |
 | `4-work-completed.png` | Completed: recorded completions charted from `/home/snapshot`, by job, then the closed runs |
 | `5-work-narrow.png` | 390px wide — tiles two-by-two, job head stacked |
-| `7-work-job-list.png` | By job in List density: one line per job — name, verdict, open, last run, cadence, cost per run |
-| `8-job-page.png` | the job page, in the agent detail page's language: name and verdict pill, the window strip, runs as a feed (recent few → all loaded → next page), health & expectations with the observed path and declared steps, settings and history, archive |
-| `6-derived-job.png` | the job page of a DERIVED job: `ops-bot` was never declared, so Trovis filed its runs under a job named after it, tagged "not yet described", with the Describe door that promotes it |
+| `7-work-job-list.png` | By job in List density: one line per job — name, verdict, open, last run, runs per day, cost per run |
+| `8-job-page.png` | the job page, in the agent detail page's language: name and verdict pill, the window strip (last run, runs per day, typical time to finish, cost per run — each with its basis), runs as a feed (recent few → all loaded → next page), **How this job runs** — the declared steps drawn as boxes with today's open runs placed on them and Done at the end — then Expectations (only the declared targets), settings and history, archive |
+| `6-derived-job.png` | the job page of a DERIVED job: `ops-bot` was never declared, so Trovis filed its runs under a job named after it, tagged "not yet described", with the Describe door that promotes it; with one declared step there is no drawing, so the card says every run stayed with `ops-bot` |
 
 The page reads `/work/overview`, `/work/items`, `/workflows` and
 `/work/suggestions`; Completed adds `/work/items?status=done` and

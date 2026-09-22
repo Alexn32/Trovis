@@ -11,6 +11,7 @@
 
 import { kindPath, pathBasis } from './board.js'
 import { NO_DATA, ageLabel, durationLabel, numOrNull, observedPerDay } from './workBoard.js'
+import { stationHeat } from './loops.js'
 
 /** "$4.12" / "$0.0042" — null when there is nothing real to show. */
 export function costLabel(v) {
@@ -81,23 +82,51 @@ export function jobPath(job, runs) {
 }
 
 /**
- * The four facts at the top: last run, cadence, median close, cost per run.
+ * The four facts at the top: last run, runs per day, typical time to finish,
+ * cost per run.
  *
- * Each is `{ label, value }` with value null when the record cannot say. A
- * null renders as an em dash, never as zero — a job that has never closed a
- * run has no median, and printing "0s" would be a measurement of something
- * that did not happen.
+ * Each is `{ label, value, sub? }` with value null when the record cannot
+ * say. A null renders as words, never as zero — a job that has never finished
+ * a run has no typical time, and printing "0s" would be a measurement of
+ * something that did not happen.
+ *
+ * The labels are the words a manager would use, not the statistician's:
+ * "Runs per day" where the code says cadence, "Typical time to finish" where
+ * it says median close. The sub-lines carry the basis — how many runs the
+ * rate is over, how many the median is over — so the number is never a
+ * bare assertion.
  */
 export function jobStats(job, { now = Date.now() } = {}) {
   const last = ageLabel(job?.last_run_at, now)
   const perDay = observedPerDay(job)
+  const started = numOrNull(job?.started_runs)
+  const closed = numOrNull(job?.closed_runs)
+  const days = numOrNull(job?.window_days)
   return [
     { key: 'last', label: 'Last run', value: last ? `${last} ago` : null },
-    { key: 'cadence', label: 'Cadence', value: perDay === null ? null : `${perDay}/day` },
-    { key: 'close', label: 'Median close', value: durationLabel(job?.median_close_s) },
+    {
+      key: 'perDay',
+      label: 'Runs per day',
+      value: perDay === null ? null : `${perDay}/day`,
+      sub: started !== null && days !== null && days > 0
+        ? `${started} ${started === 1 ? 'run' : 'runs'} in the last ${days} days`
+        : null,
+    },
+    {
+      key: 'finish',
+      label: 'Typical time to finish',
+      value: durationLabel(job?.median_close_s),
+      sub: closed !== null && closed > 0 ? `over ${closed} finished ${closed === 1 ? 'run' : 'runs'}` : null,
+      // The reason, when the reason is known: nothing has finished, so there
+      // is nothing to time. Better than "No data", which reads as a fault.
+      empty: closed === 0 ? NO_FINISHED : null,
+    },
     { key: 'cost', label: 'Cost per run', value: costLabel(job?.cost_per_run), sub: costBasis(job) },
   ]
 }
+
+/** What an unmeasurable finish-side number says when the cause is known. */
+export const NO_FINISHED = 'No finished runs yet'
 
 /**
  * What the cost per run is an average OF: "over 52 of 59 runs".
@@ -121,34 +150,42 @@ export function costBasis(job) {
 }
 
 // The four things a job can declare, and the observed number each is read
-// against. Order is fixed: volume, then speed, then how often a person was
-// needed, then how often it failed.
+// against. Order is fixed: how often it runs, then how long it takes, then
+// how often a person was needed, then how often it failed. Plain words: a
+// manager reads "Needed a person", not "Intervention".
 const METRICS = [
-  { key: 'volume', label: 'Volume' },
-  { key: 'close', label: 'Close time' },
-  { key: 'intervention', label: 'Intervention' },
-  { key: 'failure', label: 'Failure rate' },
+  { key: 'volume', label: 'Runs per day' },
+  { key: 'close', label: 'Time to finish' },
+  { key: 'intervention', label: 'Needed a person' },
+  { key: 'failure', label: 'Failed' },
 ]
 
 /**
- * The health section: four rows, each naming the number it is derived from.
+ * The expectations section: one row per metric, each naming the number it is
+ * derived from.
  *
- * `{ key, label, observed, expected, over, noData }`. `expected` is null when
- * nothing was declared — the row still shows what the record observed, with
- * the comparison column simply empty. That is the whole rule: a verdict needs
- * a declared number, an observation does not, and the page never turns the
- * second into the first.
+ * `{ key, label, observed, expected, over, noData, declared }`. `expected` is
+ * null when nothing was declared — the row still carries what the record
+ * observed, with the comparison column simply empty, and `declared` is false
+ * so the page can leave the row out when the card is about what was
+ * declared. That is the whole rule: a verdict needs a declared number, an
+ * observation does not, and the page never turns the second into the first.
  *
  * `over` marks a breach, and is only ever true when BOTH numbers exist.
  *
- * `noData` is rule 6: the observation is missing. It renders as the words
- * `No data`, not an em dash — a dash is punctuation the reader has to
- * interpret, and next to three rows carrying numbers it reads as a small
- * value rather than as no value. It is set whether or not an expectation was
- * declared, but it MATTERS most where one was: that row is a check that did
- * not run, and the badge refuses to call the job healthy while it stands.
+ * `noData` is rule 6: the observation is missing. It renders as words, not
+ * an em dash — a dash is punctuation the reader has to interpret, and next
+ * to three rows carrying numbers it reads as a small value rather than as no
+ * value. The words name the CAUSE where it is known: the three finish-side
+ * numbers are measured over finished runs, so when none has finished they
+ * read "No finished runs yet" rather than the bare "No data". It is set
+ * whether or not an expectation was declared, but it MATTERS most where one
+ * was: that row is a check that did not run, and the badge refuses to call
+ * the job healthy while it stands.
  */
 export function healthRows(job) {
+  const closed = numOrNull(job?.closed_runs)
+  const finishSide = closed === 0 ? NO_FINISHED : NO_DATA
   const perDay = observedPerDay(job)
   const closeS = numOrNull(job?.median_close_s)
   const iv = numOrNull(job?.intervention_pct)
@@ -189,10 +226,85 @@ export function healthRows(job) {
     return {
       ...m,
       ...r,
-      observed: r.observed === null ? NO_DATA : r.observed,
+      observed: r.observed === null ? (m.key === 'volume' ? NO_DATA : finishSide) : r.observed,
       noData: r.observed === null,
+      declared: r.expected !== null,
     }
   })
+}
+
+/**
+ * How this job runs, drawn: the declared steps with today's work placed on
+ * them, or — when nobody has declared enough steps to draw — the route the
+ * record observed.
+ *
+ *   { mode: 'declared', steps: [{ kind, who, label, tools, carrier, heat }],
+ *     doneToday, offPath, live }
+ *   { mode: 'observed' }       → the caller draws `jobPath` with its provenance
+ *   { mode: 'none' }           → nothing to draw yet
+ *
+ * A declared drawing needs at least TWO steps. A single step is the owning
+ * agent named once, which every derived job carries and which tells the
+ * reader nothing they did not already see in the header. That single step
+ * is the noise this rule removes.
+ *
+ * `heat` is where the open runs are right now — `{ count, oldestS }` from
+ * the live map, or null when the map has not loaded or nothing is there.
+ * `offPath` counts open runs the map could not place on these steps: they
+ * are real work, and a drawing that hid them would be claiming the steps
+ * are complete when the record says otherwise. `live` says whether a map
+ * arrived at all, so the drawing can say "where the work is" only when it
+ * knows.
+ */
+export function jobFlow(job, map, { now = Date.now() } = {}) {
+  const raw = Array.isArray(job?.stations) ? job.stations.filter((s) => s && typeof s === 'object') : []
+  if (raw.length < 2) {
+    // The one name the record has for who does this job, so the page can say
+    // "every run stayed with X" instead of pretending it has no runs.
+    const s = raw[0]
+    const solo = String(s?.holder || job?.owning_service_name || job?.derived_from || '').trim()
+    return { mode: 'observed', solo: solo || null }
+  }
+  const live = Boolean(map && Array.isArray(map.loops))
+  const heat = live ? stationHeat(map.loops, now) : new Map()
+  const steps = raw.map((s, i) => {
+    const kind = s.holder_type === 'human' ? 'human' : s.holder_type === 'system' ? 'tool' : 'agent'
+    const who = String(s.holder || '').trim()
+      || (kind === 'human' ? 'A person' : kind === 'tool' ? 'A system' : 'An agent')
+    return {
+      kind,
+      who,
+      label: String(s.label || '').trim(),
+      // The API stores tools as a list; the editor's draft is a comma string.
+      tools: (Array.isArray(s.tools) ? s.tools : String(s.tools || '').split(','))
+        .map((t) => String(t).trim()).filter(Boolean),
+      carrier: String(s.carrier || '').trim(),
+      heat: heat.get(i) || null,
+    }
+  })
+  const offPath = live ? map.loops.filter((l) => l?.position?.status === 'off_path').length : 0
+  const doneToday = live ? numOrNull(map.done_today) : null
+  return { mode: 'declared', steps, doneToday, offPath, live }
+}
+
+/**
+ * "2 here · 3h" — who is holding work at a step, and how long the oldest of
+ * it has been there. Copied in words, so the drawing never shows a bare count.
+ */
+export function flowHeatLabel(heat) {
+  if (!heat || !heat.count) return null
+  const base = `${heat.count} here`
+  return heat.oldestS != null ? `${base} · ${ageWords(heat.oldestS)}` : base
+}
+
+function ageWords(seconds) {
+  const s = Math.max(0, Math.floor(seconds))
+  if (s < 60) return 'under a minute'
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  return `${Math.floor(h / 24)}d`
 }
 
 /**
