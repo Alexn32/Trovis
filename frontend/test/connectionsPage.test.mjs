@@ -81,7 +81,7 @@ test('Connect on an AI connector reuses the existing Add Agent flow', () => {
   assert.doesNotMatch(page, /pip install|npm install|trovis\.init|OTEL_EXPORTER|CodeBlock/)
   // App routes the click into the one Add Agent overlay.
   const app = strip(src('App.jsx'))
-  assert.match(app, /setOverlay\(\{ kind: 'add', view: entry\.view, platform: entry\.platform \}\)/)
+  assert.match(app, /setOverlay\(\{ kind: 'add', view: entry\.view, platform: entry\.platform, nonce: Date\.now\(\) \}\)/)
   assert.match(app, /<Connections active=\{connectionsVisible\} onConnect=\{openConnectorSetup\} \/>/)
   // AddAgent accepts the preselection and defaults to the landing otherwise.
   const addAgent = strip(src('AddAgent.jsx'))

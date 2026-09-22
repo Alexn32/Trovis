@@ -62,6 +62,7 @@ try:
         agent_name="smoke-test-agent",
         endpoint="http://127.0.0.1:1/v1/traces",
         capture_outputs=False,
+        connection_id="cn_smoke0123456789abcdef",
     )
     check("init() returned without raising", True)
 
@@ -74,6 +75,12 @@ try:
         "provider is an SDK TracerProvider",
         isinstance(provider, TracerProvider),
         f"got {type(provider).__name__}",
+    )
+    res_attrs = dict(getattr(getattr(provider, "resource", None), "attributes", {}) or {})
+    check(
+        "connection_id lands on the resource as trovis.connection.id",
+        res_attrs.get("trovis.connection.id") == "cn_smoke0123456789abcdef",
+        f"resource attrs: {sorted(k for k in res_attrs if k.startswith('trovis.'))}",
     )
 
     step(4, "Emitting a manual span…")

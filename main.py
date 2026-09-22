@@ -96,6 +96,9 @@ except Exception as _grok_mcp_err:  # noqa: BLE001 — never fatal
     )
     grok_mcp = grok_mcp_app = None
 from models import (
+    ConnectionInstanceCreate,
+    ConnectionInstanceList,
+    ConnectionInstanceResponse,
     ConnectorsResponse,
     AgentCosts,
     AgentDeleteResponse,
@@ -6400,6 +6403,97 @@ def connect_connectors(request: Request) -> ConnectorsResponse:
     if account_id is None:
         raise HTTPException(status_code=401, detail="authentication required")
     return ConnectorsResponse(connectors=connector_registry.to_public())
+
+
+def _connection_instance_response(inst: dict) -> ConnectionInstanceResponse:
+    """Health-shaped instance (derived state) plus the wire stamp."""
+    account_id = inst["account_id"]
+    body = connect_health_model.build_connection_health(account_id)
+    for row in body["connectors"]:
+        for i in row.get("instances") or []:
+            if i["id"] == inst["id"]:
+                return ConnectionInstanceResponse(
+                    **i, stamp={connect_health_model.CONNECTION_ID_ATTR: i["connection_key"]},
+                )
+    raise HTTPException(status_code=404, detail="connection not found")
+
+
+@app.post("/connect/connections", response_model=ConnectionInstanceResponse, status_code=201)
+def connect_create_connection(request: Request, body: ConnectionInstanceCreate) -> ConnectionInstanceResponse:
+    """Record that setup of one connection began: the durable fact the
+    telemetry connectors never had. Returns the instance and the resource
+    attribute (`trovis.connection.id`) a snippet / SDK / door stamps so its
+    telemetry attributes to THIS instance. Telemetry connectors only — an
+    OAuth door records its own instance when the provider authorizes."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    c = connector_registry.get(body.connector_id)
+    if c is None or c.availability != "available":
+        raise HTTPException(status_code=400, detail="unknown or unavailable connector")
+    if c.setup_type == "oauth":
+        raise HTTPException(status_code=400, detail="an OAuth connector is set up by authorizing it, not by hand")
+    source = (body.setup_source or "manual").strip().lower()
+    if source not in ("guide", "manual", "connections", "api"):
+        raise HTTPException(status_code=400, detail="unknown setup_source")
+    user = getattr(request.state, "user", None) or {}
+    user_id = user.get("id") if isinstance(user, dict) else None
+    inst = database.create_connection_instance(
+        account_id, c.id, setup_type=c.setup_type, setup_source=source,
+        label=body.label, created_by_user_id=user_id if isinstance(user_id, int) else None,
+    )
+    return _connection_instance_response(inst)
+
+
+@app.get("/connect/connections", response_model=ConnectionInstanceList)
+def connect_list_connections(request: Request, connector_id: str | None = None) -> ConnectionInstanceList:
+    """The account's configured instances with derived state, newest first.
+    A reload of the guided setup resumes from the newest live row."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    body = connect_health_model.build_connection_health(account_id)
+    rows = [i for row in body["connectors"] for i in (row.get("instances") or [])
+            if not connector_id or row["connector_id"] == connector_id.strip().lower()]
+    rows.sort(key=lambda i: (i.get("setup_started_at") or "", i["id"]), reverse=True)
+    return ConnectionInstanceList(connections=rows)
+
+
+def _owned_instance_or_404(account_id: int | None, instance_id: int) -> dict:
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    inst = database.get_connection_instance(account_id, instance_id)
+    if inst is None:
+        # Cross-account ids are 404, never 403 — a 403 confirms the id exists.
+        raise HTTPException(status_code=404, detail="connection not found")
+    return inst
+
+
+@app.post("/connect/connections/{instance_id}/complete", response_model=ConnectionInstanceResponse)
+def connect_complete_connection(instance_id: int, request: Request) -> ConnectionInstanceResponse:
+    """The person (or the guide) says setup finished. Recorded as a fact;
+    the instance reads waiting_for_data until its stamp is observed."""
+    account_id = getattr(request.state, "account_id", None)
+    inst = _owned_instance_or_404(account_id, instance_id)
+    if inst["setup_status"] == "disconnected":
+        raise HTTPException(status_code=409, detail="connection is disconnected")
+    inst = database.set_connection_instance_status(account_id, instance_id, "completed")
+    return _connection_instance_response(inst)
+
+
+@app.post("/connect/connections/{instance_id}/disconnect", response_model=ConnectionInstanceResponse)
+def connect_disconnect_connection(instance_id: int, request: Request) -> ConnectionInstanceResponse:
+    """Record a disconnect. For an OAuth-backed instance this also revokes the
+    provider connection (the same path as DELETE /saas/{provider}); for a
+    telemetry instance Trovis cannot stop the exporter — the registry's
+    `management` field says what the person does — so the record is the
+    whole action, and a past observation stays true."""
+    account_id = getattr(request.state, "account_id", None)
+    inst = _owned_instance_or_404(account_id, instance_id)
+    if inst["setup_type"] == "oauth":
+        database.disconnect_saas_connection(account_id, inst["connector_id"])
+    inst = database.set_connection_instance_status(account_id, instance_id, "disconnected")
+    return _connection_instance_response(inst)
 
 
 @app.get("/connect/health", response_model=ConnectionHealthResponse)

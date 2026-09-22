@@ -34,6 +34,7 @@ item with a real title, a waiting state, and a close.
 from __future__ import annotations
 
 import contextvars
+import urllib.parse
 import hashlib
 import logging
 import time
@@ -70,6 +71,13 @@ mcp = FastMCP(
     transport_security=_TSS(enable_dns_rebinding_protection=False),
 )
 
+# The connection instance a Bot's MCP URL names (`/mcp/grok?connection=cn_…`),
+# so its reports attribute to the setup that produced them. Optional: a Bot
+# configured before instances existed carries none and attributes at the
+# connector level as before.
+_CONNECTION_CV: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "trovis_grok_connection", default=None,
+)
 _ACCOUNT_CV: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "trovis_grok_account", default=None
 )
@@ -294,6 +302,7 @@ def _report_span(
                     # Canonical connector identity (connect_health.py). A Grok
                     # Bot is its own connector, distinct from the xAI SDK.
                     "trovis.connector.id": "grok-bot",
+                    **_connection_stamp(account_id),
                 },
             }
         ],
@@ -511,6 +520,29 @@ async def report_job_failed(
 _streamable_app = mcp.streamable_http_app()
 
 
+def _connection_stamp(account_id: int | None) -> dict[str, str]:
+    """`trovis.connection.id` for this request's instance key, only when the
+    key belongs to THIS account (a key is not a credential and must never
+    attribute across tenants). Empty when absent or foreign."""
+    key = _CONNECTION_CV.get()
+    if not key or account_id is None:
+        return {}
+    try:
+        inst = database.get_connection_instance_by_key(account_id, key)
+    except Exception:  # noqa: BLE001 — attribution must never fail a report
+        return {}
+    return {"trovis.connection.id": key} if inst else {}
+
+
+def _connection_from_scope(scope) -> str | None:
+    qs = (scope.get("query_string") or b"").decode("latin-1")
+    for part in qs.split("&"):
+        if part.startswith("connection="):
+            val = urllib.parse.unquote(part[len("connection="):]).strip()
+            return val or None
+    return None
+
+
 def _resolve_auth_from_scope(scope) -> int | None:
     authorization = None
     for k, v in scope.get("headers") or []:
@@ -526,7 +558,9 @@ async def http_app(scope, receive, send):
         await _streamable_app(scope, receive, send)
         return
     cv_token = _ACCOUNT_CV.set(_resolve_auth_from_scope(scope))
+    conn_token = _CONNECTION_CV.set(_connection_from_scope(scope))
     try:
         await _streamable_app(scope, receive, send)
     finally:
+        _CONNECTION_CV.reset(conn_token)
         _ACCOUNT_CV.reset(cv_token)

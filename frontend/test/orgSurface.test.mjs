@@ -86,11 +86,11 @@ test('the Connections tab is the Connect atom, read as Connections', () => {
   assert.ok(!ALL_SURFACES.includes('Connections'), 'no new permission atom')
   assert.equal(TAB_PATHS.connections, '/connections')
   assert.equal(parsePath('/connections').tab, 'connections')
-  // A seat without Connect loses the tab AND the header's quick Add Agent
+  // A seat without Connect loses the tab AND the header's quick Connect
   // door — both are the same surface. App reads the seat, never asserts one.
   assert.ok(!visibleTabs(['Home', 'Work']).some(([id]) => id === 'connections'))
   assert.match(app, /hasSurface\(seat, 'Connect'\)/)
-  assert.match(app, /\{canConnect && \(\s*<button[\s\S]*?aria-label="Add Agent"/)
+  assert.match(app, /\{canConnect && \(\s*<button[\s\S]*?aria-label="Connect to Trovis"/)
 })
 
 test('the Fleet pane reads Agents in the nav, while the atom stays Fleet', () => {

@@ -387,11 +387,15 @@ _CONNECT_SETUP_EXTRAS = (
 # placeholders that the frontend substitutes with the org's real values.
 SYSTEM_CONNECT = (
     "You are the Trovis connect guide. You walk the user through connecting "
-    "ONE AI agent to Trovis, step by step, in a chat. The DATA section below "
-    "lists the agents already connected to this account.\n"
+    "things to Trovis, step by step, in a chat: an AI worker or agent "
+    "platform, a work system (Stripe, HubSpot, Shopify), or a custom "
+    "OpenTelemetry source. ONE thing at a time — when the user names several "
+    "(\"our Grok Bot processes Shopify returns\"), connect the AI worker "
+    "first, then the work system. The DATA section below lists the agents "
+    "already connected to this account.\n"
     "\n"
     "Always respond with raw JSON (no code fences, nothing outside the JSON):\n"
-    "{\"answer\": \"...\", \"options\": [], \"code\": []}\n"
+    "{\"answer\": \"...\", \"options\": [], \"code\": [], \"connectors\": []}\n"
     "- answer: 1-3 short plain sentences. No markdown. Never put commands or "
     "code inline in the answer — commands go ONLY in code.\n"
     "- options: quick-reply chips, ONLY when you are asking a genuine "
@@ -401,6 +405,21 @@ SYSTEM_CONNECT = (
     "\"bash|python|json\", \"content\": \"...\"}. All three keys are "
     "required on every snippet — use \"\" for a title a step doesn't need. "
     "Leave the array [] when there is nothing to run.\n"
+    "- connectors: the registry ids (the [id] in the connector list below) "
+    "of the connectors THIS turn is about — at most 3, [] when none. For a "
+    "work system (stripe, hubspot, shopify) this is what makes the Connect "
+    "button appear in the chat.\n"
+    "\n"
+    "Work systems are connected with a button, never with code:\n"
+    "- When the user wants Stripe, HubSpot or Shopify, put its id in "
+    "`connectors`, say that a Connect button for it appears right here in "
+    "the chat and that Trovis will ask them to authorize in the provider, "
+    "and give NO code, pip command or webhook URL — the OAuth door handles "
+    "all of it. `code` stays [] for a work system.\n"
+    "- Say plainly what a work system adds: independent evidence of the "
+    "provider's own outcomes (a payment clearing, an order fulfilled), "
+    "linked to a run only when the agent puts trovis_loop_external_id on "
+    "the provider object. It never creates work on its own.\n"
     "\n"
     "CRITICAL — code must be attached, never just promised:\n"
     "- The `code` array IS what the user sees as a copy-paste block. The "
@@ -465,6 +484,7 @@ CONNECT_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "answer": {"type": "string"},
         "options": {"type": "array", "items": {"type": "string"}},
+        "connectors": {"type": "array", "items": {"type": "string"}},
         "code": {
             "type": "array",
             "items": {
@@ -479,7 +499,7 @@ CONNECT_RESPONSE_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["answer", "options", "code"],
+    "required": ["answer", "options", "code", "connectors"],
     "additionalProperties": False,
 }
 CONNECT_OUTPUT_FORMAT: dict[str, Any] = {
@@ -635,7 +655,7 @@ def ask_about_fleet(
 
 
 def _parse_connect_response(raw_text: str) -> dict[str, Any]:
-    """Parse a connect-guide reply into {answer, options, code}, tolerant of
+    """Parse a connect-guide reply into {answer, options, code, connectors}, tolerant of
     non-JSON. Mirrors _parse_ask_response: strip ``` fences, json.loads, and
     on any failure degrade to plain text with empty options/code. A truncated
     reply (MAX_TOKENS cutoff) is salvaged via the "answer" field when
@@ -674,7 +694,12 @@ def _parse_connect_response(raw_text: str) -> dict[str, Any]:
                         "content": content,
                     }
                 )
-            return {"answer": answer.strip(), "options": options, "code": code}
+            return {
+                "answer": answer.strip(),
+                "options": options,
+                "code": code,
+                "connectors": _known_connectors(parsed.get("connectors")),
+            }
     # Truncated JSON: pull the answer string out so the user never sees raw
     # JSON. Matches "answer": "..." allowing escaped quotes.
     m = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)', text)
@@ -684,8 +709,23 @@ def _parse_connect_response(raw_text: str) -> dict[str, Any]:
         except (json.JSONDecodeError, ValueError):
             salvaged = m.group(1)
         if salvaged.strip():
-            return {"answer": salvaged.strip(), "options": [], "code": []}
-    return {"answer": (raw_text or "").strip(), "options": [], "code": []}
+            return {"answer": salvaged.strip(), "options": [], "code": [], "connectors": []}
+    return {"answer": (raw_text or "").strip(), "options": [], "code": [], "connectors": []}
+
+
+def _known_connectors(raw: Any) -> list[str]:
+    """Registry ids the model named this turn — only ids connectors.py knows,
+    de-duplicated, in the order given, at most 3. An unknown or coming-soon id
+    is dropped rather than rendered as a door that does not exist."""
+    out: list[str] = []
+    for item in (raw or []) if isinstance(raw, list) else []:
+        c = connectors.get(item) if isinstance(item, str) else None
+        if c is None or c.availability != "available" or c.id in out:
+            continue
+        out.append(c.id)
+        if len(out) == 3:
+            break
+    return out
 
 
 def ask_connect(

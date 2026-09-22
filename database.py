@@ -1774,6 +1774,57 @@ CREATE TABLE IF NOT EXISTS saas_events (
 )
 """
 
+# Connection INSTANCES — the durable record that a connection was set up
+# (connectors.py names the kinds; this is one configured instance of a kind).
+# Store recorded ACTIONS, derive state: `setup_status` is what a person or a
+# door did (started / completed / disconnected); whether data ever arrived is
+# read from spans (telemetry, matched by the `trovis.connection.id` resource
+# stamp = connection_key) or saas_events (OAuth) at read time, never stored.
+# One account may hold many instances of one connector. For an OAuth
+# connector the row points at its saas_connections credential row; that table
+# keeps its one-per-provider rule until instances are needed there too.
+# Instants are unix-ns like loops.last_event_unix so they compare directly
+# with spans.start_time_unix.
+_CONNECTION_INSTANCES_DDL_PG = """
+CREATE TABLE IF NOT EXISTS connection_instances (
+    id                    SERIAL    PRIMARY KEY,
+    account_id            INTEGER   NOT NULL REFERENCES accounts(id),
+    connector_id          TEXT      NOT NULL,
+    connection_key        TEXT      NOT NULL UNIQUE,
+    label                 TEXT,
+    setup_type            TEXT      NOT NULL,
+    setup_source          TEXT      NOT NULL,
+    setup_status          TEXT      NOT NULL DEFAULT 'started',
+    setup_started_unix    BIGINT    NOT NULL,
+    setup_completed_unix  BIGINT,
+    disconnected_unix     BIGINT,
+    created_by_user_id    INTEGER   REFERENCES users(id),
+    saas_connection_id    INTEGER   REFERENCES saas_connections(id),
+    created_at            TIMESTAMP DEFAULT NOW(),
+    updated_at            TIMESTAMP DEFAULT NOW()
+)
+"""
+
+_CONNECTION_INSTANCES_DDL_SQLITE = """
+CREATE TABLE IF NOT EXISTS connection_instances (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id            INTEGER NOT NULL REFERENCES accounts(id),
+    connector_id          TEXT    NOT NULL,
+    connection_key        TEXT    NOT NULL UNIQUE,
+    label                 TEXT,
+    setup_type            TEXT    NOT NULL,
+    setup_source          TEXT    NOT NULL,
+    setup_status          TEXT    NOT NULL DEFAULT 'started',
+    setup_started_unix    INTEGER NOT NULL,
+    setup_completed_unix  INTEGER,
+    disconnected_unix     INTEGER,
+    created_by_user_id    INTEGER REFERENCES users(id),
+    saas_connection_id    INTEGER REFERENCES saas_connections(id),
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 # Tables that gained account_id post-launch. The column is nullable so
 # pre-multi-tenant rows (with NULL account_id) survive — but they're
 # strictly filtered out for authenticated requests, since they have no
@@ -1781,6 +1832,12 @@ CREATE TABLE IF NOT EXISTS saas_events (
 _ACCOUNT_ID_TABLES = ("spans", "descriptions", "agent_registrations")
 
 _INDEXES = [
+    # Connection instances: the Connections page reads an account's rows per
+    # connector; ingest-side attribution looks a stamped key up per account.
+    "CREATE INDEX IF NOT EXISTS idx_connection_instances_account_connector "
+    "ON connection_instances(account_id, connector_id)",
+    "CREATE INDEX IF NOT EXISTS idx_connection_instances_account_key "
+    "ON connection_instances(account_id, connection_key)",
     # One derived job per agent per account. Partial so declared jobs
     # (derived_from NULL) are unconstrained; the same syntax works on both
     # backends, and the ingest fallback relies on it to survive two batches
@@ -1960,6 +2017,8 @@ def init_db() -> None:
             _SAAS_CONNECTIONS_DDL_PG,
             _SAAS_OAUTH_STATES_DDL_PG,
             _SAAS_EVENTS_DDL_PG,
+            # After users and saas_connections — both FKs reference them.
+            _CONNECTION_INSTANCES_DDL_PG,
             _FINDINGS_DDL_PG,
             _ANALYSIS_JOBS_DDL_PG,
             _HOME_LLM_DDL_PG,
@@ -2001,6 +2060,7 @@ def init_db() -> None:
             _SAAS_CONNECTIONS_DDL_SQLITE,
             _SAAS_OAUTH_STATES_DDL_SQLITE,
             _SAAS_EVENTS_DDL_SQLITE,
+            _CONNECTION_INSTANCES_DDL_SQLITE,
             _FINDINGS_DDL_SQLITE,
             _ANALYSIS_JOBS_DDL_SQLITE,
             _HOME_LLM_DDL_SQLITE,
@@ -13314,7 +13374,14 @@ def upsert_saas_connection(
             f"FROM saas_connections WHERE id = {PH}",
             (row_id,),
         )
-        return _saas_connection_public(dict(cur.fetchone()))
+        public = _saas_connection_public(dict(cur.fetchone()))
+    # The lifecycle row the Connections surface manages (connection_instances):
+    # an authorization is a completed setup for this credential row.
+    sync_saas_connection_instance(
+        account_id, provider, row_id, connected=(status == "connected"),
+        label=provider_account_id,
+    )
+    return public
 
 
 def get_saas_connections(account_id: int) -> list[dict[str, Any]]:
@@ -13499,6 +13566,7 @@ def disconnect_saas_connection(account_id: int, provider: str) -> dict[str, Any]
             f"WHERE account_id = {PH} AND provider = {PH}",
             (account_id, provider),
         )
+    sync_saas_connection_instance(account_id, provider, None, connected=False)
     return get_saas_connection(account_id, provider)
 
 
@@ -13613,6 +13681,184 @@ def record_saas_event_outcome(
             )
     except Exception:  # noqa: BLE001 — the effect already happened
         logger.exception("[saas] could not record outcome for %s/%s", provider, event_id)
+
+
+# ---------------------------------------------------------------------------
+# Connection instances (connection_instances) — see the DDL comment.
+# ---------------------------------------------------------------------------
+
+CONNECTION_SETUP_STATUSES: tuple[str, ...] = ("started", "completed", "disconnected")
+_CONNECTION_INSTANCE_COLS = (
+    "id, account_id, connector_id, connection_key, label, setup_type, setup_source, "
+    "setup_status, setup_started_unix, setup_completed_unix, disconnected_unix, "
+    "created_by_user_id, saas_connection_id"
+)
+
+
+def _connection_instance_public(row: Any) -> dict[str, Any]:
+    d = dict(row)
+    return {
+        "id": int(d["id"]),
+        "account_id": d.get("account_id"),
+        "connector_id": d["connector_id"],
+        "connection_key": d["connection_key"],
+        "label": d.get("label"),
+        "setup_type": d["setup_type"],
+        "setup_source": d["setup_source"],
+        "setup_status": d["setup_status"],
+        "setup_started_at": _ns_to_iso(d["setup_started_unix"]) if d.get("setup_started_unix") else None,
+        "setup_started_unix": int(d["setup_started_unix"]) if d.get("setup_started_unix") else None,
+        "setup_completed_at": _ns_to_iso(d["setup_completed_unix"]) if d.get("setup_completed_unix") else None,
+        "disconnected_at": _ns_to_iso(d["disconnected_unix"]) if d.get("disconnected_unix") else None,
+        "created_by_user_id": d.get("created_by_user_id"),
+        "saas_connection_id": d.get("saas_connection_id"),
+    }
+
+
+def new_connection_key() -> str:
+    """The wire stamp for one instance: `trovis.connection.id`. Not a
+    credential — it appears in pasted snippets — so attribution always pairs
+    it with the account that owns it."""
+    return "cn_" + secrets.token_hex(12)
+
+
+def create_connection_instance(
+    account_id: int,
+    connector_id: str,
+    *,
+    setup_type: str,
+    setup_source: str,
+    label: str | None = None,
+    created_by_user_id: int | None = None,
+    saas_connection_id: int | None = None,
+    setup_status: str = "started",
+) -> dict[str, Any]:
+    """Record that setup of one connection began (or, for an OAuth door,
+    completed). The caller validates connector_id against connectors.py."""
+    if setup_status not in CONNECTION_SETUP_STATUSES:
+        raise ValueError(f"unknown setup_status {setup_status!r}")
+    now_ns = int(time.time() * 1_000_000_000)
+    key = new_connection_key()
+    with _connect() as conn, _cursor(conn) as cur:
+        row_id = _insert_returning_id(
+            cur,
+            "INSERT INTO connection_instances "
+            "(account_id, connector_id, connection_key, label, setup_type, setup_source, "
+            "setup_status, setup_started_unix, setup_completed_unix, created_by_user_id, "
+            "saas_connection_id) "
+            f"VALUES ({PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH}, {PH})",
+            (
+                account_id, (connector_id or "").strip().lower(), key,
+                (label or "").strip() or None, setup_type, setup_source, setup_status,
+                now_ns, now_ns if setup_status == "completed" else None,
+                created_by_user_id, saas_connection_id,
+            ),
+        )
+        cur.execute(
+            f"SELECT {_CONNECTION_INSTANCE_COLS} FROM connection_instances WHERE id = {PH}",
+            (row_id,),
+        )
+        return _connection_instance_public(cur.fetchone())
+
+
+def list_connection_instances(
+    account_id: int, connector_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """An account's instances, newest setup first. Strictly account-scoped."""
+    sql = f"SELECT {_CONNECTION_INSTANCE_COLS} FROM connection_instances WHERE account_id = {PH}"
+    args: list[Any] = [account_id]
+    if connector_id:
+        sql += f" AND connector_id = {PH}"
+        args.append(connector_id.strip().lower())
+    sql += " ORDER BY setup_started_unix DESC, id DESC"
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(sql, tuple(args))
+        return [_connection_instance_public(r) for r in cur.fetchall()]
+
+
+def get_connection_instance(account_id: int, instance_id: int) -> dict[str, Any] | None:
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_CONNECTION_INSTANCE_COLS} FROM connection_instances "
+            f"WHERE account_id = {PH} AND id = {PH}",
+            (account_id, instance_id),
+        )
+        row = cur.fetchone()
+        return _connection_instance_public(row) if row else None
+
+
+def get_connection_instance_by_key(account_id: int, connection_key: str) -> dict[str, Any] | None:
+    """The instance a wire stamp names — for THIS account only. The key
+    appears in pasted snippets, so a key from another tenant must never
+    attribute here; the pair is the lookup, never the key alone."""
+    key = (connection_key or "").strip()
+    if not key or account_id is None:
+        return None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"SELECT {_CONNECTION_INSTANCE_COLS} FROM connection_instances "
+            f"WHERE account_id = {PH} AND connection_key = {PH}",
+            (account_id, key),
+        )
+        row = cur.fetchone()
+        return _connection_instance_public(row) if row else None
+
+
+def set_connection_instance_status(
+    account_id: int, instance_id: int, setup_status: str,
+) -> dict[str, Any] | None:
+    """Record a lifecycle action: `completed` (the person or door says setup
+    finished) or `disconnected`. Timestamps are set once and never moved
+    backwards; a disconnected row stays disconnected."""
+    if setup_status not in ("completed", "disconnected"):
+        raise ValueError(f"cannot set setup_status {setup_status!r}")
+    now_ns = int(time.time() * 1_000_000_000)
+    now_sql = "NOW()" if USE_POSTGRES else "CURRENT_TIMESTAMP"
+    with _connect() as conn, _cursor(conn) as cur:
+        if setup_status == "completed":
+            cur.execute(
+                "UPDATE connection_instances SET setup_status = 'completed', "
+                f"setup_completed_unix = COALESCE(setup_completed_unix, {PH}), updated_at = {now_sql} "
+                f"WHERE account_id = {PH} AND id = {PH} AND setup_status <> 'disconnected'",
+                (now_ns, account_id, instance_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE connection_instances SET setup_status = 'disconnected', "
+                f"disconnected_unix = COALESCE(disconnected_unix, {PH}), updated_at = {now_sql} "
+                f"WHERE account_id = {PH} AND id = {PH}",
+                (now_ns, account_id, instance_id),
+            )
+    return get_connection_instance(account_id, instance_id)
+
+
+def sync_saas_connection_instance(
+    account_id: int, provider: str, saas_connection_id: int | None, *, connected: bool,
+    label: str | None = None,
+) -> None:
+    """Keep the OAuth door's instance row in step with saas_connections: an
+    authorization completes (or creates, completed) the live instance for
+    that credential row; a disconnect marks it disconnected. One instance per
+    credential row while saas_connections is one-per-provider."""
+    provider = (provider or "").strip().lower()
+    live = [
+        r for r in list_connection_instances(account_id, provider)
+        if r["setup_status"] != "disconnected"
+        and (saas_connection_id is None or r.get("saas_connection_id") in (None, saas_connection_id))
+    ]
+    if connected:
+        if live:
+            for r in live:
+                if r["setup_status"] != "completed":
+                    set_connection_instance_status(account_id, r["id"], "completed")
+            return
+        create_connection_instance(
+            account_id, provider, setup_type="oauth", setup_source="connections",
+            label=label, saas_connection_id=saas_connection_id, setup_status="completed",
+        )
+        return
+    for r in live:
+        set_connection_instance_status(account_id, r["id"], "disconnected")
 
 
 def find_open_loop_by_external_id(

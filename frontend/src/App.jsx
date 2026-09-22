@@ -4,7 +4,7 @@ import HomeView from './HomeView.jsx'
 import CostPage from './CostPage.jsx'
 import WorkFeedPage from './WorkFeedPage.jsx'
 import WorkTab from './WorkTab.jsx'
-import { currentView, navigate, onPopState } from './route.js'
+import { connectRequest, currentView, navigate, onPopState, saasReturn } from './route.js'
 import WorkflowPage from './WorkflowPage.jsx'
 import WorkflowEditor from './WorkflowEditor.jsx'
 import Fleet from './Fleet.jsx'
@@ -152,8 +152,11 @@ function AppInner() {
   // A path of "/" is "no opinion" — the address bar's default, not a choice —
   // so the persisted tab still wins there. Any other path is a real request.
   const bootView = currentView()
+  const bootSaas = typeof window !== 'undefined' ? saasReturn(window.location.search) : null
+  const bootConnectId =
+    typeof window !== 'undefined' ? connectRequest(window.location.pathname, window.location.search) : null
   const urlSaysSomething =
-    typeof window !== 'undefined' && window.location.pathname !== '/'
+    typeof window !== 'undefined' && (window.location.pathname !== '/' || Boolean(bootSaas))
   const initialTab = urlSaysSomething ? bootView.tab : persistedTab
   const [tab, setTab] = useState(initialTab) // 'dashboard' | 'fleet' | 'team' | 'work'
   // Which Work page the URL is pointing at: {job} | {run} | neither.
@@ -174,6 +177,36 @@ function AppInner() {
     // urlSaysSomething is a boot-time fact, not a dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routingActive, tab, workRoute.job, workRoute.run])
+  // Two one-shot query flags, read once the shell is on screen and then
+  // cleared so a reload does not replay them:
+  //   /connections?connect=<id>   open Connect on that connector (the hook a
+  //                               "Connect Stripe" link elsewhere uses)
+  //   /?saas=<provider>_connected an OAuth return from a SaaS callback — land
+  //   /?saas=<provider>_error     on Connections, where the row now reads
+  //                               Authorized / Waiting for data
+  const bootConnect = useRef({ connect: bootConnectId, saas: bootSaas })
+  useEffect(() => {
+    if (!routingActive) return
+    const { connect, saas } = bootConnect.current
+    if (!connect && !saas) return
+    bootConnect.current = { connect: null, saas: null }
+    // Consumed: clear the flag so a reload does not replay it. `navigate`
+    // compares pathnames only, so the query has to go explicitly.
+    try {
+      window.history.replaceState({}, '', '/connections')
+    } catch {
+      /* ignore */
+    }
+    if (saas) {
+      setTab('connections')
+      setWorkRoute({ job: null, run: null })
+    }
+    if (connect) {
+      setTab('connections')
+      setOverlay({ kind: 'add', view: 'guide', connector: connect, nonce: Date.now() })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routingActive])
   useEffect(() => {
     if (!routingActive) return undefined
     return onPopState((v) => {
@@ -307,16 +340,26 @@ function AppInner() {
   function openDetail(serviceName, agentId) {
     setOverlay({ kind: 'detail', serviceName, agentId })
   }
-  function openAddAgent() {
-    setOverlay({ kind: 'add' })
+  // The one Connect door: the landing asks what to connect, the guided setup
+  // does the rest. `view` / `platform` open a specific manual tile; `connector`
+  // opens the guide on a registry id (a work system renders its Connect card
+  // at once); `message` seeds the guide's first user turn.
+  // `nonce` keys the overlay so a fresh open remounts the flow: AddAgent reads
+  // its starting view and seed once, so opening Connect on Stripe while the
+  // landing is already up must not leave the old landing on screen.
+  function openConnect({ view = null, platform = null, connector = null, message = null } = {}) {
+    setOverlay({ kind: 'add', view, platform, connector, message, nonce: Date.now() })
   }
-  // Connections → "Connect" on an AI connector: the same Add Agent overlay,
-  // opened on that connector's existing setup (manual tile or AI guide).
-  // A connector with no setup entry (coming soon) opens nothing.
+  function openAddAgent() {
+    openConnect()
+  }
+  // Connections → "Connect" on an AI connector: the same overlay, opened on
+  // that connector's existing setup (manual tile or AI guide). A connector
+  // with no setup entry (coming soon) opens nothing.
   function openConnectorSetup(connectorId) {
     const entry = setupEntryFor(connectorId)
     if (!entry) return
-    setOverlay({ kind: 'add', view: entry.view, platform: entry.platform })
+    setOverlay({ kind: 'add', view: entry.view, platform: entry.platform, nonce: Date.now() })
   }
   function openConnections() {
     setTab('connections')
@@ -539,13 +582,16 @@ function AppInner() {
     // keeps the first agent from landing behind a stale "no agents yet".
     overlayContent = (
       <AddAgent
+        key={overlay.nonce || 'persisted'}
         onClose={() => {
           rosterChanged('overlay')
           closeOverlay()
         }}
         onUpgrade={openUpgrade}
-        initialView={overlay.view ?? null}
+        initialView={overlay.view ?? (overlay.connector || overlay.message ? 'guide' : null)}
         initialPlatform={overlay.platform ?? null}
+        initialConnector={overlay.connector ?? null}
+        initialMessage={overlay.message ?? null}
       />
     )
   } else if (overlay?.kind === 'settings') {
@@ -864,7 +910,7 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
   // re-checks the seat, so a stale one costs a visible tab, never access.
   const seat = seatOf(me)
   const tabs = visibleTabs(seat.surfaces)
-  // The quick "+ Add Agent" door is the Connect surface too: a seat without
+  // The quick "+ Connect" door is the Connect surface too: a seat without
   // it hides the button the same way it hides the Connections tab. Courtesy,
   // not a lock — the API re-checks the seat on every request.
   const canConnect = hasSurface(seat, 'Connect')
@@ -899,9 +945,9 @@ function Header({ tab, onTabChange, onAddAgent, me, onLogout, onOpenSettings }) 
             type="button"
             className="btn btn-primary btn-compact"
             onClick={onAddAgent}
-            aria-label="Add Agent"
+            aria-label="Connect to Trovis"
           >
-            <PlusIcon /> <span className="btn-compact-label">Add Agent</span>
+            <PlusIcon /> <span className="btn-compact-label">Connect</span>
           </button>
         )}
         <AccountBadge me={me} onLogout={onLogout} onOpenSettings={onOpenSettings} />

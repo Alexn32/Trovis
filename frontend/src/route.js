@@ -48,6 +48,31 @@ export function parsePath(pathname) {
   return { tab: 'work', job: null, run: null }
 }
 
+/**
+ * `/connections?connect=<connector id>` asks to open the Connect flow on that
+ * connector — the hook a "Connect Stripe" link elsewhere in the product uses.
+ * Only on the Connections path, only a registry-shaped id; the opener decides
+ * whether the id is real. Returns the id or null. Not part of the view (a
+ * one-shot request, not a place), so `parsePath` and `buildPath` ignore it.
+ */
+export function connectRequest(pathname, search) {
+  if (parsePath(pathname).tab !== 'connections') return null
+  const raw = String(search || '')
+  const m = /(?:^|[?&])connect=([a-z0-9-]{1,40})(?:&|$)/.exec(raw.startsWith('?') ? raw : `?${raw}`)
+  return m ? m[1] : null
+}
+
+/**
+ * The OAuth return flag the SaaS callbacks redirect with (`?saas=<provider>_connected`
+ * or `_error`). Returns `{ provider, ok }` or null. The app reads it once at
+ * boot, clears it from the address bar, and lands on Connections.
+ */
+export function saasReturn(search) {
+  const raw = String(search || '')
+  const m = /(?:^|[?&])saas=([a-z]+)_(connected|error)(?:&|$)/.exec(raw.startsWith('?') ? raw : `?${raw}`)
+  return m ? { provider: m[1], ok: m[2] === 'connected' } : null
+}
+
 /** The inverse: view state -> pathname. */
 export function buildPath({ tab = 'dashboard', job = null, run = null } = {}) {
   if (tab === 'work') {

@@ -176,6 +176,27 @@ test('the Grok door is the SDK path, not xai-sdk\'s own OTLP exporter', () => {
   assert.match(px.slice(0, px.indexOf('\n}')), /<GrokSdkSetup/)
 })
 
+test('the front door is Connect — one landing for AI workers, work systems and custom sources', () => {
+  // The header button and the landing no longer assume an agent. The guided
+  // setup is the primary path; the manual wizard stays one click away.
+  const app = read('App.jsx')
+  assert.match(app, /aria-label="Connect to Trovis"/)
+  assert.doesNotMatch(app, /aria-label="Add Agent"/)
+  assert.match(addAgent, /function ConnectLanding/)
+  assert.match(addAgent, /Connect to Trovis/)
+  assert.match(addAgent, /What do you want Trovis to see\?/)
+  assert.match(addAgent, /intentChips\(\)/)
+  assert.match(addAgent, /Set up with AI/)
+  assert.match(addAgent, /set up an agent manually/)
+  // What the landing learns is handed to the guide, not lost.
+  assert.match(addAgent, /initialMessage=\{guideSeed\.message\}/)
+  assert.match(addAgent, /initialConnector=\{guideSeed\.connector\}/)
+  // The guide opens on the same question and offers the work systems too.
+  assert.match(guide, /What do you want Trovis to see\?/)
+  assert.match(guide, /workSystemOptions\(\)/)
+  assert.match(guide, /function WorkSystemConnectCard/)
+})
+
 test('the two Grok doors are named apart and never blur together', () => {
   // Two different products with the same word in the name. "Grok (xAI SDK)" is
   // an app built on xai-sdk; "Grok Bot" is a desktop assistant that
