@@ -158,6 +158,11 @@ response = chat.sample()   # → a Trovis span, with token usage and cost
 `platform="grok"` is accepted as an alias, and `platform="auto"` picks this
 up whenever `xai-sdk` is installed.
 
+`connection_id` (also `TROVIS_CONNECTION_ID`) is the `cn_…` key Trovis shows
+when you set a connection up in the app. Pass it and every span carries
+`trovis.connection.id`, so the Connections page attributes this agent's
+telemetry to that exact setup instead of only to "the SDK". Optional.
+
 `agent_role` (also `TROVIS_AGENT_ROLE`) works on **every** platform, not just
 this one. It registers what the agent is for, and Trovis writes the agent's
 description from that first — without it, an agent is described from behavior

@@ -112,10 +112,10 @@ MCP_URL = f"{BASE}/mcp/grok"
 print(f"  (live server on {BASE}, Grok Bot MCP at /mcp/grok)")
 
 
-async def call_tool(name, args, api_key=None):
+async def call_tool(name, args, api_key=None, url=None):
     """One real MCP session: initialize, call one tool, read the text back."""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-    async with streamablehttp_client(MCP_URL, headers=headers) as (read, write, _):
+    async with streamablehttp_client(url or MCP_URL, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, args)
@@ -575,6 +575,48 @@ try:
         check(f"{name} tells the bot when to call it", "call this" in doc)
         check(f"{name} never claims automatic recording",
               "automatic" not in doc and "xai-sdk" not in doc)
+
+    print("\n[11] The MCP URL can name the connection instance the setup created")
+    # Connections (Phase 4): the app hands out `/mcp/grok?connection=cn_…` for a
+    # setup it recorded; reports through that URL attribute to that instance.
+    TOKEN = r.json()["token"]
+    HB_SESSION = {"Authorization": f"Bearer {TOKEN}"}
+    created = requests.post(f"{BASE}/connect/connections", timeout=30, headers=HB_SESSION,
+                            json={"connector_id": "grok-bot", "setup_source": "guide"})
+    check("the app records a Grok Bot connection instance", created.status_code == 201, created.text[:200])
+    inst = created.json()
+    keyed_url = f"{MCP_URL}?connection={inst['connection_key']}"
+    run(call_tool("report_job_started", {
+        "title": "Keyed report lands on its instance", "bot_name": "Keyed Bot", "job_id": "grok-keyed-1",
+    }, KEY, url=keyed_url))
+    deadline = time.time() + 10
+    while time.time() < deadline and not loops_for(KEY, "grok-keyed-1"):
+        time.sleep(0.2)
+    hrows = {row["connector_id"]: row for row in
+             requests.get(f"{BASE}/connect/health", timeout=30, headers=HB_SESSION).json()["connectors"]}
+    gi = [i for i in hrows["grok-bot"]["instances"] if i["id"] == inst["id"]]
+    check("the instance is connected from that report alone",
+          bool(gi) and gi[0]["state"] == "connected" and gi[0]["source_count"] == 1,
+          f"instances={hrows['grok-bot']['instances']}")
+    # A foreign key on the URL attributes to nothing: the report still lands
+    # (connector level), the other org's instance stays untouched.
+    other_token = r2.json()["token"]
+    foreign = requests.post(f"{BASE}/connect/connections", timeout=30,
+                            headers={"Authorization": f"Bearer {other_token}"},
+                            json={"connector_id": "grok-bot"}).json()
+    run(call_tool("report_job_started", {
+        "title": "Wrong key", "bot_name": "Keyed Bot", "job_id": "grok-keyed-2",
+    }, KEY, url=f"{MCP_URL}?connection={foreign['connection_key']}"))
+    deadline = time.time() + 10
+    while time.time() < deadline and not loops_for(KEY, "grok-keyed-2"):
+        time.sleep(0.2)
+    check("the report with a foreign key still lands for the caller's org", bool(loops_for(KEY, "grok-keyed-2")))
+    other_rows = {row["connector_id"]: row for row in
+                  requests.get(f"{BASE}/connect/health", timeout=30,
+                               headers={"Authorization": f"Bearer {other_token}"}).json()["connectors"]}
+    fi = [i for i in other_rows["grok-bot"]["instances"] if i["id"] == foreign["id"]]
+    check("but the other org's instance stays setup_started — a key is not a credential",
+          bool(fi) and fi[0]["state"] == "setup_started" and fi[0]["source_count"] == 0)
 
 finally:
     server.should_exit = True

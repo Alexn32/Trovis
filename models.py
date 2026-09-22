@@ -2718,6 +2718,56 @@ class WorkGraphResponse(BaseModel):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class ConnectionInstance(BaseModel):
+    """One configured connection of a connector (connection_instances) with
+    its derived state. `setup_status` is what was RECORDED (started /
+    completed / disconnected); `state` is derived at read time:
+
+      setup_started     recorded started, nothing observed for this instance
+      waiting_for_data  recorded completed (or OAuth authorized), nothing observed
+      connected         an observation carries this instance's stamp (or, for
+                        an OAuth door, a verified event reached the account)
+      disconnected      recorded disconnected; a past observation stays true
+
+    `connection_key` is the wire stamp (`trovis.connection.id`). Not a
+    credential. `observed_connector_ids` lists connectors whose stamp arrived
+    under this key when they differ from `connector_id` (the instance wins;
+    the connector-level row still counts the stamped connector)."""
+
+    id: int
+    connector_id: str
+    connection_key: str
+    label: str | None = None
+    setup_type: str
+    setup_source: str
+    setup_status: str
+    state: str
+    setup_started_at: str | None = None
+    setup_completed_at: str | None = None
+    disconnected_at: str | None = None
+    last_observed_at: str | None = None
+    source_count: int = 0
+    observed_connector_ids: list[str] = Field(default_factory=list)
+    saas_connection_id: int | None = None
+
+
+class ConnectionInstanceCreate(BaseModel):
+    connector_id: str
+    label: str | None = None
+    setup_source: str = "manual"  # guide | manual | connections | api
+
+
+class ConnectionInstanceResponse(ConnectionInstance):
+    """A created/updated instance, plus the resource attribute to stamp on
+    the wire so its telemetry attributes to this instance."""
+
+    stamp: dict[str, str] = Field(default_factory=dict)
+
+
+class ConnectionInstanceList(BaseModel):
+    connections: list[ConnectionInstance] = Field(default_factory=list)
+
+
 class ConnectionHealth(BaseModel):
     """What Trovis knows about one connector right now (connect_health.py).
 
@@ -2764,6 +2814,9 @@ class ConnectionHealth(BaseModel):
     events_without_link_key: int | None = None
     events_without_open_run: int | None = None
     last_linked_at: str | None = None
+    # Configured instances of this connector (connection_instances), newest
+    # first. [] when nothing was ever set up through Trovis for it.
+    instances: list[ConnectionInstance] = Field(default_factory=list)
 
 
 class ConnectionHealthResponse(BaseModel):

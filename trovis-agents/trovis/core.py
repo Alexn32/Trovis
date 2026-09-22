@@ -99,6 +99,7 @@ def _setup_otel(
     api_key: Optional[str] = None,
     agent_name: str = "agent",
     platform: str = "agent",
+    connection_id: Optional[str] = None,
 ) -> Any:
     """Construct (or reuse) the global TracerProvider pointed at an
     Trovis endpoint. Returns the tracer.
@@ -118,14 +119,19 @@ def _setup_otel(
     if _state.get("tracer") is not None:
         return _state["tracer"]
 
-    resource = Resource.create(
-        {
-            "service.name": agent_name,
-            "service.version": __version__,
-            "trovis.sdk.version": __version__,
-            "trovis.sdk.platform": platform,
-        }
-    )
+    attrs = {
+        "service.name": agent_name,
+        "service.version": __version__,
+        "trovis.sdk.version": __version__,
+        "trovis.sdk.platform": platform,
+    }
+    if connection_id:
+        # The connection instance this setup belongs to (the key Trovis handed
+        # out when the connection was created, `cn_…`). Lets the Connections
+        # page attribute this agent's telemetry to that exact setup instead of
+        # only to "the SDK". Optional; without it attribution is per connector.
+        attrs["trovis.connection.id"] = connection_id
+    resource = Resource.create(attrs)
     headers: dict[str, str] = {}
     if api_key:
         headers["X-Trovis-Api-Key"] = api_key
@@ -172,6 +178,7 @@ def init(
     capture_outputs: bool = False,
     platform: str = "auto",
     agent_role: Optional[str] = None,
+    connection_id: Optional[str] = None,
 ) -> None:
     """Connect this process's agents to Trovis.
 
@@ -199,6 +206,12 @@ def init(
             (legacy OVERSEE_AGENT_ROLE). Optional but strongly recommended
             for the SDK doors that have no identity file to read — xAI and
             plain OTEL agents especially.
+        connection_id: The connection instance key Trovis showed when you
+            set this connection up (`cn_…`). Stamped on every span as
+            `trovis.connection.id` so the Connections page attributes this
+            agent's telemetry to that setup. Falls back to
+            TROVIS_CONNECTION_ID. Optional — without it Trovis still
+            attributes the telemetry to the SDK connector.
         capture_outputs: When True, the CaptureProcessor emits
             additional Trovis-named spans with the actual message /
             response / tool-result content (truncated to 10 000 chars).
@@ -249,6 +262,7 @@ def init(
         or (_env("CAPTURE_OUTPUTS", "") or "").lower() == "true"
     )
     resolved_role = (agent_role or _env("AGENT_ROLE") or "").strip()
+    resolved_connection = (connection_id or _env("CONNECTION_ID") or "").strip() or None
 
     # Setting the capture flag must happen on every call, even when
     # we skip the rest of init (re-init case).
@@ -266,6 +280,7 @@ def init(
         api_key=resolved_api_key,
         agent_name=resolved_agent_name,
         platform=_platform_label_for_init(platform),
+        connection_id=resolved_connection,
     )
     _state["capture_outputs"] = resolved_capture
 

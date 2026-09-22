@@ -71,6 +71,14 @@ Identity on the wire, in precedence order (`identify_connector`):
 
 Grok (the xAI SDK) and Grok Bot (a desktop assistant reporting over MCP)
 are different connectors with different stamps and never merge.
+
+Instances. A connection set up THROUGH Trovis has a row in
+connection_instances and a key it stamps on the wire as
+`trovis.connection.id` (`identify_connection`). Health rows carry those
+instances with a derived per-instance state (INSTANCE_STATES); a stamped
+span attributes to its instance IN ADDITION to the connector its other
+stamps name. Unstamped telemetry attributes at connector level only —
+today's behaviour, not a fallback that invents an instance.
 """
 from __future__ import annotations
 
@@ -82,6 +90,11 @@ import connectors
 import database
 
 CONNECTOR_ID_ATTR = "trovis.connector.id"
+# The per-INSTANCE stamp: a connection_instances.connection_key, written on the
+# resource by a snippet / SDK / door that was set up through Trovis. Absent on
+# most traffic today; absence means connector-level attribution, exactly as
+# before instances existed.
+CONNECTION_ID_ATTR = "trovis.connection.id"
 
 # Telemetry connectors this model can attribute — every available connector
 # whose data path is telemetry rather than OAuth. Derived from the canonical
@@ -96,6 +109,18 @@ STATE_NOT_CONNECTED = "not_connected"
 STATE_WAITING_FOR_DATA = "waiting_for_data"
 STATE_CONNECTED = "connected"
 STATES: tuple[str, ...] = (STATE_NOT_CONNECTED, STATE_WAITING_FOR_DATA, STATE_CONNECTED)
+
+# Per-INSTANCE states (connection_instances), a separate enum from the
+# connector-level STATES above, which stay three-valued. Derived, never
+# stored: the row records an action (started / completed / disconnected);
+# whether data arrived is read from spans or saas_events.
+INSTANCE_SETUP_STARTED = "setup_started"
+INSTANCE_WAITING_FOR_DATA = "waiting_for_data"
+INSTANCE_CONNECTED = "connected"
+INSTANCE_DISCONNECTED = "disconnected"
+INSTANCE_STATES: tuple[str, ...] = (
+    INSTANCE_SETUP_STARTED, INSTANCE_WAITING_FOR_DATA, INSTANCE_CONNECTED, INSTANCE_DISCONNECTED,
+)
 
 # Legacy explicit stamp → (connector, method). Both GPT doors (Actions and
 # the MCP server) stamp the same value, so the method is not knowable.
@@ -161,6 +186,17 @@ def identify_connector(resource_attrs: str | dict[str, Any] | None) -> tuple[str
     return "custom-otel", "otel"
 
 
+def identify_connection(resource_attrs: str | dict[str, Any] | None) -> str | None:
+    """The instance key a span's resource carries (`trovis.connection.id`),
+    or None. Identity only — the caller resolves it against the account's
+    own connection_instances; a key alone attributes nothing."""
+    attrs = _load_attrs(resource_attrs)
+    key = attrs.get(CONNECTION_ID_ATTR)
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    return None
+
+
 def _iso_max(a: str | None, b: str | None) -> str | None:
     if a is None:
         return b
@@ -169,7 +205,9 @@ def _iso_max(a: str | None, b: str | None) -> str | None:
     return a if a >= b else b
 
 
-def _telemetry_rows(account_id: int) -> dict[str, dict[str, Any]]:
+def _telemetry_rows(
+    account_id: int, instance_obs: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Fold observations into per-connector rows.
 
     Each observation is one distinct (service, resource-attribute blob)
@@ -186,12 +224,24 @@ def _telemetry_rows(account_id: int) -> dict[str, dict[str, Any]]:
                         once in each)
       connection_method one method only when every attributable
                         observation agrees; otherwise None
+
+    `instance_obs`, when given, is filled per `trovis.connection.id` stamp
+    with the newest time, the service names and the connector ids seen under
+    that key — the same pass, no second scan. The connector-level row still
+    counts every observation under its STAMPED connector; the instance is
+    a second, finer attribution, never a reassignment.
     """
     rows: dict[str, dict[str, Any]] = {}
     sources: dict[str, set[str]] = {}
     for obs in database.get_connector_observations(account_id):
         cid, method = identify_connector(obs.get("resource_attributes"))
         last = obs.get("last_observed_at")
+        key = identify_connection(obs.get("resource_attributes"))
+        if key is not None and instance_obs is not None:
+            io = instance_obs.setdefault(key, {"last_observed_at": None, "services": set(), "connector_ids": set()})
+            io["last_observed_at"] = _iso_max(io["last_observed_at"], last)
+            io["services"].add(obs.get("service_name"))
+            io["connector_ids"].add(cid)
         row = rows.get(cid)
         if row is None:
             row = rows[cid] = {
@@ -263,13 +313,84 @@ def _saas_rows(account_id: int) -> dict[str, dict[str, Any]]:
     return rows
 
 
+def _instance_state(inst: dict[str, Any], observed: bool) -> str:
+    if inst.get("setup_status") == "disconnected":
+        return INSTANCE_DISCONNECTED
+    if observed:
+        return INSTANCE_CONNECTED
+    if inst.get("setup_status") == "completed":
+        return INSTANCE_WAITING_FOR_DATA
+    return INSTANCE_SETUP_STARTED
+
+
+def _instance_rows(
+    account_id: int,
+    instance_obs: dict[str, dict[str, Any]],
+    saas: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Per connector, the account's configured instances with derived state.
+
+    Telemetry instance: observed when a stored span carries its key (the
+    key is looked up under THIS account only — a foreign key attributes
+    nothing). OAuth instance: observed when the provider's row is observed,
+    since saas_events carry no instance key while saas_connections is
+    one-per-provider."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for inst in database.list_connection_instances(account_id):
+        cid = inst["connector_id"]
+        key = inst["connection_key"]
+        if inst["setup_type"] == "oauth":
+            row = saas.get(cid) or {}
+            observed = bool(row.get("observed"))
+            last = row.get("last_observed_at") if observed else None
+            services: set[str] = set()
+            stamped: set[str] = set()
+        else:
+            io = instance_obs.get(key)
+            observed = io is not None
+            last = io["last_observed_at"] if io else None
+            services = io["services"] if io else set()
+            stamped = io["connector_ids"] if io else set()
+        out.setdefault(cid, []).append({
+            "id": inst["id"],
+            "connector_id": cid,
+            "connection_key": key,
+            "label": inst.get("label"),
+            "setup_type": inst["setup_type"],
+            "setup_source": inst["setup_source"],
+            "setup_status": inst["setup_status"],
+            "state": _instance_state(inst, observed),
+            "setup_started_at": inst.get("setup_started_at"),
+            "setup_completed_at": inst.get("setup_completed_at"),
+            "disconnected_at": inst.get("disconnected_at"),
+            "last_observed_at": last,
+            "source_count": len([sname for sname in services if sname]),
+            # Stamps seen under this key that name a DIFFERENT connector: the
+            # instance wins the attribution, and the mismatch is surfaced.
+            "observed_connector_ids": sorted(c for c in stamped if c != cid),
+            "saas_connection_id": inst.get("saas_connection_id"),
+        })
+    return out
+
+
+def _configured_from_instances(instances: list[dict[str, Any]]) -> bool | None:
+    """None when nothing was ever set up through Trovis (not tracked, as
+    before), True when a live instance exists, False when only disconnected
+    ones remain."""
+    if not instances:
+        return None
+    return any(i["setup_status"] != "disconnected" for i in instances)
+
+
 def build_connection_health(account_id: int) -> dict[str, Any]:
     """The read model for one account. Deterministic; no model calls."""
-    telemetry = _telemetry_rows(account_id)
+    instance_obs: dict[str, dict[str, Any]] = {}
+    telemetry = _telemetry_rows(account_id, instance_obs)
     saas = _saas_rows(account_id)
+    instances = _instance_rows(account_id, instance_obs, saas)
     connectors: list[dict[str, Any]] = []
     for cid in TELEMETRY_CONNECTOR_IDS:
-        connectors.append(telemetry.get(cid) or {
+        row = telemetry.get(cid) or {
             "connector_id": cid,
             "state": STATE_NOT_CONNECTED,
             "configured": None,
@@ -278,9 +399,20 @@ def build_connection_health(account_id: int) -> dict[str, Any]:
             "connection_method": None,
             "label": None,
             "source_count": 0,
-        })
+        }
+        insts = instances.get(cid, [])
+        row["instances"] = insts
+        # Configuration is now a recorded fact for telemetry connectors too —
+        # but only where a door or the UI recorded it. No rows → None, as
+        # before: absence of a record is not False.
+        row["configured"] = _configured_from_instances(insts)
+        if not row["observed"] and any(i["state"] == INSTANCE_WAITING_FOR_DATA for i in insts):
+            row["state"] = STATE_WAITING_FOR_DATA
+        connectors.append(row)
     for cid in SAAS_CONNECTOR_IDS:
-        connectors.append(saas[cid])
+        row = saas[cid]
+        row["instances"] = instances.get(cid, [])
+        connectors.append(row)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "connectors": connectors,
