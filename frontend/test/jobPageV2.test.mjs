@@ -192,7 +192,7 @@ test('cost per run states what it is an average of, and only when that is not th
   assert.equal(st.find((s) => s.key === 'cost').sub, 'over 3 of 10 runs')
   // Rendered under the value, and never under "No data".
   const work = src('WorkTab.jsx')
-  assert.match(work, /\{st\.sub && st\.value != null && <span className="jobp-stat-sub">\{st\.sub\}<\/span>\}/)
+  assert.match(work, /\{st\.sub && st\.value != null && <div className="jp-stat-sub">\{st\.sub\}<\/div>\}/)
 })
 
 test('cadence counts runs STARTED, not runs finished', () => {
@@ -555,17 +555,20 @@ test('no jargon on the job page', () => {
 // --- one job page ---------------------------------------------------------------
 
 test('the job page is THE job page: edit door, declared steps, history, paged runs', () => {
-  const page = work.slice(work.indexOf('function JobPage'), work.indexOf('function DeclaredStepsBand'))
+  const page = work.slice(work.indexOf('function JobPage'), work.indexOf('function WorkHome'))
   // One edit door, worded for what it does on each kind of job.
   assert.match(page, /\{job\.derived \? 'Describe this job' : 'Edit job'\}/)
   // Declared steps sit apart from the observed path, so a declaration is
   // never read as a measurement.
-  assert.match(page, /<JobPathBand path=\{path\} provenance=\{provenance\} \/>\s*<DeclaredStepsBand steps=\{steps\} \/>/)
+  assert.match(work, /<JobPathBand path=\{path\} provenance=\{provenance\} \/>\s*<DeclaredStepsBand steps=\{steps\} \/>/)
   assert.match(page, /<HistoryBand versions=\{versions\} \/>/)
   // Runs: the board's status vocabulary, and a Load more that continues the
   // same server question (this job's id) — never a second predicate.
   assert.match(page, /\[\.\.\.STATUS_CHIPS, 'done'\]\.map/)
-  assert.match(page, /runsCursor && onLoadMoreRuns && \(/)
+  assert.match(page, /runsCursor && onLoadMoreRuns\) onLoadMoreRuns\(\)/)
+  // Three depths, as on the agent page: the recent few, all loaded, the next page.
+  assert.match(page, /const visible = expanded \? runs : runs\.slice\(0, RECENT\)/)
+  assert.match(page, /Show all \$\{runs\.length\} loaded/)
   assert.match(page, /loaded\{runsCursor \? ', more on record' : ''\}/)
   const tab = work.slice(work.indexOf('async function loadMoreFinished'), work.indexOf('const overviewFailSoftRef'))
   assert.match(tab, /cursor: finishedCursor/)

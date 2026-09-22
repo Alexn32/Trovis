@@ -7315,147 +7315,225 @@ button.work-td-task:hover {
 }
 .kind-node.is-divergence .kind-node-pct { color: var(--warning); }
 
-/* --- Work page 2: one job (a pattern) ---------------------------------------
-   Everything on this page is an average. The provenance line and the empty
-   comparison column are what keep it from reading like the run page. */
+/* --- The job page ---------------------------------------------------------
+   Laid out like the agent detail page (AgentDetail.jsx): the same full-bleed
+   linen shell, cream cards with 14px corners, mono uppercase labels,
+   dot-pills for a verdict, feed rows for runs. That page carries its own
+   light palette by design so the two detail pages read as one; these tokens
+   are that palette, scoped to `.jp`, defined here rather than inline so a
+   media query can still reach the layout. Everything else on this page is an
+   average, and the provenance line and the empty comparison column are what
+   keep it from reading like the run page. */
+.jp {
+  --jp-linen: #F5F1EB; --jp-cream: #FBF8F3; --jp-subtle: #ECE8E1; --jp-border: #DDD7CE;
+  --jp-ink: #2C2418; --jp-body: #4A4137; --jp-muted: #8C8378; --jp-faint: #B8B0A4;
+  --jp-teal: #5A7B7B; --jp-ok: #2A9D6E; --jp-warn: #D4792A; --jp-err: #C43528;
+  --jp-mono: "JetBrains Mono", ui-monospace, monospace;
+  --jp-disp: "Space Grotesk", "DM Sans", sans-serif;
+  --jp-body-font: "DM Sans", sans-serif;
+  flex: 1; width: 100%; min-height: 100vh;
+  background: var(--jp-linen); color: var(--jp-ink); font-family: var(--jp-body-font);
+}
+.jp-inner { max-width: 980px; margin: 0 auto; padding: 28px 24px 64px; }
+.jp-back {
+  display: inline-flex; align-items: center; background: none; border: none; padding: 0;
+  margin-bottom: 18px; color: var(--jp-muted); font: inherit; font-size: 13.5px; cursor: pointer;
+}
+.jp-back:hover { color: var(--jp-ink); }
 
-/* The operator's own words, in the display face — the definition is the
-   subject of the page, not metadata about it. */
-.jobp-definition {
-  font-family: "Space Grotesk", "DM Sans", sans-serif;
-  font-size: 15.5px; line-height: 1.5; color: var(--text-secondary);
-  margin: -8px 0 0; max-width: 68ch;
+/* header */
+.jp-head { display: flex; flex-direction: column; gap: 10px; }
+.jp-head-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.jp-title {
+  font-family: var(--jp-mono); font-weight: 500; font-size: 26px; margin: 0;
+  color: var(--jp-ink); letter-spacing: -0.01em; overflow-wrap: anywhere;
 }
+.jp-edit { margin-left: auto; }
+.jp-meta {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  font-size: 13px; color: var(--jp-muted);
+}
+.jp-definition {
+  font-size: 15px; line-height: 1.55; color: var(--jp-body); margin: 2px 0 0; max-width: 720px;
+}
+.jp-definition.is-derived { color: var(--jp-muted); }
+.jp-definition .jp-link { margin-left: 6px; }
 
-/* Four aggregates. A missing one is an em dash, never a zero. */
-.jobp-stats {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px; background: var(--border-default);
-  border: 1px solid var(--border-default); border-radius: 9px; overflow: hidden;
+/* atoms shared with the agent page's look */
+.jp-label {
+  font-family: var(--jp-mono); font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--jp-muted); margin-bottom: 10px;
 }
-.jobp-stat {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 12px 14px; background: var(--bg-surface);
+.jp .dash-caps {
+  font-family: var(--jp-mono); font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--jp-muted); margin: 0;
 }
-.jobp-stat-label {
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--text-muted);
+.jp-pill {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px;
+  background: var(--jp-cream); border: 1px solid var(--jp-border); border-radius: 999px;
+  font-size: 12.5px; color: var(--jp-body); white-space: nowrap;
 }
-.jobp-stat-value {
-  font-size: 19px; font-weight: 650; color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
+.jp-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--jp-muted); }
+.jp-dot.is-ok { background: var(--jp-ok); }
+.jp-dot.is-warn { background: var(--jp-warn); }
+.jp-dot.is-err { background: var(--jp-err); }
+.jp-dot.is-muted { background: var(--jp-muted); }
+.jp-tag {
+  display: inline-flex; align-items: center; gap: 6px; font-family: var(--jp-mono);
+  font-size: 11.5px; background: var(--jp-subtle); padding: 2px 8px; border-radius: 6px;
+  color: var(--jp-body); border: none;
 }
-/* Rule 6: smaller and muted, so a missing measurement never has the visual
-   weight of a real one. */
-.jobp-stat.is-nodata .jobp-stat-value {
-  font-size: 14px; font-weight: 500; color: var(--text-muted);
+.jp-tag.is-link { cursor: pointer; font: inherit; font-family: var(--jp-mono); font-size: 11.5px; }
+.jp-tag.is-link:hover { color: var(--jp-teal); }
+.jp-link {
+  background: none; border: none; padding: 0; color: var(--jp-teal); font: inherit;
+  font-size: 13.5px; cursor: pointer;
 }
-/* The denominator under an average: what the number is an average OF. */
-.jobp-stat-sub { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-@media (max-width: 720px) {
-  .jobp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.jp-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.jp-btn {
+  padding: 9px 16px; background: var(--jp-teal); color: var(--jp-cream); border: none;
+  border-radius: 10px; font-family: var(--jp-disp); font-weight: 600; font-size: 13.5px; cursor: pointer;
 }
+.jp-btn:hover { filter: brightness(1.06); }
+.jp-btn-ghost {
+  padding: 10px 16px; background: none; color: var(--jp-muted); border: 1px solid var(--jp-border);
+  border-radius: 10px; font-family: var(--jp-disp); font-weight: 600; font-size: 13.5px; cursor: pointer;
+}
+.jp-btn-danger {
+  padding: 10px 18px; background: var(--jp-err); color: #fff; border: none;
+  border-radius: 10px; font-family: var(--jp-disp); font-weight: 600; font-size: 13.5px; cursor: pointer;
+}
+.jp-btn-danger:disabled, .jp-btn-ghost:disabled { opacity: 0.6; cursor: default; }
+.jp-quiet { font-size: 13.5px; color: var(--jp-muted); margin: 0; }
+.jp-quiet.is-pad { padding: 20px 18px; border-top: 1px solid var(--jp-subtle); }
 
-/* The job page's edit door sits in the header, after the name. */
-.jobp-edit { margin-left: auto; }
-.work-kind-page .work-home-head .wk-derived-tag { margin-left: 4px; }
-/* Recent runs: the heading and its chips on one line, scope under the list. */
-.jobp-runs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.jobp-runs-filters { gap: 5px; }
-.jobp-runs-scope { margin: 6px 0 0; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-/* History: every version, newest first. */
-.jobp-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.jobp-history-row { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; }
-.jobp-history-date { color: var(--text-muted); }
-.jobp-history-note { color: var(--text-muted); font-style: italic; }
+/* cards */
+.jp-card {
+  background: var(--jp-cream); border: 1px solid var(--jp-border); border-radius: 14px;
+  padding: 18px 20px; margin-top: 16px;
+}
+.jp-card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.jp-card-head .jp-label { margin-bottom: 0; }
+.jp-lede { margin: 12px 0 16px; font-size: 14px; line-height: 1.55; color: var(--jp-body); max-width: 720px; }
+.jp-sub { margin-top: 18px; }
+.jp-sub .jp-label { margin-bottom: 8px; }
 
-/* Never optional, never far from the diagram. */
-.jobp-computed {
-  margin: 2px 0 0; font-size: 11.5px; color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
+/* the window strip — the agent page's "This week" */
+.jp-stats { display: flex; flex-wrap: wrap; align-items: flex-end; row-gap: 14px; }
+.jp-stat { padding-right: 28px; margin-right: 28px; border-right: 1px solid var(--jp-subtle); }
+.jp-stat:last-of-type { border-right: none; }
+.jp-stat-label {
+  font-family: var(--jp-mono); font-size: 10.5px; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--jp-muted); margin-bottom: 4px;
 }
+.jp-stat-value { font-family: var(--jp-disp); font-weight: 700; font-size: 22px; color: var(--jp-ink); }
+.jp-stat.is-nodata .jp-stat-value { font-size: 15px; font-weight: 500; color: var(--jp-muted); }
+.jp-stat-sub { font-size: 11.5px; color: var(--jp-muted); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.jp-shape { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 6px; padding-bottom: 4px; }
+.jp-shape .wk-bar { background: var(--jp-subtle); }
+.jp-shape .wk-bar-seg.tone-live { background: var(--jp-teal); }
+.jp-shape .wk-bar-seg.tone-waiting { background: var(--jp-warn); }
+.jp-shape .wk-bar-seg.tone-stuck { background: var(--jp-err); }
+.jp-shape .wk-bar-seg.tone-done { background: var(--jp-faint); }
+.jp-shape-line { font-family: var(--jp-mono); font-size: 11.5px; color: var(--jp-muted); }
 
-/* Said plainly, once, above the rows it applies to. */
-.jobp-nodecl { margin: 0; font-size: 12.5px; color: var(--text-muted); max-width: 68ch; }
-
-.jobp-health {
-  margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+/* the runs — the agent page's work feed */
+.jp-feed { padding: 0; overflow: hidden; }
+.jp-feed-head { padding: 16px 18px 12px; align-items: baseline; }
+.jp-count { font-family: var(--jp-mono); font-size: 11.5px; color: var(--jp-muted); }
+.jp-filters { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 18px 12px; }
+.jp-filter {
+  font-family: var(--jp-mono); font-size: 10.5px; font-weight: 500; letter-spacing: 0.04em;
+  text-transform: uppercase; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--jp-subtle); background: transparent; color: var(--jp-muted);
 }
-.jobp-metric {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 10px 0 10px 12px; border-left: 2px solid var(--border-default);
+.jp-filter.is-on { border-color: var(--jp-teal); background: var(--jp-subtle); color: var(--jp-teal); }
+.jp-rows { display: flex; flex-direction: column; }
+.jp-row {
+  display: grid; grid-template-columns: 8px minmax(0, 1fr) auto minmax(80px, 160px) 64px 10px;
+  align-items: center; gap: 14px; width: 100%; padding: 14px 18px;
+  background: none; border: none; border-top: 1px solid var(--jp-subtle);
+  cursor: pointer; text-align: left; font: inherit; color: var(--jp-ink);
 }
-/* Colour only on a breach, and only when there was a declared number to
-   breach. An observation with nothing to grade it against stays neutral. */
-.jobp-metric.is-over { border-left-color: var(--error); }
-.jobp-metric dt {
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--text-muted);
+.jp-row:hover { background: var(--jp-linen); }
+.jp-row:focus-visible { outline: 2px solid var(--jp-teal); outline-offset: -2px; }
+.jp-row-title { font-size: 14.5px; color: var(--jp-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jp-row-tag {
+  font-family: var(--jp-mono); font-size: 10px; font-weight: 500; letter-spacing: 0.04em;
+  text-transform: uppercase; background: var(--jp-subtle); padding: 2px 8px; border-radius: 6px;
+  white-space: nowrap; color: var(--jp-muted);
 }
-.jobp-metric dd { margin: 0; }
-.jobp-observed {
-  font-size: 16px; font-weight: 650; color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-.jobp-metric.is-over .jobp-observed { color: var(--error); }
-/* Rule 6. Muted and lighter than a number, so a missing measurement never
-   reads as a small one — and never green, because it is not a pass. */
-.jobp-metric.is-nodata .jobp-observed {
-  color: var(--text-muted); font-weight: 500; font-size: 14px;
-}
-/* Empty when nothing was declared — an empty cell, not a dash pretending to
-   be a verdict. It keeps its height so the four rows stay aligned. */
-.jobp-expected {
-  font-size: 11.5px; color: var(--text-muted); min-height: 16px;
-  font-variant-numeric: tabular-nums;
-}
-@media (max-width: 720px) {
-  .jobp-health { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-/* Recent runs. Dense and quiet, and every state in the one list so a
-   repeated failure reads as a cluster. */
-.jobp-runs { list-style: none; margin: 0; padding: 0; }
-.jobp-runs > li + li { border-top: 1px solid var(--border-default); }
-.jobp-run {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto 52px;
-  align-items: baseline; gap: 12px; width: 100%; text-align: left;
-  padding: 9px 4px; background: none; border: none; cursor: pointer;
-  font-family: inherit;
-}
-.jobp-run:hover { background: var(--bg-surface-hover); }
-.jobp-run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.jobp-run-what {
-  font-size: 13px; color: var(--text-primary);
+.jp-row-tag.is-ok { color: var(--jp-teal); }
+.jp-row-tag.is-warn { color: var(--jp-warn); }
+.jp-row-tag.is-err { color: var(--jp-err); }
+.jp-row-meta {
+  font-family: var(--jp-mono); font-size: 12px; color: var(--jp-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.jobp-run-age {
-  font-size: 11.5px; color: var(--text-muted); text-align: right;
-  font-variant-numeric: tabular-nums;
+.jp-row-meta:last-of-type { text-align: right; }
+.jp-row-go { color: var(--jp-faint); font-size: 12px; }
+.jp-feed-more {
+  display: block; width: 100%; padding: 13px 18px; background: var(--jp-linen);
+  border: none; border-top: 1px solid var(--jp-subtle); color: var(--jp-teal);
+  font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer;
 }
+.jp-feed-more:hover { filter: brightness(0.98); }
 
-/* The technical block, below the fold. This detail lives here and nowhere
-   else — it does not go on a run page. */
-.jobp-settings dl {
-  margin: 0; display: grid; grid-template-columns: 168px minmax(0, 1fr);
-  gap: 0 16px;
+/* health & expectations — the agent page's identity card */
+.jp-metrics { margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.jp-metric { display: flex; flex-direction: column; gap: 3px; padding: 10px 0 10px 12px; border-left: 2px solid var(--jp-subtle); }
+.jp-metric.is-over { border-left-color: var(--jp-err); }
+.jp-metric dt {
+  font-family: var(--jp-mono); font-size: 10.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--jp-muted);
 }
-.jobp-settings dl > div {
-  display: contents;
+.jp-metric dd { margin: 0; }
+.jp-metric-value { font-family: var(--jp-disp); font-size: 18px; font-weight: 700; color: var(--jp-ink); font-variant-numeric: tabular-nums; }
+.jp-metric.is-over .jp-metric-value { color: var(--jp-err); }
+.jp-metric.is-nodata .jp-metric-value { color: var(--jp-muted); font-weight: 500; font-size: 14px; }
+.jp-metric-expected { font-size: 11.5px; color: var(--jp-muted); min-height: 16px; font-variant-numeric: tabular-nums; }
+/* the observed path and the declared steps reuse the board's kind-path pills */
+.jp .kind-node { background: var(--jp-linen); border-color: var(--jp-border); color: var(--jp-body); }
+.jp .kind-node.kind-done { background: none; border-color: transparent; color: var(--jp-muted); }
+.jp .kind-node.is-divergence { border-color: var(--jp-warn); background: #FBEBDD; color: var(--jp-ink); }
+.jp .kind-node-pct { color: var(--jp-muted); }
+.jp .kind-node.is-divergence .kind-node-pct { color: var(--jp-warn); }
+.jp .kind-arrow { color: var(--jp-faint); }
+.jp .jobp-computed { color: var(--jp-muted); font-family: var(--jp-mono); font-size: 11px; margin-top: 8px; }
+
+/* settings & history */
+.jp-settings { margin: 0; display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 0 16px; }
+.jp-settings > div { display: contents; }
+.jp-settings dt { font-size: 12.5px; color: var(--jp-muted); padding: 7px 0; border-top: 1px solid var(--jp-subtle); }
+.jp-settings dd {
+  margin: 0; font-family: var(--jp-mono); font-size: 12.5px; color: var(--jp-body); padding: 7px 0;
+  border-top: 1px solid var(--jp-subtle); overflow-wrap: anywhere;
 }
-.jobp-settings dt {
-  font-size: 12px; color: var(--text-muted); padding: 6px 0;
-  border-top: 1px solid var(--border-default);
+.jp-settings dd .jp-link { font-family: var(--jp-mono); font-size: 12.5px; }
+.jp-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.jp-history-row { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; color: var(--jp-body); }
+.jp-history-date { color: var(--jp-muted); }
+.jp-history-note { color: var(--jp-muted); font-style: italic; }
+
+/* archive — the agent page's danger zone, for the write this record allows */
+.jp-danger {
+  margin-top: 28px; border: 1px solid rgba(196, 53, 40, 0.2); border-radius: 14px; padding: 16px 20px;
+  display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap;
 }
-.jobp-settings dd {
-  margin: 0; font-size: 12.5px; color: var(--text-secondary); padding: 6px 0;
-  border-top: 1px solid var(--border-default);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  overflow-wrap: anywhere;
-}
+.jp-danger-title { font-family: var(--jp-disp); font-weight: 700; font-size: 14.5px; color: var(--jp-ink); margin-bottom: 3px; }
+.jp-danger-sub { font-size: 13px; color: var(--jp-muted); max-width: 560px; line-height: 1.5; }
+.jp-danger-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
 @media (max-width: 720px) {
-  .jobp-settings dl { grid-template-columns: 1fr; gap: 0; }
-  .jobp-settings dd { border-top: none; padding-top: 0; }
+  .jp-inner { padding: 20px 16px 48px; }
+  .jp-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 12px; }
+  .jp-stat { padding-right: 0; margin-right: 0; border-right: none; }
+  .jp-shape { grid-column: 1 / -1; min-width: 0; }
+  .jp-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jp-row { grid-template-columns: 8px minmax(0, 1fr) auto 10px; }
+  .jp-row .jp-row-meta { display: none; }
+  .jp-settings { grid-template-columns: 1fr; gap: 0; }
+  .jp-settings dd { border-top: none; padding-top: 0; }
+  .jp-edit { margin-left: 0; }
 }
 
 /* --- Work home ------------------------------------------------------------ */
