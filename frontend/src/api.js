@@ -372,6 +372,24 @@ export const api = {
   // Normalized connection health for the Connections page — one row per
   // connector: state, observed, last_observed_at (connect_health.py).
   getConnectHealth: () => request('/connect/health'),
+  // Connection instances — the durable record that a connection was set up
+  // (connection_instances). The guided setup creates one when it shows a
+  // recipe, stamps its key into the snippets, and polls its status instead
+  // of diffing agent names. `since` is optional: the server defaults to the
+  // instance's own setup start, so a reload resumes from a recorded fact.
+  createConnection: (body) =>
+    request('/connect/connections', { method: 'POST', body: JSON.stringify(body) }),
+  listConnections: (connectorId) =>
+    request(`/connect/connections${connectorId ? `?connector_id=${encodeURIComponent(connectorId)}` : ''}`),
+  getConnectionStatus: (id, since) =>
+    request(`/connect/connections/${encodeURIComponent(id)}/status${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+  completeConnection: (id) =>
+    request(`/connect/connections/${encodeURIComponent(id)}/complete`, { method: 'POST' }),
+  disconnectConnection: (id) =>
+    request(`/connect/connections/${encodeURIComponent(id)}/disconnect`, { method: 'POST' }),
+  // The same read for a connector with no instance yet (`since` required).
+  getConnectorStatus: (connectorId, since) =>
+    request(`/connect/health/${encodeURIComponent(connectorId)}?since=${encodeURIComponent(since)}`),
 
   // SaaS Connect (Stripe / HubSpot / Shopify Work adapters — not Trovis billing).
   getSaasConnections: () => request('/saas/connections'),

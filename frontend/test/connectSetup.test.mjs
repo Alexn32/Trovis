@@ -126,8 +126,11 @@ test('the guidance teaches Run, not Job: the title names one occurrence of work'
   // path only fires when the provider object carries it.
   assert.match(body, /trovis_loop_external_id/)
   assert.match(body, /Stripe metadata/)
-  const otel = addAgent.slice(addAgent.indexOf('function otelSetupBlock'))
-  assert.match(otel.slice(0, otel.indexOf('\n}')), /trovis_loop_external_id/)
+  const otelStart = addAgent.indexOf('function otelSetupBlock')
+  const otel = addAgent.slice(otelStart, addAgent.indexOf('\nfunction ', otelStart + 1))
+  assert.match(otel, /trovis_loop_external_id/)
+  // The recipe stamps the connection instance too (dropped when there is none).
+  assert.match(otel, /trovis\.connection\.id/)
   // No recipe page anywhere calls the titled unit a job.
   assert.doesNotMatch(addAgent, /named job on Work/)
   assert.doesNotMatch(addAgent, /becomes the job'?s name in Trovis/)

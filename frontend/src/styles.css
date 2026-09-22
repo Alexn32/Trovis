@@ -4809,6 +4809,26 @@ a:hover {
 .connect-card-desc { margin: 0; font-size: 13px; color: var(--text-secondary); }
 .connect-card-note { margin: 0; font-size: 12.5px; color: var(--text-muted); line-height: 1.45; }
 .connect-card-cta { align-self: flex-start; }
+/* The setup's lifecycle line: set up → waiting for data → connected. */
+.connect-status {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  align-self: stretch; font-size: 13px; color: var(--text-secondary);
+  padding: 8px 12px; border-radius: 8px; background: var(--bg-surface);
+  border: 1px dashed var(--border-default);
+}
+.connect-status-strip { margin-top: 18px; }
+.connect-status-title { font-weight: 600; color: var(--text-primary); }
+.connect-status-detail { color: var(--text-muted); }
+.connect-status.is-connected { border-style: solid; background: var(--success-faint); color: var(--success); }
+.connect-status.is-connected .connect-status-title { color: var(--success); }
+.connect-status.is-connector_only { border-color: var(--text-dim); }
+.connect-status-cta { margin-left: auto; }
+.connect-banner-stack { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.connect-gap {
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+  max-width: 520px; font-size: 12.5px; color: var(--text-muted);
+  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-default);
+}
 
 .works-with {
   display: flex;
