@@ -21,17 +21,6 @@ const F = {
 const LAST_UPDATED = "June 22, 2026";
 const CONTACT = "hello@trovisai.com";
 
-function TMark({ size = 22, color = C.teal }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <line x1="3" y1="5" x2="21" y2="5" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-      <line x1="12" y1="5" x2="12" y2="21" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-      <line x1="6.5" y1="12" x2="9.5" y2="12" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-      <line x1="14.5" y1="12" x2="17.5" y2="12" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function Layout({ title, children }) {
   return (
     <div style={{ minHeight: "100vh", background: C.linen, color: C.ink, fontFamily: F.body }}>
@@ -42,8 +31,7 @@ function Layout({ title, children }) {
       <div style={{ maxWidth: 760, margin: "0 auto", padding: "0 24px" }}>
         <nav style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "24px 0" }}>
           <a href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
-            <TMark size={22} />
-            <span style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 19, letterSpacing: "-0.02em", color: C.teal }}>trovis</span>
+            <img src="/brand/trovis-lockup-teal.svg" alt="Trovis" height={24} style={{ display: "block" }} />
           </a>
           <div style={{ display: "flex", gap: 22 }}>
             <a href="/terms" style={{ fontSize: 14, color: C.body, textDecoration: "none" }}>Terms</a>

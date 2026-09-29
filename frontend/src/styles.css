@@ -28,9 +28,9 @@
   --accent-bg: #f0ece6;
   --accent-text: #1a1714;
   /* Trovis brand accent — slate teal. Brand identity only; status stays green. */
-  --brand-accent: #7A9E9E;
-  --brand-accent-bg: rgba(122, 158, 158, 0.12);
-  --brand-accent-hover: #8ab0b0;
+  --brand-accent: #88B0AC;
+  --brand-accent-bg: rgba(136, 176, 172, 0.12);
+  --brand-accent-hover: #9cc2be;
   --success: #3bb87e;
   --warning: #e8924a;
   --error: #e05040;
@@ -114,9 +114,9 @@
   --accent-bg: #2c2418;
   --accent-text: #faf8f4;
   /* Trovis brand accent — slate teal. Brand identity only; status stays green. */
-  --brand-accent: #5A7B7B;
-  --brand-accent-bg: rgba(90, 123, 123, 0.08);
-  --brand-accent-hover: #4a6b6b;
+  --brand-accent: #36635F;
+  --brand-accent-bg: rgba(54, 99, 95, 0.08);
+  --brand-accent-hover: #2a504d;
   --success: #2a9d6e;
   --warning: #d4792a;
   --error: #c43528;
