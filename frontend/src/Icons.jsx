@@ -138,20 +138,19 @@ export function TrovisMark({ size = 20, className = '' }) {
     <svg
       width={size}
       height={size}
-      viewBox="10 11 20 20"
-      fill="none"
+      viewBox="0 -46 635 635"
+      fill="currentColor"
       className={className}
       style={{ display: 'inline-block', verticalAlign: 'middle' }}
     >
-      <line x1="12" y1="14" x2="28" y2="14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-      <line x1="20" y1="14" x2="20" y2="28" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-      <line x1="14" y1="20" x2="18" y2="20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      <line x1="22" y1="20" x2="26" y2="20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <rect x="0" y="0" width="204" height="112" />
+      <rect x="431" y="0" width="204" height="112" />
+      <rect x="261" y="170" width="113" height="373" />
     </svg>
   )
 }
 
-// The full Trovis lockup: tinted crosshair badge + "trovis" wordmark. Renders
+// The full Trovis lockup: tinted T badge + "trovis" wordmark. Renders
 // inline (no per-theme image swap) and colors itself from --brand-accent, so it
 // adapts to light/dark automatically. Replaces the old dot + "Oversee" brand.
 export function TrovisLogo({ className = '' }) {

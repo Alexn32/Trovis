@@ -35,17 +35,6 @@ const BENEFITS = [
   "Built for eng/founder teams with agents already in production",
 ];
 
-function TMark({ size = 26, color = C.teal }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <line x1="3" y1="5" x2="21" y2="5" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-      <line x1="12" y1="5" x2="12" y2="21" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-      <line x1="6.5" y1="12" x2="9.5" y2="12" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-      <line x1="14.5" y1="12" x2="17.5" y2="12" stroke={color} strokeWidth="2.4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function WaitlistForm({ onJoined }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -252,8 +241,7 @@ export default function TrovisLanding({ onSignIn = () => {} }) {
       <div style={{ position: "relative", zIndex: 2, maxWidth: 1080, margin: "0 auto", padding: "0 24px" }}>
         <nav style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "24px 0", gap: 14 }}>
           <a href="#top" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none" }}>
-            <TMark size={24} />
-            <span style={{ fontFamily: F.disp, fontWeight: 700, fontSize: 21, letterSpacing: "-0.02em", color: C.teal }}>trovis</span>
+            <img src="/brand/trovis-lockup-teal.svg" alt="Trovis" height={26} style={{ display: "block" }} />
           </a>
           <button
             type="button"
