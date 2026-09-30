@@ -6,6 +6,8 @@ import { BrandMark, QuietBrand, WorksWithStrip } from './BrandMarks.jsx'
 import { connectorForGuideOption, guideOpeningOptions, workSystemOptions } from './connectSetup.js'
 import { getConnector } from './connectors.js'
 import { doorFor } from './saasDoors.js'
+import { cannotSee, lifecycle } from './connectFlow.js'
+import { relativeTime } from './utils.js'
 // Placeholder → real key/endpoint substitution, and the wire-history
 // flattening that keeps the placeholders. Extracted so both are covered by
 // frontend/test/connectSnippets.test.mjs.
@@ -42,6 +44,12 @@ function workSystemFor(labelOrId) {
   return c && c.setup_type === 'oauth' ? c : null
 }
 
+/** A registry telemetry connector (one with a recipe) for a chip label or id. */
+function telemetryConnectorFor(labelOrId) {
+  const c = connectorForGuideOption(labelOrId) || getConnector(labelOrId)
+  return c && c.availability === 'available' && c.setup_type !== 'oauth' && c.setup_type !== 'none' ? c : null
+}
+
 // Turns posted to the backend (the model only needs role + content).
 const MAX_HISTORY = 24
 
@@ -59,6 +67,16 @@ export default function ConnectGuide({
 }) {
   const [messages, setMessages] = useState([OPENING_TURN])
   const seeded = useRef(false)
+  // The connection instance this conversation is setting up (POST
+  // /connect/connections): created the moment a telemetry connector is
+  // chosen, resumed from the newest started row on a reload. Its key goes
+  // into every snippet, and its status is what "connected" means here.
+  const [instance, setInstance] = useState(null)
+  const [status, setStatus] = useState(null)
+  const announced = useRef(false)
+  // Set synchronously the moment a create/resume starts: a chip pick and the
+  // model reply it triggers both ask for an instance before state updates.
+  const instanceRequested = useRef(false)
   const [input, setInput] = useState('')
   const [pending, setPending] = useState(false)
   // undefined = still loading; null = none in this session; string = the key.
@@ -88,28 +106,21 @@ export default function ConnectGuide({
     }
   }, [])
 
-  // Live connection detection: snapshot the current agents, then poll; when a
-  // brand-new service_name appears, drop a local "connected" banner into the
-  // thread. Runs while mounted (even hidden during a manual detour). The
-  // banner is local-only — the model sees the new agent via the per-request
-  // fleet context on its next turn.
+  // Connection detection, connector-aware: poll THIS instance's status (what
+  // arrived since its setup began, attributed by its key or its connector's
+  // stamps) instead of diffing /agents service names, which counted any
+  // unrelated agent and could not say what kind of data came. Polls while
+  // mounted (even hidden during a manual detour); stops once connected.
   useEffect(() => {
+    if (!instance) return undefined
     let alive = true
-    let baseline = null
-    const announced = new Set()
     async function tick() {
       try {
-        const list = await api.listAgents()
-        if (!alive || !Array.isArray(list)) return
-        if (baseline === null) {
-          baseline = new Set(list.map((a) => a.service_name).filter(Boolean))
-          return
-        }
-        for (const a of list) {
-          const name = a.service_name
-          if (!name || baseline.has(name) || announced.has(name)) continue
-          announced.add(name)
-          const label = a.display_name || name
+        const st = await api.getConnectionStatus(instance.id)
+        if (!alive) return
+        setStatus(st)
+        if (st?.state === 'connected' && !announced.current) {
+          announced.current = true
           // If this new agent pushed the account past its plan cap, it lands
           // view-locked — celebrate the connection but nudge to upgrade.
           let overLimit = false
@@ -122,7 +133,7 @@ export default function ConnectGuide({
             /* best-effort — fall back to the plain "connected" banner */
           }
           if (!alive) return
-          setMessages((prev) => [...prev, { kind: 'connected', name: label, overLimit }])
+          setMessages((prev) => [...prev, { kind: 'connected', status: st, connectorId: instance.connector_id, overLimit }])
         }
       } catch {
         /* ignore — polling is best-effort */
@@ -134,7 +145,28 @@ export default function ConnectGuide({
       alive = false
       clearInterval(t)
     }
-  }, [])
+  }, [instance])
+
+  // Open (or resume) the instance for a telemetry connector the person chose.
+  // One instance per conversation: a second pick keeps the first.
+  async function ensureInstance(connectorId) {
+    if (instance || instanceRequested.current || !connectorId) return
+    instanceRequested.current = true
+    try {
+      const existing = await api.listConnections(connectorId)
+      const resume = (existing?.connections || []).find((c) => c.setup_status === 'started')
+      if (resume) {
+        setInstance(resume)
+        return
+      }
+      const created = await api.createConnection({ connector_id: connectorId, setup_source: 'guide' })
+      if (created?.id) setInstance(created)
+    } catch {
+      // no instance → snippets carry no key; attribution stays connector-level.
+      // Let a later pick try again.
+      instanceRequested.current = false
+    }
+  }
 
   // Keep the newest message visible; focus the input when the guide is shown.
   useEffect(() => {
@@ -153,6 +185,8 @@ export default function ConnectGuide({
       setMessages((prev) => [...prev, { kind: 'work_system', connectorId: ws.id }])
       return
     }
+    const tc = initialConnector ? telemetryConnectorFor(initialConnector) : null
+    if (tc) ensureInstance(tc.id)
     if (initialMessage && initialLocalTurn && Array.isArray(initialLocalTurn.options)) {
       setMessages((prev) => [
         ...prev,
@@ -181,6 +215,10 @@ export default function ConnectGuide({
       ])
       return
     }
+    // A telemetry connector picked by chip: this conversation is now setting
+    // up one connection of it — record that, so the snippets carry its key.
+    const tc = telemetryConnectorFor(q)
+    if (tc) ensureInstance(tc.id)
     setPending(true)
     // Build the wire history from real chat turns (skip local banners),
     // flattening assistant turns, then append the user's new message.
@@ -203,6 +241,8 @@ export default function ConnectGuide({
         .map((id) => workSystemFor(id))
         .filter(Boolean)
         .map((c) => ({ kind: 'work_system', connectorId: c.id }))
+      const tele = (r.connectors || []).map((id) => telemetryConnectorFor(id)).find(Boolean)
+      if (tele) ensureInstance(tele.id)
       setMessages((prev) => [
         ...prev,
         {
@@ -275,7 +315,7 @@ export default function ConnectGuide({
       <div className="connect-thread" ref={threadRef}>
         {messages.map((m, i) =>
           m.kind === 'connected' ? (
-            <ConnectedBanner key={i} name={m.name} overLimit={m.overLimit} onUpgrade={onUpgrade} />
+            <ConnectedBanner key={i} status={m.status} connectorId={m.connectorId} overLimit={m.overLimit} onUpgrade={onUpgrade} onPick={send} />
           ) : m.kind === 'work_system' ? (
             <WorkSystemConnectCard key={i} connectorId={m.connectorId} />
           ) : (
@@ -285,10 +325,14 @@ export default function ConnectGuide({
               orgKey={orgKey}
               endpoint={endpoint}
               mcpUrl={mcpUrl}
+              connectionKey={instance?.connection_key || null}
               chipsEnabled={i === lastAssistantIdx && !pending}
               onPick={send}
             />
           ),
+        )}
+        {instance && status && status.state !== 'connected' && (
+          <ConnectionStatusLine status={status} connectorId={instance.connector_id} />
         )}
         {pending && (
           <div className="dash-ask-loading" aria-label="Thinking">
@@ -332,7 +376,7 @@ export default function ConnectGuide({
   )
 }
 
-function GuideBubble({ m, orgKey, endpoint, mcpUrl, chipsEnabled, onPick }) {
+function GuideBubble({ m, orgKey, endpoint, mcpUrl, connectionKey, chipsEnabled, onPick }) {
   if (m.role === 'user') {
     return (
       <div className="dash-msg user">
@@ -355,7 +399,7 @@ function GuideBubble({ m, orgKey, endpoint, mcpUrl, chipsEnabled, onPick }) {
         {code.map((c, ci) => (
           <div className="connect-code" key={ci}>
             {c.title && <div className="connect-code-title">{c.title}</div>}
-            <CodeBlock code={substitute(c.content, orgKey, endpoint, mcpUrl)} />
+            <CodeBlock code={substitute(c.content, orgKey, endpoint, mcpUrl, connectionKey)} />
             {orgKey === null && c.content.includes(KEY_PLACEHOLDER) && (
               <div className="connect-code-note">
                 No key in this session — replace ov_sk_… with your key from Settings.
@@ -492,7 +536,23 @@ function WorkSystemConnectCard({ connectorId }) {
   )
 }
 
-function ConnectedBanner({ name, overLimit, onUpgrade }) {
+// The lifecycle line under the thread while a setup is not connected yet:
+// "waiting for the first data", or the honest middle — traffic for this
+// connector arrived without this setup's id.
+function ConnectionStatusLine({ status, connectorId }) {
+  const life = lifecycle(status, getConnector(connectorId), relativeTime)
+  return (
+    <div className={`connect-status is-${life.phase}`} role="status">
+      <span className="connect-status-title">{life.title}</span>
+      {life.detail && <span className="connect-status-detail">{life.detail}</span>}
+    </div>
+  )
+}
+
+function ConnectedBanner({ status, connectorId, overLimit, onUpgrade, onPick }) {
+  const connector = getConnector(connectorId)
+  const life = lifecycle(status, connector, relativeTime)
+  const gap = cannotSee(connector)
   if (overLimit) {
     // The new agent pushed the account past its plan cap — it's recording, but
     // view-locked until they upgrade. Celebrate the connection, nudge to upgrade.
@@ -500,7 +560,7 @@ function ConnectedBanner({ name, overLimit, onUpgrade }) {
       <div className="connect-banner is-upgrade">
         <CheckCircleIcon size={15} />
         <span>
-          <strong>{name}</strong> connected — it’s recording, but locked on your plan.{' '}
+          <strong>{life.title}</strong> — it’s recording, but locked on your plan.{' '}
           {onUpgrade && (
             <button type="button" className="connect-banner-upgrade" onClick={onUpgrade}>
               Upgrade to view
@@ -511,11 +571,25 @@ function ConnectedBanner({ name, overLimit, onUpgrade }) {
     )
   }
   return (
-    <div className="connect-banner">
-      <CheckCircleIcon size={15} />
-      <span>
-        <strong>{name}</strong> connected — telemetry flowing.
-      </span>
+    <div className="connect-banner-stack">
+      <div className="connect-banner">
+        <CheckCircleIcon size={15} />
+        <span>
+          <strong>{life.title}</strong>{life.detail ? ` — ${life.detail}` : ' — telemetry flowing.'}
+        </span>
+      </div>
+      {gap && (
+        <div className="connect-gap">
+          <span>{gap.text}</span>
+          <span className="connect-chips">
+            {gap.connectors.map((id) => (
+              <button key={id} type="button" className="connect-chip" onClick={() => onPick?.(getConnector(id).name)}>
+                Connect {getConnector(id).name}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

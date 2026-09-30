@@ -13436,6 +13436,68 @@ def get_saas_activity(account_id: int) -> dict[str, dict[str, Any]]:
         }
 
 
+_CONNECT_STATUS_TIMEOUT_MS = 4_000
+
+
+def get_observations_since(
+    account_id: int, since_ns: int, limit: int = 200,
+) -> dict[str, Any]:
+    """What arrived for this account since `since_ns`, grouped by
+    (service, agent, resource blob) — the verification read behind the
+    guided setup's "is it connected yet?" poll (connect_health.
+    build_connection_status).
+
+    Per group: newest span time, span count, and three cheap facts about
+    WHAT arrived, using predicates the record already carries:
+      usage_spans   spans whose own attributes carried model usage
+                    (total_tokens IS NOT NULL — the cost denominator)
+      titled_spans  spans carrying trovis.loop.title (named work)
+      tool_spans    tool activity (trovis.tool.name, or the tool_call span
+                    the doors emit)
+    Handoffs and external outcomes are deliberately not derived here — they
+    need the loop-event record, not a span scan.
+
+    Bounded twice: the account+time index (idx_spans_account_started) keys
+    the scan, and LIMIT caps the groups returned; `bounded` says the cap was
+    hit. Same statement timeout discipline as the Connections read;
+    QueryTimeout propagates for the route to turn into a 504.
+    """
+    with _connect() as conn, _cursor(conn) as cur:
+        _set_statement_timeout(cur, _CONNECT_STATUS_TIMEOUT_MS)
+        cur.execute(
+            "SELECT service_name, agent_id, resource_attributes, "
+            "       MAX(start_time_unix) AS last_seen_ns, COUNT(*) AS span_count, "
+            "       SUM(CASE WHEN total_tokens IS NOT NULL THEN 1 ELSE 0 END) AS usage_spans, "
+            "       SUM(CASE WHEN attributes LIKE '%\"trovis.loop.title\"%' "
+            "                  OR attributes LIKE '%\"oversee.loop.title\"%' THEN 1 ELSE 0 END) AS titled_spans, "
+            "       SUM(CASE WHEN attributes LIKE '%\"trovis.tool.name\"%' "
+            "                  OR attributes LIKE '%\"oversee.tool.name\"%' "
+            "                  OR span_name = 'tool_call' THEN 1 ELSE 0 END) AS tool_spans "
+            f"FROM spans WHERE account_id = {PH} AND start_time_unix >= {PH} "
+            "GROUP BY service_name, agent_id, resource_attributes "
+            f"ORDER BY MAX(start_time_unix) DESC LIMIT {PH}",
+            (account_id, int(since_ns), int(limit) + 1),
+        )
+        rows = cur.fetchall()
+    bounded = len(rows) > limit
+    return {
+        "bounded": bounded,
+        "groups": [
+            {
+                "service_name": r["service_name"],
+                "agent_id": r["agent_id"],
+                "resource_attributes": r["resource_attributes"],
+                "last_observed_at": _ns_to_iso(r["last_seen_ns"]),
+                "span_count": int(r["span_count"] or 0),
+                "usage_spans": int(r["usage_spans"] or 0),
+                "titled_spans": int(r["titled_spans"] or 0),
+                "tool_spans": int(r["tool_spans"] or 0),
+            }
+            for r in rows[:limit]
+        ],
+    }
+
+
 def get_connector_observations(account_id: int) -> list[dict[str, Any]]:
     """Every distinct (service, resource-attribute blob) this account has
     stored, with the newest span time under each — the unit connect_health.py

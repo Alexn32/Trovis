@@ -13,8 +13,9 @@ const React = await import('react')
 const { api } = await import('../src/api.js')
 const ConnectGuide = (await import('../src/ConnectGuide.jsx')).default
 
-function stub({ saas = {}, ask = null } = {}) {
+function stub({ saas = {}, ask = null, status = null } = {}) {
   const calls = { ask: [], start: [] }
+  const statusReply = status || { connection_id: 42, connector_id: 'claude', state: 'setup_started', attribution: null, services: [], sees: {}, span_count: 0 }
   api.getApiKeys = async () => ({ keys: [{ key: 'ov_sk_test' }] })
   api.listAgents = async () => []
   api.getAccountUsage = async () => ({ agent_count: 0, agent_limit: null })
@@ -29,6 +30,20 @@ function stub({ saas = {}, ask = null } = {}) {
     calls.ask.push(msgs)
     return ask || { answer: 'ok', options: [], code: [], connectors: [] }
   }
+  // Connection instances (Phase 4/5): the guide records one when a telemetry
+  // connector is chosen and polls its status instead of diffing agent names.
+  calls.created = []
+  calls.statusPolls = 0
+  api.listConnections = async () => ({ connections: [] })
+  api.createConnection = async (body) => {
+    calls.created.push(body)
+    return { id: 42, connector_id: body.connector_id, connection_key: 'cn_test0000000000000000ab', setup_status: 'started', state: 'setup_started' }
+  }
+  api.getConnectionStatus = async () => {
+    calls.statusPolls += 1
+    return statusReply
+  }
+  api.completeConnection = async () => ({ id: 42, setup_status: 'completed', state: 'waiting_for_data' })
   api.startStripeConnect = async () => { calls.start.push('stripe'); return {} }
   api.startShopifyConnect = async (shop) => { calls.start.push(`shopify:${shop}`); return {} }
   api.startHubSpotConnect = async () => { calls.start.push('hubspot'); return {} }
@@ -142,5 +157,71 @@ test('a work-system door this deploy has not configured is offered honestly, not
   const card = m.$('.connect-card[data-connector="hubspot"]')
   assert.equal(card.querySelector('button[aria-label="Connect HubSpot"]').disabled, true)
   assert.match(card.textContent, /isn’t configured on this deploy yet/)
+  m.unmount()
+})
+
+// --- connector-aware verification: the instance, its key, its status --------
+
+test('picking a telemetry connector records an instance and stamps its key into snippets', async () => {
+  const calls = stub({
+    ask: {
+      answer: 'Add these two lines.', options: [], connectors: ['claude'],
+      code: [{ title: 'Init', language: 'python',
+        content: 'init(api_key="TROVIS_API_KEY", agent_name="x", connection_id="TROVIS_CONNECTION_ID")' }],
+    },
+  })
+  const m = await mount(guide())
+  await m.settle()
+  await m.click(chip(m, 'Claude Agent SDK / Claude Code'))
+  await m.settle(20)
+  assert.deepEqual(calls.created, [{ connector_id: 'claude', setup_source: 'guide' }])
+  assert.match(m.text(), /connection_id="cn_test0000000000000000ab"/)
+  assert.doesNotMatch(m.text(), /TROVIS_CONNECTION_ID/)
+  // The lifecycle line reads the recorded fact, not an agent-name diff.
+  assert.match(m.text(), /Set up Claude Agents, then run it/)
+  assert.ok(calls.statusPolls >= 1, 'polls the instance status')
+  m.unmount()
+})
+
+test('a work-system pick never records a telemetry instance', async () => {
+  const calls = stub()
+  const m = await mount(guide())
+  await m.settle()
+  await m.click(chip(m, 'Stripe'))
+  await m.settle()
+  assert.deepEqual(calls.created, [])
+  m.unmount()
+})
+
+test('connected: the banner says what Trovis can see and what it cannot, with the doors that add it', async () => {
+  stub({
+    ask: { answer: 'ok', options: [], code: [], connectors: ['grok-bot'] },
+    status: {
+      connection_id: 42, connector_id: 'grok-bot', state: 'connected', attribution: 'instance',
+      last_observed_at: new Date().toISOString(), services: [{ service_name: 'Trovis PM' }],
+      sees: { execution: true, actions: true, model_usage: false, named_work: true }, span_count: 3,
+    },
+  })
+  const m = await mount(guide({ initialConnector: 'grok-bot' }))
+  await m.settle(20)
+  assert.match(m.text(), /Grok Bot connected/)
+  assert.match(m.text(), /Trovis can see: execution, tool activity, named runs/)
+  assert.match(m.text(), /cannot independently see/)
+  assert.ok(m.$$('.connect-chip').some((b) => b.textContent.trim() === 'Connect Shopify'))
+  m.unmount()
+})
+
+test('connector-level traffic without the key is said plainly, never promoted to connected', async () => {
+  stub({
+    status: {
+      connection_id: 42, connector_id: 'claude', state: 'setup_started', attribution: 'connector',
+      services: [{ service_name: 'refund-helper' }], sees: { execution: true }, span_count: 1,
+    },
+  })
+  const m = await mount(guide({ initialConnector: 'claude' }))
+  await m.settle(20)
+  assert.match(m.text(), /telemetry is arriving from refund-helper/)
+  assert.match(m.text(), /does not carry this setup’s id/)
+  assert.doesNotMatch(m.text(), /Claude Agents connected/)
   m.unmount()
 })

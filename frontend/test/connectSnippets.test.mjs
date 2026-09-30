@@ -147,7 +147,7 @@ test('the guide passes the real MCP URL through to snippets', () => {
   // argument would silently blank every Grok Bot URL.
   const guide = readFileSync(new URL('../src/ConnectGuide.jsx', import.meta.url), 'utf8')
   assert.match(guide, /computeGrokMcpUrl\(\)/)
-  assert.match(guide, /substitute\(c\.content, orgKey, endpoint, mcpUrl\)/)
+  assert.match(guide, /substitute\(c\.content, orgKey, endpoint, mcpUrl, connectionKey\)/)
 })
 
 test('ConnectGuide uses these helpers instead of its own copy', () => {

@@ -31,6 +31,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -96,6 +97,7 @@ except Exception as _grok_mcp_err:  # noqa: BLE001 — never fatal
     )
     grok_mcp = grok_mcp_app = None
 from models import (
+    ConnectionStatus,
     ConnectionInstanceCreate,
     ConnectionInstanceList,
     ConnectionInstanceResponse,
@@ -6494,6 +6496,62 @@ def connect_disconnect_connection(instance_id: int, request: Request) -> Connect
         database.disconnect_saas_connection(account_id, inst["connector_id"])
     inst = database.set_connection_instance_status(account_id, instance_id, "disconnected")
     return _connection_instance_response(inst)
+
+
+def _since_ns(since: str | None, default_ns: int | None) -> int:
+    """`since` as unix-ns: an ISO-8601 timestamp, a unix-seconds or -ns
+    integer, else the instance's own setup start."""
+    raw = (since or "").strip()
+    if not raw:
+        if default_ns is None:
+            raise HTTPException(status_code=400, detail="since is required")
+        return int(default_ns)
+    if raw.isdigit():
+        n = int(raw)
+        return n if n > 10**15 else n * 1_000_000_000
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="since must be ISO-8601 or unix time") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1_000_000_000)
+
+
+@app.get("/connect/connections/{instance_id}/status", response_model=ConnectionStatus)
+def connect_connection_status(instance_id: int, request: Request, since: str | None = None) -> ConnectionStatus:
+    """Is this instance connected yet, and what arrived? Defaults `since` to
+    the instance's own setup start, so a reload resumes from the server's
+    fact rather than a client baseline. 504 when the bounded read times out."""
+    account_id = getattr(request.state, "account_id", None)
+    inst = _owned_instance_or_404(account_id, instance_id)
+    since_ns = _since_ns(since, inst.get("setup_started_unix"))
+    try:
+        body = connect_health_model.build_connection_status(
+            account_id, connector_id=inst["connector_id"], since_ns=since_ns, connection=inst,
+        )
+    except database.QueryTimeout as exc:
+        raise HTTPException(status_code=504, detail="connection status timed out") from exc
+    return ConnectionStatus(**body)
+
+
+@app.get("/connect/health/{connector_id}", response_model=ConnectionStatus)
+def connect_connector_status(connector_id: str, request: Request, since: str) -> ConnectionStatus:
+    """The same read for a connector with no instance yet (the manual wizard
+    before a row exists). `since` is required: without an instance there is
+    no recorded setup start to default to."""
+    account_id = getattr(request.state, "account_id", None)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="authentication required")
+    c = connector_registry.get(connector_id)
+    if c is None or c.id not in connect_health_model.TELEMETRY_CONNECTOR_IDS:
+        raise HTTPException(status_code=404, detail="unknown telemetry connector")
+    since_ns = _since_ns(since, None)
+    try:
+        body = connect_health_model.build_connection_status(account_id, connector_id=c.id, since_ns=since_ns)
+    except database.QueryTimeout as exc:
+        raise HTTPException(status_code=504, detail="connection status timed out") from exc
+    return ConnectionStatus(**body)
 
 
 @app.get("/connect/health", response_model=ConnectionHealthResponse)

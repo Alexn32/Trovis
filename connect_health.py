@@ -313,6 +313,113 @@ def _saas_rows(account_id: int) -> dict[str, dict[str, Any]]:
     return rows
 
 
+# What kinds of data a verification read can name from spans alone. The
+# vocabulary follows Work Coverage where it matches (execution, actions);
+# `model_usage` and `named_work` are span facts, not coverage dimensions.
+STATUS_SEES: tuple[str, ...] = ("execution", "actions", "model_usage", "named_work")
+ATTRIBUTION_INSTANCE = "instance"
+ATTRIBUTION_CONNECTOR = "connector"
+
+
+def build_connection_status(
+    account_id: int,
+    *,
+    connector_id: str,
+    since_ns: int,
+    connection: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The guided setup's verification read: what arrived for THIS connector
+    (and, when given, THIS instance) since setup began.
+
+    Replaces "a new service_name appeared in /agents", which counted any
+    unrelated agent, missed an existing service exporting again, and could
+    not say what kind of data came. This reads spans since `since_ns` and
+    attributes each group the same way health does — by stamp, and by the
+    instance key when the resource carries one.
+
+      attribution  "instance"  a span carried this instance's key
+                   "connector" spans for this connector arrived without the
+                               key (an SDK without connection_id, a door
+                               that cannot carry it yet) — connected at
+                               connector level, the instance itself still
+                               waits
+                   None        nothing for this connector since `since`
+      sees         execution / actions / model_usage / named_work — booleans
+                   from the spans counted; handoffs and external outcomes
+                   are not derivable here and are deliberately absent
+      bounded      the group cap was hit; counts are a lower bound
+
+    For an OAuth-backed instance the observation is the provider's verified
+    events (saas_events), not spans.
+    """
+    connector_id = (connector_id or "").strip().lower()
+    key = (connection or {}).get("connection_key")
+    out: dict[str, Any] = {
+        "connection_id": (connection or {}).get("id"),
+        "connector_id": connector_id,
+        "state": None,
+        "attribution": None,
+        "since": database._ns_to_iso(since_ns),
+        "last_observed_at": None,
+        "services": [],
+        "sees": {k: False for k in STATUS_SEES},
+        "span_count": 0,
+        "bounded": False,
+    }
+    if connection is not None and connection.get("setup_type") == "oauth":
+        act = database.get_saas_activity(account_id).get(connector_id) or {}
+        observed = bool(act.get("event_count"))
+        out["state"] = _instance_state(connection, observed)
+        out["attribution"] = ATTRIBUTION_INSTANCE if observed else None
+        out["last_observed_at"] = act.get("last_event_at") if observed else None
+        out["span_count"] = int(act.get("event_count") or 0)
+        return out
+
+    obs = database.get_observations_since(account_id, since_ns)
+    out["bounded"] = bool(obs["bounded"])
+    keyed: list[dict[str, Any]] = []
+    stamped: list[dict[str, Any]] = []
+    for g in obs["groups"]:
+        cid, _method = identify_connector(g["resource_attributes"])
+        gk = identify_connection(g["resource_attributes"])
+        if key and gk == key:
+            keyed.append(g)
+        elif cid == connector_id and (gk is None or gk != key):
+            stamped.append(g)
+    chosen = keyed if keyed else stamped
+    if keyed:
+        out["attribution"] = ATTRIBUTION_INSTANCE
+    elif stamped:
+        out["attribution"] = ATTRIBUTION_CONNECTOR
+    last = None
+    sees = {k: False for k in STATUS_SEES}
+    for g in chosen:
+        last = _iso_max(last, g["last_observed_at"])
+        out["span_count"] += g["span_count"]
+        sees["execution"] = True
+        if g["tool_spans"]:
+            sees["actions"] = True
+        if g["usage_spans"]:
+            sees["model_usage"] = True
+        if g["titled_spans"]:
+            sees["named_work"] = True
+        out["services"].append({
+            "service_name": g["service_name"],
+            "agent_id": g["agent_id"],
+            "last_observed_at": g["last_observed_at"],
+            "span_count": g["span_count"],
+        })
+    out["last_observed_at"] = last
+    out["sees"] = sees
+    if connection is not None:
+        # The instance's own state: only ITS key connects it. Connector-level
+        # traffic leaves it waiting, and the caller can say so.
+        out["state"] = _instance_state(connection, bool(keyed))
+    else:
+        out["state"] = STATE_CONNECTED if chosen else STATE_NOT_CONNECTED
+    return out
+
+
 def _instance_state(inst: dict[str, Any], observed: bool) -> str:
     if inst.get("setup_status") == "disconnected":
         return INSTANCE_DISCONNECTED

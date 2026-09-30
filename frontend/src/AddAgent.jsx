@@ -6,6 +6,11 @@ import ConnectGuide from './ConnectGuide.jsx'
 import { brandIdForConnector } from './connectors.js'
 import { SETUP_TILE_IDS } from './connectionsPage.js'
 import { intentChips, pickerTiles, recipeTiles, variantsFor } from './connectSetup.js'
+import { withConnectionKey } from './connectSnippets.js'
+import { lifecycle } from './connectFlow.js'
+import { getConnector } from './connectors.js'
+import { relativeTime } from './utils.js'
+import { createContext, useContext } from 'react'
 
 // Tile → V1 brand id, read from the canonical connector registry
 // (connectors.js) — tile ids are connector ids. ChatGPT and the OpenAI Agents
@@ -166,8 +171,17 @@ function effectiveAgentName(name) {
   return (name || '').trim() || 'my-agent-name'
 }
 
-function fill(text, agentName, endpoint) {
-  return text
+// The connection instance the wizard recorded for this setup (POST
+// /connect/connections). Recipes read it to stamp `trovis.connection.id`;
+// null (an embedded onboarding before a row exists, a failed create) drops
+// the line instead of shipping a placeholder — see withConnectionKey.
+const ConnectionKeyContext = createContext(null)
+function useConnectionKey() {
+  return useContext(ConnectionKeyContext)
+}
+
+function fill(text, agentName, endpoint, connectionKey = null) {
+  return withConnectionKey(text, connectionKey)
     .replaceAll('AGENT_NAME', effectiveAgentName(agentName))
     .replaceAll('TROVIS_ENDPOINT', endpoint)
 }
@@ -469,6 +483,7 @@ OTEL_TRACES_EXPORTER=otlp \\
 OTEL_METRICS_EXPORTER=none \\
 OTEL_LOGS_EXPORTER=none \\
 OTEL_EXPORTER_OTLP_HEADERS=X-Trovis-Api-Key=TROVIS_API_KEY \\
+OTEL_RESOURCE_ATTRIBUTES=trovis.connection.id=TROVIS_CONNECTION_ID \\
 opentelemetry-instrument python {RUN_FILE}`
 
 const EXPLICIT_SETUP_TEMPLATE =
@@ -478,7 +493,10 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry import trace
 
-resource = Resource.create({"service.name": "AGENT_NAME"})
+resource = Resource.create({
+    "service.name": "AGENT_NAME",
+    "trovis.connection.id": "TROVIS_CONNECTION_ID",
+})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
     BatchSpanProcessor(OTLPSpanExporter(
@@ -490,16 +508,17 @@ trace.set_tracer_provider(provider)
 
 {IMPORT_LINES}`
 
-function pythonQuickEnvCmd(agentName, endpoint, runFile, apiKey) {
-  return fill(QUICK_ENV_TEMPLATE.replace('{RUN_FILE}', runFile), agentName, endpoint)
+function pythonQuickEnvCmd(agentName, endpoint, runFile, apiKey, connectionKey = null) {
+  return fill(QUICK_ENV_TEMPLATE.replace('{RUN_FILE}', runFile), agentName, endpoint, connectionKey)
     .replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 }
 
-function pythonExplicitSetup(importLines, agentName, endpoint, apiKey) {
+function pythonExplicitSetup(importLines, agentName, endpoint, apiKey, connectionKey = null) {
   return fill(
     EXPLICIT_SETUP_TEMPLATE.replace('{IMPORT_LINES}', importLines),
     agentName,
     endpoint,
+    connectionKey,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 }
 
@@ -515,8 +534,9 @@ function PythonInstrumentorTabs({
   const apiKey = getApiKey() || ''
   const quickInstall = `pip install opentelemetry-distro opentelemetry-exporter-otlp ${pkg}`
   const explicitInstall = `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http ${pkg}`
-  const envCmd = pythonQuickEnvCmd(agentName, endpoint, runFile, apiKey)
-  const explicitSetup = pythonExplicitSetup(importLines, agentName, endpoint, apiKey)
+  const connectionKey = useConnectionKey()
+  const envCmd = pythonQuickEnvCmd(agentName, endpoint, runFile, apiKey, connectionKey)
+  const explicitSetup = pythonExplicitSetup(importLines, agentName, endpoint, apiKey, connectionKey)
 
   return (
     <Tabs
@@ -667,7 +687,7 @@ OpenAIInstrumentor().instrument()`
   )
 }
 
-function otelSetupBlock(agentName, endpoint, apiKey) {
+function otelSetupBlock(agentName, endpoint, apiKey, connectionKey = null) {
   return fill(
 `from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -677,7 +697,13 @@ from opentelemetry import trace
 
 # trovis.connector.id tells Connections this is the Cursor recipe. Without it
 # the traces still arrive, filed under Custom (OpenTelemetry).
-resource = Resource.create({"service.name": "AGENT_NAME", "trovis.connector.id": "cursor"})
+# trovis.connection.id ties this telemetry to the connection you are setting
+# up right now, so Connections can tell it apart from another Cursor setup.
+resource = Resource.create({
+    "service.name": "AGENT_NAME",
+    "trovis.connector.id": "cursor",
+    "trovis.connection.id": "TROVIS_CONNECTION_ID",
+})
 provider = TracerProvider(resource=resource)
 provider.add_span_processor(
     BatchSpanProcessor(OTLPSpanExporter(
@@ -702,12 +728,13 @@ with tracer.start_as_current_span("handle_refund") as span:
     # provider's own events link back to this run.
     span.set_attribute("trovis.loop.external_id", "order-4821")
     # your agent logic here`,
-    agentName, endpoint,
+    agentName, endpoint, connectionKey,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 }
 
 function PythonGenericInstructions({ agentName, endpoint }) {
   const apiKey = getApiKey() || ''
+  const connectionKey = useConnectionKey()
   return (
     <>
       <h2 className="instructions-title">Generic OpenTelemetry setup</h2>
@@ -715,7 +742,7 @@ function PythonGenericInstructions({ agentName, endpoint }) {
         <CodeBlock code="pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http" />
       </NumberedStep>
       <NumberedStep n={2} title="Add this setup block and instrument your operations">
-        <CodeBlock code={otelSetupBlock(agentName, endpoint, apiKey)} />
+        <CodeBlock code={otelSetupBlock(agentName, endpoint, apiKey, connectionKey)} />
       </NumberedStep>
       <SuccessCallout />
     </>
@@ -726,6 +753,7 @@ function PythonGenericInstructions({ agentName, endpoint }) {
 function CursorOtelInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
+  const connectionKey = useConnectionKey()
   return (
     <>
       <h2 className="instructions-title">Send Cursor traces over OpenTelemetry</h2>
@@ -743,7 +771,7 @@ function CursorOtelInstructions({ agentName, endpoint }) {
         <CodeBlock code="pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http" />
       </NumberedStep>
       <NumberedStep n={2} title="Point traces at Trovis">
-        <CodeBlock code={otelSetupBlock(agentName, resolvedEndpoint, apiKey)} />
+        <CodeBlock code={otelSetupBlock(agentName, resolvedEndpoint, apiKey, connectionKey)} />
       </NumberedStep>
       <NumberedStep n={3} title="Name the run (required for named Work)">
         <NamedWorkGuidance />
@@ -862,6 +890,7 @@ function OpenClawInstructions() {
 function OpenAIAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
+  const connectionKey = useConnectionKey()
   const installCmd = 'pip install trovis-agents[openai]'
   // The setup snippet uses our `fill()` substitution for AGENT_NAME +
   // TROVIS_ENDPOINT. The API key is substituted separately because
@@ -872,13 +901,14 @@ function OpenAIAgentsInstructions({ agentName, endpoint }) {
 `from agents import Agent, Runner
 from trovis import init
 
-init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME")
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", connection_id="TROVIS_CONNECTION_ID")
 
 # Your existing code — no changes needed
 agent = Agent(name="Support", instructions="You handle customer tickets…")
 result = await Runner.run(agent, "Help me with my order")`,
     agentName,
     resolvedEndpoint,
+    connectionKey,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
@@ -965,12 +995,13 @@ result = await Runner.run(agent, "Help me with my order")`,
 function AnthropicAgentsInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
+  const connectionKey = useConnectionKey()
   const installCmd = 'pip install trovis-agents[anthropic]'
   const setupCode = fill(
 `import anthropic
 from trovis import init
 
-init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="anthropic")
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="anthropic", connection_id="TROVIS_CONNECTION_ID")
 
 # Your existing code — no changes needed
 client = anthropic.Anthropic()
@@ -986,6 +1017,7 @@ for event in client.beta.sessions.stream(session.id):
     ...  # your event handling — spans flow into Trovis automatically`,
     agentName,
     resolvedEndpoint,
+    connectionKey,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
@@ -1088,13 +1120,14 @@ client = monitor(anthropic.Anthropic())
 function ClaudeAgentSdkInstructions({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
+  const connectionKey = useConnectionKey()
   const installCmd = 'pip install trovis-agents[claude-agent-sdk]'
   const setupCode = fill(
 `from claude_agent_sdk import query, ClaudeAgentOptions
 from trovis import init
 
 # Call init() BEFORE importing/using query so the patch is in place.
-init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="claude-agent-sdk")
+init(api_key="TROVIS_API_KEY", agent_name="AGENT_NAME", platform="claude-agent-sdk", connection_id="TROVIS_CONNECTION_ID")
 
 # Your existing code — no changes needed
 async for message in query(
@@ -1104,6 +1137,7 @@ async for message in query(
     ...  # handle messages as you already do`,
     agentName,
     resolvedEndpoint,
+    connectionKey,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
@@ -1222,6 +1256,7 @@ function GrokInstructions({ agentName, endpoint }) {
 function GrokSdkSetup({ agentName, endpoint }) {
   const resolvedEndpoint = endpoint || computeOverseeEndpoint()
   const apiKey = getApiKey() || ''
+  const connectionKey = useConnectionKey()
   const installCmd = 'pip install trovis-agents[xai]'
   const setupCode = fill(
 `from trovis import init, set_loop_title
@@ -1232,6 +1267,7 @@ init(
     api_key="TROVIS_API_KEY",
     agent_name="AGENT_NAME",
     platform="xai",
+    connection_id="TROVIS_CONNECTION_ID",
     # One line on what this agent is for. Trovis describes it from this
     # rather than from whatever it happens to do first.
     agent_role="Front-line support: answers billing questions, escalates refunds",
@@ -1250,6 +1286,7 @@ chat.append(user("Customer wants a refund on order 4821 — what are our options
 response = chat.sample()   # → a Trovis span, with token usage and cost`,
     agentName,
     resolvedEndpoint,
+    connectionKey,
   ).replace('TROVIS_API_KEY', apiKey || 'ov_sk_…')
 
   return (
@@ -1316,7 +1353,11 @@ response = chat.sample()   # → a Trovis span, with token usage and cost`,
 // implying silent telemetry.
 
 function GrokBotInstructions() {
-  const mcpUrl = computeGrokMcpUrl()
+  const connectionKey = useConnectionKey()
+  // The Bot's MCP URL names the connection instance too, so its reports
+  // attribute to this setup (mcp_grok.py reads ?connection=; a key the org
+  // does not own attributes to nothing).
+  const mcpUrl = connectionKey ? `${computeGrokMcpUrl()}?connection=${connectionKey}` : computeGrokMcpUrl()
   const apiKey = getApiKey() || ''
   const key = apiKey || 'ov_sk_…'
   // The whole setup, as one thing you paste into a chat with the Bot. This is
@@ -2158,6 +2199,26 @@ function ManualWizard({ onClose, embedded = false, onBackToLanding = null, initi
   // variant is chosen; every other platform passes through unchanged.
   const effectivePlatform = needsClaudeVariant ? claudeVariant : platform
 
+  // The durable record: the moment a recipe is on screen, this setup exists
+  // (POST /connect/connections). Its key goes into the snippets; its status
+  // is what the strip under the recipe reports. Embedded onboarding skips it
+  // — that flow polls the roster itself and owns its own chrome.
+  const [instance, setInstance] = useState(null)
+  useEffect(() => {
+    if (!showInstructions || embedded || instance || !platform) return undefined
+    let alive = true
+    api
+      .createConnection({ connector_id: platform, setup_source: 'manual' })
+      .then((row) => alive && row?.id && setInstance(row))
+      .catch(() => {
+        // no instance → snippets carry no key; attribution stays connector-level
+      })
+    return () => {
+      alive = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInstructions, embedded, platform])
+
   return (
     <div>
       <WizardHeader
@@ -2173,11 +2234,66 @@ function ManualWizard({ onClose, embedded = false, onBackToLanding = null, initi
         <ClaudeVariantStep onSelect={(v) => setClaudeVariant(v.id)} />
       )}
       {showInstructions && (
-        <InstructionsView
-          platform={effectivePlatform}
-          agentName=""
-          endpoint={endpoint}
-        />
+        <ConnectionKeyContext.Provider value={instance?.connection_key || null}>
+          <InstructionsView
+            platform={effectivePlatform}
+            agentName=""
+            endpoint={endpoint}
+          />
+          {instance && <ConnectionStatusStrip instance={instance} onChange={setInstance} />}
+        </ConnectionKeyContext.Provider>
+      )}
+    </div>
+  )
+}
+
+// Under a recipe: the setup's lifecycle from GET /connect/connections/:id/status
+// — set up → waiting for data → connected — with "I've run it" recording the
+// person's word as a fact (POST …/complete). Polls while mounted, stops once
+// connected. Never infers a state the endpoint did not return.
+function ConnectionStatusStrip({ instance, onChange }) {
+  const [status, setStatus] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const connector = getConnector(instance.connector_id)
+  useEffect(() => {
+    let alive = true
+    async function tick() {
+      try {
+        const st = await api.getConnectionStatus(instance.id)
+        if (alive) setStatus(st)
+      } catch {
+        // best-effort
+      }
+    }
+    tick()
+    const t = setInterval(tick, 5000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [instance.id])
+  const life = lifecycle(status, connector, relativeTime)
+  const done = status?.state === 'connected'
+  async function ranIt() {
+    setBusy(true)
+    try {
+      const row = await api.completeConnection(instance.id)
+      if (row?.id) onChange?.(row)
+      setStatus((prev) => (prev ? { ...prev, state: prev.state === 'connected' ? 'connected' : 'waiting_for_data' } : prev))
+    } catch {
+      // the strip keeps polling; nothing to undo
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className={`connect-status connect-status-strip is-${life.phase}`} role="status" data-connection={instance.connection_key}>
+      <span className="connect-status-title">{life.title}</span>
+      {life.detail && <span className="connect-status-detail">{life.detail}</span>}
+      {!done && instance.setup_status === 'started' && (
+        <button type="button" className="btn btn-secondary btn-sm connect-status-cta" onClick={ranIt} disabled={busy}>
+          {busy ? 'Working…' : 'I’ve run it'}
+        </button>
       )}
     </div>
   )
