@@ -106,40 +106,6 @@ function prefersReducedMotion() {
 }
 
 /**
- * Wire up a tablist: click + arrow keys / Home / End, roving tabindex, and the
- * matching panel shown. Returns select(index, { focus }).
- */
-function setupTabs(tabs, on, { onSelect } = {}) {
-  const panels = tabs.map((t) => document.getElementById(t.getAttribute('aria-controls')))
-  function select(index, { focus = false } = {}) {
-    tabs.forEach((tab, i) => {
-      const active = i === index
-      tab.setAttribute('aria-selected', active ? 'true' : 'false')
-      tab.tabIndex = active ? 0 : -1
-      // The panel's CSS fade replays each time it is unhidden.
-      if (panels[i]) panels[i].hidden = !active
-    })
-    if (focus) tabs[index].focus()
-    if (onSelect) onSelect(index)
-  }
-  tabs.forEach((tab, i) => {
-    on(tab, 'click', () => select(i))
-    on(tab, 'keydown', (e) => {
-      const last = tabs.length - 1
-      let next = null
-      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = i === last ? 0 : i + 1
-      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = i === 0 ? last : i - 1
-      else if (e.key === 'Home') next = 0
-      else if (e.key === 'End') next = last
-      if (next === null) return
-      e.preventDefault()
-      select(next, { focus: true })
-    })
-  })
-  return select
-}
-
-/**
  * Mount the landing behaviour on `root` (an element containing landing.html).
  * Returns a cleanup function.
  */
@@ -181,97 +147,106 @@ export function mountLanding(root, options = {}) {
     )
   }
 
-  // Every "Join the waitlist" CTA lands on the email field.
-  const joinSection = $('#join')
-  const emailInput = $('#tl-email')
-  const successBox = $('[data-success]')
-  $$('[data-cta]').forEach((a) =>
-    on(a, 'click', (e) => {
-      track('cta_click', { location: a.getAttribute('data-cta') })
-      if (!joinSection) return
+  // --- Product preview: workflow → its latest run → one recorded step. ---
+  const wfButtons = $$('.tl-wf')
+  const runs = $$('[data-run]')
+  const expls = $$('[data-expl]')
+  const evButtons = $$('.tl-ev-btn')
+  // Each run opens on the step its markup marks as selected.
+  const defaultStep = {}
+  runs.forEach((run) => {
+    const pressed = run.querySelector('.tl-ev-btn[aria-pressed="true"]')
+    if (pressed) defaultStep[run.dataset.run] = pressed.dataset.ev
+  })
+
+  function selectStep(evId, { focus = false } = {}) {
+    const btn = evButtons.find((b) => b.dataset.ev === evId)
+    if (!btn) return
+    const run = btn.closest('[data-run]')
+    run.querySelectorAll('.tl-ev-btn').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'))
+    run.querySelectorAll('[data-detail]').forEach((d) => {
+      d.hidden = d.dataset.detail !== evId
+    })
+    if (focus) btn.focus()
+  }
+  function selectWorkflow(id) {
+    wfButtons.forEach((b) => b.setAttribute('aria-pressed', b.dataset.wf === id ? 'true' : 'false'))
+    runs.forEach((r) => {
+      r.hidden = r.dataset.run !== id
+    })
+    expls.forEach((x) => {
+      x.hidden = x.dataset.expl !== id
+    })
+    if (defaultStep[id]) selectStep(defaultStep[id])
+  }
+
+  wfButtons.forEach((b) =>
+    on(b, 'click', () => {
+      if (b.getAttribute('aria-pressed') === 'true') return
+      selectWorkflow(b.dataset.wf)
+      track('preview_workflow', { workflow: b.dataset.wf })
+    }),
+  )
+  evButtons.forEach((b) => {
+    on(b, 'click', () => {
+      selectStep(b.dataset.ev)
+      track('preview_step', { step: b.dataset.ev })
+    })
+    // Up/Down walk the recorded steps of the open run.
+    on(b, 'keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+      const list = Array.from(b.closest('[data-run]').querySelectorAll('.tl-ev-btn'))
+      const i = list.indexOf(b)
+      const next = list[e.key === 'ArrowDown' ? Math.min(i + 1, list.length - 1) : Math.max(i - 1, 0)]
       e.preventDefault()
-      joinSection.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' })
-      const target = successBox && !successBox.hidden ? successBox : emailInput
-      if (target) target.focus({ preventScroll: true })
+      selectStep(next.dataset.ev, { focus: true })
+    })
+  })
+  // Evidence in an explanation opens the step it cites.
+  $$('[data-goto]').forEach((chip) =>
+    on(chip, 'click', () => {
+      selectStep(chip.dataset.goto, { focus: true })
+      track('preview_evidence', { step: chip.dataset.goto })
     }),
   )
 
-  // --- Product preview: the explanation leads; a step opens its records,
-  // and pressing it again (or Escape) closes them. ---
-  const steps = $$('.tl-step')
-  const panels = $$('[data-panel]')
-  const showRecords = (stepId) => {
-    steps.forEach((s) => s.setAttribute('aria-pressed', s.dataset.step === stepId ? 'true' : 'false'))
-    panels.forEach((p) => {
-      p.hidden = p.dataset.panel !== stepId
-    })
-  }
-  steps.forEach((step) => {
-    on(step, 'click', () => {
-      const open = step.getAttribute('aria-pressed') === 'true'
-      showRecords(open ? null : step.dataset.step)
-      if (!open) track('preview_step_open', { step: step.dataset.step })
-    })
-    on(step, 'keydown', (e) => {
-      if (e.key === 'Escape') showRecords(null)
-    })
-  })
-
-  // --- Discoveries: question → explanation → supporting workflow ---
-  const qTabs = $$('.tl-q')
-  if (qTabs.length) setupTabs(qTabs, on)
-
-  // --- Motion: reveal the preview as a sequence, sections as they arrive. ---
-  const preview = $('#tl-preview')
+  // --- Motion: sections fade in as they arrive. ---
   const reveals = $$('.tl-reveal')
-  const timers = []
-  const goLive = () => {
-    if (!preview || preview.classList.contains('is-live')) return
-    preview.classList.add('is-live')
-    timers.push(setTimeout(() => preview.classList.add('is-ready'), reduced ? 0 : 1800))
-  }
   if (reduced || !hasIO) {
-    if (preview) preview.classList.add('is-live', 'is-ready')
     reveals.forEach((el) => el.classList.add('is-in'))
   } else {
     const io = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           if (!entry.isIntersecting) return
-          if (entry.target === preview) goLive()
-          else entry.target.classList.add('is-in')
+          entry.target.classList.add('is-in')
           io.unobserve(entry.target)
         })
       },
       { threshold: 0.15, rootMargin: '0px 0px -40px 0px' },
     )
-    if (preview) io.observe(preview)
     reveals.forEach((el) => io.observe(el))
     cleanups.push(() => io.disconnect())
   }
-  cleanups.push(() => timers.forEach(clearTimeout))
 
-  // --- Signup ---
+  // --- Signup: the same form in the hero and the closing section. Joining
+  // in either marks both as joined; the optional questions are asked once,
+  // where the visitor signed up. ---
   const attribution = readAttribution()
-  const joinForm = $('[data-form="join"]')
-  const followForm = $('[data-form="followup"]')
-  const successText = $('[data-success-text]')
-  const moreDone = $('[data-more-done]')
+  const blocks = $$('[data-signup]').map((el) => ({
+    el,
+    where: el.dataset.signup,
+    joinForm: el.querySelector('[data-form="join"]'),
+    email: el.querySelector('input[name="email"]'),
+    success: el.querySelector('[data-success]'),
+    successText: el.querySelector('[data-success-text]'),
+    followForm: el.querySelector('[data-form="followup"]'),
+    moreDone: el.querySelector('[data-more-done]'),
+  }))
   let followupToken = null
   let joinBusy = false
   let followBusy = false
   let started = false
-
-  const markStarted = () => {
-    if (started) return
-    started = true
-    track('form_start')
-  }
-  on(emailInput, 'focus', markStarted)
-  on(emailInput, 'input', () => {
-    markStarted()
-    emailInput.removeAttribute('aria-invalid')
-  })
 
   function showError(form, message) {
     const el = form.querySelector('[data-error]')
@@ -287,81 +262,112 @@ export function mountLanding(root, options = {}) {
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
   }
 
-  on(joinForm, 'submit', async (e) => {
-    e.preventDefault()
-    if (joinBusy) return
-    showError(joinForm, '')
-    const email = (emailInput.value || '').trim()
-    if (!EMAIL_RE.test(email)) {
-      emailInput.setAttribute('aria-invalid', 'true')
-      showError(joinForm, email ? 'Please enter a valid work email.' : 'Please enter your work email.')
-      emailInput.focus()
-      return
-    }
-    const website = (joinForm.querySelector('[name="website"]')?.value || '').trim()
-    joinBusy = true
-    setBusy(joinForm, true, 'Join the waitlist', 'Joining…')
-    try {
-      const res = await api.joinWaitlist({
-        email,
-        website: website || null,
-        source: 'landing-waitlist',
-        ...attribution,
-      })
-      const status = res && res.status
-      if (status !== 'joined' && status !== 'already_joined') throw new Error(GENERIC_ERROR)
-      // Saved: only now does the page say so.
-      followupToken = (res && res.followup_token) || null
-      joinForm.hidden = true
-      successText.textContent = status === 'joined' ? JOINED_TEXT : ALREADY_TEXT
-      successBox.hidden = false
-      if (followForm) followForm.hidden = !followupToken
-      successBox.focus({ preventScroll: true })
-      track(status === 'joined' ? 'signup_success' : 'signup_already_joined')
-    } catch (err) {
-      showError(joinForm, friendlyError(err))
-      track('signup_error', { status: err && typeof err.status === 'number' ? err.status : null })
-    } finally {
-      joinBusy = false
-      setBusy(joinForm, false, 'Join the waitlist', 'Joining…')
-    }
-  })
+  // Every "Join the waitlist" CTA lands on an email field (or the success
+  // message, once joined).
+  $$('[data-cta]').forEach((a) =>
+    on(a, 'click', (e) => {
+      track('cta_click', { location: a.getAttribute('data-cta') })
+      const block = blocks.find((b) => b.where === a.getAttribute('data-cta-target')) || blocks[0]
+      if (!block) return
+      e.preventDefault()
+      block.el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' })
+      const target = block.success && !block.success.hidden ? block.success : block.email
+      if (target) target.focus({ preventScroll: true })
+    }),
+  )
 
-  const finishFollowup = () => {
-    followForm.hidden = true
-    followupToken = null
-  }
-  on($('[data-skip]'), 'click', () => {
-    finishFollowup()
-    track('followup_skip')
-    successBox.focus({ preventScroll: true })
-  })
-  on(followForm, 'submit', async (e) => {
-    e.preventDefault()
-    if (followBusy || !followupToken) return
-    showError(followForm, '')
-    const company = (followForm.querySelector('[name="company"]')?.value || '').trim()
-    const aiUse = (followForm.querySelector('[name="ai_use"]')?.value || '').trim()
-    if (!company && !aiUse) {
+  blocks.forEach((block) => {
+    const { joinForm, email, followForm } = block
+    const markStarted = () => {
+      if (started) return
+      started = true
+      track('form_start', { location: block.where })
+    }
+    on(email, 'focus', markStarted)
+    on(email, 'input', () => {
+      markStarted()
+      email.removeAttribute('aria-invalid')
+    })
+
+    on(joinForm, 'submit', async (e) => {
+      e.preventDefault()
+      if (joinBusy) return
+      showError(joinForm, '')
+      const value = (email.value || '').trim()
+      if (!EMAIL_RE.test(value)) {
+        email.setAttribute('aria-invalid', 'true')
+        showError(joinForm, value ? 'Please enter a valid work email.' : 'Please enter your work email.')
+        email.focus()
+        return
+      }
+      const website = (joinForm.querySelector('[name="website"]')?.value || '').trim()
+      joinBusy = true
+      setBusy(joinForm, true, 'Join the waitlist', 'Joining…')
+      try {
+        const res = await api.joinWaitlist({
+          email: value,
+          website: website || null,
+          source: 'landing-waitlist',
+          ...attribution,
+        })
+        const status = res && res.status
+        if (status !== 'joined' && status !== 'already_joined') throw new Error(GENERIC_ERROR)
+        // Saved: only now does the page say so — in every signup block.
+        followupToken = (res && res.followup_token) || null
+        blocks.forEach((b) => {
+          b.joinForm.hidden = true
+          b.successText.textContent = status === 'joined' ? JOINED_TEXT : ALREADY_TEXT
+          b.success.hidden = false
+          if (b.followForm) b.followForm.hidden = !(followupToken && b === block)
+        })
+        block.success.focus({ preventScroll: true })
+        track(status === 'joined' ? 'signup_success' : 'signup_already_joined', { location: block.where })
+      } catch (err) {
+        showError(joinForm, friendlyError(err))
+        track('signup_error', { location: block.where, status: err && typeof err.status === 'number' ? err.status : null })
+      } finally {
+        joinBusy = false
+        setBusy(joinForm, false, 'Join the waitlist', 'Joining…')
+      }
+    })
+
+    if (!followForm) return
+    const finishFollowup = () => {
+      followForm.hidden = true
+      followupToken = null
+    }
+    on(block.el.querySelector('[data-skip]'), 'click', () => {
       finishFollowup()
       track('followup_skip')
-      successBox.focus({ preventScroll: true })
-      return
-    }
-    followBusy = true
-    setBusy(followForm, true, 'Send answers', 'Sending…')
-    try {
-      await api.saveWaitlistFollowup({ token: followupToken, company: company || null, ai_use: aiUse || null })
-      finishFollowup()
-      moreDone.hidden = false
-      successBox.focus({ preventScroll: true })
-      track('followup_saved')
-    } catch (err) {
-      showError(followForm, friendlyError(err))
-    } finally {
-      followBusy = false
-      setBusy(followForm, false, 'Send answers', 'Sending…')
-    }
+      block.success.focus({ preventScroll: true })
+    })
+    on(followForm, 'submit', async (e) => {
+      e.preventDefault()
+      if (followBusy || !followupToken) return
+      showError(followForm, '')
+      const company = (followForm.querySelector('[name="company"]')?.value || '').trim()
+      const aiUse = (followForm.querySelector('[name="ai_use"]')?.value || '').trim()
+      if (!company && !aiUse) {
+        finishFollowup()
+        track('followup_skip')
+        block.success.focus({ preventScroll: true })
+        return
+      }
+      followBusy = true
+      setBusy(followForm, true, 'Send answers', 'Sending…')
+      try {
+        await api.saveWaitlistFollowup({ token: followupToken, company: company || null, ai_use: aiUse || null })
+        finishFollowup()
+        block.moreDone.hidden = false
+        block.success.focus({ preventScroll: true })
+        track('followup_saved')
+      } catch (err) {
+        showError(followForm, friendlyError(err))
+      } finally {
+        followBusy = false
+        setBusy(followForm, false, 'Send answers', 'Sending…')
+      }
+    })
   })
 
   return () => cleanups.splice(0).forEach((fn) => fn())
