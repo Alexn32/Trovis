@@ -3477,19 +3477,21 @@ def join_waitlist(body: WaitlistRequest, request: Request) -> WaitlistResponse:
 
 @app.post("/waitlist/followup", response_model=WaitlistFollowupResponse)
 def waitlist_followup(body: WaitlistFollowupRequest, request: Request) -> WaitlistFollowupResponse:
-    """Optional answers asked after a successful signup (company, what the
-    team uses AI for). Authorised by the one-time token POST /waitlist issued
+    """Optional answers asked after a successful signup (company, which
+    agents/tools/workflows they'd connect first, what the team uses AI
+    for). Authorised by the one-time token POST /waitlist issued
     for that signup — never by email — and the token is spent on use."""
     _check_waitlist_rate_limit(request)
     saved = database.update_waitlist_followup(
         body.token,
         company=_clip_waitlist_field(body.company, 200),
         ai_use=_clip_waitlist_field(body.ai_use, 2000),
+        tools=_clip_waitlist_field(body.tools, 2000),
     )
     if not saved:
         raise HTTPException(
             status_code=404,
-            detail="We couldn’t save those answers. You’re still on the list.",
+            detail="We couldn’t save those details. Your early-access request is still saved.",
         )
     return WaitlistFollowupResponse(saved=True)
 

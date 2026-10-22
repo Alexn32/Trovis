@@ -159,6 +159,20 @@
 }
 .tl-h1, .tl-h2, .tl-expl-title, .tl-answer-title { text-wrap: balance; }
 .tl-accent { display: block; color: var(--teal); }
+/* Launch stage: readable status, not decoration. */
+.tl-badge {
+  display: inline-flex; align-items: center; gap: 10px; margin-bottom: 22px;
+  padding: 7px 14px 7px 12px; border-radius: 999px;
+  background: var(--paper); border: 1px solid #b7cfcc; color: var(--teal-deep);
+  font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  box-shadow: 0 6px 16px -12px rgba(33, 61, 58, 0.5);
+}
+.tl-badge-dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--teal); }
+.tl-badge-dot::after {
+  content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--teal);
+  opacity: 0; animation: tl-ping 2.4s var(--ease) infinite;
+}
+@keyframes tl-ping { 0% { transform: scale(0.5); opacity: 0.6; } 80%, 100% { transform: scale(1.5); opacity: 0; } }
 .tl-lede { margin-top: 24px; max-width: 720px; font-size: clamp(17.5px, 1.5vw, 20px); line-height: 1.6; color: var(--body); }
 .tl-benefit { margin-top: 14px; font-family: var(--disp); font-size: 17px; font-weight: 600; letter-spacing: -0.01em; color: var(--teal); }
 
@@ -178,7 +192,11 @@
 .tl-label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 8px; }
 .tl-form-more .tl-label { margin-top: 14px; }
 .tl-error { margin-top: 10px; font-size: 14px; }
-.tl-disclosure { margin-top: 12px; font-size: 13px; line-height: 1.55; }
+.tl-form-note { margin-top: 12px; font-size: 15px; font-weight: 500; }
+.tl-disclosure { margin-top: 6px; font-size: 13px; line-height: 1.55; }
+.tl-optional { font-weight: 400; opacity: 0.75; }
+.tl-help { margin-top: 6px; font-size: 13px; }
+.tl-success-body { margin-top: 8px; padding-left: 40px; font-size: 15px; line-height: 1.55; }
 .tl-disclosure a { text-underline-offset: 2px; }
 .tl-hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
 .tl-success:focus { outline: none; }
@@ -190,7 +208,9 @@
 .tl-more-done { margin-top: 14px; font-size: 15px; }
 
 .tl-signup-light .tl-error { color: var(--fail); }
-.tl-signup-light .tl-disclosure { color: var(--muted); }
+.tl-signup-light .tl-disclosure, .tl-signup-light .tl-help { color: var(--muted); }
+.tl-signup-light .tl-form-note { color: var(--ink); }
+.tl-signup-light .tl-success-body { color: var(--body); }
 .tl-signup-light .tl-check { background: var(--done-bg); color: var(--done); }
 .tl-signup-light .tl-success { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
 .tl-signup-light .tl-success-title { color: var(--ink); }
@@ -200,7 +220,10 @@
 
 .tl-signup-dark { color: #e6eeed; }
 .tl-signup-dark .tl-error { color: #ffc2b8; }
-.tl-signup-dark .tl-disclosure { color: #a9bdba; }
+.tl-signup-dark .tl-disclosure, .tl-signup-dark .tl-help { color: #a9bdba; }
+.tl-signup-dark .tl-form-note { color: #fff; }
+.tl-signup-dark .tl-success-body { color: #cfdcda; }
+.tl-signup-dark .tl-label { color: #e6eeed; }
 .tl-signup-dark .tl-disclosure a { color: #e6eeed; }
 .tl-signup-dark .tl-check { background: rgba(136,176,172,0.2); color: #fff; }
 .tl-signup-dark .tl-success-title { color: #fff; }
@@ -397,8 +420,14 @@
 .tl-stage-title { margin-top: 8px; font-family: var(--disp); font-size: 20px; font-weight: 700; letter-spacing: -0.015em; }
 .tl-stage p { margin-top: 6px; font-size: 15px; }
 
+/* Early-team offer */
+.tl-offer-label { margin-top: 32px; font-size: 12px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--teal); }
+.tl-offer-list { margin-top: 12px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.tl-offer-list li { padding: 22px; border-radius: 16px; background: var(--paper); border: 1px solid var(--line); border-top: 3px solid var(--teal); }
+.tl-offer-list p { margin-top: 8px; font-size: 15.5px; color: var(--body); }
+
 /* ---------- Join ---------- */
-.tl-join { margin-top: 112px; background: var(--teal-ink); color: #e6eeed; padding: 88px 0; position: relative; overflow: hidden; }
+.tl-join { margin-top: 96px; background: var(--teal-ink); color: #e6eeed; padding: 88px 0; position: relative; overflow: hidden; }
 .tl-join::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;
   background:
@@ -409,6 +438,12 @@
 .tl-join .tl-h2 { color: #fff; }
 .tl-join-copy p { margin-top: 18px; font-size: 18px; line-height: 1.6; color: #cfdcda; max-width: 500px; }
 .tl-join-card { background: rgba(255,255,255,0.05); border: 1px solid rgba(136,176,172,0.3); border-radius: 18px; padding: 26px; }
+
+.tl-faq { position: relative; margin-top: 56px; padding-top: 32px; border-top: 1px solid rgba(136,176,172,0.22); }
+.tl-faq-title { font-family: var(--disp); font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: #fff; }
+.tl-faq-list { margin-top: 16px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; }
+.tl-faq-list dt { font-family: var(--disp); font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: #fff; }
+.tl-faq-list dd { margin-top: 8px; font-size: 15px; line-height: 1.6; color: #cfdcda; }
 
 /* ---------- Footer ---------- */
 .tl-footer { background: var(--teal-ink); color: #a9bdba; border-top: 1px solid rgba(136,176,172,0.18); }
@@ -433,7 +468,8 @@
   .tl-col + .tl-col { border-left: 0; }
   .tl-col-expl { order: 2; }
   .tl-col-run { order: 3; }
-  .tl-fit-steps, .tl-zoom, .tl-problems, .tl-stages { grid-template-columns: minmax(0, 1fr); }
+  .tl-fit-steps, .tl-zoom, .tl-problems, .tl-stages, .tl-offer-list, .tl-faq-list { grid-template-columns: minmax(0, 1fr); }
+  .tl-faq-list { gap: 20px; }
   .tl-fit-steps li:not(:last-child)::after { right: auto; left: 34px; top: auto; bottom: -14px; width: 2px; height: 12px; }
   .tl-zoom-step + .tl-zoom-step { border-left: 0; border-top: 1px solid var(--line-soft); }
   .tl-zoom-step:not(:last-child)::after { right: auto; left: 24px; top: auto; bottom: -9px; transform: rotate(90deg); }
@@ -452,6 +488,8 @@
   .tl-btn-sm { padding: 0 12px; font-size: 14px; }
   .tl-hero { padding-top: 40px; }
   .tl-form-row .tl-btn { width: 100%; }
+  .tl-badge { font-size: 11.5px; letter-spacing: 0.06em; padding: 6px 12px 6px 10px; }
+  .tl-success-body { padding-left: 0; }
   .tl-preview { margin-top: 40px; border-radius: 18px; margin-left: -4px; margin-right: -4px; }
   .tl-col { padding: 16px; }
   .tl-col-expl { padding: 20px 16px; }

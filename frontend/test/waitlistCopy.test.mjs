@@ -35,14 +35,49 @@ test('hero: approved headline, copy, benefit line, and an email signup', () => {
   assert.match(hero, /data-signup="hero"/)
 })
 
-test('"Join the waitlist" everywhere; signup in hero and closing; Sign in only in the footer', () => {
-  assert.match(text, /data-cta="header"[^>]*>Join the waitlist</)
-  assert.equal([...text.matchAll(/data-submit>Join the waitlist</g)].length, 2)
+test('launch stage is visible above the headline', () => {
+  const hero = section('tl-hero-title', 'tl-problem-title')
+  const badgeAt = hero.indexOf('In development · Early access waitlist open')
+  assert.ok(badgeAt >= 0 && badgeAt < hero.indexOf('AI is changing how work gets done.'), 'badge precedes the headline')
+  assert.match(hero, /class="tl-badge"/)
+})
+
+test('"Request early access" is the CTA everywhere; signup in hero and closing; Sign in only in the footer', () => {
+  assert.match(text, /data-cta="header"[^>]*>Request early access</)
+  assert.equal([...text.matchAll(/data-submit>Request early access</g)].length, 2)
+  assert.doesNotMatch(text, /Join the waitlist/)
   assert.deepEqual([...text.matchAll(/data-signup="(\w+)"/g)].map((m) => m[1]), ['hero', 'join'])
   assert.doesNotMatch(text.slice(text.indexOf('<header'), text.indexOf('</header>')), /Sign in/)
   assert.match(text.slice(text.indexOf('<footer')), /data-signin>Sign in</)
-  assert.match(text, /Your AI is doing real work\.<br \/>See how it all connects\./)
-  assert.match(text, /Join the waitlist for early access to Trovis and help shape visibility across your agents,\s+people, and workflows\./)
+  const hero = text.slice(text.indexOf('data-signup="hero"'), text.indexOf('data-signup="join"'))
+  assert.match(hero, /Be among the first teams to connect your agents and workflows to Trovis\./)
+  const join = section('tl-join-title')
+  assert.match(join, /Be one of the first teams inside Trovis\./)
+  assert.match(join, /Request early access to understand how work moves across your agents, people, and tools\.\s+Help shape Trovis around the work your team is doing\./)
+  assert.match(join, /We’ll reach out when early access is available for your team\./)
+})
+
+test('early-team offer is framed for invited teams, without promises', () => {
+  const offer = section('tl-offer-title', 'tl-join-title')
+  assert.match(offer, /Build the next chapter of work with us\./)
+  assert.match(offer, /For teams invited into early access/)
+  for (const h of ['Get in before public launch', 'Connect a real workflow', 'Have a direct line to the founder']) assert.ok(offer.includes(h), h)
+  assert.match(offer, /initial supported agent workflow/)
+})
+
+test('expectations FAQ says plainly that a request is not access', () => {
+  const join = section('tl-join-title')
+  assert.match(join, /What does requesting early access mean\?/)
+  assert.match(join, /Will I get access immediately\?<\/dt>\s*<dd>Not yet\. Trovis is in development, and submitting a request does not provide immediate access\./)
+  assert.match(join, /You don’t need to connect anything to join the list\./)
+})
+
+test('no manufactured urgency or pricing promises', () => {
+  const low = text.toLowerCase()
+  for (const bad of ['countdown', 'spots left', 'only a few', 'limited spots', 'launching on', 'free forever', 'lifetime', 'discount', '% off', 'guaranteed', 'your position', 'in line', 'invitations are being sent', 'check your inbox', 'confirmation email']) {
+    assert.ok(!low.includes(bad), `avoid: ${bad}`)
+  }
+  assert.doesNotMatch(text, /\b\d[\d,]* (teams|people|companies) (have )?(joined|signed up|on the list)/i)
 })
 
 test('preview is labelled and walks workflows → run → explanation', () => {
@@ -137,10 +172,18 @@ test('signup asks only for email first, optional questions after, with disclosur
     assert.match(join, /name="email"[^>]*required/)
     assert.doesNotMatch(join, /name="company"|name="ai_use"/)
     assert.match(join, /name="website"/) // honeypot
-    assert.match(join, /early-access updates and for product research/)
+    assert.match(join, /not immediate access\. We’ll use what you\s+submit to contact you about early access and for product research\./)
   }
-  assert.match(text, /What work is your team using AI for\?/)
-  assert.match(text, /You’re on the list\. We’ll reach out with early-access updates\./)
+  const success = text.slice(text.indexOf('data-success'))
+  assert.match(success, /You’re on the early-access list\./)
+  assert.match(success, /We’ll reach out as access opens\. Tell us what you’d connect so we can better understand your team’s needs\./)
+  assert.match(success, /name="company"/)
+  assert.match(success, /Which agents, tools, or workflows would you connect first\?/)
+  assert.match(success, /name="tools"/)
+  assert.match(success, /This helps us match early teams with the connections we’re building\./)
+  assert.match(success, /data-submit>Share with the team</)
+  assert.match(success, /data-skip>Skip for now</)
+  assert.match(success, /Thanks\. Your details are saved, and we’ll be in touch as early access opens\./)
 })
 
 test('success is shown only after the server confirms the save', () => {
@@ -150,6 +193,12 @@ test('success is shown only after the server confirms the save', () => {
   assert.ok(awaitAt > 0 && showAt > awaitAt, 'success must come after the awaited save')
   assert.ok(submit.indexOf("'signup_success'") > awaitAt)
   for (const m of behaviour.matchAll(/track\(([^)]*)\)/g)) assert.doesNotMatch(m[1], /email/i)
+  // The conversion event fires from the signup only — never from the
+  // optional follow-up.
+  assert.equal([...behaviour.matchAll(/'signup_success'/g)].length, 1)
+  const follow = behaviour.slice(behaviour.indexOf("on(followForm, 'submit'"))
+  assert.doesNotMatch(follow, /signup_success/)
+  assert.match(follow, /tools: tools \|\| null/)
 })
 
 test('SEO and social metadata describe the landing', () => {

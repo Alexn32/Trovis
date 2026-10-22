@@ -13,8 +13,10 @@ export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const ATTRIBUTION_PARAMS = ['ref', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']
 const GENERIC_ERROR = 'Something went wrong and you’re not on the list yet. Please try again.'
 const NETWORK_ERROR = 'We couldn’t reach Trovis. Check your connection and try again.'
-const JOINED_TEXT = 'You’re on the list. We’ll reach out with early-access updates.'
-const ALREADY_TEXT = 'You’re already on the list. We’ll reach out with early-access updates.'
+const JOINED_TITLE = 'You’re on the early-access list.'
+const ALREADY_TITLE = 'You’re already on the early-access list.'
+const FOLLOWUP_BODY = 'We’ll reach out as access opens. Tell us what you’d connect so we can better understand your team’s needs.'
+const PLAIN_BODY = 'We’ll reach out as access opens.'
 
 /** Referral + UTM fields from the landing URL, plus an off-site referrer. */
 export function readAttribution(loc = window.location, doc = document) {
@@ -239,7 +241,8 @@ export function mountLanding(root, options = {}) {
     joinForm: el.querySelector('[data-form="join"]'),
     email: el.querySelector('input[name="email"]'),
     success: el.querySelector('[data-success]'),
-    successText: el.querySelector('[data-success-text]'),
+    successTitle: el.querySelector('[data-success-title]'),
+    successBody: el.querySelector('[data-success-body]'),
     followForm: el.querySelector('[data-form="followup"]'),
     moreDone: el.querySelector('[data-more-done]'),
   }))
@@ -262,7 +265,7 @@ export function mountLanding(root, options = {}) {
     form.setAttribute('aria-busy', busy ? 'true' : 'false')
   }
 
-  // Every "Join the waitlist" CTA lands on an email field (or the success
+  // Every "Request early access" CTA lands on an email field (or the success
   // message, once joined).
   $$('[data-cta]').forEach((a) =>
     on(a, 'click', (e) => {
@@ -302,7 +305,7 @@ export function mountLanding(root, options = {}) {
       }
       const website = (joinForm.querySelector('[name="website"]')?.value || '').trim()
       joinBusy = true
-      setBusy(joinForm, true, 'Join the waitlist', 'Joining…')
+      setBusy(joinForm, true, 'Request early access', 'Requesting…')
       try {
         const res = await api.joinWaitlist({
           email: value,
@@ -315,10 +318,12 @@ export function mountLanding(root, options = {}) {
         // Saved: only now does the page say so — in every signup block.
         followupToken = (res && res.followup_token) || null
         blocks.forEach((b) => {
+          const askHere = Boolean(followupToken) && b === block
           b.joinForm.hidden = true
-          b.successText.textContent = status === 'joined' ? JOINED_TEXT : ALREADY_TEXT
+          b.successTitle.textContent = status === 'joined' ? JOINED_TITLE : ALREADY_TITLE
+          b.successBody.textContent = askHere ? FOLLOWUP_BODY : PLAIN_BODY
           b.success.hidden = false
-          if (b.followForm) b.followForm.hidden = !(followupToken && b === block)
+          if (b.followForm) b.followForm.hidden = !askHere
         })
         block.success.focus({ preventScroll: true })
         track(status === 'joined' ? 'signup_success' : 'signup_already_joined', { location: block.where })
@@ -327,7 +332,7 @@ export function mountLanding(root, options = {}) {
         track('signup_error', { location: block.where, status: err && typeof err.status === 'number' ? err.status : null })
       } finally {
         joinBusy = false
-        setBusy(joinForm, false, 'Join the waitlist', 'Joining…')
+        setBusy(joinForm, false, 'Request early access', 'Requesting…')
       }
     })
 
@@ -335,6 +340,7 @@ export function mountLanding(root, options = {}) {
     const finishFollowup = () => {
       followForm.hidden = true
       followupToken = null
+      block.successBody.textContent = PLAIN_BODY
     }
     on(block.el.querySelector('[data-skip]'), 'click', () => {
       finishFollowup()
@@ -346,18 +352,20 @@ export function mountLanding(root, options = {}) {
       if (followBusy || !followupToken) return
       showError(followForm, '')
       const company = (followForm.querySelector('[name="company"]')?.value || '').trim()
-      const aiUse = (followForm.querySelector('[name="ai_use"]')?.value || '').trim()
-      if (!company && !aiUse) {
+      const tools = (followForm.querySelector('[name="tools"]')?.value || '').trim()
+      if (!company && !tools) {
         finishFollowup()
         track('followup_skip')
         block.success.focus({ preventScroll: true })
         return
       }
       followBusy = true
-      setBusy(followForm, true, 'Send answers', 'Sending…')
+      setBusy(followForm, true, 'Share with the team', 'Saving…')
       try {
-        await api.saveWaitlistFollowup({ token: followupToken, company: company || null, ai_use: aiUse || null })
+        await api.saveWaitlistFollowup({ token: followupToken, company: company || null, tools: tools || null })
         finishFollowup()
+        // The thank-you line says it all; drop the now-repeated body.
+        block.successBody.hidden = true
         block.moreDone.hidden = false
         block.success.focus({ preventScroll: true })
         track('followup_saved')
@@ -365,7 +373,7 @@ export function mountLanding(root, options = {}) {
         showError(followForm, friendlyError(err))
       } finally {
         followBusy = false
-        setBusy(followForm, false, 'Send answers', 'Sending…')
+        setBusy(followForm, false, 'Share with the team', 'Saving…')
       }
     })
   })
