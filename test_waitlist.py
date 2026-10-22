@@ -1,4 +1,4 @@
-"""Public founding waitlist: HTML landing, signup persist, anti-spam.
+"""Public waitlist: HTML landing, signup persist, follow-up, attribution, anti-spam.
 
 Run:
   TROVIS_DISABLE_PRICING_SYNC=1 python3 test_waitlist.py
@@ -92,7 +92,7 @@ with TestClient(main.app) as c:
     print("\nseeded owner does not hide the public landing:")
     r = c.get("/")
     check("GET / after owner exists → 200", r.status_code == 200)
-    check("GET / after owner is waitlist HTML, not 401", "Join the founding list" in r.text)
+    check("GET / after owner is waitlist HTML, not 401", "Join the waitlist" in r.text)
 
     print("\npublic HTML landing:")
     for path in ("/", "/waitlist", "/waitlist/"):
@@ -100,39 +100,22 @@ with TestClient(main.app) as c:
         check(f"GET {path} → 200", r.status_code == 200)
         check(f"GET {path} is HTML", "text/html" in r.headers.get("content-type", ""))
         body = r.text
-        check(f"GET {path} has founding CTA", "Join the founding list" in body)
-        check(f"GET {path} has name field", 'name="name"' in body)
-        check(f"GET {path} name precedes email", body.find('name="name"') < body.find('name="email"'))
+        check(f"GET {path} shared markup filled in", "<!-- landing:markup -->" not in body and 'id="tl-top"' in body)
+        check(f"GET {path} has hero headline", "AI is changing how work gets done." in body)
+        check(f"GET {path} has CTA", "Join the waitlist" in body)
         check(f"GET {path} has email field", 'name="email"' in body)
-        check(f"GET {path} has company field", 'name="company"' in body)
-        check(f"GET {path} has role field", 'name="role"' in body)
-        check(f"GET {path} has tools field", 'name="tools"' in body)
         check(f"GET {path} has honeypot", 'name="website"' in body)
-        check(f"GET {path} title is waitlist", "Founding waitlist" in body)
-        check(f"GET {path} has locked headline", "See the Work" in body)
-        hero = body.split("Home desk: what needs you")[0]
-        check(f"GET {path} visibility is not in the hero", "actually doing" not in hero)
-        check(f"GET {path} has Home desk bullet", "Home desk: what needs you, not another dashboard" in body)
-        check(
-            f"GET {path} has Work-as-jobs bullet",
-            "Work as jobs you can see and judge — people, agents, and the tools already in the loop — one place to see and judge the Work." in body,
-        )
-        check(
-            f"GET {path} has agent-visibility bullet",
-            "See what your agents are actually doing — and who’s waiting / what’s stuck — without drowning in traces" in body,
-        )
-        check(f"GET {path} has beachhead bullet", "eng/founder teams with agents already in production" in body)
-        check(f"GET {path} has honesty line", "Desk and Work visibility first" in body)
-        check(f"GET {path} honesty says not live yet", "we’re not pitching them as live yet" in body)
-        low = body.lower()
-        check(f"GET {path} does not claim Connect is live", "connect is live" not in low)
-        check(f"GET {path} does not lead with Cost", "cost tracking" not in low)
-        check(f"GET {path} does not lead with Fleet", "fleet" not in low)
-        check(f"GET {path} is not create-account hero", "create your account" not in low)
-        check(f"GET {path} mentions handoffs", "handoffs get stuck" in low)
-        check(f"GET {path} mentions waiting", "waiting" in low)
-        check(f"GET {path} does not imply Connect live", "saas in one loop" not in low)
-        check(f"GET {path} is not recording pitch", "record themselves" not in low)
+        check(f"GET {path} has follow-up question", "What work is your team using AI for?" in body)
+        check(f"GET {path} preview labelled illustrative", "Illustrative product preview" in body)
+        check(f"GET {path} has disclosure", "early-access updates and for product research" in body)
+        check(f"GET {path} loads shared assets", "/landing.css" in body and "/landing.js" in body)
+        check(f"GET {path} title", "<title>Trovis — Understand how work gets done" in body)
+
+    print("\nshared landing assets:")
+    for path, ctype in (("/landing.css", "text/css"), ("/landing.js", "javascript"), ("/og.png", "image/png")):
+        r = c.get(path)
+        check(f"GET {path} → 200", r.status_code == 200)
+        check(f"GET {path} content-type", ctype in r.headers.get("content-type", ""))
 
     print("\nsignup persist:")
     r = c.post("/waitlist", json={
@@ -175,6 +158,45 @@ with TestClient(main.app) as c:
     r = c.post("/waitlist", json={"email": "not-an-email"})
     check("invalid email → 422", r.status_code == 422)
     check("invalid email not stored", database.get_waitlist_signup("not-an-email") is None)
+
+    print("\nlanding signup: attribution + one-time follow-up:")
+    main._waitlist_hits.clear()
+    r = c.post("/waitlist", json={
+        "email": "ops@northwind.dev",
+        "source": "landing-waitlist",
+        "ref": "friend",
+        "referrer": "https://news.example/post",
+        "utm_source": "newsletter",
+        "utm_medium": "email",
+        "utm_campaign": "launch",
+        "utm_term": "agents",
+        "utm_content": "hero",
+    })
+    check("landing signup → 200", r.status_code == 200)
+    token = r.json().get("followup_token")
+    check("new signup gets a follow-up token", bool(token))
+    row = database.get_waitlist_signup("ops@northwind.dev")
+    check("attribution stored", row and row["utm_source"] == "newsletter" and row["utm_campaign"] == "launch"
+          and row["ref"] == "friend" and row["referrer"] == "https://news.example/post"
+          and row["utm_medium"] == "email" and row["utm_term"] == "agents" and row["utm_content"] == "hero")
+    check("token stored hashed, not raw", row and row["followup_token_hash"] and row["followup_token_hash"] != token)
+    check("company empty before follow-up", row and not row.get("company"))
+
+    r = c.post("/waitlist", json={"email": "ops@northwind.dev"})
+    check("repeat signup gets no token", r.json().get("status") == "already_joined" and not r.json().get("followup_token"))
+
+    r = c.post("/waitlist/followup", json={"token": token, "company": "Northwind", "ai_use": "Onboarding and support"})
+    check("follow-up → 200", r.status_code == 200 and r.json().get("saved") is True)
+    row = database.get_waitlist_signup("ops@northwind.dev")
+    check("follow-up company stored", row and row["company"] == "Northwind")
+    check("follow-up ai_use stored", row and row["ai_use"] == "Onboarding and support")
+    check("token spent", row and row["followup_token_hash"] is None)
+
+    r = c.post("/waitlist/followup", json={"token": token, "company": "Evil Corp"})
+    check("replayed token → 404", r.status_code == 404)
+    check("replay did not overwrite", database.get_waitlist_signup("ops@northwind.dev")["company"] == "Northwind")
+    r = c.post("/waitlist/followup", json={"token": "made-up", "company": "x"})
+    check("unknown token → 404", r.status_code == 404)
 
     print("\nhoneypot:")
     before = database.get_waitlist_count()

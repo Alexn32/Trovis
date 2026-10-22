@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -214,6 +215,8 @@ from models import (
     TeamMemberCreate,
     WaitlistCountResponse,
     WaitlistDeleteResponse,
+    WaitlistFollowupRequest,
+    WaitlistFollowupResponse,
     WaitlistRequest,
     WaitlistResponse,
     WeeklySummary,
@@ -248,7 +251,11 @@ _OPEN_PATHS = {
     "/waitlist",                 # public founding waitlist (GET HTML / POST JSON)
     "/waitlist/",
     "/waitlist/count",           # public signup count for the marketing site
+    "/waitlist/followup",        # optional answers after signup (one-time token)
     "/trovis-favicon.svg",       # mark on the public waitlist page
+    "/landing.css",              # waitlist landing styles (shared with the SPA)
+    "/landing.js",               # waitlist landing behaviour (shared with the SPA)
+    "/og.png",                   # social-share image the landing's og:image points at
     "/billing/webhook",          # Stripe *billing* webhook — Trovis plan gate. Isolated.
     "/saas/stripe/webhook",      # Stripe *SaaS* Work webhook — signature, not a Trovis key
     "/saas/stripe/oauth/callback",  # Stripe Connect redirects the browser here
@@ -3328,6 +3335,11 @@ _WAITLIST_RATE_MAX = 8
 _WAITLIST_RATE_WINDOW_S = 600
 _waitlist_hits: dict[str, tuple[int, float]] = {}
 _WAITLIST_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "waitlist.html")
+# The landing page body, styles and behaviour live once, in the SPA source,
+# and are shared by both front doors: the SPA's logged-out view and this
+# FastAPI-served page (static/waitlist.html is only the <head> shell).
+_LANDING_DIR = os.path.join(os.path.dirname(__file__), "frontend", "src", "landing")
+_LANDING_MARKER = "<!-- landing:markup -->"
 
 
 def _waitlist_client_ip(request: Request) -> str:
@@ -3382,14 +3394,46 @@ def public_favicon():
 @app.get("/waitlist", include_in_schema=False)
 @app.get("/waitlist/", include_in_schema=False)
 def public_waitlist_page() -> HTMLResponse:
-    """Public founding waitlist. Served from FastAPI so trovisai.com
-    (Railway) has a homepage — the SPA is a separate app host."""
+    """Public waitlist landing. Served from FastAPI so trovisai.com
+    (Railway) has a homepage — the SPA is a separate app host. The shell's
+    marker is filled with the shared landing markup."""
     try:
         with open(_WAITLIST_HTML_PATH, encoding="utf-8") as fh:
             html = fh.read()
+        with open(os.path.join(_LANDING_DIR, "landing.html"), encoding="utf-8") as fh:
+            markup = fh.read()
     except OSError:
         raise HTTPException(status_code=500, detail="waitlist page unavailable")
+    html = html.replace(_LANDING_MARKER, markup, 1)
     return HTMLResponse(html, headers={"Cache-Control": "public, max-age=120"})
+
+
+_OG_IMAGE_PATH = os.path.join(os.path.dirname(__file__), "frontend", "public", "og.png")
+
+
+@app.get("/og.png", include_in_schema=False)
+def public_og_image():
+    if not os.path.isfile(_OG_IMAGE_PATH):
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(_OG_IMAGE_PATH, media_type="image/png")
+
+
+@app.get("/landing.css", include_in_schema=False)
+def public_landing_css():
+    return FileResponse(
+        os.path.join(_LANDING_DIR, "landing.css"),
+        media_type="text/css",
+        headers={"Cache-Control": "public, max-age=120"},
+    )
+
+
+@app.get("/landing.js", include_in_schema=False)
+def public_landing_js():
+    return FileResponse(
+        os.path.join(_LANDING_DIR, "landing.js"),
+        media_type="text/javascript",
+        headers={"Cache-Control": "public, max-age=120"},
+    )
 
 
 @app.post("/waitlist", response_model=WaitlistResponse)
@@ -3409,6 +3453,11 @@ def join_waitlist(body: WaitlistRequest, request: Request) -> WaitlistResponse:
     tools = _clip_waitlist_field(body.tools, 2000) or _clip_waitlist_field(
         body.runtime_interest, 2000
     )
+    attribution = {
+        field: _clip_waitlist_field(getattr(body, field), 500)
+        for field in database._WAITLIST_ATTRIBUTION_FIELDS
+    }
+    followup_token = secrets.token_urlsafe(24)
     status = database.add_waitlist_signup(
         email=email,
         name=name,
@@ -3416,8 +3465,33 @@ def join_waitlist(body: WaitlistRequest, request: Request) -> WaitlistResponse:
         runtime_interest=tools,
         company=_clip_waitlist_field(body.company, 200),
         role=_clip_waitlist_field(body.role, 200),
+        ai_use=_clip_waitlist_field(body.ai_use, 2000),
+        attribution=attribution,
+        followup_token=followup_token,
     )
-    return WaitlistResponse(status=status)
+    return WaitlistResponse(
+        status=status,
+        followup_token=followup_token if status == "joined" else None,
+    )
+
+
+@app.post("/waitlist/followup", response_model=WaitlistFollowupResponse)
+def waitlist_followup(body: WaitlistFollowupRequest, request: Request) -> WaitlistFollowupResponse:
+    """Optional answers asked after a successful signup (company, what the
+    team uses AI for). Authorised by the one-time token POST /waitlist issued
+    for that signup — never by email — and the token is spent on use."""
+    _check_waitlist_rate_limit(request)
+    saved = database.update_waitlist_followup(
+        body.token,
+        company=_clip_waitlist_field(body.company, 200),
+        ai_use=_clip_waitlist_field(body.ai_use, 2000),
+    )
+    if not saved:
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn’t save those answers. You’re still on the list.",
+        )
+    return WaitlistFollowupResponse(saved=True)
 
 
 @app.get("/waitlist/count", response_model=WaitlistCountResponse)

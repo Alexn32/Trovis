@@ -304,14 +304,45 @@ class WaitlistRequest(BaseModel):
     source: str | None = None
     runtime_interest: str | None = None
     website: str | None = None
+    # Landing-page follow-up answer ("what work is your team using AI for?").
+    ai_use: str | None = None
+    # Referral + UTM attribution, captured from the landing URL when present.
+    ref: str | None = None
+    referrer: str | None = None
+    utm_source: str | None = None
+    utm_medium: str | None = None
+    utm_campaign: str | None = None
+    utm_term: str | None = None
+    utm_content: str | None = None
 
+
+class WaitlistFollowupRequest(BaseModel):
+    """Body for POST /waitlist/followup — the optional questions asked after
+    the email is saved. `token` is the one-time `followup_token` returned by
+    POST /waitlist for a new signup."""
+
+    token: str
+    company: str | None = None
+    ai_use: str | None = None
 
 
 class WaitlistResponse(BaseModel):
     """Result of a waitlist signup. `status` is "joined" for a new entry or
-    "already_joined" when the email was already on the list (idempotent)."""
+    "already_joined" when the email was already on the list (idempotent).
+
+    `followup_token` is issued only for a new signup: it authorises one
+    POST /waitlist/followup to add the optional answers. A repeat email gets
+    none, so nobody can rewrite another person's signup by knowing the email.
+    """
 
     status: str
+    followup_token: str | None = None
+
+
+class WaitlistFollowupResponse(BaseModel):
+    """Result of POST /waitlist/followup."""
+
+    saved: bool
 
 
 class WaitlistCountResponse(BaseModel):
