@@ -997,6 +997,19 @@ CREATE TABLE IF NOT EXISTS waitlist_signups (
 )
 """
 
+# Columns added to waitlist_signups after the original DDL (all nullable TEXT,
+# migrated in by init_db). Attribution is captured once, on the first signup.
+_WAITLIST_ATTRIBUTION_FIELDS = (
+    "ref",
+    "referrer",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+)
+_WAITLIST_EXTRA_COLUMNS = ("ai_use", *_WAITLIST_ATTRIBUTION_FIELDS, "followup_token_hash")
+
 # Cache table for Claude-generated insights (weekly summaries,
 # capability maps, …). Polymorphic on `kind` so both insight types
 # share one table; `data` is a JSON blob whose shape is determined
@@ -2326,6 +2339,12 @@ def init_db() -> None:
         _try_add_column(cur, "waitlist_signups", "company", "TEXT")
         _try_add_column(cur, "waitlist_signups", "role", "TEXT")
         _try_add_column(cur, "waitlist_signups", "name", "TEXT")
+        # Landing-page waitlist: the optional follow-up answer ("what work is
+        # your team using AI for?"), referral + UTM attribution, and the hash
+        # of the one-time token that lets the signer add those follow-up
+        # answers after the email is already saved.
+        for _col in _WAITLIST_EXTRA_COLUMNS:
+            _try_add_column(cur, "waitlist_signups", _col, "TEXT")
 
         # Backfill by email, within the account. A team_members row whose
         # email matches a login IS that person; one with no email, or no
@@ -9786,6 +9805,10 @@ def get_team_members(account_id: int | None) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _waitlist_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def add_waitlist_signup(
     email: str,
     source: str | None = None,
@@ -9793,68 +9816,91 @@ def add_waitlist_signup(
     company: str | None = None,
     role: str | None = None,
     name: str | None = None,
+    ai_use: str | None = None,
+    attribution: dict | None = None,
+    followup_token: str | None = None,
 ) -> str:
     """Record a waitlist signup. Email is lowercased + trimmed before insert.
 
     Idempotent: a repeat email is success, not an error — we swallow the
     UNIQUE violation and report it. Returns "joined" for a new signup or
     "already_joined" when the email is already on the list.
+
+    `attribution` holds the referral / UTM fields named in
+    _WAITLIST_ATTRIBUTION_FIELDS (anything else is ignored).
+    `followup_token`, when given, is stored hashed so the signer can add the
+    optional follow-up answers later via update_waitlist_followup.
     """
     clean_email = (email or "").strip().lower()
     if not clean_email:
         raise ValueError("email is required")
-    clean_name = (name or "").strip() or None
-    clean_source = (source or "").strip() or None
-    clean_interest = (runtime_interest or "").strip() or None
-    clean_company = (company or "").strip() or None
-    clean_role = (role or "").strip() or None
 
+    def _clean(value):
+        return (value or "").strip() or None
+
+    attribution = attribution or {}
+    values = {
+        "email": clean_email,
+        "name": _clean(name),
+        "source": _clean(source),
+        "runtime_interest": _clean(runtime_interest),
+        "company": _clean(company),
+        "role": _clean(role),
+        "ai_use": _clean(ai_use),
+        "followup_token_hash": (
+            _waitlist_token_hash(followup_token) if followup_token else None
+        ),
+    }
+    for field in _WAITLIST_ATTRIBUTION_FIELDS:
+        values[field] = _clean(attribution.get(field))
+
+    columns = ", ".join(values)
+    placeholders = ", ".join([PH] * len(values))
+    sql = f"INSERT INTO waitlist_signups ({columns}) VALUES ({placeholders})"
     if USE_POSTGRES:
-        sql = """
-            INSERT INTO waitlist_signups
-                (email, name, source, runtime_interest, company, role)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """
         try:
             with _connect() as conn, _cursor(conn) as cur:
-                cur.execute(
-                    sql,
-                    (
-                        clean_email,
-                        clean_name,
-                        clean_source,
-                        clean_interest,
-                        clean_company,
-                        clean_role,
-                    ),
-                )
+                cur.execute(sql, tuple(values.values()))
         except psycopg2.errors.UniqueViolation:
             return "already_joined"
     else:
-        sql = """
-            INSERT INTO waitlist_signups
-                (email, name, source, runtime_interest, company, role)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """
         try:
             with _connect() as conn, _cursor(conn) as cur:
-                cur.execute(
-                    sql,
-                    (
-                        clean_email,
-                        clean_name,
-                        clean_source,
-                        clean_interest,
-                        clean_company,
-                        clean_role,
-                    ),
-                )
+                cur.execute(sql, tuple(values.values()))
         except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
                 return "already_joined"
             raise
 
     return "joined"
+
+
+def update_waitlist_followup(
+    followup_token: str,
+    company: str | None = None,
+    ai_use: str | None = None,
+) -> bool:
+    """Add the optional follow-up answers to the signup that `followup_token`
+    was issued for. The token is single-use: it is cleared on success, so a
+    leaked token can't be replayed to overwrite answers. Returns False when
+    the token matches no signup."""
+    token = (followup_token or "").strip()
+    if not token:
+        return False
+    clean_company = (company or "").strip() or None
+    clean_ai_use = (ai_use or "").strip() or None
+    with _connect() as conn, _cursor(conn) as cur:
+        cur.execute(
+            f"""
+            UPDATE waitlist_signups
+               SET company = COALESCE({PH}, company),
+                   ai_use = COALESCE({PH}, ai_use),
+                   followup_token_hash = NULL
+             WHERE followup_token_hash = {PH}
+            """,
+            (clean_company, clean_ai_use, _waitlist_token_hash(token)),
+        )
+        return (cur.rowcount or 0) > 0
 
 
 def get_waitlist_signup(email: str) -> dict | None:

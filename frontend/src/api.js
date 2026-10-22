@@ -181,6 +181,9 @@ export const api = {
   // Public founding waitlist — no auth required.
   joinWaitlist: (data) =>
     request('/waitlist', { method: 'POST', body: JSON.stringify(data) }),
+  // Optional answers after signup, authorised by the one-time followup_token.
+  saveWaitlistFollowup: (data) =>
+    request('/waitlist/followup', { method: 'POST', body: JSON.stringify(data) }),
 
   // --- data ---
   listAgents: (opts = {}) => request('/agents', opts),
