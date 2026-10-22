@@ -106,8 +106,8 @@ with TestClient(main.app) as c:
         check(f"GET {path} has email field", 'name="email"' in body)
         check(f"GET {path} has honeypot", 'name="website"' in body)
         check(f"GET {path} has follow-up question", "What work is your team using AI for?" in body)
-        check(f"GET {path} preview labelled illustrative", "Illustrative product preview" in body)
-        check(f"GET {path} has disclosure", "early-access updates and for product research" in body)
+        check(f"GET {path} preview labelled illustrative", "Illustrative example" in body)
+        check(f"GET {path} has disclosure", "for product research" in body)
         check(f"GET {path} loads shared assets", "/landing.css" in body and "/landing.js" in body)
         check(f"GET {path} title", "<title>Trovis — Understand how work gets done" in body)
 

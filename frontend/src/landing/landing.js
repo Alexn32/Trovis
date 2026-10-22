@@ -116,16 +116,8 @@ function setupTabs(tabs, on, { onSelect } = {}) {
       const active = i === index
       tab.setAttribute('aria-selected', active ? 'true' : 'false')
       tab.tabIndex = active ? 0 : -1
-      const panel = panels[i]
-      if (!panel) return
-      if (active && panel.hidden) {
-        panel.hidden = false
-        panel.classList.remove('is-entering')
-        void panel.offsetWidth
-        panel.classList.add('is-entering')
-      } else if (!active) {
-        panel.hidden = true
-      }
+      // The panel's CSS fade replays each time it is unhidden.
+      if (panels[i]) panels[i].hidden = !active
     })
     if (focus) tabs[index].focus()
     if (onSelect) onSelect(index)
@@ -204,17 +196,28 @@ export function mountLanding(root, options = {}) {
     }),
   )
 
-  // --- Product preview: steps as tabs, evidence chips jump to a step. ---
-  const stepTabs = $$('.tl-step')
-  const selectStep = stepTabs.length ? setupTabs(stepTabs, on) : null
-  $$('[data-goto]').forEach((chip) =>
-    on(chip, 'click', () => {
-      const index = stepTabs.findIndex((t) => t.dataset.step === chip.dataset.goto)
-      if (index >= 0 && selectStep) selectStep(index, { focus: true })
-    }),
-  )
+  // --- Product preview: the explanation leads; a step opens its records,
+  // and pressing it again (or Escape) closes them. ---
+  const steps = $$('.tl-step')
+  const panels = $$('[data-panel]')
+  const showRecords = (stepId) => {
+    steps.forEach((s) => s.setAttribute('aria-pressed', s.dataset.step === stepId ? 'true' : 'false'))
+    panels.forEach((p) => {
+      p.hidden = p.dataset.panel !== stepId
+    })
+  }
+  steps.forEach((step) => {
+    on(step, 'click', () => {
+      const open = step.getAttribute('aria-pressed') === 'true'
+      showRecords(open ? null : step.dataset.step)
+      if (!open) track('preview_step_open', { step: step.dataset.step })
+    })
+    on(step, 'keydown', (e) => {
+      if (e.key === 'Escape') showRecords(null)
+    })
+  })
 
-  // --- Ask examples ---
+  // --- Discoveries: question → explanation → supporting workflow ---
   const qTabs = $$('.tl-q')
   if (qTabs.length) setupTabs(qTabs, on)
 
@@ -225,7 +228,7 @@ export function mountLanding(root, options = {}) {
   const goLive = () => {
     if (!preview || preview.classList.contains('is-live')) return
     preview.classList.add('is-live')
-    timers.push(setTimeout(() => preview.classList.add('is-ready'), reduced ? 0 : 2200))
+    timers.push(setTimeout(() => preview.classList.add('is-ready'), reduced ? 0 : 1800))
   }
   if (reduced || !hasIO) {
     if (preview) preview.classList.add('is-live', 'is-ready')
