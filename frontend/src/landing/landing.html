@@ -3,8 +3,9 @@
   One source for both front doors: the SPA's logged-out view (TrovisLanding.jsx)
   and the FastAPI-served trovisai.com page (static/waitlist.html, which main.py
   fills with this fragment). Behaviour lives in landing.js, styles in landing.css.
-  Everything in the product preview and the discoveries is illustrative sample
-  data and is labelled as such on the page.
+  The product preview and the pattern example are illustrative sample data and
+  are labelled as such on the page. Connection methods named in "How Trovis
+  fits" are the ones connectors.registry.json marks available.
 -->
 <div class="tl" id="tl-top">
   <a class="tl-skip" href="#tl-main">Skip to content</a>
@@ -15,7 +16,7 @@
         <svg class="tl-lockup" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" viewBox="0 0 1960.3 402.9" fill="none"><g fill="currentColor"><rect x="0" y="43.1975" width="132.243" height="72.6041"/><rect x="279.396" y="43.1975" width="132.243" height="72.6041"/><rect x="169.193" y="153.4" width="73.2523" height="241.797"/></g><path fill="currentColor" d="M650.157560875793 395.1975308641975Q623.0361616988382 395.1975308641975 606.1544744560399 378.31584362139915Q589.2727872132415 361.4341563786008 589.2727872132415 333.20576131687244V178.22633744855966H520.6390423572744V120.6625514403292H589.2727872132415V35.42386831275718H659.0135279539822V120.6625514403292H734.2892481185913V178.22633744855966H659.0135279539822V321.02880658436214Q659.0135279539822 337.63374485596705 674.5114703408135 337.63374485596705H727.6472728099493V395.1975308641975ZM782.4435691062456 395.1975308641975V120.6625514403292H851.0773139622128V151.65843621399176H861.0402769251757Q867.1287542914308 135.05349794238685 881.242951822295 127.3045267489712Q895.3571493531592 119.55555555555554 914.1760793943115 119.55555555555554H947.3859559375214V181.54732510288065H913.0690835095378Q886.5011822749699 181.54732510288065 869.3427460609781 195.66152263374485Q852.1843098469864 209.77572016460906 852.1843098469864 239.11111111111111V395.1975308641975ZM1117.3098242502786 402.94650205761315Q1076.350976513653 402.94650205761315 1043.69459791283 386.34156378600824Q1011.0382193120068 369.7366255144033 992.2192892708546 338.1872427983539Q973.4003592297023 306.63786008230454 973.4003592297023 262.358024691358V253.50205761316872Q973.4003592297023 209.22222222222223 992.2192892708546 177.67283950617283Q1011.0382193120068 146.12345679012344 1043.69459791283 129.5185185185185Q1076.350976513653 112.91358024691357 1117.3098242502786 112.91358024691357Q1158.2686719869039 112.91358024691357 1190.9250505877271 129.5185185185185Q1223.5814291885501 146.12345679012344 1242.4003592297024 177.67283950617283Q1261.2192892708547 209.22222222222223 1261.2192892708547 253.50205761316872V262.358024691358Q1261.2192892708547 306.63786008230454 1242.4003592297024 338.1872427983539Q1223.5814291885501 369.7366255144033 1190.9250505877271 386.34156378600824Q1158.2686719869039 402.94650205761315 1117.3098242502786 402.94650205761315ZM1117.3098242502786 340.95473251028807Q1149.4127049087147 340.95473251028807 1170.4456267194141 320.1985596707819Q1191.4785485301138 299.4423868312757 1191.4785485301138 260.6975308641975V255.16255144032922Q1191.4785485301138 216.41769547325103 1170.7223756906078 195.66152263374485Q1149.9662028511016 174.90534979423867 1117.3098242502786 174.90534979423867Q1085.2069435918422 174.90534979423867 1064.1740217811425 195.66152263374485Q1043.141099970443 216.41769547325103 1043.141099970443 255.16255144032922V260.6975308641975Q1043.141099970443 299.4423868312757 1064.1740217811425 320.1985596707819Q1085.2069435918422 340.95473251028807 1117.3098242502786 340.95473251028807ZM1368.044392151513 395.1975308641975 1280.5917172543936 120.6625514403292H1354.7604415342291L1418.4127049087147 344.275720164609H1428.3756678716777L1492.0279312461632 120.6625514403292H1566.1966555259987L1478.7439806288794 395.1975308641975ZM1598.8530341268217 395.1975308641975V120.6625514403292H1668.5937748675626V395.1975308641975ZM1633.7234044971922 88.55967078189298Q1614.90447445604 88.55967078189298 1601.8972728099493 76.38271604938271Q1588.890071163859 64.20576131687244 1588.890071163859 44.279835390946516Q1588.890071163859 24.353909465020593 1601.8972728099493 12.176954732510296Q1614.90447445604 0.0 1633.7234044971922 0.0Q1653.0958324807314 0.0 1665.8262851556283 12.176954732510296Q1678.5567378305254 24.353909465020593 1678.5567378305254 44.279835390946516Q1678.5567378305254 64.20576131687244 1665.8262851556283 76.38271604938271Q1653.0958324807314 88.55967078189298 1633.7234044971922 88.55967078189298ZM1845.1596184889618 402.94650205761315Q1791.4703180774393 402.94650205761315 1757.1534456494558 379.6995884773662Q1722.8365732214722 356.4526748971193 1715.6410999704433 313.27983539094646L1779.8468612873157 296.67489711934155Q1783.7213468840237 316.0473251028807 1792.8540629334063 327.1172839506173Q1801.986778982789 338.1872427983539 1815.5474785712663 342.891975308642Q1829.1081781597436 347.59670781893004 1845.1596184889618 347.59670781893004Q1869.5135279539825 347.59670781893004 1881.136984744106 339.01748971193416Q1892.7604415342294 330.4382716049383 1892.7604415342294 317.7078189300411Q1892.7604415342294 304.97736625514403 1881.6904826864927 298.05864197530866Q1870.620523838756 291.13991769547323 1846.2666143737356 286.71193415637856L1830.7686719869043 283.94444444444446Q1801.986778982789 278.40946502057614 1778.1863674601552 268.7232510288066Q1754.3859559375214 259.03703703703707 1739.995009435464 241.87860082304528Q1725.6040629334063 224.72016460905348 1725.6040629334063 197.59876543209876Q1725.6040629334063 156.63991769547326 1755.4929518222953 134.7767489711934Q1785.381840711184 112.91358024691357 1834.0896596412251 112.91358024691357Q1880.0299888593322 112.91358024691357 1910.4723756906078 133.39300411522635Q1940.9147625218836 153.8724279835391 1950.3242275424598 187.08230452674897L1885.5649682832004 207.0082304526749Q1881.1369847441058 185.97530864197532 1867.5762851556285 177.119341563786Q1854.0155855671512 168.2633744855967 1834.0896596412251 168.2633744855967Q1814.1637337152993 168.2633744855967 1803.6472728099495 175.1820987654321Q1793.1308119045998 182.10082304526748 1793.1308119045998 194.27777777777777Q1793.1308119045998 207.56172839506172 1804.2007707523362 213.9269547325103Q1815.2707296000729 220.29218106995884 1834.0896596412251 223.61316872427983L1849.5876020280566 226.380658436214Q1880.5834868017191 231.91563786008228 1905.7676431803197 241.048353909465Q1930.9517995589206 250.18106995884773 1945.6194950321717 267.0627572016461Q1960.2871905054228 283.94444444444446 1960.2871905054228 312.72633744855966Q1960.2871905054228 355.8991769547325 1929.0145567605668 379.42283950617286Q1897.7419230157109 402.94650205761315 1845.1596184889618 402.94650205761315Z"/></svg>
       </a>
       <nav class="tl-nav" aria-label="Primary">
-        <a class="tl-btn tl-btn-sm" href="#join" data-cta="header">Join the waitlist</a>
+        <a class="tl-btn tl-btn-sm" href="#tl-email-hero" data-cta="header" data-cta-target="hero">Request early access</a>
       </nav>
     </div>
   </header>
@@ -25,127 +26,381 @@
     <section class="tl-hero" aria-labelledby="tl-hero-title">
       <div class="tl-wrap">
         <div class="tl-hero-copy">
+          <p class="tl-badge"><span class="tl-badge-dot" aria-hidden="true"></span>In development · Early access waitlist open</p>
           <h1 id="tl-hero-title" class="tl-h1">
             AI is changing how work gets done.
             <span class="tl-accent">Understand what’s happening.</span>
           </h1>
           <p class="tl-lede">
-            Trovis uses AI to understand how work moves across your people, agents, and tools,
-            explain what’s happening, and surface what needs your attention.
+            Connect your AI agents and workflows to Trovis. See the steps they take, the tools they use,
+            and how work passes between agents, people, and systems. Get AI-powered explanations of what
+            happened and what needs your attention.
           </p>
-          <div class="tl-hero-cta">
-            <a class="tl-btn" href="#join" data-cta="hero">Join the waitlist</a>
-            <p class="tl-small">Early access for teams putting AI to work.</p>
+          <p class="tl-benefit">Inside the agent. Across the workflow. Throughout your business.</p>
+
+          <div class="tl-signup tl-signup-light" data-signup="hero">
+            <form class="tl-form" data-form="join" novalidate>
+              <div class="tl-hp" aria-hidden="true">
+                <label for="tl-website-hero">Website</label>
+                <input id="tl-website-hero" name="website" type="text" tabindex="-1" autocomplete="off" />
+              </div>
+              <label class="tl-label tl-sr" for="tl-email-hero">Work email</label>
+              <div class="tl-form-row">
+                <input class="tl-input" id="tl-email-hero" name="email" type="email" required autocomplete="email" inputmode="email" placeholder="you@company.com" aria-describedby="tl-note-hero tl-disclosure-hero" />
+                <button class="tl-btn" type="submit" data-submit>Request early access</button>
+              </div>
+              <p class="tl-error" role="alert" data-error hidden></p>
+              <p class="tl-form-note" id="tl-note-hero">Be among the first teams to connect your agents and workflows to Trovis.</p>
+              <p class="tl-disclosure" id="tl-disclosure-hero">
+                This is a request to join the early-access list, not immediate access. We’ll use what you
+                submit to contact you about early access and for product research.
+                <a href="https://app.trovisai.com/privacy">Privacy</a>
+              </p>
+            </form>
+
+            <div class="tl-success" data-success hidden tabindex="-1">
+              <div role="status">
+                <p class="tl-success-title"><span class="tl-check" aria-hidden="true">✓</span><span data-success-title>You’re on the early-access list.</span></p>
+                <p class="tl-success-body" data-success-body>We’ll reach out as access opens. Tell us what you’d connect so we can better understand your team’s needs.</p>
+              </div>
+              <form class="tl-form tl-form-more" data-form="followup" novalidate hidden>
+                <label class="tl-label" for="tl-company-hero">Company <span class="tl-optional">(optional)</span></label>
+                <input class="tl-input" id="tl-company-hero" name="company" type="text" autocomplete="organization" />
+                <label class="tl-label" for="tl-tools-hero">Which agents, tools, or workflows would you connect first? <span class="tl-optional">(optional)</span></label>
+                <textarea class="tl-input tl-textarea" id="tl-tools-hero" name="tools" rows="3" aria-describedby="tl-tools-help-hero"></textarea>
+                <p class="tl-help" id="tl-tools-help-hero">This helps us match early teams with the connections we’re building.</p>
+                <p class="tl-error" role="alert" data-error hidden></p>
+                <div class="tl-more-actions">
+                  <button class="tl-btn" type="submit" data-submit>Share with the team</button>
+                  <button class="tl-textbtn" type="button" data-skip>Skip for now</button>
+                </div>
+              </form>
+              <p class="tl-more-done" data-more-done hidden>Thanks. Your details are saved, and we’ll be in touch as early access opens.</p>
+            </div>
           </div>
         </div>
 
-        <!-- 2. Product preview: the explanation leads, the records wait to be explored -->
-        <figure class="tl-preview" id="tl-preview" aria-labelledby="tl-insight-title">
+        <!-- 2. Explorable product preview -->
+        <figure class="tl-preview" id="tl-preview" aria-labelledby="tl-preview-title">
           <div class="tl-preview-bar">
-            <span class="tl-preview-kicker">Customer onboarding · Northwind Co.</span>
-            <span class="tl-tag tl-tag-sample">Illustrative example</span>
+            <h2 id="tl-preview-title" class="tl-preview-title">Trovis</h2>
+            <span class="tl-tag tl-tag-sample">Interactive product concept · Sample data</span>
           </div>
-
-          <section class="tl-insight">
-            <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis</div>
-            <h2 id="tl-insight-title" class="tl-insight-title">The agent finished. The onboarding is still waiting.</h2>
-            <p class="tl-insight-text">
-              The setup was prepared and approval was requested from Janet. No approval is
-              recorded in the connected systems, so account activation remains pending.
-            </p>
-            <p class="tl-attn">
-              <span class="tl-attn-label">Needs attention</span>
-              <span class="tl-attn-text">Janet’s approval, waiting since 9:12 AM</span>
-            </p>
-          </section>
-
-          <div class="tl-trace">
-            <p class="tl-trace-label" id="tl-trace-label">
-              How the work moved <span class="tl-trace-hint">Select a step to see its records</span>
-            </p>
-            <ol class="tl-flow" aria-labelledby="tl-trace-label">
-              <li class="tl-flow-item" style="--i:0">
-                <button class="tl-step" type="button" aria-pressed="false" aria-controls="tl-records" data-step="1">
-                  <span class="tl-avatar tl-av-person" aria-hidden="true">M</span>
-                  <span class="tl-step-text"><span class="tl-type">Person</span><span class="tl-step-name">Marcus starts onboarding</span></span>
-                  <span class="tl-status tl-status-done">Done</span>
-                </button>
-                <span class="tl-handoff" aria-hidden="true"><span class="tl-handoff-line"></span></span>
-              </li>
-              <li class="tl-flow-item" style="--i:1">
-                <button class="tl-step" type="button" aria-pressed="false" aria-controls="tl-records" data-step="2">
-                  <span class="tl-avatar tl-av-agent" aria-hidden="true"><svg viewBox="0 0 16 16" width="12" height="12"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
-                  <span class="tl-step-text"><span class="tl-type">AI agent</span><span class="tl-step-name">Agent prepares setup</span></span>
-                  <span class="tl-status tl-status-done">Done</span>
-                </button>
-                <span class="tl-handoff" aria-hidden="true"><span class="tl-handoff-line"></span></span>
-              </li>
-              <li class="tl-flow-item" style="--i:2">
-                <button class="tl-step" type="button" aria-pressed="false" aria-controls="tl-records" data-step="3">
-                  <span class="tl-avatar tl-av-system" aria-hidden="true">#</span>
-                  <span class="tl-step-text"><span class="tl-type">System</span><span class="tl-step-name">Approval requested</span></span>
-                  <span class="tl-status tl-status-done">Sent</span>
-                </button>
-                <span class="tl-handoff" aria-hidden="true"><span class="tl-handoff-line"></span></span>
-              </li>
-              <li class="tl-flow-item tl-flow-attn" style="--i:3">
-                <button class="tl-step" type="button" aria-pressed="false" aria-controls="tl-records" data-step="4">
-                  <span class="tl-avatar tl-av-person" aria-hidden="true">J</span>
-                  <span class="tl-step-text"><span class="tl-type">Person</span><span class="tl-step-name">Janet’s approval</span></span>
-                  <span class="tl-status tl-status-pending"><span class="tl-pulse" aria-hidden="true"></span>Pending</span>
-                </button>
-                <span class="tl-handoff tl-handoff-blocked" aria-hidden="true"><span class="tl-handoff-line"></span></span>
-              </li>
-              <li class="tl-flow-item" style="--i:4">
-                <button class="tl-step" type="button" aria-pressed="false" aria-controls="tl-records" data-step="5">
-                  <span class="tl-avatar tl-av-system" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11"><rect x="2" y="2" width="5" height="5" fill="currentColor"/><rect x="9" y="2" width="5" height="5" fill="currentColor"/><rect x="2" y="9" width="5" height="5" fill="currentColor"/><rect x="9" y="9" width="5" height="5" fill="currentColor" opacity=".45"/></svg></span>
-                  <span class="tl-step-text"><span class="tl-type">System</span><span class="tl-step-name">Account activation</span></span>
-                  <span class="tl-status tl-status-waiting">Waiting</span>
+          <div class="tl-app">
+            <nav class="tl-col tl-col-wf" aria-labelledby="tl-wf-label">
+              <p class="tl-col-label" id="tl-wf-label">Your connected work</p>
+              <ul class="tl-wfs">
+              <li>
+                <button type="button" class="tl-wf" data-wf="support" aria-pressed="true" aria-controls="tl-run-support tl-expl-support">
+                  <span class="tl-wf-top"><span class="tl-wf-name">Customer support</span><span class="tl-status tl-status-fail">1 needs review</span></span>
+                  <ul class="tl-wf-parts" aria-label="Participants"><li><span class="tl-pill tl-pill-agent">Support agent</span></li><li><span class="tl-pill tl-pill-system">Email service</span></li><li><span class="tl-pill tl-pill-person">Support team</span></li></ul>
+                  <span class="tl-wf-recent">24 runs today · last 10:14 AM</span>
                 </button>
               </li>
-            </ol>
-
-            <div class="tl-records-region" id="tl-records" aria-live="polite">
-              <section class="tl-panel" data-panel="1" hidden>
-                <h3 class="tl-panel-title">Marcus starts onboarding</h3>
-                <ul class="tl-records">
-                  <li><span class="tl-src">CRM</span><span class="tl-rec">Deal “Northwind Co.” moved to Closed won, owner Marcus</span><time class="tl-time">9:01 AM</time></li>
-                  <li><span class="tl-src">CRM</span><span class="tl-rec">Onboarding record created by Marcus</span><time class="tl-time">9:02 AM</time></li>
-                  <li class="tl-rec-link"><span class="tl-src">Handoff</span><span class="tl-rec">New record triggered the onboarding agent</span><time class="tl-time">9:02 AM</time></li>
-                </ul>
-              </section>
-              <section class="tl-panel" data-panel="2" hidden>
-                <h3 class="tl-panel-title">Onboarding agent prepares the account setup</h3>
-                <ul class="tl-records">
-                  <li><span class="tl-src">Agent run</span><span class="tl-rec">Run started from the onboarding record</span><time class="tl-time">9:03 AM</time></li>
-                  <li><span class="tl-src">Agent run</span><span class="tl-rec">Workspace settings and user seats drafted</span><time class="tl-time">9:09 AM</time></li>
-                  <li><span class="tl-src">Agent run</span><span class="tl-rec">Run completed. Activation needs an approval first</span><time class="tl-time">9:11 AM</time></li>
-                </ul>
-              </section>
-              <section class="tl-panel" data-panel="3" hidden>
-                <h3 class="tl-panel-title">Approval request in #cs-approvals</h3>
-                <ul class="tl-records">
-                  <li><span class="tl-src">Team chat</span><span class="tl-rec">“Account setup for Northwind Co. is ready. @Janet, please approve activation.”</span><time class="tl-time">9:12 AM</time></li>
-                  <li class="tl-rec-gap"><span class="tl-src">Team chat</span><span class="tl-rec">No replies or reactions since</span><time class="tl-time">9:12 AM</time></li>
-                </ul>
-              </section>
-              <section class="tl-panel" data-panel="4" hidden>
-                <h3 class="tl-panel-title">Janet’s approval</h3>
-                <ul class="tl-records">
-                  <li class="tl-rec-gap"><span class="tl-src">Account platform</span><span class="tl-rec">Approval for Northwind Co. is still empty</span><time class="tl-time">now</time></li>
-                  <li class="tl-rec-gap"><span class="tl-src">All connected</span><span class="tl-rec">No approval recorded anywhere Trovis can see</span><time class="tl-time">since 9:12 AM</time></li>
-                </ul>
-                <p class="tl-panel-note">If Janet approved somewhere that isn’t connected, Trovis can’t see it yet.</p>
-              </section>
-              <section class="tl-panel" data-panel="5" hidden>
-                <h3 class="tl-panel-title">Account activation</h3>
-                <ul class="tl-records">
-                  <li><span class="tl-src">Account platform</span><span class="tl-rec">Activation queued. Requires approval</span><time class="tl-time">9:11 AM</time></li>
-                  <li class="tl-rec-gap"><span class="tl-src">Account platform</span><span class="tl-rec">No activation event recorded yet</span><time class="tl-time">now</time></li>
-                </ul>
-              </section>
+              <li>
+                <button type="button" class="tl-wf" data-wf="onboarding" aria-pressed="false" aria-controls="tl-run-onboarding tl-expl-onboarding">
+                  <span class="tl-wf-top"><span class="tl-wf-name">Customer onboarding</span><span class="tl-status tl-status-done">Running normally</span></span>
+                  <ul class="tl-wf-parts" aria-label="Participants"><li><span class="tl-pill tl-pill-agent">Onboarding agent</span></li><li><span class="tl-pill tl-pill-system">CRM</span></li><li><span class="tl-pill tl-pill-person">Account manager</span></li></ul>
+                  <span class="tl-wf-recent">6 runs today · last 9:48 AM</span>
+                </button>
+              </li>
+              <li>
+                <button type="button" class="tl-wf" data-wf="reporting" aria-pressed="false" aria-controls="tl-run-reporting tl-expl-reporting">
+                  <span class="tl-wf-top"><span class="tl-wf-name">Weekly reporting</span><span class="tl-status tl-status-pending">Later than usual</span></span>
+                  <ul class="tl-wf-parts" aria-label="Participants"><li><span class="tl-pill tl-pill-agent">Report agent</span></li><li><span class="tl-pill tl-pill-system">Data warehouse</span></li><li><span class="tl-pill tl-pill-person">Reviewer</span></li></ul>
+                  <span class="tl-wf-recent">1 run this week · Mon 8:00 AM</span>
+                </button>
+              </li>
+              </ul>
+            </nav>
+            <div class="tl-col tl-col-run">
+            <div class="tl-run" id="tl-run-support" data-run="support">
+              <div class="tl-run-head">
+                <div>
+                  <p class="tl-col-label">Inside the agent’s work</p>
+                  <h3 class="tl-run-title">Handle return request · Order #1042</h3>
+                  <p class="tl-run-meta">Today, 10:14 AM · 8 recorded steps</p>
+                </div>
+                <span class="tl-status tl-status-fail">Routed for review</span>
+              </div>
+              <ul class="tl-legend" aria-label="Step types">
+                <li><span class="tl-key tl-key-agent" aria-hidden="true"></span>Agent action</li>
+                <li><span class="tl-key tl-key-system" aria-hidden="true"></span>Tool or system event</li>
+                <li><span class="tl-key tl-key-person" aria-hidden="true"></span>Human handoff</li>
+              </ul>
+              <ol class="tl-events" aria-label="Recorded steps. Select one to see its details.">
+                  <li class="tl-ev tl-ev-system">
+                    <button type="button" class="tl-ev-btn" data-ev="support-1" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="5" height="5" fill="currentColor"/><rect x="9" y="2" width="5" height="5" fill="currentColor"/><rect x="2" y="9" width="5" height="5" fill="currentColor"/><rect x="9" y="9" width="5" height="5" fill="currentColor" opacity=".45"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Request received from customer inbox</span><span class="tl-ev-kind">Tool or system event · Customer inbox</span></span>
+                      <time class="tl-time">10:14:02</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-agent">
+                    <button type="button" class="tl-ev-btn" data-ev="support-2" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Support agent retrieved the order</span><span class="tl-ev-kind">Agent action · Support agent</span></span>
+                      <time class="tl-time">10:14:05</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-agent">
+                    <button type="button" class="tl-ev-btn" data-ev="support-3" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Support agent checked the return policy</span><span class="tl-ev-kind">Agent action · Support agent</span></span>
+                      <time class="tl-time">10:14:07</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-agent">
+                    <button type="button" class="tl-ev-btn" data-ev="support-4" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Support agent drafted a response</span><span class="tl-ev-kind">Agent action · Support agent</span></span>
+                      <time class="tl-time">10:14:11</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-system">
+                    <button type="button" class="tl-ev-btn" data-ev="support-5" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="5" height="5" fill="currentColor"/><rect x="9" y="2" width="5" height="5" fill="currentColor"/><rect x="2" y="9" width="5" height="5" fill="currentColor"/><rect x="9" y="9" width="5" height="5" fill="currentColor" opacity=".45"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Email tool attempted delivery</span><span class="tl-ev-kind">Tool or system event · Email service</span></span>
+                      <time class="tl-time">10:14:12</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-fail">
+                    <button type="button" class="tl-ev-btn" data-ev="support-6" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Delivery failed</span><span class="tl-ev-kind">Tool or system event · Email service</span></span>
+                      <time class="tl-time">10:14:13</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-fail">
+                    <button type="button" class="tl-ev-btn" data-ev="support-7" aria-pressed="true" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Retry failed</span><span class="tl-ev-kind">Tool or system event · Email service</span></span>
+                      <time class="tl-time">10:14:43</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-person">
+                    <button type="button" class="tl-ev-btn" data-ev="support-8" aria-pressed="false" aria-controls="tl-detail-support">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="5.5" r="3" fill="currentColor"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Case routed to the support team for review</span><span class="tl-ev-kind">Human handoff · Support team</span></span>
+                      <time class="tl-time">10:14:44</time>
+                    </button>
+                  </li>
+              </ol>
+              <div class="tl-details" id="tl-detail-support" aria-live="polite">
+                  <section class="tl-detail" data-detail="support-1" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 1</span>Request received from customer inbox</p>
+                    <dl class="tl-dl"><div><dt>Source</dt><dd>Customer inbox</dd></div><div><dt>Event</dt><dd>New email</dd></div><div><dt>Subject</dt><dd>“Return request for order #1042”</dd></div><div><dt>From</dt><dd>customer@example.com (sample)</dd></div><div><dt>Next recorded step</dt><dd>Support agent</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-2" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 2</span>Support agent retrieved the order</p>
+                    <dl class="tl-dl"><div><dt>Tool call</dt><dd>Order system · get_order</dd></div><div><dt>Input</dt><dd>order_id: 1042</dd></div><div><dt>Output</dt><dd>1 item · delivered 9 days ago</dd></div><div><dt>Result</dt><dd>Success</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-3" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 3</span>Support agent checked the return policy</p>
+                    <dl class="tl-dl"><div><dt>Tool call</dt><dd>Knowledge base · search</dd></div><div><dt>Input</dt><dd>“return policy, delivered items”</dd></div><div><dt>Output</dt><dd>“Returns accepted within 30 days of delivery”</dd></div><div><dt>Result</dt><dd>Success</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-4" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 4</span>Support agent drafted a response</p>
+                    <dl class="tl-dl"><div><dt>Output</dt><dd>Reply draft with return instructions</dd></div><div><dt>Length</dt><dd>142 words</dd></div><div><dt>Result</dt><dd>Draft ready to send</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-5" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 5</span>Email tool attempted delivery</p>
+                    <dl class="tl-dl"><div><dt>Tool</dt><dd>Email service</dd></div><div><dt>Action</dt><dd>Send customer response</dd></div><div><dt>Recipient</dt><dd>customer@example.com (sample)</dd></div><div><dt>Attempt</dt><dd>1 of 2</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-6" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 6</span>Delivery failed</p>
+                    <dl class="tl-dl"><div><dt>Tool</dt><dd>Email service</dd></div><div><dt>Action</dt><dd>Send customer response</dd></div><div><dt>Result</dt><dd class="tl-dd-fail">Failed</dd></div><div><dt>Recorded error</dt><dd class="tl-dd-fail">Authentication expired</dd></div><div><dt>Attempt</dt><dd>1 of 2</dd></div><div><dt>Next recorded step</dt><dd>Automatic retry</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-7">
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 7</span>Retry failed</p>
+                    <dl class="tl-dl"><div><dt>Tool</dt><dd>Email service</dd></div><div><dt>Action</dt><dd>Send customer response</dd></div><div><dt>Result</dt><dd class="tl-dd-fail">Failed</dd></div><div><dt>Recorded error</dt><dd class="tl-dd-fail">Authentication expired</dd></div><div><dt>Attempts</dt><dd>2</dd></div><div><dt>Next recorded destination</dt><dd>Support review queue</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="support-8" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 8</span>Case routed to the support team for review</p>
+                    <dl class="tl-dl"><div><dt>Handoff</dt><dd>Support agent → Support team</dd></div><div><dt>Destination</dt><dd>Support review queue</dd></div><div><dt>Recorded reason</dt><dd>“Delivery failed after 2 attempts”</dd></div><div><dt>Status</dt><dd>Waiting for review</dd></div></dl>
+                  </section>
+              </div>
+            </div>
+            <div class="tl-run" id="tl-run-onboarding" data-run="onboarding" hidden>
+              <div class="tl-run-head">
+                <div>
+                  <p class="tl-col-label">Inside the agent’s work</p>
+                  <h3 class="tl-run-title">Set up new account · Northwind Co.</h3>
+                  <p class="tl-run-meta">Today, 9:20 AM · 5 recorded steps</p>
+                </div>
+                <span class="tl-status tl-status-done">Completed</span>
+              </div>
+              <ul class="tl-legend" aria-label="Step types">
+                <li><span class="tl-key tl-key-agent" aria-hidden="true"></span>Agent action</li>
+                <li><span class="tl-key tl-key-system" aria-hidden="true"></span>Tool or system event</li>
+                <li><span class="tl-key tl-key-person" aria-hidden="true"></span>Human handoff</li>
+              </ul>
+              <ol class="tl-events" aria-label="Recorded steps. Select one to see its details.">
+                  <li class="tl-ev tl-ev-system">
+                    <button type="button" class="tl-ev-btn" data-ev="onboarding-1" aria-pressed="false" aria-controls="tl-detail-onboarding">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="5" height="5" fill="currentColor"/><rect x="9" y="2" width="5" height="5" fill="currentColor"/><rect x="2" y="9" width="5" height="5" fill="currentColor"/><rect x="9" y="9" width="5" height="5" fill="currentColor" opacity=".45"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Onboarding record created in the CRM</span><span class="tl-ev-kind">Tool or system event · CRM</span></span>
+                      <time class="tl-time">9:20 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-agent">
+                    <button type="button" class="tl-ev-btn" data-ev="onboarding-2" aria-pressed="false" aria-controls="tl-detail-onboarding">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Onboarding agent prepared the workspace</span><span class="tl-ev-kind">Agent action · Onboarding agent</span></span>
+                      <time class="tl-time">9:24 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-person">
+                    <button type="button" class="tl-ev-btn" data-ev="onboarding-3" aria-pressed="false" aria-controls="tl-detail-onboarding">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="5.5" r="3" fill="currentColor"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Approval requested from the account manager</span><span class="tl-ev-kind">Human handoff · Account manager</span></span>
+                      <time class="tl-time">9:26 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-person">
+                    <button type="button" class="tl-ev-btn" data-ev="onboarding-4" aria-pressed="true" aria-controls="tl-detail-onboarding">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="5.5" r="3" fill="currentColor"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Priya approved the setup</span><span class="tl-ev-kind">Human handoff · Priya</span></span>
+                      <time class="tl-time">9:48 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-system">
+                    <button type="button" class="tl-ev-btn" data-ev="onboarding-5" aria-pressed="false" aria-controls="tl-detail-onboarding">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="5" height="5" fill="currentColor"/><rect x="9" y="2" width="5" height="5" fill="currentColor"/><rect x="2" y="9" width="5" height="5" fill="currentColor"/><rect x="9" y="9" width="5" height="5" fill="currentColor" opacity=".45"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Account activated</span><span class="tl-ev-kind">Tool or system event · Account platform</span></span>
+                      <time class="tl-time">9:48 AM</time>
+                    </button>
+                  </li>
+              </ol>
+              <div class="tl-details" id="tl-detail-onboarding" aria-live="polite">
+                  <section class="tl-detail" data-detail="onboarding-1" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 1</span>Onboarding record created in the CRM</p>
+                    <dl class="tl-dl"><div><dt>Source</dt><dd>CRM</dd></div><div><dt>Event</dt><dd>Deal moved to Closed won</dd></div><div><dt>Record</dt><dd>Northwind Co. (sample)</dd></div><div><dt>Next recorded step</dt><dd>Onboarding agent</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="onboarding-2" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 2</span>Onboarding agent prepared the workspace</p>
+                    <dl class="tl-dl"><div><dt>Tool call</dt><dd>Account platform · create_workspace</dd></div><div><dt>Input</dt><dd>plan: Team · seats: 12</dd></div><div><dt>Output</dt><dd>Workspace drafted, not yet active</dd></div><div><dt>Result</dt><dd>Success</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="onboarding-3" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 3</span>Approval requested from the account manager</p>
+                    <dl class="tl-dl"><div><dt>Handoff</dt><dd>Onboarding agent → Priya (account manager)</dd></div><div><dt>Channel</dt><dd>Team chat</dd></div><div><dt>Status</dt><dd>Waiting for approval</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="onboarding-4">
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 4</span>Priya approved the setup</p>
+                    <dl class="tl-dl"><div><dt>Recorded by</dt><dd>Account platform</dd></div><div><dt>Decision</dt><dd>Approved</dd></div><div><dt>Waited</dt><dd>22 minutes</dd></div><div><dt>Next recorded step</dt><dd>Account activation</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="onboarding-5" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 5</span>Account activated</p>
+                    <dl class="tl-dl"><div><dt>Event</dt><dd>Workspace activated</dd></div><div><dt>Result</dt><dd>Success</dd></div><div><dt>Welcome email</dt><dd>Sent to the customer’s admin</dd></div></dl>
+                  </section>
+              </div>
+            </div>
+            <div class="tl-run" id="tl-run-reporting" data-run="reporting" hidden>
+              <div class="tl-run-head">
+                <div>
+                  <p class="tl-col-label">Inside the agent’s work</p>
+                  <h3 class="tl-run-title">Weekly sales report · Week 42</h3>
+                  <p class="tl-run-meta">Mon 8:00 AM → Tue 2:10 PM · 5 recorded steps</p>
+                </div>
+                <span class="tl-status tl-status-pending">Delivered late</span>
+              </div>
+              <ul class="tl-legend" aria-label="Step types">
+                <li><span class="tl-key tl-key-agent" aria-hidden="true"></span>Agent action</li>
+                <li><span class="tl-key tl-key-system" aria-hidden="true"></span>Tool or system event</li>
+                <li><span class="tl-key tl-key-person" aria-hidden="true"></span>Human handoff</li>
+              </ul>
+              <ol class="tl-events" aria-label="Recorded steps. Select one to see its details.">
+                  <li class="tl-ev tl-ev-agent">
+                    <button type="button" class="tl-ev-btn" data-ev="reporting-1" aria-pressed="false" aria-controls="tl-detail-reporting">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Report agent queried the data warehouse</span><span class="tl-ev-kind">Agent action · Report agent</span></span>
+                      <time class="tl-time">Mon 8:02 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-agent">
+                    <button type="button" class="tl-ev-btn" data-ev="reporting-2" aria-pressed="false" aria-controls="tl-detail-reporting">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.5l1.6 4.1 4.1 1.6-4.1 1.6L8 12.9 6.4 8.8 2.3 7.2l4.1-1.6z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Report agent drafted the report</span><span class="tl-ev-kind">Agent action · Report agent</span></span>
+                      <time class="tl-time">Mon 8:20 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-person">
+                    <button type="button" class="tl-ev-btn" data-ev="reporting-3" aria-pressed="false" aria-controls="tl-detail-reporting">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="5.5" r="3" fill="currentColor"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Draft sent for review</span><span class="tl-ev-kind">Human handoff · Reviewer</span></span>
+                      <time class="tl-time">Mon 8:21 AM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-person">
+                    <button type="button" class="tl-ev-btn" data-ev="reporting-4" aria-pressed="true" aria-controls="tl-detail-reporting">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="5.5" r="3" fill="currentColor"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5z" fill="currentColor"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Reviewer approved the draft</span><span class="tl-ev-kind">Human handoff · Reviewer</span></span>
+                      <time class="tl-time">Tue 1:55 PM</time>
+                    </button>
+                  </li>
+                  <li class="tl-ev tl-ev-system">
+                    <button type="button" class="tl-ev-btn" data-ev="reporting-5" aria-pressed="false" aria-controls="tl-detail-reporting">
+                      <span class="tl-ev-dot" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><rect x="2" y="2" width="5" height="5" fill="currentColor"/><rect x="9" y="2" width="5" height="5" fill="currentColor"/><rect x="2" y="9" width="5" height="5" fill="currentColor"/><rect x="9" y="9" width="5" height="5" fill="currentColor" opacity=".45"/></svg></span>
+                      <span class="tl-ev-main"><span class="tl-ev-label">Report emailed to the sales team</span><span class="tl-ev-kind">Tool or system event · Email service</span></span>
+                      <time class="tl-time">Tue 2:10 PM</time>
+                    </button>
+                  </li>
+              </ol>
+              <div class="tl-details" id="tl-detail-reporting" aria-live="polite">
+                  <section class="tl-detail" data-detail="reporting-1" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 1</span>Report agent queried the data warehouse</p>
+                    <dl class="tl-dl"><div><dt>Tool call</dt><dd>Data warehouse · run_query</dd></div><div><dt>Input</dt><dd>Sales by region, last 7 days</dd></div><div><dt>Output</dt><dd>4 regions · 1 table</dd></div><div><dt>Result</dt><dd>Success</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="reporting-2" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 2</span>Report agent drafted the report</p>
+                    <dl class="tl-dl"><div><dt>Output</dt><dd>Draft in shared docs</dd></div><div><dt>Length</dt><dd>2 pages · 3 charts</dd></div><div><dt>Result</dt><dd>Draft ready</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="reporting-3" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 3</span>Draft sent for review</p>
+                    <dl class="tl-dl"><div><dt>Handoff</dt><dd>Report agent → Reviewer</dd></div><div><dt>Channel</dt><dd>Shared docs</dd></div><div><dt>Status</dt><dd>Waiting for review</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="reporting-4">
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 4</span>Reviewer approved the draft</p>
+                    <dl class="tl-dl"><div><dt>Recorded by</dt><dd>Shared docs</dd></div><div><dt>Decision</dt><dd>Approved with 2 edits</dd></div><div><dt>Waited</dt><dd>29 hours 34 minutes</dd></div><div><dt>Next recorded step</dt><dd>Send report</dd></div></dl>
+                  </section>
+                  <section class="tl-detail" data-detail="reporting-5" hidden>
+                    <p class="tl-detail-head"><span class="tl-detail-n">Step 5</span>Report emailed to the sales team</p>
+                    <dl class="tl-dl"><div><dt>Tool</dt><dd>Email service</dd></div><div><dt>Action</dt><dd>Send report</dd></div><div><dt>Result</dt><dd>Delivered</dd></div></dl>
+                  </section>
+              </div>
+            </div>
+            </div>
+            <div class="tl-col tl-col-expl">
+            <section class="tl-expl" id="tl-expl-support" data-expl="support" aria-label="Trovis explanation">
+              <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis explanation</div>
+              <h3 class="tl-expl-title">The response was prepared, but the customer never received it.</h3>
+              <p class="tl-expl-text">The support agent retrieved the order, checked the return policy, and drafted a reply. Both delivery attempts failed because the email connection had expired. The case was routed to the support team for review.</p>
+              <dl class="tl-facts"><div><dt>What failed</dt><dd>Email delivery</dd></div><div><dt>What it affected</dt><dd>Customer response</dd></div><div><dt>Where the work went next</dt><dd>Support review queue</dd></div></dl>
+              <p class="tl-basis-label">Supporting evidence</p>
+              <ul class="tl-basis-list"><li><button type="button" class="tl-chip" data-goto="support-6">Delivery failed · 10:14:13</button></li><li><button type="button" class="tl-chip" data-goto="support-7">Retry failed · 10:14:43</button></li><li><button type="button" class="tl-chip" data-goto="support-8">Routing record · 10:14:44</button></li></ul>
+            </section>
+            <section class="tl-expl" id="tl-expl-onboarding" data-expl="onboarding" hidden aria-label="Trovis explanation">
+              <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis explanation</div>
+              <h3 class="tl-expl-title">Onboarding finished end to end.</h3>
+              <p class="tl-expl-text">The onboarding agent prepared the workspace, Priya approved it 22 minutes later, and the account platform recorded the activation. Nothing here needs attention.</p>
+              <dl class="tl-facts"><div><dt>Outcome</dt><dd>Account active</dd></div><div><dt>Longest wait</dt><dd>Approval, 22 minutes</dd></div><div><dt>Needs attention</dt><dd>Nothing</dd></div></dl>
+              <p class="tl-basis-label">Supporting evidence</p>
+              <ul class="tl-basis-list"><li><button type="button" class="tl-chip" data-goto="onboarding-2">Workspace prepared · 9:24 AM</button></li><li><button type="button" class="tl-chip" data-goto="onboarding-4">Approval recorded · 9:48 AM</button></li><li><button type="button" class="tl-chip" data-goto="onboarding-5">Activation · 9:48 AM</button></li></ul>
+            </section>
+            <section class="tl-expl" id="tl-expl-reporting" data-expl="reporting" hidden aria-label="Trovis explanation">
+              <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis explanation</div>
+              <h3 class="tl-expl-title">The report went out Tuesday afternoon instead of Monday.</h3>
+              <p class="tl-expl-text">The report agent finished the draft at 8:20 AM Monday. It then waited for review until Tuesday afternoon, so the delay in this run happened at the review step, not in the agent.</p>
+              <dl class="tl-facts"><div><dt>What happened</dt><dd>Delivered a day late</dd></div><div><dt>Where the time went</dt><dd>Review handoff</dd></div><div><dt>Needs attention</dt><dd>Review timing</dd></div></dl>
+              <p class="tl-basis-label">Supporting evidence</p>
+              <ul class="tl-basis-list"><li><button type="button" class="tl-chip" data-goto="reporting-2">Draft ready · Mon 8:20 AM</button></li><li><button type="button" class="tl-chip" data-goto="reporting-4">Approval · Tue 1:55 PM</button></li><li><button type="button" class="tl-chip" data-goto="reporting-5">Sent · Tue 2:10 PM</button></li></ul>
+            </section>
             </div>
           </div>
+          <figcaption class="tl-preview-cap">
+            Sample data. Select a workflow to open its latest run, and a step to see what was recorded.
+            Trovis shows recorded actions and evidence, not an agent’s internal reasoning.
+          </figcaption>
         </figure>
       </div>
     </section>
@@ -155,201 +410,254 @@
       <div class="tl-wrap">
         <div class="tl-section-head tl-reveal">
           <h2 id="tl-problem-title" class="tl-h2">More work is happening.<br />Less of it is in view.</h2>
-          <p class="tl-intro">
-            Work moves from a person to an agent, through a platform, and into another team.
-            Each system records a piece. Understanding the whole journey still falls on you.
-          </p>
         </div>
         <ul class="tl-problems">
           <li class="tl-problem-card tl-reveal">
-            <h3 class="tl-quote">“What actually happened?”</h3>
-            <p>You’re checking agent runs, messages, and system updates to reconstruct one piece of work.</p>
+            <h3 class="tl-quote">“Where did that actually happen?”</h3>
+            <p>Agent runs live in one platform, messages in another, outcomes in your business tools. The story of one piece of work is scattered.</p>
           </li>
           <li class="tl-problem-card tl-reveal">
-            <h3 class="tl-quote">“I thought that was being handled.”</h3>
-            <p>A step finishes, but the next handoff stalls. You find out when someone follows up.</p>
+            <h3 class="tl-quote">“The agent finished. Is the work done?”</h3>
+            <p>An agent completing its step doesn’t mean the customer, order, or process moved forward.</p>
           </li>
           <li class="tl-problem-card tl-reveal">
             <h3 class="tl-quote">“Where do I need to step in?”</h3>
-            <p>More activity creates more to oversee. You need context about what matters.</p>
+            <p>You need to know where to intervene without reconstructing every journey by hand.</p>
           </li>
         </ul>
       </div>
     </section>
 
-    <!-- 4. Discoveries: question → Trovis's explanation → the supporting workflow -->
-    <section class="tl-section tl-discover" aria-labelledby="tl-discover-title">
+    <!-- 4. How Trovis fits -->
+    <section class="tl-section tl-fit" aria-labelledby="tl-fit-title">
       <div class="tl-wrap">
         <div class="tl-section-head tl-reveal">
-          <span class="tl-tag tl-tag-concept">Illustrative examples</span>
-          <h2 id="tl-discover-title" class="tl-h2">Ask about the work.<br />Understand the bigger picture.</h2>
-          <p class="tl-intro">
-            Follow the work, know what needs attention, and discover how your business operates.
-            Each answer comes with the workflow and records behind it.
-          </p>
+          <h2 id="tl-fit-title" class="tl-h2">Connect the work.<br />See the whole journey.</h2>
         </div>
-
-        <div class="tl-d-grid tl-reveal">
-          <div class="tl-questions" role="tablist" aria-label="Example questions" aria-orientation="vertical">
-            <button type="button" class="tl-q" role="tab" id="tl-q-1" aria-controls="tl-a-1" aria-selected="true" tabindex="0">
-              <span class="tl-q-kind tl-q-kind-stalled">Stalled handoff</span>
-              <span class="tl-q-text">“What’s stuck right now?”</span>
-            </button>
-            <button type="button" class="tl-q" role="tab" id="tl-q-2" aria-controls="tl-a-2" aria-selected="false" tabindex="-1">
-              <span class="tl-q-kind tl-q-kind-slower">Slower workflow</span>
-              <span class="tl-q-text">“Why is the weekly sales report taking longer?”</span>
-            </button>
-            <button type="button" class="tl-q" role="tab" id="tl-q-3" aria-controls="tl-a-3" aria-selected="false" tabindex="-1">
-              <span class="tl-q-kind tl-q-kind-rework">Repeated corrections</span>
-              <span class="tl-q-text">“Which AI work keeps coming back to people?”</span>
-            </button>
-          </div>
-
-          <div class="tl-answers">
-            <!-- A: stalled between an agent and a person -->
-            <section class="tl-answer" role="tabpanel" id="tl-a-1" aria-labelledby="tl-q-1" tabindex="0">
-              <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis</div>
-              <h3 class="tl-answer-title">A vendor invoice has been waiting on procurement for two days.</h3>
-              <p>The accounts payable agent matched the invoice and found a price that doesn’t match the purchase order. It sent the question to Dana in procurement on Monday. No reply is recorded, so the payment can’t be scheduled.</p>
-              <ol class="tl-mini" aria-label="Supporting workflow">
-                <li class="tl-mini-step"><span class="tl-pill tl-pill-agent">AP agent</span><span class="tl-mini-what">Flags price mismatch</span><span class="tl-status tl-status-done">Done</span></li>
-                <li class="tl-mini-step tl-mini-attn"><span class="tl-pill tl-pill-person">Dana</span><span class="tl-mini-what">Answers the question</span><span class="tl-status tl-status-pending">2 days</span></li>
-                <li class="tl-mini-step"><span class="tl-pill tl-pill-system">Payments</span><span class="tl-mini-what">Schedules payment</span><span class="tl-status tl-status-waiting">On hold</span></li>
-              </ol>
-              <ul class="tl-cites">
-                <li><span class="tl-src">Agent run</span>Price mismatch flagged · Mon 10:40 AM</li>
-                <li><span class="tl-src">Email</span>Question sent to Dana · Mon 10:41 AM</li>
-                <li><span class="tl-src">Payments</span>Invoice on hold. No reply recorded</li>
-              </ul>
-            </section>
-
-            <!-- B: a recurring workflow slowed after its steps changed -->
-            <section class="tl-answer" role="tabpanel" id="tl-a-2" aria-labelledby="tl-q-2" tabindex="0" hidden>
-              <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis</div>
-              <h3 class="tl-answer-title">It slowed down when a review step was added.</h3>
-              <p>The report agent still drafts it in minutes. Since March 3, the draft waits in a shared doc for review before it’s sent, so the report now goes out the next day instead of Monday morning.</p>
-              <div class="tl-change" aria-label="Supporting workflow, before and after the change">
-                <div class="tl-change-row">
-                  <span class="tl-change-when">Before</span>
-                  <span class="tl-change-flow"><span class="tl-pill tl-pill-agent">Report agent</span><span class="tl-arrow" aria-hidden="true"></span><span class="tl-pill tl-pill-system">Sent</span></span>
-                  <span class="tl-change-out">Sent Mon morning</span>
-                </div>
-                <div class="tl-change-row">
-                  <span class="tl-change-when">Since Mar 3</span>
-                  <span class="tl-change-flow"><span class="tl-pill tl-pill-agent">Report agent</span><span class="tl-arrow" aria-hidden="true"></span><span class="tl-pill tl-pill-person tl-pill-new">Review <em>new step</em></span><span class="tl-arrow" aria-hidden="true"></span><span class="tl-pill tl-pill-system">Sent</span></span>
-                  <span class="tl-change-out tl-change-late">Sent Tue afternoon</span>
-                </div>
-              </div>
-              <ul class="tl-cites">
-                <li><span class="tl-src">Agent run</span>Draft ready Monday 8:20 AM, unchanged</li>
-                <li><span class="tl-src">Docs</span>Review step first appears Mar 3</li>
-                <li><span class="tl-src">Email</span>Report sent Tuesday each of the last four weeks</li>
-              </ul>
-            </section>
-
-            <!-- C: work repeatedly returning to people for corrections -->
-            <section class="tl-answer" role="tabpanel" id="tl-a-3" aria-labelledby="tl-q-3" tabindex="0" hidden>
-              <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis</div>
-              <h3 class="tl-answer-title">Refund replies from the support agent are often corrected before they’re sent.</h3>
-              <p>Support leads edit almost half of the agent’s refund drafts, usually changing the amount. The edits started after the refund policy was updated, which suggests the agent is still working from the old policy.</p>
-              <div class="tl-loop" aria-label="Supporting workflow: drafts go back to people for correction">
-                <span class="tl-pill tl-pill-agent">Support agent</span>
-                <span class="tl-loop-arrows" aria-hidden="true"><span class="tl-loop-fwd">drafts reply</span><span class="tl-loop-back">corrects amount</span></span>
-                <span class="tl-pill tl-pill-person">Support lead</span>
-                <span class="tl-arrow" aria-hidden="true"></span>
-                <span class="tl-pill tl-pill-system">Customer</span>
-              </div>
-              <ul class="tl-cites">
-                <li><span class="tl-src">Help desk</span>11 of 24 refund drafts edited before sending this week</li>
-                <li><span class="tl-src">Help desk</span>Most edits change the refund amount</li>
-                <li><span class="tl-src">Docs</span>Refund policy updated Apr 8, the week the edits began</li>
-              </ul>
-            </section>
-
-            <p class="tl-ask-note">Illustrative examples with sample records, not a live system.</p>
-          </div>
+        <ol class="tl-fit-steps tl-reveal">
+          <li>
+            <span class="tl-fit-n">1</span>
+            <h3 class="tl-h3">Connect</h3>
+            <p>Bring activity from your agents, workflows, and business tools into Trovis.</p>
+          </li>
+          <li>
+            <span class="tl-fit-n">2</span>
+            <h3 class="tl-h3">Understand</h3>
+            <p>Follow recorded steps, tool calls, outcomes, and handoffs in one connected view.</p>
+          </li>
+          <li>
+            <span class="tl-fit-n">3</span>
+            <h3 class="tl-h3">Stay informed</h3>
+            <p>Get explanations of what happened, where work stopped, and what needs your attention.</p>
+          </li>
+        </ol>
+        <div class="tl-ways tl-reveal">
+          <h3 class="tl-ways-title">Ways to connect today</h3>
+          <ul class="tl-ways-list">
+            <li><strong>Add a few lines to a Python agent.</strong> The Trovis SDK records agents built with supported frameworks, such as the OpenAI Agents SDK and the Claude Agent SDK.</li>
+            <li><strong>Send OpenTelemetry traces.</strong> Custom agents and tools that already emit OpenTelemetry can send their traces to Trovis.</li>
+            <li><strong>Install a plugin on a supported agent platform,</strong> such as OpenClaw.</li>
+            <li><strong>Connect supported business tools,</strong> starting with Stripe, HubSpot, and Shopify, to see the work they record.</li>
+          </ul>
+          <p class="tl-ways-note">Not every platform is supported yet. Tell us which agents and workflows you use when you request access.</p>
         </div>
       </div>
     </section>
 
-    <!-- 5. Vision -->
-    <section class="tl-section tl-vision" aria-labelledby="tl-vision-title">
+    <!-- 5. Three levels of visibility -->
+    <section class="tl-section tl-levels" aria-labelledby="tl-levels-title">
       <div class="tl-wrap">
         <div class="tl-section-head tl-reveal">
-          <h2 id="tl-vision-title" class="tl-h2 tl-h2-sm">Understand the work today.<br />Make it work better tomorrow.</h2>
-          <p class="tl-intro">
-            Understanding how work happens is the foundation for improving it. Our vision is for
-            Trovis to identify better workflows, help optimize operations, and carry out approved fixes.
-          </p>
+          <h2 id="tl-levels-title" class="tl-h2">See inside the AI.<br />Understand the work around it.</h2>
         </div>
-        <ol class="tl-stages tl-reveal">
-          <li class="tl-stage tl-stage-now">
-            <span class="tl-stage-tag">Initial focus</span>
-            <h3 class="tl-stage-title">Understand</h3>
-            <p>Connect activity and explain how work happens.</p>
+        <ol class="tl-zoom tl-reveal">
+          <li class="tl-zoom-step">
+            <p class="tl-zoom-n">Level 1</p>
+            <h3 class="tl-h3">Across your AI work</h3>
+            <p>See connected workflows, participating agents, recent runs, and work needing attention.</p>
+            <div class="tl-zoom-vis" aria-hidden="true">
+              <div class="tl-zv-row"><span>Customer support</span><span class="tl-status tl-status-fail">1 needs review</span></div>
+              <div class="tl-zv-row"><span>Customer onboarding</span><span class="tl-status tl-status-done">Running normally</span></div>
+              <div class="tl-zv-row"><span>Weekly reporting</span><span class="tl-status tl-status-pending">Later than usual</span></div>
+            </div>
           </li>
-          <li class="tl-stage">
-            <span class="tl-stage-tag">Longer-term vision</span>
-            <h3 class="tl-stage-title">Improve</h3>
-            <p>Identify opportunities and recommend changes.</p>
+          <li class="tl-zoom-step">
+            <p class="tl-zoom-n">Level 2</p>
+            <h3 class="tl-h3">Inside each run</h3>
+            <p>Inspect recorded steps, tool calls, available inputs and outputs, failures, and retries.</p>
+            <div class="tl-zoom-vis" aria-hidden="true">
+              <div class="tl-zv-ev tl-zv-agent">Drafted a response</div>
+              <div class="tl-zv-ev tl-zv-fail">Delivery failed</div>
+              <div class="tl-zv-ev tl-zv-fail">Retry failed</div>
+            </div>
           </li>
-          <li class="tl-stage">
-            <span class="tl-stage-tag">Longer-term vision</span>
-            <h3 class="tl-stage-title">Act</h3>
-            <p>Execute approved fixes and verify the result.</p>
+          <li class="tl-zoom-step">
+            <p class="tl-zoom-n">Level 3</p>
+            <h3 class="tl-h3">Beyond the agent</h3>
+            <p>Follow work into the next agent, person, or system and understand whether the process continued.</p>
+            <div class="tl-zoom-vis" aria-hidden="true">
+              <div class="tl-zv-flow"><span class="tl-pill tl-pill-agent">Support agent</span><span class="tl-arrow"></span><span class="tl-pill tl-pill-person">Support team</span></div>
+              <p class="tl-zv-note">Waiting in the support review queue</p>
+            </div>
           </li>
         </ol>
       </div>
     </section>
 
-    <!-- 6. Closing signup -->
-    <section class="tl-join" id="join" aria-labelledby="tl-join-title">
-      <div class="tl-wrap tl-join-in">
-        <div class="tl-join-copy">
-          <h2 id="tl-join-title" class="tl-h2">Your workforce is evolving.<br />Your visibility should too.</h2>
-          <p>
-            Be among the first teams to see their work connected. Join the waitlist for early-access
-            updates and opportunities to test Trovis with your team.
+    <!-- 6. Patterns across runs -->
+    <section class="tl-section tl-pattern" aria-labelledby="tl-pattern-title">
+      <div class="tl-wrap tl-pattern-in">
+        <div class="tl-section-head tl-reveal">
+          <span class="tl-tag tl-tag-concept">Illustrative finding · Sample data</span>
+          <h2 id="tl-pattern-title" class="tl-h2 tl-h2-sm">Spot what keeps happening, not just what happened once.</h2>
+          <p class="tl-intro">Trovis looks across many runs to surface recurring behavior, alongside explaining a single failure.</p>
+        </div>
+        <div class="tl-answers tl-reveal">
+          <p class="tl-ask-q">“Which AI work keeps coming back to people?”</p>
+          <div class="tl-insight-kicker"><span class="tl-mark-dot" aria-hidden="true"></span>Trovis</div>
+          <h3 class="tl-answer-title">Refund replies from the support agent are often corrected before they’re sent.</h3>
+          <p class="tl-answer-text">Support leads edited 11 of 24 refund drafts this week, usually changing the amount. The edits began the week the refund policy was updated, so it’s worth checking whether the agent is using the current policy.</p>
+          <div class="tl-loop">
+            <span class="tl-pill tl-pill-agent">Support agent</span>
+            <span class="tl-loop-arrows" aria-hidden="true"><span class="tl-loop-fwd">drafts reply</span><span class="tl-loop-back">corrects amount</span></span>
+            <span class="tl-pill tl-pill-person">Support lead</span>
+            <span class="tl-arrow" aria-hidden="true"></span>
+            <span class="tl-pill tl-pill-system">Customer email</span>
+          </div>
+          <ul class="tl-cites">
+            <li><span class="tl-src">Help desk</span>11 of 24 refund drafts edited before sending</li>
+            <li><span class="tl-src">Help desk</span>Most edits change the refund amount</li>
+            <li><span class="tl-src">Docs</span>Refund policy updated the same week the edits began</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. Vision -->
+    <section class="tl-section tl-vision" aria-labelledby="tl-vision-title">
+      <div class="tl-wrap">
+        <div class="tl-section-head tl-reveal">
+          <h2 id="tl-vision-title" class="tl-h2 tl-h2-sm">Understand the work today.<br />Make it work better tomorrow.</h2>
+        </div>
+        <ol class="tl-stages tl-reveal">
+          <li class="tl-stage tl-stage-now">
+            <span class="tl-stage-tag">Initial focus</span>
+            <h3 class="tl-stage-title">Understand</h3>
+            <p>Understand connected work and surface what needs attention.</p>
+          </li>
+          <li class="tl-stage">
+            <span class="tl-stage-tag">Longer-term vision</span>
+            <h3 class="tl-stage-title">Improve</h3>
+            <p>Suggest better workflows and help optimize operations.</p>
+          </li>
+          <li class="tl-stage">
+            <span class="tl-stage-tag">Longer-term vision</span>
+            <h3 class="tl-stage-title">Act</h3>
+            <p>Carry out approved fixes, including repairs to agents.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- 8. Early-team offer -->
+    <section class="tl-section tl-offer" aria-labelledby="tl-offer-title">
+      <div class="tl-wrap">
+        <div class="tl-section-head tl-reveal">
+          <h2 id="tl-offer-title" class="tl-h2 tl-h2-sm">Build the next chapter of work with us.</h2>
+          <p class="tl-intro">
+            We’re looking for teams already putting AI to work. Our first teams will help shape Trovis
+            around real agents, real workflows, and the questions that matter in their businesses.
           </p>
         </div>
+        <p class="tl-offer-label tl-reveal">For teams invited into early access</p>
+        <ul class="tl-offer-list tl-reveal">
+          <li>
+            <h3 class="tl-h3">Get in before public launch</h3>
+            <p>An opportunity to use Trovis with your team as early access opens.</p>
+          </li>
+          <li>
+            <h3 class="tl-h3">Connect a real workflow</h3>
+            <p>Work directly with us to connect an initial supported agent workflow and explore the activity behind it.</p>
+          </li>
+          <li>
+            <h3 class="tl-h3">Have a direct line to the founder</h3>
+            <p>Share feedback and help inform the integrations and capabilities we prioritize.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
 
-        <div class="tl-join-card">
-          <form class="tl-form" data-form="join" novalidate>
-            <div class="tl-hp" aria-hidden="true">
-              <label for="tl-website">Website</label>
-              <input id="tl-website" name="website" type="text" tabindex="-1" autocomplete="off" />
-            </div>
-            <label class="tl-label" for="tl-email">Work email</label>
-            <div class="tl-form-row">
-              <input class="tl-input" id="tl-email" name="email" type="email" required autocomplete="email" inputmode="email" placeholder="you@company.com" aria-describedby="tl-disclosure" />
-              <button class="tl-btn tl-btn-light" type="submit" data-submit>Join the waitlist</button>
-            </div>
-            <p class="tl-error" role="alert" data-error hidden></p>
-            <p class="tl-disclosure" id="tl-disclosure">
-              We’ll use what you submit to send Trovis early-access updates and invitations to test,
-              and for product research.
-              <a href="https://app.trovisai.com/privacy">Privacy</a>
+    <!-- 9. Closing signup + expectations -->
+    <section class="tl-join" id="join" aria-labelledby="tl-join-title">
+      <div class="tl-wrap">
+        <div class="tl-join-in">
+          <div class="tl-join-copy">
+            <h2 id="tl-join-title" class="tl-h2">Be one of the first teams inside Trovis.</h2>
+            <p>
+              Request early access to understand how work moves across your agents, people, and tools.
+              Help shape Trovis around the work your team is doing.
             </p>
-          </form>
-
-          <div class="tl-success" data-success hidden tabindex="-1">
-            <div class="tl-check" aria-hidden="true">✓</div>
-            <p class="tl-success-title" role="status" data-success-text>You’re on the list. We’ll reach out with early-access updates.</p>
-
-            <form class="tl-form tl-form-more" data-form="followup" novalidate hidden>
-              <p class="tl-more-lede">Optional: tell us about your team so we can make early access useful to you.</p>
-              <label class="tl-label" for="tl-company">Company</label>
-              <input class="tl-input" id="tl-company" name="company" type="text" autocomplete="organization" />
-              <label class="tl-label" for="tl-ai-use">What work is your team using AI for?</label>
-              <textarea class="tl-input tl-textarea" id="tl-ai-use" name="ai_use" rows="3"></textarea>
-              <p class="tl-error" role="alert" data-error hidden></p>
-              <div class="tl-more-actions">
-                <button class="tl-btn tl-btn-light" type="submit" data-submit>Send answers</button>
-                <button class="tl-textbtn" type="button" data-skip>Skip</button>
-              </div>
-            </form>
-            <p class="tl-more-done" data-more-done hidden>Thanks. That helps us make early access useful to your team.</p>
           </div>
+          <div class="tl-join-card">
+          <div class="tl-signup tl-signup-dark" data-signup="join">
+            <form class="tl-form" data-form="join" novalidate>
+              <div class="tl-hp" aria-hidden="true">
+                <label for="tl-website-join">Website</label>
+                <input id="tl-website-join" name="website" type="text" tabindex="-1" autocomplete="off" />
+              </div>
+              <label class="tl-label" for="tl-email-join">Work email</label>
+              <div class="tl-form-row">
+                <input class="tl-input" id="tl-email-join" name="email" type="email" required autocomplete="email" inputmode="email" placeholder="you@company.com" aria-describedby="tl-note-join tl-disclosure-join" />
+                <button class="tl-btn tl-btn-light" type="submit" data-submit>Request early access</button>
+              </div>
+              <p class="tl-error" role="alert" data-error hidden></p>
+              <p class="tl-form-note" id="tl-note-join">We’ll reach out when early access is available for your team.</p>
+              <p class="tl-disclosure" id="tl-disclosure-join">
+                This is a request to join the early-access list, not immediate access. We’ll use what you
+                submit to contact you about early access and for product research.
+                <a href="https://app.trovisai.com/privacy">Privacy</a>
+              </p>
+            </form>
+
+            <div class="tl-success" data-success hidden tabindex="-1">
+              <div role="status">
+                <p class="tl-success-title"><span class="tl-check" aria-hidden="true">✓</span><span data-success-title>You’re on the early-access list.</span></p>
+                <p class="tl-success-body" data-success-body>We’ll reach out as access opens. Tell us what you’d connect so we can better understand your team’s needs.</p>
+              </div>
+              <form class="tl-form tl-form-more" data-form="followup" novalidate hidden>
+                <label class="tl-label" for="tl-company-join">Company <span class="tl-optional">(optional)</span></label>
+                <input class="tl-input" id="tl-company-join" name="company" type="text" autocomplete="organization" />
+                <label class="tl-label" for="tl-tools-join">Which agents, tools, or workflows would you connect first? <span class="tl-optional">(optional)</span></label>
+                <textarea class="tl-input tl-textarea" id="tl-tools-join" name="tools" rows="3" aria-describedby="tl-tools-help-join"></textarea>
+                <p class="tl-help" id="tl-tools-help-join">This helps us match early teams with the connections we’re building.</p>
+                <p class="tl-error" role="alert" data-error hidden></p>
+                <div class="tl-more-actions">
+                  <button class="tl-btn tl-btn-light" type="submit" data-submit>Share with the team</button>
+                  <button class="tl-textbtn" type="button" data-skip>Skip for now</button>
+                </div>
+              </form>
+              <p class="tl-more-done" data-more-done hidden>Thanks. Your details are saved, and we’ll be in touch as early access opens.</p>
+            </div>
+          </div>
+          </div>
+        </div>
+
+        <div class="tl-faq" aria-labelledby="tl-faq-title">
+          <h3 id="tl-faq-title" class="tl-faq-title">What to expect</h3>
+          <dl class="tl-faq-list">
+            <div>
+              <dt>What does requesting early access mean?</dt>
+              <dd>You’ll join the list of teams interested in trying Trovis before public launch. We’ll contact teams as supported connections and onboarding become available.</dd>
+            </div>
+            <div>
+              <dt>Will I get access immediately?</dt>
+              <dd>Not yet. Trovis is in development, and submitting a request does not provide immediate access.</dd>
+            </div>
+            <div>
+              <dt>What should I have ready?</dt>
+              <dd>An example of work your team is already doing with AI, and the agents or tools involved. You don’t need to connect anything to join the list.</dd>
+            </div>
+          </dl>
         </div>
       </div>
     </section>

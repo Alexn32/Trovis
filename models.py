@@ -324,6 +324,8 @@ class WaitlistFollowupRequest(BaseModel):
     token: str
     company: str | None = None
     ai_use: str | None = None
+    # "Which agents, tools, or workflows would you connect first?"
+    tools: str | None = None
 
 
 class WaitlistResponse(BaseModel):

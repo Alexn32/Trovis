@@ -92,7 +92,7 @@ with TestClient(main.app) as c:
     print("\nseeded owner does not hide the public landing:")
     r = c.get("/")
     check("GET / after owner exists → 200", r.status_code == 200)
-    check("GET / after owner is waitlist HTML, not 401", "Join the waitlist" in r.text)
+    check("GET / after owner is waitlist HTML, not 401", "Request early access" in r.text)
 
     print("\npublic HTML landing:")
     for path in ("/", "/waitlist", "/waitlist/"):
@@ -102,11 +102,13 @@ with TestClient(main.app) as c:
         body = r.text
         check(f"GET {path} shared markup filled in", "<!-- landing:markup -->" not in body and 'id="tl-top"' in body)
         check(f"GET {path} has hero headline", "AI is changing how work gets done." in body)
-        check(f"GET {path} has CTA", "Join the waitlist" in body)
+        check(f"GET {path} has hero + closing signup", 'data-signup="hero"' in body and 'data-signup="join"' in body)
+        check(f"GET {path} has CTA", "Request early access" in body)
+        check(f"GET {path} shows launch stage", "In development · Early access waitlist open" in body)
         check(f"GET {path} has email field", 'name="email"' in body)
         check(f"GET {path} has honeypot", 'name="website"' in body)
-        check(f"GET {path} has follow-up question", "What work is your team using AI for?" in body)
-        check(f"GET {path} preview labelled illustrative", "Illustrative example" in body)
+        check(f"GET {path} has follow-up question", "Which agents, tools, or workflows would you connect first?" in body)
+        check(f"GET {path} preview labelled as sample data", "Interactive product concept · Sample data" in body)
         check(f"GET {path} has disclosure", "for product research" in body)
         check(f"GET {path} loads shared assets", "/landing.css" in body and "/landing.js" in body)
         check(f"GET {path} title", "<title>Trovis — Understand how work gets done" in body)
@@ -192,12 +194,25 @@ with TestClient(main.app) as c:
     check("follow-up ai_use stored", row and row["ai_use"] == "Onboarding and support")
     check("token spent", row and row["followup_token_hash"] is None)
 
+    r = c.post("/waitlist", json={"email": "tools@northwind.dev"})
+    tools_token = r.json().get("followup_token")
+    r = c.post("/waitlist/followup", json={"token": tools_token, "tools": "Support agent, help desk"})
+    check("follow-up tools → 200", r.status_code == 200)
+    trow = database.get_waitlist_signup("tools@northwind.dev")
+    check("follow-up tools stored on runtime_interest", trow and trow["runtime_interest"] == "Support agent, help desk")
+    check("tools follow-up leaves other signups alone",
+          database.get_waitlist_signup("ops@northwind.dev")["runtime_interest"] is None)
+
+    r = c.post("/waitlist", json={"email": "skipper@northwind.dev"})
+    check("skipped follow-up keeps the signup", r.status_code == 200 and database.get_waitlist_signup("skipper@northwind.dev") is not None)
+
     r = c.post("/waitlist/followup", json={"token": token, "company": "Evil Corp"})
     check("replayed token → 404", r.status_code == 404)
     check("replay did not overwrite", database.get_waitlist_signup("ops@northwind.dev")["company"] == "Northwind")
     r = c.post("/waitlist/followup", json={"token": "made-up", "company": "x"})
     check("unknown token → 404", r.status_code == 404)
 
+    main._waitlist_hits.clear()  # the checks above spend the per-IP budget
     print("\nhoneypot:")
     before = database.get_waitlist_count()
     r = c.post("/waitlist", json={"email": "bot@spam.test", "website": "https://spam.test"})

@@ -9879,26 +9879,31 @@ def update_waitlist_followup(
     followup_token: str,
     company: str | None = None,
     ai_use: str | None = None,
+    tools: str | None = None,
 ) -> bool:
     """Add the optional follow-up answers to the signup that `followup_token`
     was issued for. The token is single-use: it is cleared on success, so a
     leaked token can't be replayed to overwrite answers. Returns False when
-    the token matches no signup."""
+    the token matches no signup. `tools` ("which agents, tools or workflows
+    would you connect first?") lands on runtime_interest, the column the
+    signup form's tools question already uses."""
     token = (followup_token or "").strip()
     if not token:
         return False
     clean_company = (company or "").strip() or None
     clean_ai_use = (ai_use or "").strip() or None
+    clean_tools = (tools or "").strip() or None
     with _connect() as conn, _cursor(conn) as cur:
         cur.execute(
             f"""
             UPDATE waitlist_signups
                SET company = COALESCE({PH}, company),
                    ai_use = COALESCE({PH}, ai_use),
+                   runtime_interest = COALESCE({PH}, runtime_interest),
                    followup_token_hash = NULL
              WHERE followup_token_hash = {PH}
             """,
-            (clean_company, clean_ai_use, _waitlist_token_hash(token)),
+            (clean_company, clean_ai_use, clean_tools, _waitlist_token_hash(token)),
         )
         return (cur.rowcount or 0) > 0
 

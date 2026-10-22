@@ -13,7 +13,7 @@ import "./landing/landing.css";
 
 const TITLE = "Trovis — Understand how work gets done across people, AI agents, and tools";
 const DESCRIPTION =
-  "Trovis uses AI to connect activity across your people, agents, and tools into a living picture of how your business works. Join the waitlist.";
+  "Connect your AI agents and workflows to Trovis. See the steps they take, the tools they use, and how work passes between agents, people, and systems.";
 
 export default function TrovisLanding({ onSignIn = () => {} }) {
   const ref = useRef(null);
