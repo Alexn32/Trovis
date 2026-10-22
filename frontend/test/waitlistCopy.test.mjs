@@ -1,7 +1,7 @@
 // The public waitlist landing: one shared page (src/landing/) behind both
 // front doors, carrying the approved copy and staying inside the messaging
 // boundaries — understanding first, later stages labelled as vision, the
-// preview and Ask examples labelled as illustrative.
+// preview and discoveries labelled as illustrative.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -27,47 +27,58 @@ test('both front doors render the one shared landing', () => {
 test('hero carries the approved copy and CTA', () => {
   assert.match(text, /AI is changing how work gets done\./)
   assert.match(text, /Understand what’s happening\./)
-  assert.match(text, /Trovis uses AI to connect activity across your people, agents, and tools into a\s+living picture of how your business works\./)
-  assert.match(text, /See how work moves\. Understand where it gets stuck\. Know what needs your attention\./)
-  assert.match(text, /Get early-access updates and help shape Trovis\./)
+  assert.match(text, /Trovis uses AI to understand how work moves across your people, agents, and tools,\s+explain what’s happening, and surface what needs your attention\./)
 })
 
-test('"Join the waitlist" is the CTA in header, hero, and closing form', () => {
+test('"Join the waitlist" is the CTA in header, hero, and closing form; Sign in lives in the footer', () => {
   assert.match(text, /data-cta="header">Join the waitlist</)
   assert.match(text, /data-cta="hero">Join the waitlist</)
   assert.match(text, /data-submit>Join the waitlist</)
-  assert.doesNotMatch(text, /founding list|founding seat/i)
+  assert.doesNotMatch(text, /founding list|founding seat|help shape Trovis/i)
+  const header = text.slice(text.indexOf('<header'), text.indexOf('</header>'))
+  assert.doesNotMatch(header, /Sign in/)
+  const footer = text.slice(text.indexOf('<footer'))
+  assert.match(footer, /data-signin>Sign in</)
 })
 
-test('preview is the onboarding example, labelled illustrative, with the Trovis explanation', () => {
-  for (const s of ['Marcus', 'Onboarding agent', '#cs-approvals', 'Janet', 'Account activation']) {
-    assert.ok(text.includes(s), `missing step ${s}`)
+test('preview leads with the explanation; records open only on demand', () => {
+  const preview = text.slice(text.indexOf('id="tl-preview"'), text.indexOf('aria-labelledby="tl-problem-title"'))
+  assert.match(preview, /Illustrative example/)
+  const insightAt = preview.indexOf('The agent finished. The onboarding is still waiting.')
+  assert.ok(insightAt > 0 && insightAt < preview.indexOf('class="tl-flow"'), 'explanation comes before the steps')
+  assert.match(preview, /No approval is\s+recorded in the connected systems, so account activation remains pending\./)
+  const steps = [...preview.matchAll(/class="tl-step"[^>]*aria-pressed="false"[^>]*data-step="(\d)"/g)].map((m) => m[1])
+  assert.deepEqual(steps, ['1', '2', '3', '4', '5'])
+  for (const n of steps) assert.match(preview, new RegExp(`data-panel="${n}" hidden`))
+  for (const t of ['Person', 'AI agent', 'System']) assert.ok(preview.includes(`<span class="tl-type">${t}</span>`))
+})
+
+test('three different discoveries, each question → explanation → workflow → records', () => {
+  const d = text.slice(text.indexOf('aria-labelledby="tl-discover-title"'), text.indexOf('aria-labelledby="tl-vision-title"'))
+  assert.match(d, /Illustrative examples/)
+  assert.match(d, /Ask about the work\.<br \/>Understand the bigger picture\./)
+  const panels = d.split('role="tabpanel"').slice(1)
+  assert.equal(panels.length, 3)
+  for (const p of panels) {
+    assert.match(p, /class="tl-answer-title"/)
+    assert.match(p, /class="tl-(mini|change|loop)"/)
+    assert.match(p, /class="tl-cites"/)
   }
-  assert.match(text, /Illustrative product preview/)
-  assert.match(text, /The agent finished\. The onboarding is still waiting\./)
-  assert.match(text, /No approval is\s+recorded in the connected systems, so account activation remains pending\./)
-  // Every step is an inspectable tab with its own evidence panel.
-  const tabs = [...text.matchAll(/role="tab" id="tl-step-(\d)" aria-controls="tl-panel-\1"/g)]
-  assert.equal(tabs.length, 5)
-  for (const [, n] of tabs) assert.match(text, new RegExp(`role="tabpanel" id="tl-panel-${n}"`))
-  // Participant types are named in text, not colour alone.
-  for (const t of ['Person', 'AI agent', 'System']) assert.ok(text.includes(`<span class="tl-type">${t}</span>`))
+  assert.match(d, /Stalled handoff/)
+  assert.match(d, /Slower workflow/)
+  assert.match(d, /Repeated corrections/)
+  // Janet's approval is the hero's example, not the whole page's.
+  assert.doesNotMatch(d, /Janet|Northwind/)
+  // The old separate capability + Ask sections are merged into this one.
+  assert.doesNotMatch(text, /Understand the work behind the activity/)
 })
 
-test('problem, value, ask, vision, and closing sections carry the approved headlines', () => {
+test('problem, vision, and closing sections carry the approved copy', () => {
   assert.match(text, /More work is happening\.<br \/>Less of it is in view\./)
   assert.match(text, /“What actually happened\?”/)
-  assert.match(text, /“I thought that was being handled\.”/)
-  assert.match(text, /“Where do I need to step in\?”/)
-  assert.match(text, /Understand the work behind the activity\./)
-  for (const h of ['Follow the work', 'Know what needs attention', 'Discover how your business operates']) {
-    assert.ok(text.includes(h), `missing capability ${h}`)
-  }
-  assert.match(text, /Ask about the work\.<br \/>Understand the bigger picture\./)
-  assert.match(text, /The delay is in the review handoff\./)
-  assert.match(text, /Product concept · sample records/)
   assert.match(text, /Understand the work today\.<br \/>Make it work better tomorrow\./)
   assert.match(text, /Your workforce is evolving\.<br \/>Your visibility should too\./)
+  assert.match(text, /Be among the first teams to see their work connected\. Join the waitlist for early-access\s+updates and opportunities to test Trovis with your team\./)
 })
 
 test('vision labels understanding as the focus and the rest as longer-term', () => {
@@ -90,7 +101,7 @@ test('signup asks only for email first, optional questions after, with disclosur
   assert.doesNotMatch(join, /name="company"|name="ai_use"/)
   assert.match(text, /What work is your team using AI for\?/)
   assert.match(text, /You’re on the list\. We’ll reach out with early-access updates\./)
-  assert.match(text, /early-access updates and for product research/)
+  assert.match(text, /early-access updates and invitations to test,\s+and for product research/)
   assert.match(text, /name="website"/) // honeypot
 })
 
